@@ -51,8 +51,19 @@ impl Backend for R2Backend {
     ) -> Result<PutOutcome> {
         self.client.put(key, data, expected).await
     }
+    async fn put_from_path(
+        &self,
+        key: &ObjectKey,
+        source: &std::path::Path,
+        expected: &ContentHash,
+    ) -> Result<PutOutcome> {
+        self.client.put_from_path(key, source, expected).await
+    }
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
         self.client.get(key).await
+    }
+    async fn get_to_path(&self, key: &ObjectKey, dest: &std::path::Path) -> Result<()> {
+        self.client.get_to_path(key, dest).await
     }
     async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Bytes> {
         self.client.get_range(key, range).await

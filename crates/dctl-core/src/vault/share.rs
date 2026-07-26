@@ -6,17 +6,23 @@
 //! [`Vault::fetch_recipient`] are the `r/<hex key_id>` `DRR1` registry: a self-certifying
 //! trust anchor for discovering the `DRK1` bytes of an already-pinned `key_id`.
 //!
+//! §12.6 grant sidecar: [`Vault::share_add_recipients`] and
+//! [`Vault::share_remove_recipient`] edit the recipient set of an already-uploaded
+//! `kem_id=1` object by rewriting a small `DGS1` object at `g/<hex file_id>` — never
+//! re-uploading the (multi-GB) payload.
+//!
 //! DEFERRED (additive, not needed for the core round-trip):
-// TODO(task-16-followup): §12.6 `DGS1` grant sidecar at `g/<hex file_id>` (add/remove
-// recipients without re-uploading the object) and imported/external (non-root-derived)
-// keypairs (the `k/*` reserved store).
+// TODO(task-16-followup): imported/external (non-root-derived) keypairs (the `k/*`
+// reserved store).
 
 use bytes::Bytes;
-use dctl_crypto::constants::{DRK1_LEN, KEY_ID_LEN};
+use dctl_crypto::constants::{
+    DRK1_LEN, FILE_ID_LEN, KEM_ID_HYBRID, KEY_ID_LEN, MAX_GRANT_COUNT, OBJECT_HEAD_LEN,
+};
 use dctl_crypto::object::{self, Metadata};
 use dctl_crypto::{kem, path};
 use dctl_index::Record;
-use dctl_store::{ContentHash, ObjectKey};
+use dctl_store::{ByteRange, ContentHash, ObjectKey, StoreError};
 
 use super::put::now_unix;
 use super::{Vault, layout};
@@ -122,6 +128,227 @@ impl Vault {
         // Overwrite GC: the new mapping is durable, so delete the superseded object.
         self.gc_superseded_object(previous, &object_key).await;
         Ok(())
+    }
+
+    /// Add `recipients` to the read set of the already-uploaded object at `logical_path` by
+    /// writing (or extending) its §12.6 grant sidecar at `g/<file_id>` — WITHOUT
+    /// re-uploading the object's (possibly multi-GB) payload.
+    ///
+    /// This vault must itself be able to recover the object's `KW` (as an inline recipient,
+    /// or via an existing sidecar grant); it re-wraps that same `KW` to each new recipient
+    /// as a §12.2 sub-record (fresh ephemeral + ML-KEM Encaps, bound to the exact object
+    /// head, §12.1), appends the grants, bumps `grant_gen`, and verified-writes the sidecar.
+    /// Recipients already present (inline or in the sidecar) and this vault's own identity
+    /// are skipped (dedup by `key_id`). O(1) in the object size; a no-op if nothing is new.
+    ///
+    /// Guidance (§12.6): put durable recipients (owner, permanent backup key) INLINE at
+    /// upload time — they cannot be removed without re-uploading — and put revocable
+    /// recipients in the sidecar via this call.
+    #[tracing::instrument(skip(self, recipients), fields(backend = self.backend.name(), recipients = recipients.len()))]
+    pub async fn share_add_recipients(
+        &self,
+        logical_path: &str,
+        recipients: &[kem::Drk1Public],
+    ) -> Result<()> {
+        let path = path::normalize(logical_path)?;
+        let object_key = self
+            .lookup_object_key(&path)
+            .await?
+            .ok_or_else(|| CoreError::NotFound(path.clone()))?;
+
+        // Head + inline kem_wrap block (bounded range reads — never the whole payload).
+        let (head_bytes, file_id, block) = self.fetch_head_and_block(&object_key).await?;
+
+        // Read any existing sidecar (re-bound to THIS object) to extend it; else start fresh.
+        let sidecar_key = ObjectKey::new(format!(
+            "{}{}",
+            layout::GRANT_KEY_PREFIX,
+            hex::encode(file_id)
+        ));
+        let (mut grants, prev_gen) = match self.backend.get(&sidecar_key).await {
+            Ok(b) => {
+                let parsed = kem::sidecar::parse(b.as_ref(), &file_id, &head_bytes)?;
+                (parsed.grants, parsed.grant_gen)
+            }
+            // Only a genuinely ABSENT sidecar (§12.6: "absent sidecar ⇒ not yet
+            // extended") means "start fresh". Any other StoreError is transient
+            // (B2/S3 map every non-404 to `Backend`/`Io`) and MUST propagate: if
+            // swallowed here it would re-seal only the new recipients, roll
+            // grant_gen back to 1, and verified-overwrite `g/<file_id>` — silently
+            // revoking every previously-added sidecar recipient and violating §12.6
+            // grant_gen monotonicity. A transient error aborts the share instead.
+            Err(StoreError::NotFound(_)) => (Vec::new(), 0u64),
+            Err(e) => return Err(e.into()),
+        };
+
+        // Recover KW: this vault must be an authorized reader (inline, else an existing grant).
+        let kw = if let Some(kw) =
+            kem::sidecar::recover_kw_from_block(&self.identity, &head_bytes, &block)?
+        {
+            kw
+        } else if let Some(grant) = grants.iter().find(|g| g.key_id() == self.identity_key_id) {
+            kem::sidecar::recover_kw_as_recipient(grant, &self.identity, &head_bytes)?
+        } else {
+            return Err(CoreError::Crypto(dctl_crypto::CryptoError::Format(
+                "cannot share: this vault is not a recipient of the object".into(),
+            )));
+        };
+
+        // Dedup set: inline recipients ∪ this vault's own identity ∪ existing sidecar grants.
+        let mut present: Vec<[u8; KEY_ID_LEN]> = kem::sidecar::inline_key_ids(&block)?;
+        present.push(self.identity_key_id);
+        for g in &grants {
+            present.push(g.key_id());
+        }
+
+        let mut added = 0usize;
+        for r in recipients {
+            let id = r.key_id();
+            if present.iter().any(|p| p == &id) {
+                continue; // already inline, already granted, or the owner itself
+            }
+            present.push(id);
+            grants.push(kem::sidecar::seal_kw_to_recipient(&kw, r, &head_bytes)?);
+            added += 1;
+        }
+        if added == 0 {
+            tracing::debug!("share_add_recipients: nothing new to grant");
+            return Ok(());
+        }
+        if grants.len() > MAX_GRANT_COUNT as usize {
+            return Err(CoreError::Crypto(dctl_crypto::CryptoError::Format(
+                "grant_count would exceed 4096".into(),
+            )));
+        }
+
+        // Bump grant_gen (monotonic; higher wins on rewrite races) and verified-write.
+        let grant_gen = prev_gen.checked_add(1).ok_or_else(|| {
+            CoreError::Crypto(dctl_crypto::CryptoError::Format(
+                "grant_gen overflow".into(),
+            ))
+        })?;
+        let sidecar = kem::sidecar::serialize(&file_id, &head_bytes, grant_gen, &grants)?;
+        let expected = ContentHash::blake3(&sidecar);
+        self.backend
+            .put(&sidecar_key, Bytes::from(sidecar), &expected)
+            .await?;
+        tracing::info!(added, grant_gen, "grant sidecar written");
+        Ok(())
+    }
+
+    /// Remove the recipient `key_id` from the object's §12.6 grant sidecar, blocking its
+    /// FUTURE `KW` recovery via the sidecar. Rewrites `g/<file_id>` omitting that grant and
+    /// bumps `grant_gen`. Errors if the object has no sidecar or no grant for `key_id`.
+    ///
+    /// Caveats (§11/§12.6):
+    /// - **Inline recipients cannot be removed this way.** A recipient wrapped inline at
+    ///   upload time (owner, durable backup key) is part of the object body; dropping it
+    ///   requires re-sealing under a fresh DEK (a full re-upload). This call only edits the
+    ///   sidecar.
+    /// - **Removal does not un-decrypt already-downloaded copies.** It blocks future access
+    ///   via the sidecar but cannot revoke a copy an ex-recipient already fetched; true
+    ///   revocation requires re-encrypting the payload under a fresh DEK.
+    #[tracing::instrument(skip(self, key_id), fields(backend = self.backend.name()))]
+    pub async fn share_remove_recipient(
+        &self,
+        logical_path: &str,
+        key_id: &[u8; KEY_ID_LEN],
+    ) -> Result<()> {
+        let path = path::normalize(logical_path)?;
+        let object_key = self
+            .lookup_object_key(&path)
+            .await?
+            .ok_or_else(|| CoreError::NotFound(path.clone()))?;
+        let (head_bytes, file_id, _block) = self.fetch_head_and_block(&object_key).await?;
+
+        let sidecar_key = ObjectKey::new(format!(
+            "{}{}",
+            layout::GRANT_KEY_PREFIX,
+            hex::encode(file_id)
+        ));
+        // A genuinely ABSENT sidecar ⇒ the grant is absent (nothing removable). Any
+        // other StoreError is transient and MUST propagate rather than masquerade as
+        // a permanent "no grant sidecar" — a 503 is not proof the grant is gone.
+        let bytes = match self.backend.get(&sidecar_key).await {
+            Ok(b) => b,
+            Err(StoreError::NotFound(_)) => {
+                return Err(CoreError::NotFound(format!("no grant sidecar for {path}")));
+            }
+            Err(e) => return Err(e.into()),
+        };
+        let parsed = kem::sidecar::parse(bytes.as_ref(), &file_id, &head_bytes)?;
+
+        let mut grants = parsed.grants;
+        let before = grants.len();
+        grants.retain(|g| &g.key_id() != key_id);
+        if grants.len() == before {
+            return Err(CoreError::NotFound(format!(
+                "no sidecar grant for the given key_id on {path}"
+            )));
+        }
+
+        // Rewrite the sidecar omitting the grant, bumping grant_gen (§12.6). An empty
+        // sidecar (G=0) with a higher grant_gen is intentionally kept rather than deleted,
+        // so a replayed older sidecar cannot silently re-add the removed grant.
+        let grant_gen = parsed.grant_gen.checked_add(1).ok_or_else(|| {
+            CoreError::Crypto(dctl_crypto::CryptoError::Format(
+                "grant_gen overflow".into(),
+            ))
+        })?;
+        let sidecar = kem::sidecar::serialize(&file_id, &head_bytes, grant_gen, &grants)?;
+        let expected = ContentHash::blake3(&sidecar);
+        self.backend
+            .put(&sidecar_key, Bytes::from(sidecar), &expected)
+            .await?;
+        tracing::info!(
+            grant_gen,
+            remaining = grants.len(),
+            "grant removed from sidecar"
+        );
+        Ok(())
+    }
+
+    /// Fetch a `kem_id=1` object's fixed 68-byte head and its inline §12.2 `kem_wrap` block
+    /// via BOUNDED range reads (never the payload), returning `(head_bytes, file_id, block)`.
+    /// Rejects a non-hybrid object — only `kem_id=1` objects carry recipient grants.
+    async fn fetch_head_and_block(
+        &self,
+        object_key: &str,
+    ) -> Result<([u8; OBJECT_HEAD_LEN], [u8; FILE_ID_LEN], Vec<u8>)> {
+        let key = ObjectKey::new(object_key.to_string());
+        // Head (68) + kem_ct_len (2).
+        let prefix = self
+            .backend
+            .get_range(&key, ByteRange::new(0, Some((OBJECT_HEAD_LEN + 2) as u64)))
+            .await?;
+        if prefix.len() < OBJECT_HEAD_LEN + 2 {
+            return Err(CoreError::Integrity(
+                "object truncated (head/kem_ct_len)".into(),
+            ));
+        }
+        let head = object::parse_head(prefix.as_ref())?;
+        if head.kem_id != KEM_ID_HYBRID {
+            return Err(CoreError::Crypto(dctl_crypto::CryptoError::Format(
+                "not a shared (kem_id=1) object — cannot add/remove recipients".into(),
+            )));
+        }
+        let mut head_bytes = [0u8; OBJECT_HEAD_LEN];
+        head_bytes.copy_from_slice(&prefix[0..OBJECT_HEAD_LEN]);
+        let kem_ct_len =
+            u16::from_le_bytes([prefix[OBJECT_HEAD_LEN], prefix[OBJECT_HEAD_LEN + 1]]) as usize;
+        let block = self
+            .backend
+            .get_range(
+                &key,
+                ByteRange::new((OBJECT_HEAD_LEN + 2) as u64, Some(kem_ct_len as u64)),
+            )
+            .await?;
+        if block.len() != kem_ct_len {
+            return Err(CoreError::Integrity("object truncated (kem_wrap)".into()));
+        }
+        let mut file_id = [0u8; FILE_ID_LEN];
+        file_id.copy_from_slice(&head_bytes[52..68]);
+        Ok((head_bytes, file_id, block.to_vec()))
     }
 
     /// Publish this vault's **public** recipient identity to the §12.3 registry at backend

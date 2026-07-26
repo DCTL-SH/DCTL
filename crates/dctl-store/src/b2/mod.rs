@@ -175,8 +175,21 @@ impl Backend for B2Backend {
         upload::put(self, key, data, expected).await
     }
 
+    async fn put_from_path(
+        &self,
+        key: &ObjectKey,
+        source: &std::path::Path,
+        expected: &ContentHash,
+    ) -> Result<PutOutcome> {
+        upload::put_from_path(self, key, source, expected).await
+    }
+
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
         download::get(self, key).await
+    }
+
+    async fn get_to_path(&self, key: &ObjectKey, dest: &std::path::Path) -> Result<()> {
+        download::get_to_path(self, key, dest).await
     }
 
     async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Bytes> {

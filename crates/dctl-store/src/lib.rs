@@ -18,6 +18,7 @@ pub mod local;
 pub mod model;
 pub mod r2;
 pub mod s3;
+mod streaming;
 mod tls;
 
 pub use backend::Backend;

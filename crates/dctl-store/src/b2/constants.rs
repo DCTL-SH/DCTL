@@ -16,6 +16,7 @@ pub(super) const EP_GET_UPLOAD_URL: &str = "b2_get_upload_url";
 pub(super) const EP_START_LARGE_FILE: &str = "b2_start_large_file";
 pub(super) const EP_GET_UPLOAD_PART_URL: &str = "b2_get_upload_part_url";
 pub(super) const EP_FINISH_LARGE_FILE: &str = "b2_finish_large_file";
+pub(super) const EP_CANCEL_LARGE_FILE: &str = "b2_cancel_large_file";
 pub(super) const EP_LIST_FILE_NAMES: &str = "b2_list_file_names";
 pub(super) const EP_LIST_FILE_VERSIONS: &str = "b2_list_file_versions";
 pub(super) const EP_DELETE_FILE_VERSION: &str = "b2_delete_file_version";
@@ -34,6 +35,12 @@ pub(super) const CONTENT_TYPE_AUTO: &str = "b2/x-auto";
 
 /// B2's absolute minimum part size (bytes) for large files.
 pub(super) const MIN_PART_SIZE: u64 = 5_000_000;
+/// B2's documented maximum part size (bytes) for large files: 5 GB, in B2's decimal
+/// byte convention (matching `MIN_PART_SIZE`'s 5 MB). This is the upper bound when
+/// adaptively growing part size to keep a large file within B2's 10,000-part cap;
+/// combined, a single large file is bounded at 5 GB * 10,000 = 50 TB.
+/// See <https://www.backblaze.com/apidocs/b2-upload-part>.
+pub(super) const B2_MAX_PART_SIZE: u64 = 5_000_000_000;
 /// Objects larger than this use the large-file (multipart) API.
 pub(super) const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024;
 /// Objects requested per listing page.

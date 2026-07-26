@@ -159,20 +159,35 @@ mod tests {
         let store = dctl_store::StoreError::NotFound("x".into());
         let store_code = store.code();
         assert_eq!(CoreError::Store(store).code(), store_code);
-        assert_eq!(CoreError::Store(dctl_store::StoreError::NotFound("x".into())).code(), 2001);
+        assert_eq!(
+            CoreError::Store(dctl_store::StoreError::NotFound("x".into())).code(),
+            2001
+        );
 
         // Crypto delegation.
-        assert_eq!(CoreError::Crypto(dctl_crypto::CryptoError::Aead).code(), 1003);
+        assert_eq!(
+            CoreError::Crypto(dctl_crypto::CryptoError::Aead).code(),
+            1003
+        );
 
         // Index delegation.
-        assert_eq!(CoreError::Index(dctl_index::IndexError::Serialize).code(), 3002);
+        assert_eq!(
+            CoreError::Index(dctl_index::IndexError::Serialize).code(),
+            3002
+        );
     }
 
     #[test]
     fn kind_classifies_representative_variants() {
         assert_eq!(CoreError::Unlock.kind(), ErrorKind::Auth);
-        assert_eq!(CoreError::NotFound(String::new()).kind(), ErrorKind::NotFound);
-        assert_eq!(CoreError::Integrity(String::new()).kind(), ErrorKind::Integrity);
+        assert_eq!(
+            CoreError::NotFound(String::new()).kind(),
+            ErrorKind::NotFound
+        );
+        assert_eq!(
+            CoreError::Integrity(String::new()).kind(),
+            ErrorKind::Integrity
+        );
 
         // A transient store error classifies as Transient.
         let transient = CoreError::Store(dctl_store::StoreError::Io(std::io::Error::other("net")));

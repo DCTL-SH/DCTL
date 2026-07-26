@@ -83,6 +83,13 @@ pub(crate) struct FinishLargeFileResponse {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct CancelLargeFileResponse {
+    #[allow(dead_code)]
+    pub file_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(crate) struct ListFileNamesResponse {
     pub files: Vec<FileItem>,
     pub next_file_name: Option<String>,

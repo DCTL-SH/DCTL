@@ -6,14 +6,14 @@
 //! local index required. Integrity is checked against the object's **own** DEK-
 //! authenticated `content_blake3`, so it holds even with no local cache.
 
-use std::io::{Read, Write};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use dctl_crypto::constants::{KEM_ID_HYBRID, KEM_ID_NONE, OBJECT_HEAD_LEN, RECIP_IDX_DEFAULT};
+use dctl_crypto::constants::{FILE_ID_LEN, KEM_ID_HYBRID, KEM_ID_NONE, KEY_LEN, OBJECT_HEAD_LEN};
 use dctl_crypto::object::{self, Metadata};
 use dctl_crypto::{kem, path};
-use dctl_store::{ContentHash, HashAlgo, Hasher, ObjectKey, StoreError};
+use dctl_store::{ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, StoreError};
 use zeroize::Zeroizing;
 
 use super::put_stream::io_err;
@@ -77,12 +77,12 @@ impl Vault {
         let head = object::parse_head(&object)?;
         let opened = match head.kem_id {
             KEM_ID_NONE => object::open(&self.root_key, &object)?,
-            KEM_ID_HYBRID => object::open_as_recipient(
-                self.identity.x_sk(),
-                self.identity.dk(),
-                &self.identity_key_id,
-                &object,
-            )?,
+            // §12: recover `KW` via this vault's identity — inline recipient first, then
+            // the §12.6 grant sidecar — then decode with it.
+            KEM_ID_HYBRID => {
+                let kw = self.recover_object_kw(&object).await?;
+                object::open_with_kw(&kw, &object)?
+            }
             // `parse_head` already rejects any other `kem_id`; keep the match total.
             other => return Err(unsupported_kem_id(other)),
         };
@@ -132,33 +132,59 @@ impl Vault {
             .await?
             .ok_or_else(|| CoreError::NotFound(path.clone()))?;
         tracing::debug!(object = %object_key, "resolved object key");
+        let key = ObjectKey::new(object_key);
 
-        // Stream the ciphertext object to a temp file (constant memory on LocalFs).
-        let obj_temp = tempfile::NamedTempFile::new().map_err(io_err)?;
-        self.backend
-            .get_to_path(&ObjectKey::new(object_key), obj_temp.path())
+        // Peek the fixed 68-byte head (bounded range read) to route on `kem_id` without
+        // buffering the whole object.
+        let head_peek = self
+            .backend
+            .get_range(&key, ByteRange::new(0, Some(OBJECT_HEAD_LEN as u64)))
             .await?;
+        let kem_id = object::parse_head(head_peek.as_ref())?.kem_id;
 
-        // Decrypt the temp object → dest off the async runtime (blocking file I/O + CPU).
-        // The recipient keypair for a `kem_id=1` object is re-derived inside the task from
-        // the (cloned) root key, so no private key material has to be moved across the
-        // task boundary. `kem_id=0` streams at O(chunk_size); `kem_id=1` buffers the whole
-        // plaintext for now (constant-memory streaming for it is TODO(task-16-followup)).
-        let root_key = self.root_key.clone();
-        let dest = dest.to_path_buf();
-        let err_path = path.clone();
-        tokio::task::spawn_blocking(move || -> Result<()> {
-            let out = decrypt_object_to_dest_any(&root_key, obj_temp.path(), &dest, &err_path);
-            drop(obj_temp); // remove the temp object only after decrypt finished with it
-            out
-        })
-        .await
-        .map_err(|e| {
+        let err_task = |e: tokio::task::JoinError| {
             CoreError::Store(StoreError::Backend(format!(
                 "streaming read task failed: {e}"
             )))
-        })??;
-        tracing::info!(%path, "file decrypted (streamed) to destination");
+        };
+
+        match kem_id {
+            // `kem_id=0`: constant-memory streaming decrypt straight to `dest`.
+            KEM_ID_NONE => {
+                let obj_temp = tempfile::NamedTempFile::new().map_err(io_err)?;
+                self.backend.get_to_path(&key, obj_temp.path()).await?;
+                let root_key = self.root_key.clone();
+                let dest = dest.to_path_buf();
+                let err_path = path.clone();
+                tokio::task::spawn_blocking(move || -> Result<()> {
+                    let out = decrypt_object_to_dest(&root_key, obj_temp.path(), &dest, &err_path);
+                    drop(obj_temp); // remove the temp only after decrypt finished with it
+                    out
+                })
+                .await
+                .map_err(err_task)??;
+            }
+            // `kem_id=1` (§12): recover `KW` here in async (inline recipient first, then the
+            // §12.6 grant sidecar — the first successful recovery wins), then decode + write
+            // off the runtime. Buffered (whole object in memory); constant-memory streaming
+            // for `kem_id=1` is a follow-up. Only `KW` — a per-object secret — crosses into
+            // the blocking task, never the recipient private key.
+            KEM_ID_HYBRID => {
+                let object = self.backend.get(&key).await?;
+                let kw = self.recover_object_kw(&object).await?;
+                let dest = dest.to_path_buf();
+                let err_path = path.clone();
+                tokio::task::spawn_blocking(move || -> Result<()> {
+                    let opened = object::open_with_kw(&kw, object.as_ref())?;
+                    let expected = opened.metadata.as_ref().map(|m| &m.content_blake3);
+                    write_plaintext_atomic(opened.plaintext.as_slice(), expected, &dest, &err_path)
+                })
+                .await
+                .map_err(err_task)??;
+            }
+            other => return Err(unsupported_kem_id(other)),
+        }
+        tracing::info!(%path, "file decrypted to destination");
         Ok(())
     }
 
@@ -180,17 +206,13 @@ impl Vault {
                 let mut sink = std::io::sink();
                 object::open_stream(&self.root_key, &object, &mut sink)?;
             }
-            // `kem_id=1` (§12): the buffered recipient opener verifies every chunk tag,
-            // the footer, and `meta.size == plaintext_len`; we additionally re-check the
-            // object's own `content_blake3`. Constant-memory streaming verify for
-            // `kem_id=1` is TODO(task-16-followup).
+            // `kem_id=1` (§12): recover `KW` (inline recipient first, then the §12.6 grant
+            // sidecar), then the buffered opener verifies every chunk tag, the footer, and
+            // `meta.size == plaintext_len`; we additionally re-check the object's own
+            // `content_blake3`. Constant-memory streaming verify for `kem_id=1` is a follow-up.
             KEM_ID_HYBRID => {
-                let opened = object::open_as_recipient(
-                    self.identity.x_sk(),
-                    self.identity.dk(),
-                    &self.identity_key_id,
-                    &object,
-                )?;
+                let kw = self.recover_object_kw(&object).await?;
+                let opened = object::open_with_kw(&kw, &object)?;
                 if let Some(meta) = &opened.metadata {
                     let got = ContentHash::blake3(opened.plaintext.as_slice());
                     if got.bytes[..] != meta.content_blake3[..] {
@@ -202,6 +224,93 @@ impl Vault {
         }
         Ok(())
     }
+
+    /// Recover the per-object `KW` of a `kem_id=1` object from its full in-memory `blob`,
+    /// trying this vault's INLINE recipient sub-record first, then the §12.6 grant sidecar.
+    /// Slices the head, `kem_ct_len`, `kem_wrap` block, and `file_id` out of `blob`, then
+    /// delegates to [`recover_object_kw_parts`](Vault::recover_object_kw_parts).
+    pub(super) async fn recover_object_kw(&self, blob: &[u8]) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+        if blob.len() < OBJECT_HEAD_LEN + 2 {
+            return Err(CoreError::Integrity(
+                "object truncated (head/kem_ct_len)".into(),
+            ));
+        }
+        let mut head_bytes = [0u8; OBJECT_HEAD_LEN];
+        head_bytes.copy_from_slice(&blob[0..OBJECT_HEAD_LEN]);
+        let kem_ct_len =
+            u16::from_le_bytes([blob[OBJECT_HEAD_LEN], blob[OBJECT_HEAD_LEN + 1]]) as usize;
+        let block_start = OBJECT_HEAD_LEN + 2;
+        let block_end = block_start
+            .checked_add(kem_ct_len)
+            .ok_or_else(|| CoreError::Integrity("kem_ct_len overflow".into()))?;
+        if blob.len() < block_end {
+            return Err(CoreError::Integrity("object truncated (kem_wrap)".into()));
+        }
+        let block = &blob[block_start..block_end];
+        let mut file_id = [0u8; FILE_ID_LEN];
+        file_id.copy_from_slice(&head_bytes[52..68]);
+        self.recover_object_kw_parts(&head_bytes, block, &file_id)
+            .await
+    }
+
+    /// Recover `KW` for a `kem_id=1` object from its `head_bytes` + inline `kem_wrap` block,
+    /// falling back to the §12.6 sidecar at `g/<file_id>`. "First successful KW recovery
+    /// (inline or sidecar) wins" (§12.6): the inline recipient list is tried first, and only
+    /// if this vault holds no inline sub-record is the sidecar read, parsed (which re-binds
+    /// `file_id` + `head_hash` to THIS object), and scanned for this identity's grant.
+    ///
+    /// Absence of a sidecar, or of a grant for this identity, surfaces as the ordinary "not
+    /// a recipient" error — the same result as before sidecars existed.
+    pub(super) async fn recover_object_kw_parts(
+        &self,
+        head_bytes: &[u8; OBJECT_HEAD_LEN],
+        kem_wrap_block: &[u8],
+        file_id: &[u8; FILE_ID_LEN],
+    ) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+        // Inline recipient first.
+        if let Some(kw) =
+            kem::sidecar::recover_kw_from_block(&self.identity, head_bytes, kem_wrap_block)?
+        {
+            return Ok(kw);
+        }
+        // Sidecar fallback: g/<file_id>. An absent sidecar ⇒ not a recipient.
+        let sidecar_key = ObjectKey::new(format!(
+            "{}{}",
+            layout::GRANT_KEY_PREFIX,
+            hex::encode(file_id)
+        ));
+        let bytes = match self.backend.get(&sidecar_key).await {
+            Ok(b) => b,
+            // A genuinely ABSENT sidecar (§12.6) is a real "not a recipient" — the
+            // same fail-closed result as before sidecars existed. Any other
+            // StoreError is transient (network 5xx/timeout mapped to `Backend`/`Io`)
+            // and MUST propagate so its `.kind()` stays `Transient`: a legitimate
+            // sidecar-only recipient hitting a 503 gets a retryable error, never a
+            // false permanent authorization denial.
+            Err(StoreError::NotFound(_)) => return Err(not_a_recipient()),
+            Err(e) => return Err(e.into()),
+        };
+        let parsed = kem::sidecar::parse(bytes.as_ref(), file_id, head_bytes)?;
+        let grant = parsed
+            .grants
+            .iter()
+            .find(|g| g.key_id() == self.identity_key_id)
+            .ok_or_else(not_a_recipient)?;
+        Ok(kem::sidecar::recover_kw_as_recipient(
+            grant,
+            &self.identity,
+            head_bytes,
+        )?)
+    }
+}
+
+/// The "no `KW` for this vault" outcome: neither an inline `kem_wrap` sub-record nor a
+/// §12.6 sidecar grant addressed this vault's identity. Same meaning (and error shape) as
+/// the pre-sidecar hybrid opener's "not a recipient".
+fn not_a_recipient() -> CoreError {
+    CoreError::Crypto(dctl_crypto::CryptoError::Format(
+        "not a recipient: no inline sub-record and no sidecar grant for this identity".into(),
+    ))
 }
 
 /// The head declared a `kem_id` neither opener supports. Unreachable in practice —
@@ -211,48 +320,6 @@ fn unsupported_kem_id(kem_id: u8) -> CoreError {
     CoreError::Crypto(dctl_crypto::CryptoError::Format(format!(
         "unsupported kem_id {kem_id}"
     )))
-}
-
-/// Read the object head at `obj_path`, then dispatch on `kem_id`: `kem_id=0` takes the
-/// constant-memory streaming path ([`decrypt_object_to_dest`]); `kem_id=1` (§12) re-derives
-/// this vault's recipient keypair from `root_key` and takes the buffered recipient path
-/// ([`decrypt_recipient_object_to_dest`]). Re-deriving here keeps the private `(x_sk, dk)`
-/// out of the `spawn_blocking` closure — only the (already-cloned) root crosses the boundary.
-fn decrypt_object_to_dest_any(
-    root_key: &[u8; 32],
-    obj_path: &Path,
-    dest: &Path,
-    nfc_path: &str,
-) -> Result<()> {
-    let mut head = [0u8; OBJECT_HEAD_LEN];
-    std::fs::File::open(obj_path)
-        .map_err(io_err)?
-        .read_exact(&mut head)
-        .map_err(io_err)?;
-    match object::parse_head(&head)?.kem_id {
-        KEM_ID_NONE => decrypt_object_to_dest(root_key, obj_path, dest, nfc_path),
-        KEM_ID_HYBRID => decrypt_recipient_object_to_dest(root_key, obj_path, dest, nfc_path),
-        other => Err(unsupported_kem_id(other)),
-    }
-}
-
-/// Buffered `kem_id=1` decrypt of the temp object at `obj_path` straight to `dest`. Reads
-/// the whole object into memory, recovers `KW` via the vault's recipient identity
-/// (re-derived from `root_key`), verifies the plaintext against the object's own
-/// `content_blake3`, and publishes it with the same atomic write-then-rename +
-/// clean-up-on-failure contract as [`decrypt_object_to_dest`]. Constant-memory streaming
-/// for `kem_id=1` is TODO(task-16-followup).
-fn decrypt_recipient_object_to_dest(
-    root_key: &[u8; 32],
-    obj_path: &Path,
-    dest: &Path,
-    nfc_path: &str,
-) -> Result<()> {
-    let kp = kem::derive_recipient(root_key, RECIP_IDX_DEFAULT)?;
-    let blob = std::fs::read(obj_path).map_err(io_err)?;
-    let opened = object::open_as_recipient(kp.x_sk(), kp.dk(), &kp.key_id, &blob)?;
-    let expected = opened.metadata.as_ref().map(|m| &m.content_blake3);
-    write_plaintext_atomic(opened.plaintext.as_slice(), expected, dest, nfc_path)
 }
 
 /// Publish `plaintext` to `dest` atomically: write it to a temp sibling, `sync_all`, then

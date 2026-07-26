@@ -19,3 +19,10 @@ pub(super) const NAME_KEY_PREFIX: &str = "n/";
 /// self-certifying: a reader recomputes `key_id` from the `DRK1` and requires it to match
 /// the requested key, so a hostile backend cannot substitute a different pubkey.
 pub(super) const RECIP_KEY_PREFIX: &str = "r/";
+
+/// Prefix for §12.6 grant sidecars: `g/` ‖ hex(file_id). Each entry is a rewritable `DGS1`
+/// container carrying ADDITIONAL recipients for the object with that `file_id`, so the
+/// owner can add/remove recipients without re-uploading the (multi-GB) payload. The stored
+/// bytes are self-binding: a reader verifies `file_id` and `head_hash` against THIS object
+/// before honoring any grant, so a sidecar attached to the wrong object is rejected.
+pub(super) const GRANT_KEY_PREFIX: &str = "g/";

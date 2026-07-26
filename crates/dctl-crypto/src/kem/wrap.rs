@@ -204,6 +204,34 @@ impl<'a> KemWrap<'a> {
         }
         None
     }
+
+    /// The `key_id` of every inline recipient in the block (order as stored). Used by the
+    /// §12.6 sidecar layer to skip granting to an identity that is already an inline
+    /// recipient (dedup). Cheap — no crypto, just the already-validated `key_id` fields.
+    pub(crate) fn key_ids(&self) -> Vec<[u8; KEY_ID_LEN]> {
+        let mut ids = Vec::with_capacity(self.count);
+        for i in 0..self.count {
+            let base = KEM_WRAP_HEADER_LEN + i * RECIP_SUBRECORD_LEN;
+            let mut id = [0u8; KEY_ID_LEN];
+            id.copy_from_slice(&self.block[base + 4..base + 4 + KEY_ID_LEN]);
+            ids.push(id);
+        }
+        ids
+    }
+}
+
+/// Structurally validate a **standalone** §12.2 recipient sub-record (as carried by a
+/// §12.6 grant) and return its `key_id` plus the borrowed field slices. Runs the exact
+/// same field-length checks as an inline sub-record before any crypto; the length MUST be
+/// [`RECIP_SUBRECORD_LEN`] (a grant is one whole sub-record).
+pub(crate) fn parse_subrecord(rec: &[u8]) -> Result<([u8; KEY_ID_LEN], SubRecord<'_>)> {
+    if rec.len() != RECIP_SUBRECORD_LEN {
+        return Err(CryptoError::Format("grant sub-record wrong size".into()));
+    }
+    validate_subrecord_fields(rec)?;
+    let mut key_id = [0u8; KEY_ID_LEN];
+    key_id.copy_from_slice(&rec[4..4 + KEY_ID_LEN]);
+    Ok((key_id, slice_subrecord(rec)))
 }
 
 /// Validate the fixed field-length constants of one sub-record (§12.2). All four inner

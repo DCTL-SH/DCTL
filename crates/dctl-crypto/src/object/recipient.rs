@@ -11,7 +11,8 @@ use ml_kem::EncodedSizeUser;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 use crate::constants::{
-    KEM_ID_HYBRID, KEY_ID_LEN, MAX_RECIP_COUNT, MLKEM768_EK_LEN, OBJECT_HEAD_LEN, X25519_PK_LEN,
+    KEM_ID_HYBRID, KEY_ID_LEN, KEY_LEN, MAX_RECIP_COUNT, MLKEM768_EK_LEN, OBJECT_HEAD_LEN,
+    X25519_PK_LEN,
 };
 use crate::error::{CryptoError, Result};
 use crate::kem::identity::{Drk1Public, MlKemDecapKey};
@@ -121,6 +122,32 @@ pub fn open_as_recipient(
 
     // wrapped_dek follows the block at offset 70 + K.
     open_core(&kw, blob, &head, block_end)
+}
+
+/// Decode a `kem_id=1` DSF1 object whose per-object `KW` has **already been recovered** —
+/// inline (§12.2) or via a §12.6 grant sidecar — by the caller. Skips the recipient-
+/// matching / decaps step entirely (the caller supplies `KW`) and then verifies the DEK
+/// wrap, metadata, every chunk tag, and the footer exactly like the symmetric path.
+///
+/// This is the second half of the §12.6 read fallback: the vault recovers `KW` (trying the
+/// inline recipient list first, then the sidecar) and hands it here to finish the decode.
+pub fn open_with_kw(kw: &[u8; KEY_LEN], blob: &[u8]) -> Result<Opened> {
+    let head = parse_head(blob)?;
+    if head.kem_id != KEM_ID_HYBRID {
+        return Err(CryptoError::Format(
+            "not a kem_id=1 object (open_with_kw is for the hybrid path)".into(),
+        ));
+    }
+    // wrapped_dek sits at offset 70 + K, where K = kem_ct_len (u16 LE at offset 68).
+    let kem_ct_len = read_u16(blob, OBJECT_HEAD_LEN)? as usize;
+    let block_start = OBJECT_HEAD_LEN + 2;
+    let block_end = block_start
+        .checked_add(kem_ct_len)
+        .ok_or_else(|| CryptoError::Format("kem_ct_len overflow".into()))?;
+    if block_end > blob.len() {
+        return Err(CryptoError::Format("object truncated (kem_wrap)".into()));
+    }
+    open_core(kw, blob, &head, block_end)
 }
 
 fn read_u16(b: &[u8], off: usize) -> Result<u16> {

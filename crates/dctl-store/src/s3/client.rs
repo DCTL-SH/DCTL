@@ -1,12 +1,15 @@
 //! The shared S3 protocol client: SigV4-signed requests and the object operations.
 //! Reused by every S3-family provider backend (generic S3, R2, …).
 
+use std::path::Path;
+
 use bytes::Bytes;
 use reqwest::{Method, StatusCode};
 
-use crate::checksum::ContentHash;
+use crate::checksum::{ContentHash, Hasher};
 use crate::error::{Result, StoreError};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
+use crate::streaming;
 
 use super::config::{S3_SERVICE, S3Config};
 use super::sigv4;
@@ -14,8 +17,14 @@ use super::xml;
 
 /// Objects larger than this use the multipart upload API.
 const MULTIPART_THRESHOLD: usize = 100 * 1024 * 1024;
-/// Multipart part size (>= S3's 5 MiB minimum).
+/// Base multipart part size (>= S3's 5 MiB minimum; last part may be smaller). Used as-is
+/// for normal objects; grown adaptively for objects that would exceed the 10,000-part cap.
 const PART_SIZE: usize = 100 * 1024 * 1024;
+/// S3's minimum part size: 5 MiB (every part but the last must be at least this).
+const S3_MIN_PART_SIZE: u64 = 5 * 1024 * 1024;
+/// S3's maximum part size: 5 GiB. Combined with the 10,000-part cap this bounds a single
+/// multipart object at 5 GiB * 10,000 ≈ 48.8 TiB.
+const S3_MAX_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
 /// Objects returned per listing page.
 const LIST_PAGE_SIZE: u32 = 1000;
 
@@ -155,6 +164,9 @@ impl S3Client {
         }
     }
 
+    /// In-memory multipart upload (the buffered `>100 MiB` path reachable via
+    /// [`put`](Self::put)). Aborts the upload on any error so no orphaned parts linger and
+    /// get billed — mirroring the streaming sibling [`put_multipart_from_path`].
     async fn put_multipart(&self, key: &str, data: &[u8]) -> Result<()> {
         let create = self
             .send(
@@ -175,33 +187,58 @@ impl S3Client {
         let upload_id = xml::extract_tag(&body, "UploadId")
             .ok_or_else(|| StoreError::Backend("s3: no UploadId in response".into()))?;
 
-        let mut parts_xml = String::from("<CompleteMultipartUpload>");
-        let mut part_number = 1u32;
-        let mut offset = 0usize;
-        while offset < data.len() {
-            let end = (offset + PART_SIZE).min(data.len());
-            let chunk = Bytes::copy_from_slice(&data[offset..end]);
-            let query = [
-                ("partNumber", part_number.to_string()),
-                ("uploadId", upload_id.clone()),
-            ];
-            let resp = self
-                .send(Method::PUT, Some(key), &query, &[], Some(chunk))
-                .await?;
-            if !resp.status().is_success() {
-                return Err(Self::error(resp).await);
+        match self.upload_parts_and_complete(key, &upload_id, data).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Abort so no partial upload lingers as orphaned, billed parts. Keep the
+                // original error; a failed abort is logged, not surfaced.
+                let _ = self.abort_multipart(key, &upload_id).await;
+                Err(e)
             }
-            let etag = resp
-                .headers()
-                .get("etag")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
+        }
+    }
+
+    /// Upload every part of the in-memory `data` slice, then complete the multipart upload.
+    /// Any error propagates to [`put_multipart`], which aborts the upload.
+    async fn upload_parts_and_complete(
+        &self,
+        key: &str,
+        upload_id: &str,
+        data: &[u8],
+    ) -> Result<()> {
+        // Grow the part size for very large objects so the part count stays within S3's
+        // 10,000-part cap; normal objects keep PART_SIZE.
+        let part_size = streaming::adaptive_part_size(
+            data.len() as u64,
+            PART_SIZE as u64,
+            S3_MIN_PART_SIZE,
+            S3_MAX_PART_SIZE,
+            streaming::MAX_PARTS,
+        )?;
+        let plan = streaming::plan_parts(data.len() as u64, part_size);
+        tracing::debug!(
+            bytes = data.len(),
+            part_size,
+            parts = plan.len(),
+            "s3 upload (multipart)"
+        );
+
+        let mut parts_xml = String::from("<CompleteMultipartUpload>");
+        for span in &plan {
+            let start = span.offset as usize;
+            let end = start + span.len as usize;
+            let etag = self
+                .upload_part(
+                    key,
+                    upload_id,
+                    span.number,
+                    Bytes::copy_from_slice(&data[start..end]),
+                )
+                .await?;
             parts_xml.push_str(&format!(
-                "<Part><PartNumber>{part_number}</PartNumber><ETag>{etag}</ETag></Part>"
+                "<Part><PartNumber>{}</PartNumber><ETag>{etag}</ETag></Part>",
+                span.number
             ));
-            offset = end;
-            part_number += 1;
         }
         parts_xml.push_str("</CompleteMultipartUpload>");
 
@@ -209,7 +246,7 @@ impl S3Client {
             .send(
                 Method::POST,
                 Some(key),
-                &[("uploadId", upload_id)],
+                &[("uploadId", upload_id.to_string())],
                 &[],
                 Some(Bytes::from(parts_xml)),
             )
@@ -218,6 +255,205 @@ impl S3Client {
             Ok(())
         } else {
             Err(Self::error(complete).await)
+        }
+    }
+
+    /// Streaming counterpart of [`put`](Self::put): store the file at `source` under
+    /// `key`, verified, without ever holding the whole file in memory.
+    ///
+    /// Below the multipart threshold the (bounded) file is read and handed to the verified
+    /// single-shot [`put`], exactly matching the buffered path. Above it, the file is
+    /// streamed part-by-part through the S3 multipart API at `O(part_size)` memory — same
+    /// threshold and part size as the live-verified buffered [`put_multipart`], only fed
+    /// from a file instead of an in-RAM slice.
+    pub(crate) async fn put_from_path(
+        &self,
+        key: &ObjectKey,
+        source: &Path,
+        expected: &ContentHash,
+    ) -> Result<PutOutcome> {
+        let size = tokio::fs::metadata(source).await?.len();
+
+        // Below the threshold: read the bounded file and use the verified single-shot
+        // path, exactly like `put` (in-memory guard + SigV4 body verification).
+        if !streaming::use_multipart(size, MULTIPART_THRESHOLD as u64) {
+            let data = tokio::fs::read(source).await?;
+            return self.put(key, Bytes::from(data), expected).await;
+        }
+
+        let verified = self
+            .put_multipart_from_path(key.as_str(), source, expected)
+            .await?;
+        Ok(PutOutcome { size, verified })
+    }
+
+    /// Stream a large file through the S3 multipart API, aborting the upload on any error
+    /// so nothing partial is ever committed. Returns the verified whole-file hash.
+    async fn put_multipart_from_path(
+        &self,
+        key: &str,
+        source: &Path,
+        expected: &ContentHash,
+    ) -> Result<ContentHash> {
+        let create = self
+            .send(
+                Method::POST,
+                Some(key),
+                &[("uploads", String::new())],
+                &[],
+                None,
+            )
+            .await?;
+        if !create.status().is_success() {
+            return Err(Self::error(create).await);
+        }
+        let body = create
+            .text()
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let upload_id = xml::extract_tag(&body, "UploadId")
+            .ok_or_else(|| StoreError::Backend("s3: no UploadId in response".into()))?;
+
+        match self
+            .upload_and_complete(key, &upload_id, source, expected)
+            .await
+        {
+            Ok(verified) => Ok(verified),
+            Err(e) => {
+                // Abort so no partial upload lingers or gets committed.
+                let _ = self.abort_multipart(key, &upload_id).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Upload every part streamed from `source`, verify the whole-file hash against
+    /// `expected`, then complete the multipart upload (which commits the object).
+    async fn upload_and_complete(
+        &self,
+        key: &str,
+        upload_id: &str,
+        source: &Path,
+        expected: &ContentHash,
+    ) -> Result<ContentHash> {
+        let size = tokio::fs::metadata(source).await?.len();
+        // Grow the part size for very large objects so the part count stays within S3's
+        // 10,000-part cap; normal objects keep PART_SIZE. Computed once from the total and
+        // used for the whole upload.
+        let part_size = streaming::adaptive_part_size(
+            size,
+            PART_SIZE as u64,
+            S3_MIN_PART_SIZE,
+            S3_MAX_PART_SIZE,
+            streaming::MAX_PARTS,
+        )?;
+        let plan = streaming::plan_parts(size, part_size);
+        tracing::debug!(
+            bytes = size,
+            part_size,
+            parts = plan.len(),
+            "s3 stream (multipart)"
+        );
+
+        let mut file = tokio::fs::File::open(source).await?;
+        // One reusable part buffer keeps peak memory at O(part_size).
+        let mut buf = vec![0u8; part_size as usize];
+        // Whole-file hash under the caller's algorithm, folded part-by-part, so the
+        // verified-write contract holds without ever buffering the whole file.
+        let mut whole = Hasher::new(expected.algo);
+        let mut parts_xml = String::from("<CompleteMultipartUpload>");
+
+        for span in &plan {
+            let want = span.len as usize;
+            let n = streaming::fill_buf(&mut file, &mut buf[..want]).await?;
+            if n != want {
+                return Err(StoreError::Backend(
+                    "s3 stream: source file shorter than expected (changed under read)".into(),
+                ));
+            }
+            whole.update(&buf[..want]);
+            let etag = self
+                .upload_part(
+                    key,
+                    upload_id,
+                    span.number,
+                    Bytes::copy_from_slice(&buf[..want]),
+                )
+                .await?;
+            parts_xml.push_str(&format!(
+                "<Part><PartNumber>{}</PartNumber><ETag>{etag}</ETag></Part>",
+                span.number
+            ));
+        }
+        parts_xml.push_str("</CompleteMultipartUpload>");
+
+        // Verify the streamed bytes hash to `expected` BEFORE completing (which commits).
+        let verified = whole.finalize();
+        if !verified.matches(expected) {
+            return Err(StoreError::ChecksumMismatch {
+                expected: expected.hex(),
+                actual: verified.hex(),
+            });
+        }
+
+        let complete = self
+            .send(
+                Method::POST,
+                Some(key),
+                &[("uploadId", upload_id.to_string())],
+                &[],
+                Some(Bytes::from(parts_xml)),
+            )
+            .await?;
+        if !complete.status().is_success() {
+            return Err(Self::error(complete).await);
+        }
+        Ok(verified)
+    }
+
+    /// Upload one part (S3 re-verifies the body against the SigV4 `x-amz-content-sha256`)
+    /// and return its ETag for the completion manifest.
+    async fn upload_part(
+        &self,
+        key: &str,
+        upload_id: &str,
+        part_number: u32,
+        chunk: Bytes,
+    ) -> Result<String> {
+        let query = [
+            ("partNumber", part_number.to_string()),
+            ("uploadId", upload_id.to_string()),
+        ];
+        let resp = self
+            .send(Method::PUT, Some(key), &query, &[], Some(chunk))
+            .await?;
+        if !resp.status().is_success() {
+            return Err(Self::error(resp).await);
+        }
+        Ok(resp
+            .headers()
+            .get("etag")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_string())
+    }
+
+    /// Abort an in-flight multipart upload so no partial upload is committed or lingers.
+    /// Best-effort: callers invoke it on the error path and keep the original error.
+    async fn abort_multipart(&self, key: &str, upload_id: &str) -> Result<()> {
+        let resp = self
+            .send(
+                Method::DELETE,
+                Some(key),
+                &[("uploadId", upload_id.to_string())],
+                &[],
+                None,
+            )
+            .await?;
+        if resp.status().is_success() || resp.status() == StatusCode::NOT_FOUND {
+            Ok(())
+        } else {
+            Err(Self::error(resp).await)
         }
     }
 
@@ -233,7 +469,32 @@ impl S3Client {
         self.fetch(key, Some(header)).await
     }
 
+    /// Streaming download (the S3-family override of
+    /// [`Backend::get_to_path`](crate::backend::Backend::get_to_path)): copy the object
+    /// body straight to `dest` at constant memory (temp → fsync → atomic rename) without
+    /// ever holding the whole object in RAM. A missing object maps to `NotFound`.
+    pub(crate) async fn get_to_path(&self, key: &ObjectKey, dest: &Path) -> Result<()> {
+        let resp = self.fetch_response(key, None).await?;
+        // Verify the committed length against the object's declared Content-Length so a
+        // short-but-clean body is not atomically committed as if whole.
+        let expected_len = streaming::content_length(&resp);
+        streaming::stream_to_file(resp, dest, expected_len).await
+    }
+
     async fn fetch(&self, key: &ObjectKey, range: Option<String>) -> Result<Bytes> {
+        let resp = self.fetch_response(key, range).await?;
+        resp.bytes()
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))
+    }
+
+    /// Send a GET (optionally ranged) and return the response once its status is
+    /// confirmed successful. Maps 404 to `NotFound`; other non-2xx to a backend error.
+    async fn fetch_response(
+        &self,
+        key: &ObjectKey,
+        range: Option<String>,
+    ) -> Result<reqwest::Response> {
         let extra: Vec<(&str, String)> = match range {
             Some(r) => vec![("range", r)],
             None => vec![],
@@ -247,9 +508,7 @@ impl S3Client {
         if !resp.status().is_success() {
             return Err(Self::error(resp).await);
         }
-        resp.bytes()
-            .await
-            .map_err(|e| StoreError::Backend(e.to_string()))
+        Ok(resp)
     }
 
     pub(crate) async fn head(&self, key: &ObjectKey) -> Result<ObjectMeta> {

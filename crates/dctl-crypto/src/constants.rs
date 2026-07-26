@@ -193,6 +193,22 @@ pub const RECIP_SUBRECORD_LEN: usize =
 /// Max inline recipients: `floor((65535 − 10) / 1234) = 53` (§3 `kem_ct_len ≤ 65535`).
 pub const MAX_RECIP_COUNT: u16 = 53;
 
+// ── §12.6 grant sidecar `DGS1` — FROZEN ──
+/// DSF1 `file_id` length (bytes) — head bytes `[52..68]`; binds a sidecar to its object.
+pub const FILE_ID_LEN: usize = 16;
+/// BLAKE3-256 head-hash length (bytes) — binds a sidecar to the exact 68-byte head.
+pub const HEAD_HASH_LEN: usize = 32;
+/// Grant sidecar container magic ("DCTL Grant Sidecar v1").
+pub const GRANT_SIDECAR_MAGIC: [u8; 4] = *b"DGS1";
+/// Grant sidecar version byte.
+pub const GRANT_SIDECAR_VERSION: u8 = 0x01;
+/// DGS1 header length: magic(4)+ver(1)+suite(1)+reserved(2)+file_id(16)+head_hash(32)
+/// +grant_gen(8)+grant_count(2) = 66. `grant_count` grants (each [`RECIP_SUBRECORD_LEN`]
+/// bytes, identical §12.2 sub-record format) follow at offset 66.
+pub const GRANT_SIDECAR_HEADER_LEN: usize = 4 + 1 + 1 + 2 + FILE_ID_LEN + HEAD_HASH_LEN + 8 + 2;
+/// Max grants carried in one sidecar (`0 ≤ G ≤ 4096`, §12.6).
+pub const MAX_GRANT_COUNT: u16 = 4096;
+
 // Compile-time locks on the FROZEN label byte-lengths (§12.9).
 const _: () = assert!(RECIP_ID_LABEL.len() == 17);
 const _: () = assert!(RECIP_SEED_LABEL.len() == 18);
@@ -205,6 +221,9 @@ const _: () = assert!(DRK1_LEN == 1222);
 const _: () = assert!(KEM_HYBRID_INFO_LEN == 2471);
 const _: () = assert!(RECIP_SUBRECORD_LEN == 1234);
 const _: () = assert!(WRAPPED_KW_LEN == 72);
+const _: () = assert!(FILE_ID_LEN == 16);
+const _: () = assert!(HEAD_HASH_LEN == 32);
+const _: () = assert!(GRANT_SIDECAR_HEADER_LEN == 66);
 // `kem_ct_len ≤ 65535` ⇒ 53 recipients max for suite 1.
 const _: () =
     assert!(KEM_WRAP_HEADER_LEN + RECIP_SUBRECORD_LEN * (MAX_RECIP_COUNT as usize) <= 65535);

@@ -13,16 +13,18 @@
 //! - [`identity`] — `DRK1` public identity, `key_id`, root-derived keypair (§12.3–§12.4).
 //! - `combine` — the pinned hybrid combiner + `wrapped_kw` AAD (§12.1, private).
 //! - `wrap` — `DKW1` block serialize/parse + per-recipient encaps/decaps (§12.2, private).
+//! - [`sidecar`] — `DGS1` rewritable grant sidecar (§12.6): add/remove recipients of an
+//!   already-uploaded object without re-uploading its payload.
 //!
-//! Object-level entry points live in [`crate::object`]: `seal_to_recipients` and
-//! `open_as_recipient`.
+//! Object-level entry points live in [`crate::object`]: `seal_to_recipients`,
+//! `open_as_recipient`, and `open_with_kw` (decode with an already-recovered `KW`).
 //!
-//! DEFERRED (additive, not needed for the core round-trip):
-// TODO(task-13-followup): §12.6 `DGS1` grant sidecar (rewritable extra recipients at
-// `g/<hex file_id>`) and §12.3 `DRR1` public registry object (at `r/<hex key_id>`).
+//! The §12.3 `DRR1` public recipient registry (at `r/<hex key_id>`) lives one layer up in
+//! `dctl-core` (`publish_identity`/`fetch_recipient`).
 
 pub(crate) mod combine;
 pub mod identity;
+pub mod sidecar;
 pub(crate) mod wrap;
 
 pub use identity::{Drk1Public, MlKemDecapKey, MlKemEncapKey, RecipientKeypair, derive_recipient};
