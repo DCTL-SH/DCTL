@@ -13,6 +13,10 @@
 pub mod error;
 mod vault;
 
+/// §12 asymmetric-recipient types (hybrid X25519 + ML-KEM-768), re-exported so callers can
+/// name the recipient public keys that [`Vault::put_file_shared`] and
+/// [`Vault::fetch_recipient`] speak in (`dctl_core::kem::Drk1Public`).
+pub use dctl_crypto::kem;
 pub use dctl_index::Record;
 pub use error::{CoreError, Result};
 pub use vault::Vault;

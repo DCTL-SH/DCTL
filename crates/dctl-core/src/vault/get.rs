@@ -6,12 +6,13 @@
 //! local index required. Integrity is checked against the object's **own** DEK-
 //! authenticated `content_blake3`, so it holds even with no local cache.
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use dctl_crypto::constants::{KEM_ID_HYBRID, KEM_ID_NONE, OBJECT_HEAD_LEN, RECIP_IDX_DEFAULT};
 use dctl_crypto::object::{self, Metadata};
-use dctl_crypto::path;
+use dctl_crypto::{kem, path};
 use dctl_store::{ContentHash, HashAlgo, Hasher, ObjectKey, StoreError};
 use zeroize::Zeroizing;
 
@@ -69,9 +70,22 @@ impl Vault {
         tracing::debug!(object = %object_key, "resolved object key");
 
         let object = self.backend.get(&ObjectKey::new(object_key)).await?;
-        // The object self-describes its DEK + metadata; open under the vault root key.
-        // `object::open` already verified every chunk tag and `meta.size == plaintext_len`.
-        let opened = object::open(&self.root_key, &object)?;
+        // The object self-describes its DEK + metadata; the head's `kem_id` selects the
+        // decode path. `kem_id=0` unwraps the DEK under the vault root; `kem_id=1` (§12)
+        // recovers `KW` via this vault's root-derived recipient identity. Either opener
+        // has already verified every chunk tag and `meta.size == plaintext_len`.
+        let head = object::parse_head(&object)?;
+        let opened = match head.kem_id {
+            KEM_ID_NONE => object::open(&self.root_key, &object)?,
+            KEM_ID_HYBRID => object::open_as_recipient(
+                self.identity.x_sk(),
+                self.identity.dk(),
+                &self.identity_key_id,
+                &object,
+            )?,
+            // `parse_head` already rejects any other `kem_id`; keep the match total.
+            other => return Err(unsupported_kem_id(other)),
+        };
 
         if let Some(meta) = &opened.metadata {
             let got = ContentHash::blake3(opened.plaintext.as_slice());
@@ -125,13 +139,16 @@ impl Vault {
             .get_to_path(&ObjectKey::new(object_key), obj_temp.path())
             .await?;
 
-        // Decrypt the temp object → dest off the async runtime (blocking file I/O + CPU),
-        // streaming with O(chunk_size) memory and an atomic write-then-rename onto `dest`.
+        // Decrypt the temp object → dest off the async runtime (blocking file I/O + CPU).
+        // The recipient keypair for a `kem_id=1` object is re-derived inside the task from
+        // the (cloned) root key, so no private key material has to be moved across the
+        // task boundary. `kem_id=0` streams at O(chunk_size); `kem_id=1` buffers the whole
+        // plaintext for now (constant-memory streaming for it is TODO(task-16-followup)).
         let root_key = self.root_key.clone();
         let dest = dest.to_path_buf();
         let err_path = path.clone();
         tokio::task::spawn_blocking(move || -> Result<()> {
-            let out = decrypt_object_to_dest(&root_key, obj_temp.path(), &dest, &err_path);
+            let out = decrypt_object_to_dest_any(&root_key, obj_temp.path(), &dest, &err_path);
             drop(obj_temp); // remove the temp object only after decrypt finished with it
             out
         })
@@ -156,10 +173,125 @@ impl Vault {
             .await?
             .ok_or_else(|| CoreError::NotFound(path.clone()))?;
         let object = self.backend.get(&ObjectKey::new(object_key)).await?;
-        let mut sink = std::io::sink();
-        object::open_stream(&self.root_key, &object, &mut sink)?;
+        let head = object::parse_head(&object)?;
+        match head.kem_id {
+            // `kem_id=0`: stream-decrypt to a sink at O(chunk_size) — no plaintext buffer.
+            KEM_ID_NONE => {
+                let mut sink = std::io::sink();
+                object::open_stream(&self.root_key, &object, &mut sink)?;
+            }
+            // `kem_id=1` (§12): the buffered recipient opener verifies every chunk tag,
+            // the footer, and `meta.size == plaintext_len`; we additionally re-check the
+            // object's own `content_blake3`. Constant-memory streaming verify for
+            // `kem_id=1` is TODO(task-16-followup).
+            KEM_ID_HYBRID => {
+                let opened = object::open_as_recipient(
+                    self.identity.x_sk(),
+                    self.identity.dk(),
+                    &self.identity_key_id,
+                    &object,
+                )?;
+                if let Some(meta) = &opened.metadata {
+                    let got = ContentHash::blake3(opened.plaintext.as_slice());
+                    if got.bytes[..] != meta.content_blake3[..] {
+                        return Err(CoreError::Integrity(path.clone()));
+                    }
+                }
+            }
+            other => return Err(unsupported_kem_id(other)),
+        }
         Ok(())
     }
+}
+
+/// The head declared a `kem_id` neither opener supports. Unreachable in practice —
+/// [`object::parse_head`] already rejects any value outside `{KEM_ID_NONE, KEM_ID_HYBRID}`
+/// — but keeps every `kem_id` match total without a panic (lib code never panics).
+fn unsupported_kem_id(kem_id: u8) -> CoreError {
+    CoreError::Crypto(dctl_crypto::CryptoError::Format(format!(
+        "unsupported kem_id {kem_id}"
+    )))
+}
+
+/// Read the object head at `obj_path`, then dispatch on `kem_id`: `kem_id=0` takes the
+/// constant-memory streaming path ([`decrypt_object_to_dest`]); `kem_id=1` (§12) re-derives
+/// this vault's recipient keypair from `root_key` and takes the buffered recipient path
+/// ([`decrypt_recipient_object_to_dest`]). Re-deriving here keeps the private `(x_sk, dk)`
+/// out of the `spawn_blocking` closure — only the (already-cloned) root crosses the boundary.
+fn decrypt_object_to_dest_any(
+    root_key: &[u8; 32],
+    obj_path: &Path,
+    dest: &Path,
+    nfc_path: &str,
+) -> Result<()> {
+    let mut head = [0u8; OBJECT_HEAD_LEN];
+    std::fs::File::open(obj_path)
+        .map_err(io_err)?
+        .read_exact(&mut head)
+        .map_err(io_err)?;
+    match object::parse_head(&head)?.kem_id {
+        KEM_ID_NONE => decrypt_object_to_dest(root_key, obj_path, dest, nfc_path),
+        KEM_ID_HYBRID => decrypt_recipient_object_to_dest(root_key, obj_path, dest, nfc_path),
+        other => Err(unsupported_kem_id(other)),
+    }
+}
+
+/// Buffered `kem_id=1` decrypt of the temp object at `obj_path` straight to `dest`. Reads
+/// the whole object into memory, recovers `KW` via the vault's recipient identity
+/// (re-derived from `root_key`), verifies the plaintext against the object's own
+/// `content_blake3`, and publishes it with the same atomic write-then-rename +
+/// clean-up-on-failure contract as [`decrypt_object_to_dest`]. Constant-memory streaming
+/// for `kem_id=1` is TODO(task-16-followup).
+fn decrypt_recipient_object_to_dest(
+    root_key: &[u8; 32],
+    obj_path: &Path,
+    dest: &Path,
+    nfc_path: &str,
+) -> Result<()> {
+    let kp = kem::derive_recipient(root_key, RECIP_IDX_DEFAULT)?;
+    let blob = std::fs::read(obj_path).map_err(io_err)?;
+    let opened = object::open_as_recipient(kp.x_sk(), kp.dk(), &kp.key_id, &blob)?;
+    let expected = opened.metadata.as_ref().map(|m| &m.content_blake3);
+    write_plaintext_atomic(opened.plaintext.as_slice(), expected, dest, nfc_path)
+}
+
+/// Publish `plaintext` to `dest` atomically: write it to a temp sibling, `sync_all`, then
+/// rename onto `dest`. If `expected` is set, the plaintext BLAKE3 must equal it first
+/// (the object's own DEK-authenticated `content_blake3`). Any integrity/I/O failure
+/// removes the temp and leaves no `dest` file (not even a partial one). `nfc_path` names
+/// the file only in the [`CoreError::Integrity`] message.
+fn write_plaintext_atomic(
+    plaintext: &[u8],
+    expected: Option<&[u8; 32]>,
+    dest: &Path,
+    nfc_path: &str,
+) -> Result<()> {
+    if let Some(exp) = expected {
+        let got = ContentHash::blake3(plaintext);
+        if got.bytes[..] != exp[..] {
+            tracing::warn!(path = %nfc_path, "plaintext hash mismatch — integrity failure");
+            return Err(CoreError::Integrity(nfc_path.to_string()));
+        }
+    }
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(io_err)?;
+    }
+    let dest_tmp = temp_sibling(dest);
+    let write = (|| -> Result<()> {
+        let mut f = std::fs::File::create(&dest_tmp).map_err(io_err)?;
+        f.write_all(plaintext).map_err(io_err)?;
+        f.sync_all().map_err(io_err)?;
+        Ok(())
+    })();
+    if let Err(e) = write {
+        let _ = std::fs::remove_file(&dest_tmp);
+        return Err(e);
+    }
+    if let Err(e) = std::fs::rename(&dest_tmp, dest) {
+        let _ = std::fs::remove_file(&dest_tmp);
+        return Err(io_err(e));
+    }
+    Ok(())
 }
 
 /// Decrypt the temp object at `obj_path` under `root_key` straight to `dest`, atomically

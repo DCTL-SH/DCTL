@@ -438,6 +438,84 @@ mod tests {
         );
     }
 
+    /// The two records of the worked example in `docs/AUDIT_LOG.md`.
+    fn documented_example() -> [AuditRecord; 2] {
+        let first = AuditRecord {
+            index: 0,
+            time: "2026-07-26T14:30:00Z".into(),
+            op: "copy".into(),
+            result: "success".into(),
+            path: "photos/2024/holiday.mov".into(),
+            size: 4_294_967_296,
+            plaintext_hash: "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
+                .into(),
+            ciphertext_hash: "c12f1481789d50a4c549e15c42bda1759277bc954d2f4b62c0f4531937f2e990"
+                .into(),
+            remote: "vault".into(),
+            prev: AUDIT_CHAIN_GENESIS_PREV.into(),
+            hash: "82003870c5344e3adb90c5e5319c2d77ed90605a4cc09d6f4e313558e5fa8597".into(),
+        };
+        let second = AuditRecord {
+            index: 1,
+            time: "2026-07-26T14:31:07Z".into(),
+            op: "delete".into(),
+            result: "success".into(),
+            path: "photos/2023/old.mov".into(),
+            size: 0,
+            plaintext_hash: String::new(),
+            ciphertext_hash: String::new(),
+            remote: "vault".into(),
+            prev: first.hash.clone(),
+            hash: "de169675b8da96a4892e92a98fd20b952f389d93fcfb0a38d95cf51bf4df1ccd".into(),
+        };
+        [first, second]
+    }
+
+    #[test]
+    fn the_worked_example_in_the_specification_is_the_one_this_code_produces() {
+        // `docs/AUDIT_LOG.md` promises a chain can be verified with a short
+        // script and no DCTL binary. That promise is only worth something if the
+        // numbers printed in it are the numbers this function computes, so they
+        // are pinned here: a change to the canonical form fails this test before
+        // it silently invalidates the specification.
+        let records = documented_example();
+        for record in &records {
+            assert_eq!(
+                compute_hash(record),
+                record.hash,
+                "docs/AUDIT_LOG.md and chain::canonical have drifted at index {}",
+                record.index
+            );
+        }
+        let verified = verify(&records).unwrap();
+        assert_eq!(verified.records, 2);
+        assert_eq!(
+            verified.head,
+            "de169675b8da96a4892e92a98fd20b952f389d93fcfb0a38d95cf51bf4df1ccd"
+        );
+
+        // The exact byte string the document tells a third party to hash.
+        assert_eq!(
+            canonical(&records[1]),
+            format!(
+                "82003870c5344e3adb90c5e5319c2d77ed90605a4cc09d6f4e313558e5fa8597{s}1{s}\
+                 2026-07-26T14:31:07Z{s}delete{s}success{s}photos/2023/old.mov{s}0{s}{s}{s}vault",
+                s = AUDIT_HASH_FIELD_SEPARATOR
+            )
+        );
+    }
+
+    #[test]
+    fn the_specification_pins_the_json_field_order_too() {
+        // A verifier written from the document reads the fields by name, but a
+        // human comparing a file against the worked example reads them in order.
+        let json = serde_json::to_string(&documented_example()[0]).unwrap();
+        assert_eq!(
+            json,
+            r#"{"index":0,"time":"2026-07-26T14:30:00Z","op":"copy","result":"success","path":"photos/2024/holiday.mov","size":4294967296,"plaintext_hash":"d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24","ciphertext_hash":"c12f1481789d50a4c549e15c42bda1759277bc954d2f4b62c0f4531937f2e990","remote":"vault","prev":"0000000000000000000000000000000000000000000000000000000000000000","hash":"82003870c5344e3adb90c5e5319c2d77ed90605a4cc09d6f4e313558e5fa8597"}"#
+        );
+    }
+
     #[test]
     fn sealing_assigns_the_position_and_the_hash_the_caller_cannot_choose() {
         let entry = Entry::at("copy", ExitCode::Success, Timestamp::parse("@0").unwrap())

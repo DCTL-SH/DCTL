@@ -75,6 +75,7 @@ async fn run_inner(ctx: &Ctx, command: &Command) -> Result<()> {
         Command::Check(args) => commands::check::run(ctx, args).await,
         Command::Scrub(args) => commands::scrub::run(ctx, args).await,
         Command::Hashsum(args) => commands::hashsum::run(ctx, args).await,
+        Command::Index(args) => commands::index::run(ctx, args).await,
 
         // ── Audit & recovery ─────────────────────────────────────────────
         Command::Audit(args) => commands::audit::run(ctx, args).await,

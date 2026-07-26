@@ -21,12 +21,14 @@
 //! (`/`-separated, NFC, no `.` or `..`) by [`crate::platform::path`], so two
 //! spellings of the same filename can never address two different objects.
 
-// Some of what follows is not reachable from this build's `run` body: the engine
-// has no entry point yet for the step that would call it (see the command's
-// module documentation). It is written and unit-tested now, with the tests that
-// pin its contract, rather than left until the engine lands — a machine-readable
-// output format that first appears on the day it is needed is a format nobody
-// reviewed.
+// Three accessors below have no caller yet. `check`, `scrub` and
+// `dctl index rebuild` all reach a real engine now and use `path`, `prefix`,
+// `spec`, `is_tree` and `require_remote`; `remote`, `is_remote` and `local_path`
+// are for `verify` and `hashsum`, which are still unwired. They are kept
+// — with the tests that pin the drive-letter and `..` rules through them —
+// because the grammar is the part of this file most worth testing exhaustively,
+// and `C:\data` being read as a remote is the mistake that writes to the wrong
+// side of a transfer.
 #![allow(dead_code)]
 
 use std::fmt;

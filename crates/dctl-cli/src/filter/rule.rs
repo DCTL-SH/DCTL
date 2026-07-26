@@ -91,7 +91,7 @@ enum Anchor {
 }
 
 /// One compiled include/exclude rule.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rule {
     action: Action,
     glob: Glob,
@@ -283,14 +283,20 @@ mod tests {
 
         let stored = logical::normalize_unicode(decomposed);
         // A rule typed in either spelling matches the stored (composed) path.
-        assert!(Rule::compile(Action::Exclude, "cafe\u{301}/*")
-            .expect("decomposed pattern")
-            .matches(&Candidate::file(&stored, 0)));
-        assert!(Rule::compile(Action::Exclude, "caf\u{e9}/*")
-            .expect("composed pattern")
-            .matches(&Candidate::file(&stored, 0)));
-        assert!(Rule::compile(Action::Exclude, "caf\u{e9}\u{301}*")
-            .is_ok_and(|r| !r.matches(&Candidate::file(&stored, 0))));
+        assert!(
+            Rule::compile(Action::Exclude, "cafe\u{301}/*")
+                .expect("decomposed pattern")
+                .matches(&Candidate::file(&stored, 0))
+        );
+        assert!(
+            Rule::compile(Action::Exclude, "caf\u{e9}/*")
+                .expect("composed pattern")
+                .matches(&Candidate::file(&stored, 0))
+        );
+        assert!(
+            Rule::compile(Action::Exclude, "caf\u{e9}\u{301}*")
+                .is_ok_and(|r| !r.matches(&Candidate::file(&stored, 0)))
+        );
     }
 
     #[test]

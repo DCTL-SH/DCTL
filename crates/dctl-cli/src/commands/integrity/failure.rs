@@ -19,12 +19,13 @@
 //! | `missing`    | indexed, but absent at the provider           | rebuild/reconcile     |
 //! | `unreadable` | the provider never answered                   | retry                 |
 
-// Some of what follows is not reachable from this build's `run` body: the engine
-// has no entry point yet for the step that would call it (see the command's
-// module documentation). It is written and unit-tested now, with the tests that
-// pin its contract, rather than left until the engine lands — a machine-readable
-// output format that first appears on the day it is needed is a format nobody
-// reviewed.
+// Two items below have no caller yet. `scrub` reaches a real engine now and
+// uses `Verdict`, `is_failure`, `worse`, `slug` and `failure`; `is_corruption`
+// and `object_failure` are the single-object forms, for `verify` and `hashsum`,
+// which are still unwired. They are kept with their tests because the wording
+// `object_failure` produces is the product's promise — that bytes which failed
+// authentication were not handed over — and a sentence that first appears on the
+// day it is needed is a sentence nobody reviewed.
 #![allow(dead_code)]
 
 use crate::constants::{

@@ -167,10 +167,32 @@ impl Source for VaultSource {
         // makes this answer true again.
         let query = path::normalize_unicode(path);
         let records = self.session.vault.list(&query)?;
-        Ok(records
+        let Some(entry) = records
             .into_iter()
             .find(|record| record.path == query)
-            .map(from_record))
+            .map(from_record)
+        else {
+            return Ok(None);
+        };
+
+        if !unmeasured(&entry) {
+            return Ok(Some(entry));
+        }
+
+        // A rebuilt row: real, and carrying a size nobody has ever measured.
+        // Returning its zero would make `dctl cat` write no bytes and exit 0 for
+        // a file that is plainly there, which is the one failure this project
+        // may not have. So the size is *established* rather than guessed, at the
+        // cost of a read — see [`unmeasured`] for why this case is
+        // distinguishable and why it cannot fire for a genuinely empty file.
+        let plaintext = self.whole(&entry.path).await?;
+        Ok(Some(
+            Entry::new(entry.path, plaintext.len() as u64)
+                .with_modified(entry.modified_unix)
+                // Now known, because the bytes are in hand and were
+                // authenticated on the way through.
+                .with_content_hash(blake3::hash(&plaintext).as_bytes().to_vec()),
+        ))
     }
 
     async fn verify(&self, path: &str) -> Result<()> {
@@ -219,6 +241,26 @@ fn from_record(record: Record) -> Entry {
     Entry::new(record.path, record.size)
         .with_modified(record.modified_unix)
         .with_content_hash(record.content_hash)
+}
+
+/// Whether this record's size was never measured.
+///
+/// [`Vault::rebuild_index`](dctl_core::Vault::rebuild_index) recovers a machine
+/// from the backend alone by listing and decrypting the §5 name records. That is
+/// a **list-only pass** by design — it must not cost a full read of the dataset
+/// — so the rows it writes carry `size: 0` and an *empty* content hash, and the
+/// core's own comment says the sizes populate on first read.
+///
+/// The two conditions together are what make the case identifiable. A file
+/// written through the ordinary path always has a 32-byte BLAKE3 recorded, and
+/// that is true of a genuinely empty file too: `blake3::hash(b"")` is a full
+/// digest, not nothing. So `size == 0` with *no* hash cannot be an empty file
+/// that was written here; it can only be a row nobody has measured yet.
+///
+/// Distinguishing them matters because the alternative is silent: a caller that
+/// believed the zero would read no bytes and report success.
+fn unmeasured(entry: &Entry) -> bool {
+    entry.size == 0 && entry.content_hash.is_none()
 }
 
 /// Copy the window `[offset, offset + length)` out of `plaintext`.
@@ -474,6 +516,99 @@ mod tests {
             .expect("the object is there");
         assert_eq!(found.path, "a.jpg");
         assert_eq!(found.size, 3);
+    }
+
+    #[tokio::test]
+    async fn a_rebuilt_row_is_measured_rather_than_reported_as_empty() {
+        // The failure this guards, seen for real: `dctl index rebuild` writes
+        // rows with no size, and a `stat` that believed the zero made
+        // `dctl cat archive:a.txt` print nothing and exit 0 for a file that was
+        // plainly there.
+        let fixture = vault_with(&[("a.txt", b"hello world")]).await;
+        fixture
+            .source
+            .session
+            .vault
+            .rebuild_index()
+            .await
+            .expect("the index rebuilds from the backend");
+
+        // The listing shows what the index holds, which is genuinely nothing.
+        let mut cursor = fixture.source.enumerate("").await.unwrap();
+        let listed = cursor.next().await.unwrap().expect("the row is there");
+        assert_eq!(listed.size, 0, "a rebuild records no size");
+        assert!(unmeasured(&listed));
+
+        // `stat` refuses to pass that on as a fact.
+        let found = fixture
+            .source
+            .stat("a.txt")
+            .await
+            .unwrap()
+            .expect("the object is there");
+        assert_eq!(found.size, 11);
+        assert_eq!(
+            found.content_hash.as_deref(),
+            Some(blake3::hash(b"hello world").as_bytes().as_slice())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_genuinely_empty_file_is_not_mistaken_for_an_unmeasured_row() {
+        // `blake3::hash(b"")` is a full digest, so a file written here always
+        // has one — which is exactly what keeps the two cases apart.
+        let fixture = vault_with(&[("empty.txt", b"")]).await;
+        let found = fixture
+            .source
+            .stat("empty.txt")
+            .await
+            .unwrap()
+            .expect("an empty object is still an object");
+        assert_eq!(found.size, 0);
+        assert!(found.content_hash.is_some());
+        assert!(!unmeasured(&found));
+    }
+
+    #[tokio::test]
+    async fn a_verify_authenticates_the_stored_bytes_and_notices_when_they_change() {
+        // The claim this source is allowed to make, proved: the object is
+        // overwritten behind DCTL's back and the check catches it.
+        let fixture = vault_with(&[("a.txt", b"sealed")]).await;
+        fixture
+            .source
+            .verify("a.txt")
+            .await
+            .expect("an intact object authenticates");
+
+        let objects = fixture._store.path().join("o");
+        for entry in std::fs::read_dir(&objects).expect("the object directory exists") {
+            let path = entry.expect("a directory entry").path();
+            let length = std::fs::metadata(&path).expect("readable").len();
+            std::fs::write(&path, vec![0xA5; length as usize]).expect("overwritten");
+        }
+
+        let error = fixture
+            .source
+            .verify("a.txt")
+            .await
+            .expect_err("altered bytes must not pass");
+        assert_eq!(error.code(), crate::exit::ExitCode::IntegrityFailure);
+
+        // And the claim itself, which is what separates this source from a
+        // plain store that would have read the same garbage back happily.
+        assert_eq!(fixture.source.assurance(), Assurance::Authenticated);
+        assert!(fixture.source.assurance().detects_corruption());
+    }
+
+    #[tokio::test]
+    async fn a_verify_of_a_missing_object_is_reported_as_missing() {
+        let fixture = vault_with(&[("a.txt", b"1")]).await;
+        let error = fixture
+            .source
+            .verify("nope.txt")
+            .await
+            .expect_err("a missing object cannot be verified");
+        assert_eq!(error.code(), crate::exit::ExitCode::FileNotFound);
     }
 
     #[test]

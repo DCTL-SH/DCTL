@@ -120,10 +120,11 @@ impl FileProblem {
                      silently stops protecting anything.",
                     describe_comment_markers()
                 ),
-                LineProblem::EscapesRoot =>
+                LineProblem::EscapesRoot => {
                     "Paths in a list are relative to the transfer root and may not contain \
                      '..' components."
-                        .to_string(),
+                        .to_string()
+                }
             },
         }
     }
@@ -203,15 +204,33 @@ pub fn rules_in(text: &str, origin: &Path) -> Result<Vec<Directive>, FileProblem
 
         // The marker has to be a word of its own: without the separating space
         // `-file.txt` would read as an exclusion of `file.txt` rather than as
-        // the pattern for a file whose name begins with a dash.
-        let rest = trimmed.get(action.marker().len_utf8()..).unwrap_or_default();
+        // the pattern for a file whose name begins with a dash. A marker with
+        // *nothing* after it is a different mistake, and gets its own message —
+        // the author meant to write a pattern and did not, so telling them the
+        // marker is wrong would send them to fix the wrong half of the line.
+        let rest = trimmed
+            .get(action.marker().len_utf8()..)
+            .unwrap_or_default();
+        if rest.is_empty() {
+            return Err(malformed(
+                origin,
+                line,
+                trimmed,
+                LineProblem::MissingPattern,
+            ));
+        }
         if !rest.starts_with(char::is_whitespace) {
             return Err(malformed(origin, line, trimmed, LineProblem::MissingMarker));
         }
 
         let pattern = rest.trim();
         if pattern.is_empty() {
-            return Err(malformed(origin, line, trimmed, LineProblem::MissingPattern));
+            return Err(malformed(
+                origin,
+                line,
+                trimmed,
+                LineProblem::MissingPattern,
+            ));
         }
 
         directives.push(Directive::Rule {
@@ -425,14 +444,21 @@ mod tests {
 
     #[test]
     fn a_marker_with_no_pattern_is_refused() {
-        let error = rules_in("+ \n", origin()).expect_err("nothing to include");
-        assert!(matches!(
-            error,
-            FileProblem::Malformed {
-                problem: LineProblem::MissingPattern,
-                ..
-            }
-        ));
+        // Both spellings of the same mistake: a marker followed by whitespace,
+        // and a marker followed by nothing at all.
+        for text in ["+ \n", "-\n"] {
+            let error = rules_in(text, origin()).expect_err("nothing to match");
+            assert!(
+                matches!(
+                    error,
+                    FileProblem::Malformed {
+                        problem: LineProblem::MissingPattern,
+                        ..
+                    }
+                ),
+                "{text:?} produced {error:?}"
+            );
+        }
     }
 
     #[test]
@@ -519,7 +545,10 @@ photos/2024/a.jpg
         let list_path = dir.join("list.txt");
         std::fs::write(&list_path, "a.txt\n# skip\nb/c.txt\n").expect("write list");
         let paths = paths_from_file(&list_path).expect("read list");
-        assert_eq!(paths.into_iter().collect::<Vec<_>>(), vec!["a.txt", "b/c.txt"]);
+        assert_eq!(
+            paths.into_iter().collect::<Vec<_>>(),
+            vec!["a.txt", "b/c.txt"]
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }

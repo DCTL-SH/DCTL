@@ -197,6 +197,13 @@ pub trait Source: Send + Sync {
     /// holds a file. Reserving the error channel for *failures to look* is what
     /// keeps "it is not there" distinguishable from "we could not tell".
     ///
+    /// **Accuracy outranks cheapness here.** Every range flag is resolved
+    /// against the size this returns, so a size that is merely *plausible* makes
+    /// `dctl cat` write the wrong number of bytes and exit 0. An implementation
+    /// that cannot describe an object from metadata alone must read it rather
+    /// than answer with a placeholder; where that can happen is documented on
+    /// the implementation (see [`vault`]).
+    ///
     /// # Errors
     /// Whatever the index or provider reported while looking.
     async fn stat(&self, path: &str) -> Result<Option<Entry>>;

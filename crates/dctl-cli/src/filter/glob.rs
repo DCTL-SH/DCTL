@@ -916,7 +916,9 @@ mod tests {
     fn the_nesting_ceiling_is_enforced() {
         let ok = format!(
             "{}a{}",
-            GLOB_ALTERNATION_OPEN.to_string().repeat(GLOB_MAX_NESTING_DEPTH),
+            GLOB_ALTERNATION_OPEN
+                .to_string()
+                .repeat(GLOB_MAX_NESTING_DEPTH),
             GLOB_ALTERNATION_CLOSE
                 .to_string()
                 .repeat(GLOB_MAX_NESTING_DEPTH)

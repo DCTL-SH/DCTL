@@ -21,8 +21,16 @@
 //! does not pass through [`crate::audit::redaction`] first: the setters take the
 //! raw value and store the scrubbed one. That buys two separate guarantees —
 //! credentials never reach the log, and no field can contain
-//! [`AUDIT_HASH_FIELD_SEPARATOR`], which is what stops one field's contents from
-//! being read as another's.
+//! [`crate::constants::AUDIT_HASH_FIELD_SEPARATOR`], which is what stops one
+//! field's contents from being read as another's.
+//!
+//! ## Where the clock comes from
+//!
+//! [`Timestamp`] is borrowed from `dctl touch` rather than re-derived here.
+//! DCTL converts calendar dates itself instead of taking a datetime dependency
+//! (`PLAN.md` §13.1), so there is exactly one proleptic-Gregorian
+//! implementation in the crate — and a second copy of it is how the audit log
+//! and the file listings would come to disagree about what `2028-02-29` means.
 //!
 //! ## Why the optional fields default rather than failing to parse
 //!
@@ -336,7 +344,11 @@ mod tests {
         let entry = Entry::at("copy", ExitCode::Success, Timestamp::parse("@0").unwrap());
         assert_eq!(entry.time_field(), "1970-01-01T00:00:00Z");
         // And the live clock produces the same shape.
-        assert!(Entry::new("copy", ExitCode::Success).time_field().ends_with('Z'));
+        assert!(
+            Entry::new("copy", ExitCode::Success)
+                .time_field()
+                .ends_with('Z')
+        );
     }
 
     #[test]

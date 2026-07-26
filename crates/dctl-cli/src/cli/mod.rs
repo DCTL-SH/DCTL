@@ -160,6 +160,13 @@ pub enum Command {
     /// Print content hashes for objects.
     Hashsum(commands::hashsum::HashsumArgs),
 
+    /// Operate on the local index: rebuild it from the backend.
+    ///
+    /// Grouped with the integrity verbs because the index is what they read, and
+    /// because `dctl index rebuild` is the remedy the `missing`-verdict and
+    /// index-error hints already name.
+    Index(commands::index::IndexArgs),
+
     // ── Audit & recovery ─────────────────────────────────────────────────
     /// Inspect and verify the tamper-evident audit log.
     Audit(commands::audit::AuditArgs),
@@ -234,6 +241,7 @@ impl Command {
             Self::Check(_) => "check",
             Self::Scrub(_) => "scrub",
             Self::Hashsum(_) => "hashsum",
+            Self::Index(_) => "index",
             Self::Audit(_) => "audit",
             Self::Backup(_) => "backup",
             Self::Restore(_) => "restore",

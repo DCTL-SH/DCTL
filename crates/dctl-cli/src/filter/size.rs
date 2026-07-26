@@ -28,10 +28,7 @@ use crate::output::size::parse_size;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SizeProblem {
     /// One of the two values is not a size.
-    Unreadable {
-        flag: &'static str,
-        detail: String,
-    },
+    Unreadable { flag: &'static str, detail: String },
     /// The bounds cross, so nothing can satisfy both.
     Crossed { min: u64, max: u64 },
 }
@@ -41,11 +38,15 @@ impl SizeProblem {
     pub fn hint(&self) -> String {
         match self {
             Self::Unreadable { .. } => {
-                format!("Sizes are written as {SIZE_PARSE_EXAMPLES}; '{SIZE_LIMIT_OFF}' removes a limit.")
+                format!(
+                    "Sizes are written as {SIZE_PARSE_EXAMPLES}; '{SIZE_LIMIT_OFF}' removes a limit."
+                )
             }
-            Self::Crossed { .. } => "No file can satisfy both bounds, so the run would move nothing \
+            Self::Crossed { .. } => {
+                "No file can satisfy both bounds, so the run would move nothing \
                  and still report success. Swap them, or drop one."
-                .to_string(),
+                    .to_string()
+            }
         }
     }
 }
@@ -77,11 +78,20 @@ pub struct SizeBounds {
 }
 
 impl SizeBounds {
+    /// Both ends open. The starting point for a filter with no size flags, and
+    /// `const` so an unrestricted [`super::FilterSet`] can be built in one.
+    pub const fn open() -> Self {
+        Self {
+            min: None,
+            max: None,
+        }
+    }
+
     /// Build a validated pair from two already-parsed values.
     ///
     /// # Errors
     /// [`SizeProblem::Crossed`] when the bounds cannot both be satisfied.
-    pub const fn new(min: Option<u64>, max: Option<u64>) -> Result<Self, SizeProblem> {
+    pub fn new(min: Option<u64>, max: Option<u64>) -> Result<Self, SizeProblem> {
         if let (Some(low), Some(high)) = (min, max) {
             if low > high {
                 return Err(SizeProblem::Crossed {
@@ -147,6 +157,7 @@ mod tests {
     #[test]
     fn an_unset_pair_admits_everything() {
         let open = SizeBounds::default();
+        assert_eq!(open, SizeBounds::open());
         assert!(!open.is_limited());
         assert!(open.admits(0));
         assert!(open.admits(u64::MAX));

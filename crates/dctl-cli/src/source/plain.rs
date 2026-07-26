@@ -481,6 +481,46 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn a_read_back_touches_every_byte_and_says_what_that_proves() {
+        // The window is larger than these objects, so this exercises the loop's
+        // ordinary exit; the point being asserted is that a present object
+        // passes and a missing one is reported as missing rather than as damage.
+        let fixture = tree_with(&[("a.bin", b"0123456789"), ("empty.bin", b"")]);
+        let source = &fixture.source;
+
+        source.verify("a.bin").await.expect("an intact object");
+        // A zero-length object is still an object: `head` proves it is there,
+        // and there are no bytes to disagree about.
+        source.verify("empty.bin").await.expect("an empty object");
+
+        let error = source
+            .verify("gone.bin")
+            .await
+            .expect_err("a missing object cannot be verified");
+        assert_eq!(error.code(), crate::exit::ExitCode::FileNotFound);
+
+        // And the claim a pass supports is stated, not assumed: nothing here
+        // recorded a hash, so a clean read proves retrievability and no more.
+        assert_eq!(source.assurance(), Assurance::ReadBack);
+        assert!(!source.assurance().detects_corruption());
+    }
+
+    #[tokio::test]
+    async fn an_object_larger_than_one_window_is_read_back_in_full() {
+        // The loop, genuinely entered more than once. A read-back that stopped
+        // after the first window would report a truncated object as healthy.
+        let size = usize::try_from(READ_BACK_WINDOW_BYTES).unwrap() + 1024;
+        let root = TempDir::new().unwrap();
+        std::fs::write(root.path().join("big.bin"), vec![7u8; size]).unwrap();
+        let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(root.path()));
+
+        PlainSource::new(backend)
+            .verify("big.bin")
+            .await
+            .expect("a multi-window object reads back");
+    }
+
     #[test]
     fn a_local_spec_needs_no_configuration_to_resolve() {
         // The headless case `PLAN.md` §14 requires: a bare path is a legitimate

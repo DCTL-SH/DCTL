@@ -12,3 +12,10 @@ pub(super) const OBJECT_KEY_PREFIX: &str = "o/";
 /// The authoritative, backend-resident path→object map that makes a vault restorable
 /// on any device with only the password (`docs/FORMAT.md` §5).
 pub(super) const NAME_KEY_PREFIX: &str = "n/";
+
+/// Prefix for the §12.3 public recipient registry: `r/` ‖ hex(key_id). Each entry is an
+/// unencrypted `DRR1` container holding a recipient's public `DRK1` (no secrets), so a
+/// writer can discover the public key of an already-pinned `key_id`. The stored bytes are
+/// self-certifying: a reader recomputes `key_id` from the `DRK1` and requires it to match
+/// the requested key, so a hostile backend cannot substitute a different pubkey.
+pub(super) const RECIP_KEY_PREFIX: &str = "r/";

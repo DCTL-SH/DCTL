@@ -6,13 +6,14 @@ mod list;
 mod put;
 mod put_stream;
 mod restore;
+mod share;
 
 use std::path::Path;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use dctl_crypto::names::NameKeys;
-use dctl_crypto::{constants, envelope, kdf, keys};
+use dctl_crypto::{constants, envelope, kdf, kem, keys};
 use dctl_index::Index;
 use dctl_store::{Backend, ContentHash, ObjectKey};
 use zeroize::Zeroizing;
@@ -29,6 +30,13 @@ pub struct Vault {
     vault_id: [u8; constants::VAULT_ID_LEN],
     index: Index,
     chunk_size: u32,
+    /// The vault's own root-derived recipient identity (§12.4, `idx = 0`). It carries the
+    /// private `(x_sk, dk)` needed to read `kem_id=1` objects sealed to this vault — the
+    /// same trust level as `root_key`, which is already held here, and a pure
+    /// deterministic function of it (no new persisted bytes).
+    identity: kem::RecipientKeypair,
+    /// Cached stable key-id of `identity` (§12.3) — the recipient-matching handle.
+    identity_key_id: [u8; constants::KEY_ID_LEN],
 }
 
 impl Vault {
@@ -141,6 +149,11 @@ impl Vault {
         let index = Index::open(index_path, &index_subkey)?;
         let name_keys = NameKeys::derive(root_key)?;
 
+        // Root-derived recipient identity (§12.4). Deterministic in `root_key`, so every
+        // device that unlocks the vault reproduces the same `key_id, x_pk, ek, dk`.
+        let identity = kem::derive_recipient(root_key, constants::RECIP_IDX_DEFAULT)?;
+        let identity_key_id = identity.key_id;
+
         let mut root = Zeroizing::new([0u8; 32]);
         root.copy_from_slice(root_key);
 
@@ -151,6 +164,23 @@ impl Vault {
             vault_id,
             index,
             chunk_size: constants::DEFAULT_CHUNK_SIZE,
+            identity,
+            identity_key_id,
         })
+    }
+
+    /// The vault's own root-derived recipient **public** identity (§12.4). A writer seals
+    /// `kem_id=1` objects to this `DRK1` so the owner can always recover them (§12.8); it
+    /// is also what other vaults add to their recipient sets to share *to* this vault.
+    #[must_use]
+    pub fn identity(&self) -> &kem::Drk1Public {
+        &self.identity.public
+    }
+
+    /// The stable 32-byte key-id of the vault's recipient identity (§12.3) — the
+    /// self-certifying handle used to look this vault up in the `r/*` registry.
+    #[must_use]
+    pub fn identity_key_id(&self) -> [u8; constants::KEY_ID_LEN] {
+        self.identity_key_id
     }
 }

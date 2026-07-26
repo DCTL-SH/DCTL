@@ -422,6 +422,190 @@ async fn cross_device_delete_removes_object_and_name_record() {
     );
 }
 
+/// Path of the single stored content object under a `LocalFs` store's `o/` prefix. Only
+/// valid when exactly one object exists (the sharing tests arrange that).
+fn only_object_path(store: &std::path::Path) -> std::path::PathBuf {
+    let dir = store.join("o");
+    std::fs::read_dir(&dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path()
+}
+
+/// Raw bytes of that single stored content object.
+fn only_object_bytes(store: &std::path::Path) -> Vec<u8> {
+    std::fs::read(only_object_path(store)).unwrap()
+}
+
+#[tokio::test]
+async fn shared_put_roundtrips_and_head_is_kem1() {
+    let e = env();
+    let owner = Vault::init(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+
+    // A separate vault (its own root → its own identity) supplies a recipient to share to.
+    let r_env = env();
+    let recipient = Vault::init(r_env.backend.clone(), &r_env.index_path, "pw2")
+        .await
+        .unwrap();
+
+    let data = b"hello asymmetric recipients";
+    owner
+        .put_file_shared("shared/a", data, &[recipient.identity().clone()])
+        .await
+        .unwrap();
+
+    // The owner reads it back through the ordinary get_file (kem_id=1 branch exercised).
+    assert_eq!(owner.get_file("shared/a").await.unwrap().as_slice(), data);
+
+    // The stored object's head declares kem_id=1 (FORMAT.md §3: head byte 6 = kem_id).
+    let obj = only_object_bytes(e._store.path());
+    assert_eq!(obj[6], 1, "shared object head kem_id must be 1 (hybrid)");
+}
+
+#[tokio::test]
+async fn recipient_in_set_decrypts_but_non_recipient_errors() {
+    // Owner O shares to recipient B (not C). B is a recipient → opens the object via
+    // get_file; C is not → the hybrid open finds no sub-record for its key_id and errors.
+    // Name records are per-root, so B and C resolve the object through their OWN name
+    // record (minted by a placeholder put) whose stored bytes we replace with O's object.
+    let o_env = env();
+    let o = Vault::init(o_env.backend.clone(), &o_env.index_path, "pw")
+        .await
+        .unwrap();
+    let b_env = env();
+    let b = Vault::init(b_env.backend.clone(), &b_env.index_path, "pw")
+        .await
+        .unwrap();
+    let c_env = env();
+    let c = Vault::init(c_env.backend.clone(), &c_env.index_path, "pw")
+        .await
+        .unwrap();
+
+    // All three identities are distinct (independent random roots).
+    assert_ne!(o.identity_key_id(), b.identity_key_id());
+    assert_ne!(o.identity_key_id(), c.identity_key_id());
+    assert_ne!(b.identity_key_id(), c.identity_key_id());
+
+    let data = b"top secret shared payload";
+    // Share to B only; C is deliberately excluded (O is auto-included per §12.8).
+    o.put_file_shared("p", data, &[b.identity().clone()])
+        .await
+        .unwrap();
+    let shared = only_object_bytes(o_env._store.path());
+
+    // Mint a resolvable "p" on B and C (placeholder put), then repoint it at the shared
+    // object by overwriting the stored object bytes in place (the object KEY is unchanged).
+    b.put_file("p", b"placeholder").await.unwrap();
+    std::fs::write(only_object_path(b_env._store.path()), &shared).unwrap();
+    c.put_file("p", b"placeholder").await.unwrap();
+    std::fs::write(only_object_path(c_env._store.path()), &shared).unwrap();
+
+    // B is a recipient → decrypts to the original plaintext.
+    assert_eq!(b.get_file("p").await.unwrap().as_slice(), data);
+    // C is NOT a recipient → error (no kem_wrap sub-record for C's key_id).
+    assert!(
+        c.get_file("p").await.is_err(),
+        "a non-recipient vault must not be able to open the shared object"
+    );
+}
+
+#[tokio::test]
+async fn owner_auto_included_even_when_not_passed() {
+    // §12.8 owner-inclusion MUST: a kem_id=1 object has no symmetric fallback, so the
+    // owner is always added to the recipient set even when not passed in `recipients`.
+    let e = env();
+    let owner = Vault::init(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+    let r_env = env();
+    let recipient = Vault::init(r_env.backend.clone(), &r_env.index_path, "pw2")
+        .await
+        .unwrap();
+    assert_ne!(owner.identity_key_id(), recipient.identity_key_id());
+
+    // The recipient set does NOT contain the owner's identity...
+    let data = b"write-only backup with no symmetric fallback";
+    owner
+        .put_file_shared("backup/x", data, &[recipient.identity().clone()])
+        .await
+        .unwrap();
+
+    // ...yet the owner still recovers it: put_file_shared auto-includes the owner.
+    assert_eq!(owner.get_file("backup/x").await.unwrap().as_slice(), data);
+    let obj = only_object_bytes(e._store.path());
+    assert_eq!(obj[6], 1, "object must be hybrid (kem_id=1)");
+}
+
+#[tokio::test]
+async fn shared_object_reads_via_get_file_to_path_and_verifies() {
+    // Exercise the kem_id=1 branches of get_file_to_path (buffered) and verify_file with a
+    // genuinely multi-chunk payload (> the 1 MiB default chunk). The owner is always a
+    // recipient, so it can read/verify its own shared object.
+    let e = env();
+    let owner = Vault::init(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+    let r_env = env();
+    let recipient = Vault::init(r_env.backend.clone(), &r_env.index_path, "pw2")
+        .await
+        .unwrap();
+
+    let data = pseudo_random(1024 * 1024 + 9_001);
+    owner
+        .put_file_shared("media/clip.bin", &data, &[recipient.identity().clone()])
+        .await
+        .unwrap();
+
+    // verify_file (kem_id=1 branch): full tag/footer/content-hash check, no plaintext out.
+    owner.verify_file("media/clip.bin").await.unwrap();
+
+    // get_file_to_path (kem_id=1 buffered branch): byte-identical destination, parent made.
+    let out = TempDir::new().unwrap();
+    let dest = out.path().join("nested/clip.bin");
+    owner
+        .get_file_to_path("media/clip.bin", &dest)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), data);
+}
+
+#[tokio::test]
+async fn publish_then_fetch_recipient_roundtrips_and_bad_key_errors() {
+    let e = env();
+    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+
+    let key_id = vault.identity_key_id();
+    // Fetch before publish → absent registry entry → error.
+    assert!(
+        vault.fetch_recipient(&key_id).await.is_err(),
+        "an unpublished key_id has no registry entry"
+    );
+
+    vault.publish_identity().await.unwrap();
+    let fetched = vault.fetch_recipient(&key_id).await.unwrap();
+
+    // Round-trips to the exact same DRK1 and key_id (self-certifying trust anchor).
+    assert!(
+        fetched.encode() == vault.identity().encode(),
+        "fetched DRK1 bytes must match the published identity"
+    );
+    assert_eq!(fetched.key_id(), key_id);
+
+    // A key_id that was never published → error (absent).
+    let mut wrong = key_id;
+    wrong[0] ^= 0xFF;
+    assert!(
+        vault.fetch_recipient(&wrong).await.is_err(),
+        "a wrong/absent key_id must error"
+    );
+}
+
 #[tokio::test]
 async fn tampered_object_is_detected_on_read() {
     let e = env();

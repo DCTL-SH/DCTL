@@ -23,14 +23,6 @@
 //! a per-run seed. The seed is reported, so a run that found damage can be
 //! replayed over exactly the same slice.
 
-// Some of what follows is not reachable from this build's `run` body: the engine
-// has no entry point yet for the step that would call it (see the command's
-// module documentation). It is written and unit-tested now, with the tests that
-// pin its contract, rather than left until the engine lands — a machine-readable
-// output format that first appears on the day it is needed is a format nobody
-// reviewed.
-#![allow(dead_code)]
-
 use crate::constants::{
     SCRUB_FULL_SAMPLE_PERCENT, SCRUB_MAX_ERRORS_UNLIMITED, SCRUB_MIN_SAMPLE_PERCENT,
     SCRUB_SAMPLE_BASIS, SCRUB_SAMPLE_KEY_CONTEXT,
@@ -170,9 +162,18 @@ impl Plan {
 
     /// How many of `total` objects this plan expects to read.
     ///
-    /// An estimate for the pre-flight message only — the selector is a hash, so
-    /// the realised count varies around it — which is why it is not used to
-    /// decide anything.
+    /// An estimate for a pre-flight message — the selector is a hash, so the
+    /// realised count varies around it — which is why it is not used to decide
+    /// anything.
+    ///
+    /// No caller yet, and for a reason worth stating: `total` is unknown before
+    /// the walk. The walk streams the index one entry at a time
+    /// ([`crate::source::Entries`]), so quoting an expected count up front would
+    /// mean counting the whole dataset first, purely to print a number. What the
+    /// run reports instead is the *realised* coverage, which is a fact rather
+    /// than a projection. This becomes callable the day the index can answer
+    /// "how many objects are under this prefix" without enumerating them.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn expected_objects(&self, total: u64) -> u64 {
         if self.is_full() {

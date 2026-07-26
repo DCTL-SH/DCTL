@@ -38,11 +38,24 @@ report always names which one ran and carries a `proves_contents` boolean,
 because "0 differences" is a very different claim under each; when a metadata
 comparison is in force, `check` says so on stderr under `-v`.
 
-When a comparison needs a field one side does not have — a destination with no
-recorded modification time under the default mode, or no hash under
-`--checksum` — the verdict is `error`, never a quiet fallback to a weaker
-comparison and never `match`. A comparison that downgrades itself silently is
-worse than one that fails, because it reports a guarantee it did not check.
+When a comparison needs a field one side does not have, the verdict is `error`,
+never a quiet fallback to a weaker comparison and never `match`. A comparison
+that downgrades itself silently is worse than one that fails, because it reports
+a guarantee it did not check. In practice that is the default mode against a
+destination with no recorded modification time.
+
+`--checksum` is the exception, and deliberately so. A vault knows the plaintext
+BLAKE3 of everything it holds and answers from its index for nothing; a local
+tree or a plain object store knows no such thing. Rather than report `error` for
+every path — which would leave the only comparison that proves contents
+permanently unusable against a local tree — `check` **reads the object and
+hashes it** on the side that has no recorded hash. That is what `--checksum`
+costs: a full read of every object on any side that is not a vault, and memory
+proportional to the largest object, because the read is whole-object. The cost is
+stated rather than capped; a size limit would trade a documented cost for an
+arbitrary refusal. `--checksum` still reports `error` if an object cannot be
+read — including a vault object that fails authentication, which is named on
+stderr and does not stop the run.
 
 `--one-way` ignores paths that exist only at the destination. That is the right
 question to ask after a `copy`: "is everything from the source present and
@@ -92,18 +105,27 @@ emits one document with `source`, `dest`, `comparison`, `proves_contents`,
 its own key, so `0` is information rather than an absent field.
 `--format json-lines` emits one difference per line and no summary.
 
-### Status in this build
+### How the two sides are read
 
-**`dctl check` is not implemented in this build.** Argument parsing, target
-resolution, output-file validation (including the two-flags-one-file mistake),
-the comparison logic, the file writers, the report shape in all three formats
-and the exit-code classification are written and unit-tested; the step that
-enumerates two trees is not. `dctl_core::Vault` can list one prefix, `Ctx` does
-not yet carry an unlocked vault, and there is no local walker.
+Both arguments are opened the same way, through the binary's single read
+abstraction, so a sealed vault, a plain object store and a local directory are
+all just *sides* — neither argument is privileged, and
+`dctl check archive: ./photos` and `dctl check ./photos archive:` are the same
+walk with the labels swapped. A vault side reports plaintext paths, plaintext
+sizes and recorded hashes; a plain side reports whatever the provider holds.
 
-A complete invocation therefore validates everything it can, creates no files,
-and fails with `dctl check is not implemented in this build` and exit code
-**7**. `PLAN.md` §11 puts `ls`/`verify`/`check` in **Phase 1 (B2 MVP)**.
+Each side keys its objects by the path **relative to its own root**, which is
+what lets a remote rooted at `photos` and a local directory called `photos`
+describe the same file with the same name. The two ordered streams are then
+merged, one entry held per side, so comparing two ten-million-object trees costs
+two entries of memory rather than a map of one of them (`PLAN.md` §16.2).
+
+The `--filter-from` and `--files-from` rule files are **refused** rather than
+ignored: rule-file semantics are not implemented, and silently comparing more
+than was asked for is worse than saying so. `--include`, `--exclude`,
+`--min-size`, `--max-size` and `--max-depth` are applied, identically to both
+sides — filtering only the source would report every excluded file as
+`missing-on-src`, a finding manufactured by the filter rather than by the data.
 
 ```
 dctl check SOURCE DEST [flags]
@@ -176,29 +198,36 @@ path; a bare `vault:` or a trailing separator names a whole tree.
 
 Every global flag is accepted on `dctl check`. The ones that change what this
 command does are `--checksum` and `--size-only` (which select the comparison and
-are mutually exclusive), the `--include`/`--exclude`/`--filter-from`/
-`--files-from`/`--min-size`/`--max-size`/`--max-depth` filters, `--checkers`
-(how many metadata comparisons run in parallel), `--dry-run` (which suppresses
-the verdict files, this command's only mutation), and the output flags
-`--format`/`--json`/`--quiet`/`-v`. See
+are mutually exclusive), the `--include`/`--exclude`/`--min-size`/`--max-size`/
+`--max-depth` filters, `--dry-run` (which suppresses the verdict files, this
+command's only mutation, while still performing the comparison and printing the
+report), and the output flags `--format`/`--json`/`--quiet`/`-v`. See
 [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
+
+Two are **refused** rather than honoured: `--filter-from` and `--files-from`
+name rule files whose semantics are not implemented, and a comparison that
+silently covered more than was asked for would be worse than one that stops.
+`--checkers` is accepted and has no effect here — the merge walks both sides in
+lockstep and holds one entry per side, so there is nothing to run in parallel
+without buying back the memory the streaming walk exists to avoid.
 
 ## Exit codes
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | The two sides agree under the active comparison. Not reachable in this build. |
+| 0 | `success` | The two sides agree under the active comparison. |
 | 1 | `usage` | Unknown flag, a missing side, a path containing `..`, a remote name shorter than two characters, two verdict flags aimed at one file, or a verdict destination that is a directory. |
 | 2 | `uncategorised` | A verdict file could not be written for a reason other than a missing directory or a permission denial; or a report could not be serialised. |
 | 3 | `dir_not_found` | The parent directory of a verdict file does not exist. |
 | 6 | `partial_failure` | The run finished and the two sides disagree — `differ`, `missing-on-*` or `error` paths were found. Nothing was transferred. |
-| 7 | `fatal_error` | Returned by every complete invocation in this build (`not implemented`); also a permission denial writing a verdict file, and configuration failures. |
+| 7 | `fatal_error` | A side that could not be opened — an unresolvable remote, an unreadable configuration, or `--filter-from`/`--files-from`; also a permission denial writing a verdict file. |
+| 22 | `vault_locked` | A sealed side would not unlock. |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. |
 
-In this build only **1**, **3**, **7** and **25** are reachable — output-file
-validation runs before the comparison does, so a bad `--combined` path is still
-reported properly. Codes 0, 2 and 6 need the engine work described under
-*Status in this build*.
+A side that could not be opened is an **error**, never an empty listing. A tree
+that was never read must not come back as "everything is missing", which would
+invite someone to repair it by copying a whole dataset over a destination that
+was fine.
 
 `check` never returns 21: a disagreement between two trees is not an
 authentication failure. See [../EXIT_CODES.md](../EXIT_CODES.md) for the full

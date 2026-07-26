@@ -56,8 +56,8 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::constants::{
-    AUDIT_CHAIN_FIRST_INDEX, AUDIT_CHAIN_GENESIS_PREV, AUDIT_LOG_FILE_MODE,
-    AUDIT_TAIL_SCAN_BYTES, AUDIT_TAIL_SCAN_LIMIT_BYTES,
+    AUDIT_CHAIN_FIRST_INDEX, AUDIT_CHAIN_GENESIS_PREV, AUDIT_LOG_FILE_MODE, AUDIT_TAIL_SCAN_BYTES,
+    AUDIT_TAIL_SCAN_LIMIT_BYTES,
 };
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -105,8 +105,17 @@ impl Writer {
         let is_new = !path.exists();
 
         if let Some(parent) = parent {
+            // Hardened only when we are the ones who created it. The log sits
+            // beside the index, which may be a directory the operator chose and
+            // shares with other things; silently chmodding somebody's existing
+            // `/srv/data` to owner-only would be a surprising side effect of
+            // writing one file, and the file's own mode is what protects the
+            // history in that case.
+            let directory_is_new = !parent.exists();
             std::fs::create_dir_all(parent).map_err(|error| at_path(parent, error))?;
-            harden_directory(parent)?;
+            if directory_is_new {
+                harden_directory(parent)?;
+            }
         }
 
         let file = open_appending(path)?;
@@ -197,7 +206,10 @@ impl Writer {
         self.next_index = self.next_index.checked_add(1).ok_or_else(|| {
             CliError::new(
                 ExitCode::IndexError,
-                format!("{}: the audit chain has no more indices", self.path.display()),
+                format!(
+                    "{}: the audit chain has no more indices",
+                    self.path.display()
+                ),
             )
             .with_hint(
                 "A chain is 2^64 records long. Reaching the end means the index \
@@ -272,7 +284,9 @@ impl Writer {
                 // reads as a forgery committed by us rather than as the damage
                 // it is.
                 if !is_well_formed_hash(&record.hash)
-                    || !record.hash.eq_ignore_ascii_case(&chain::compute_hash(&record))
+                    || !record
+                        .hash
+                        .eq_ignore_ascii_case(&chain::compute_hash(&record))
                 {
                     return Err(self.broken(format!(
                         "its last record (index {}) does not hash to the value it carries",
@@ -589,7 +603,11 @@ mod tests {
 
         let error = Writer::open(&path).unwrap_err();
         assert_eq!(error.code(), ExitCode::AuditChainBroken);
-        assert!(error.message().contains("does not hash"), "{}", error.message());
+        assert!(
+            error.message().contains("does not hash"),
+            "{}",
+            error.message()
+        );
     }
 
     #[test]

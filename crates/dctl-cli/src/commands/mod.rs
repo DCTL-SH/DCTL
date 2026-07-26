@@ -56,6 +56,7 @@ pub mod delete;
 pub mod deletefile;
 pub mod directory;
 pub mod hashsum;
+pub mod index;
 pub mod init;
 pub mod integrity;
 pub mod listing;

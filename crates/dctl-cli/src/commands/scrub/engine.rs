@@ -140,9 +140,9 @@ mod tests {
     use super::*;
     use crate::cli::GlobalArgs;
     use crate::constants::{SCRUB_FULL_SAMPLE_PERCENT, SCRUB_MAX_ERRORS_UNLIMITED};
+    use crate::source::Assurance;
     use crate::source::plain::PlainSource;
     use crate::source::vault::VaultSource;
-    use crate::source::Assurance;
     use clap::Parser;
     use dctl_store::{Backend, LocalFs};
     use std::sync::Arc;
@@ -223,9 +223,16 @@ mod tests {
 
         let plan = Plan::new(10, SCRUB_MAX_ERRORS_UNLIMITED, false, 4_242).unwrap();
         let mut report = report();
-        scrub(&ctx(&[]), &source, "", &Filter::default(), &plan, &mut report)
-            .await
-            .unwrap();
+        scrub(
+            &ctx(&[]),
+            &source,
+            "",
+            &Filter::default(),
+            &plan,
+            &mut report,
+        )
+        .await
+        .unwrap();
 
         assert_eq!(report.coverage.scanned + report.coverage.skipped, 200);
         assert!(report.coverage.skipped > 0, "a 10% sample must skip most");
@@ -259,7 +266,9 @@ mod tests {
     /// Returned with the store directory, so a test can reach past DCTL and
     /// damage the bytes a provider is holding — which is the only way to prove
     /// this command detects what it exists to detect.
-    async fn sealed(files: &[(&str, &[u8])]) -> (tempfile::TempDir, tempfile::TempDir, VaultSource) {
+    async fn sealed(
+        files: &[(&str, &[u8])],
+    ) -> (tempfile::TempDir, tempfile::TempDir, VaultSource) {
         use dctl_core::Vault;
 
         let store = tempfile::TempDir::new().expect("a temporary store");
@@ -299,7 +308,9 @@ mod tests {
             if !path.is_file() {
                 continue;
             }
-            let length = std::fs::metadata(&path).expect("the object is readable").len();
+            let length = std::fs::metadata(&path)
+                .expect("the object is readable")
+                .len();
             std::fs::write(&path, vec![0xA5; length as usize]).expect("the object is overwritten");
             damaged += 1;
         }
@@ -313,7 +324,14 @@ mod tests {
         let (store, _index, source) = sealed(&[("a.txt", b"one"), ("b.txt", b"two")]).await;
         assert_eq!(damage_objects(store.path()), 2);
 
-        let mut report = Report::new("archive:", "strict", Assurance::Authenticated, 100, 0, false);
+        let mut report = Report::new(
+            "archive:",
+            "strict",
+            Assurance::Authenticated,
+            100,
+            0,
+            false,
+        );
         scrub(
             &ctx(&[]),
             &source,
@@ -338,7 +356,14 @@ mod tests {
     #[tokio::test]
     async fn an_intact_vault_reads_back_clean() {
         let (_store, _index, source) = sealed(&[("a.txt", b"one"), ("sub/b.txt", b"two")]).await;
-        let mut report = Report::new("archive:", "strict", Assurance::Authenticated, 100, 0, false);
+        let mut report = Report::new(
+            "archive:",
+            "strict",
+            Assurance::Authenticated,
+            100,
+            0,
+            false,
+        );
         scrub(
             &ctx(&[]),
             &source,
@@ -361,17 +386,31 @@ mod tests {
         // A run that ended early covered less than it was asked to, and a
         // consumer reading only the JSON has to be able to tell — otherwise the
         // damage count reads as the full extent of the damage.
-        let (store, _index, source) = sealed(&[("a.txt", b"1"), ("b.txt", b"2"), ("c.txt", b"3")])
-            .await;
+        let (store, _index, source) =
+            sealed(&[("a.txt", b"1"), ("b.txt", b"2"), ("c.txt", b"3")]).await;
         damage_objects(store.path());
 
         let plan = Plan::new(SCRUB_FULL_SAMPLE_PERCENT, 1, false, 0).unwrap();
         assert!(plan.is_bounded());
 
-        let mut report = Report::new("archive:", "strict", Assurance::Authenticated, 100, 0, false);
-        scrub(&ctx(&[]), &source, "", &Filter::default(), &plan, &mut report)
-            .await
-            .unwrap();
+        let mut report = Report::new(
+            "archive:",
+            "strict",
+            Assurance::Authenticated,
+            100,
+            0,
+            false,
+        );
+        scrub(
+            &ctx(&[]),
+            &source,
+            "",
+            &Filter::default(),
+            &plan,
+            &mut report,
+        )
+        .await
+        .unwrap();
 
         assert!(report.stopped_early, "the budget was reached");
         assert_eq!(report.coverage.damaged, 1);
@@ -385,12 +424,22 @@ mod tests {
     async fn an_unlimited_budget_never_stops_early() {
         let (_root, source) = store(&[("a.txt", b"1"), ("b.txt", b"2"), ("c.txt", b"3")]);
         let plan = full_plan();
-        assert!(!plan.is_bounded(), "0 means unlimited, not a budget of zero");
+        assert!(
+            !plan.is_bounded(),
+            "0 means unlimited, not a budget of zero"
+        );
 
         let mut report = report();
-        scrub(&ctx(&[]), &source, "", &Filter::default(), &plan, &mut report)
-            .await
-            .unwrap();
+        scrub(
+            &ctx(&[]),
+            &source,
+            "",
+            &Filter::default(),
+            &plan,
+            &mut report,
+        )
+        .await
+        .unwrap();
         assert!(!report.stopped_early);
         assert_eq!(report.coverage.scanned, 3);
     }

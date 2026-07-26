@@ -35,6 +35,7 @@ mod ctx;
 mod dispatch;
 mod error;
 mod exit;
+mod filter;
 mod logging;
 mod output;
 mod platform;

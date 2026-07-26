@@ -16,14 +16,6 @@
 //! found damage in a 10% sample is a run somebody will want to repeat over
 //! exactly the same 10%.
 
-// Some of what follows is not reachable from this build's `run` body: the engine
-// has no entry point yet for the step that would call it (see the command's
-// module documentation). It is written and unit-tested now, with the tests that
-// pin its contract, rather than left until the engine lands — a machine-readable
-// output format that first appears on the day it is needed is a format nobody
-// reviewed.
-#![allow(dead_code)]
-
 use serde::Serialize;
 
 use crate::commands::integrity::failure::{self, Verdict};
@@ -59,6 +51,14 @@ impl Record {
     }
 
     /// Mark this object as rebuilt from redundancy.
+    ///
+    /// Nothing in this build calls it, and that is the honest state of affairs
+    /// rather than an oversight: `--repair` is refused because no redundancy is
+    /// written for it to read (`PLAN.md` §13.3). The `repaired` field is still
+    /// published on every finding, so a consumer can depend on the key existing
+    /// and read `false`; this is the setter that will make it `true`, and the
+    /// grading logic that turns it into `degraded` is tested through it below.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn repaired(mut self) -> Self {
         self.repaired = true;
@@ -194,6 +194,13 @@ impl Report {
     }
 
     /// The worst verdict seen.
+    ///
+    /// The run body does not consult it — [`Report::outcome`] already reduces it
+    /// to the error that ends the run — but the reduction is the part most worth
+    /// pinning, and a test cannot assert on a private field. Exposed rather than
+    /// made `pub(crate)` so the accessor and the exit code it decides stay
+    /// documented together.
+    #[allow(dead_code)]
     #[must_use]
     pub const fn worst(&self) -> Verdict {
         self.worst

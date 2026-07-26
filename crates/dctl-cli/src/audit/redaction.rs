@@ -12,7 +12,8 @@
 //!
 //! * [`field`] — escapes control characters. This is the *integrity* half, not
 //!   the secrecy half: the canonical byte string a record's hash covers joins
-//!   fields with [`AUDIT_HASH_FIELD_SEPARATOR`], so a value containing that byte
+//!   fields with [`crate::constants::AUDIT_HASH_FIELD_SEPARATOR`], so a value
+//!   containing that byte
 //!   could forge a field boundary and make two different records hash
 //!   identically. `crate::platform::names` already rejects control characters in
 //!   paths, but "already rejected somewhere else" is not a property the hash can

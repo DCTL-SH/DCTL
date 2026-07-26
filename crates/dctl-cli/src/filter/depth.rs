@@ -56,7 +56,9 @@ impl std::error::Error for DepthProblem {}
 /// logical path never has, but a hand-written `--files-from` line might before
 /// cleaning — are not counted, so `a//b` is depth 2 rather than 3.
 pub fn depth_of(path: &str) -> usize {
-    path.split(PATH_SEPARATOR).filter(|part| !part.is_empty()).count()
+    path.split(PATH_SEPARATOR)
+        .filter(|part| !part.is_empty())
+        .count()
 }
 
 /// The recursion limit in force, if any.

@@ -18,14 +18,6 @@
 //!   way to tell them apart, which is worse than either list alone; it is
 //!   rejected up front.
 
-// Some of what follows is not reachable from this build's `run` body: the engine
-// has no entry point yet for the step that would call it (see the command's
-// module documentation). It is written and unit-tested now, with the tests that
-// pin its contract, rather than left until the engine lands — a machine-readable
-// output format that first appears on the day it is needed is a format nobody
-// reviewed.
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufWriter, Write};
