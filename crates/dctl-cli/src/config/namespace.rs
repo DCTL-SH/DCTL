@@ -100,10 +100,48 @@ impl VaultNamespace {
             .ancestors()
             .filter(|ancestor| !ancestor.as_os_str().is_empty())
         {
+            // Two spellings, because one is not enough.
+            //
+            // `Location` is deliberately pure — it never touches a filesystem,
+            // so config validation works on a machine that has never seen the
+            // paths it validates. That purity is right for validation and wrong
+            // here: the destination arrives as the user typed it, and `./srv`
+            // does not compare equal to the `/srv` the file records. The claim
+            // then missed, the write path fell through to sniffing the
+            // destination for an envelope, and the encryption decision became a
+            // function of the destination's *contents* — the one thing the
+            // addressing model forbids. Moving the same command between an
+            // absolute and a relative spelling flipped it between refusing and
+            // writing plaintext.
+            //
+            // So the comparison is made twice: once as spelled, which is free
+            // and catches the common case, and once canonicalised, which costs a
+            // `stat` and catches `./srv`, `srv/../srv`, a symlink and a
+            // different mount spelling of one directory. Canonicalisation is
+            // best-effort by necessity — it fails for a path that does not exist
+            // yet — and a failure simply leaves the as-spelled answer standing.
             let place = Location::of_path(ancestor);
+            let canonical = ancestor
+                .canonicalize()
+                .ok()
+                .map(|real| Location::of_path(&real));
+
             let store = config.names().find(|name| {
                 config.get(name).is_some_and(|remote| {
-                    remote.require_vault() && Location::of(remote).as_ref() == Some(&place)
+                    if !remote.require_vault() {
+                        return false;
+                    }
+                    let Some(configured) = Location::of(remote) else {
+                        return false;
+                    };
+                    if configured == place {
+                        return true;
+                    }
+                    // The configured side needs the same treatment: it is just
+                    // as likely to be the relative spelling of the two.
+                    canonical.as_ref().is_some_and(|here| {
+                        *here == configured || configured_canonical(remote).as_ref() == Some(here)
+                    })
                 })
             });
 
@@ -117,7 +155,26 @@ impl VaultNamespace {
         }
         None
     }
+}
 
+/// The canonical [`Location`] of a remote, when it names a local path that
+/// exists.
+///
+/// Separate from [`Location::of`] so the pure, I/O-free version stays the one
+/// config validation uses. Only the write-path check pays for the `stat`.
+fn configured_canonical(remote: &RemoteDef) -> Option<Location> {
+    let RemoteDef::Local(def) = remote else {
+        // Only a filesystem path has spellings to reconcile. A bucket name is
+        // already canonical: there is one spelling of `photos`.
+        return None;
+    };
+    def.path
+        .canonicalize()
+        .ok()
+        .map(|real| Location::of_path(&real))
+}
+
+impl VaultNamespace {
     /// What a message should name: the configured directory, or the remote.
     #[must_use]
     pub fn subject(&self) -> &str {

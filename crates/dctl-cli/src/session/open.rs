@@ -84,7 +84,7 @@ pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Session> {
     )?;
 
     let index = index_path(ctx);
-    let backend = build_backend(spec)?;
+    let backend = build_backend(ctx, spec)?;
 
     // Acquired after the backend so a typo in the remote name fails before the
     // user is asked for a secret. Being prompted for a password and *then* told
@@ -110,22 +110,66 @@ pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Session> {
     })
 }
 
-/// Build the storage backend for a parsed spec.
+/// Build the storage backend a vault's objects actually live in.
 ///
-/// The two remaining steps of the pipeline `crate::remote` documents — resolve,
-/// then build — run here rather than through
-/// [`crate::remote::build_backend`], because that entry point takes a spec as
-/// *text* and would have to re-parse what the caller already parsed. Re-parsing
-/// is what made a named remote collapse into a directory, so the text form is
-/// not reconstructed at all.
+/// Two resolutions, not one, and the second is the one that was missing.
 ///
-/// The catalog is the empty one, which is the same catalog `dctl init` resolves
-/// against: only `local:`, `b2:`, `s3:` and `r2:` resolve without a config file,
-/// and any other name is a hard failure that says so. Every command therefore
-/// agrees about which remotes exist, and none of them invents a directory.
-fn build_backend(spec: &RemoteSpec) -> Result<Arc<dyn Backend>> {
-    let resolved = crate::remote::resolve::resolve(spec, &())?;
+/// A vault remote **stores nothing itself** — it is a wrapper that seals on the
+/// way through to a base store, which is why the registry refuses to build one
+/// directly. Handing it `archive:` therefore failed with *"remote 'archive' is a
+/// vault wrapper, which stores nothing itself"*, and the sealed view — the whole
+/// point of a vault remote — was unreachable. So when the spec names a vault,
+/// this follows [`config::vault_chain`] to the remote at the end of the chain and
+/// builds *that*, which is the object store the ciphertext belongs in.
+///
+/// The catalog is the user's real configuration. It used to be `&()` — the empty
+/// catalog knowing only the `local:`/`b2:`/`s3:`/`r2:` shorthands — and a comment
+/// here argued that made "every command agree about which remotes exist". They
+/// did agree: that none did. DCTL would refuse a plain write, name `archive:` as
+/// the remedy, then reject `archive:` as unknown. A tool whose own suggested fix
+/// does not work is worse than one that just refuses.
+///
+/// A missing config is not fatal: `load_or_default` yields an empty one, which
+/// is the headless case `PLAN.md` §14 requires to keep working from environment
+/// variables alone.
+fn build_backend(ctx: &Ctx, spec: &RemoteSpec) -> Result<Arc<dyn Backend>> {
+    let path = crate::config::resolve_path(ctx.globals.config.as_deref());
+    let config = crate::config::load_or_default(&path)?;
+
+    let storage = storage_remote(&config, spec)?;
+    let resolved = crate::remote::resolve::resolve(&storage, &config)?;
     crate::remote::registry::build(&resolved)
+}
+
+/// The spec whose backend actually holds bytes.
+///
+/// For anything but a vault remote this is the spec unchanged. For a vault it is
+/// the far end of the chain, so `archive:` becomes `archive-store:`.
+fn storage_remote(config: &crate::config::Config, spec: &RemoteSpec) -> Result<RemoteSpec> {
+    let RemoteSpec::Named { remote, path } = spec else {
+        return Ok(spec.clone());
+    };
+
+    // Not configured at all: leave it alone so the provider shorthands
+    // (`b2:bucket`) and the "unknown remote" diagnosis both still work.
+    if !config.contains(remote) {
+        return Ok(spec.clone());
+    }
+
+    // Walking the chain is also what detects a cycle or a dangling base, so a
+    // broken configuration is diagnosed here rather than producing a confident
+    // wrong backend.
+    let chain = crate::config::vault_chain(config, remote)?;
+    let storage = chain.last().copied().unwrap_or(remote.as_str());
+
+    if storage == remote.as_str() {
+        return Ok(spec.clone());
+    }
+
+    Ok(RemoteSpec::Named {
+        remote: storage.to_string(),
+        path: path.clone(),
+    })
 }
 
 /// The index database this run should use.

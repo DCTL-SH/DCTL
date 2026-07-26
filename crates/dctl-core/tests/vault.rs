@@ -156,6 +156,149 @@ async fn restore_on_a_fresh_device_from_backend_only() {
     ));
 }
 
+/// Deterministic pseudo-random bytes (xorshift64) — no `rand` dep, reproducible.
+fn pseudo_random(len: usize) -> Vec<u8> {
+    let mut out = vec![0u8; len];
+    let mut x: u64 = 0x9E37_79B9_7F4A_7C15;
+    for b in out.iter_mut() {
+        x ^= x << 13;
+        x ^= x >> 7;
+        x ^= x << 17;
+        *b = (x & 0xFF) as u8;
+    }
+    out
+}
+
+#[tokio::test]
+async fn put_file_from_path_streams_multichunk_roundtrip() {
+    let e = env();
+
+    // A source file larger than the default 1 MiB chunk → genuinely multi-chunk.
+    let src = TempDir::new().unwrap();
+    let src_path = src.path().join("clip.bin");
+    let data = pseudo_random(2 * 1024 * 1024 + 12_345);
+    std::fs::write(&src_path, &data).unwrap();
+
+    {
+        let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+            .await
+            .unwrap();
+        vault
+            .put_file_from_path("videos/clip.bin", &src_path)
+            .await
+            .unwrap();
+
+        // get_file returns identical bytes.
+        assert_eq!(
+            vault.get_file("videos/clip.bin").await.unwrap().as_slice(),
+            data.as_slice()
+        );
+
+        // list shows it with the right (plaintext) size.
+        let listed = vault.list("").unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].path, "videos/clip.bin");
+        assert_eq!(listed[0].size, data.len() as u64);
+    }
+
+    // Round-trips through a fresh unlock (index reopened from scratch on disk).
+    let vault = Vault::unlock(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+    assert_eq!(
+        vault.get_file("videos/clip.bin").await.unwrap().as_slice(),
+        data.as_slice()
+    );
+}
+
+#[tokio::test]
+async fn stream_and_buffered_puts_interoperate() {
+    let e = env();
+    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+
+    // The same content stored both ways opens identically through get_file, i.e. the
+    // streaming path produces an object the buffered reader decodes with no special case.
+    let payload = pseudo_random(4096 + 7);
+    let src = TempDir::new().unwrap();
+    let src_path = src.path().join("s.bin");
+    std::fs::write(&src_path, &payload).unwrap();
+
+    vault.put_file("via/buffered", &payload).await.unwrap();
+    vault
+        .put_file_from_path("via/streamed", &src_path)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        vault.get_file("via/buffered").await.unwrap().as_slice(),
+        payload.as_slice()
+    );
+    assert_eq!(
+        vault.get_file("via/streamed").await.unwrap().as_slice(),
+        payload.as_slice()
+    );
+}
+
+#[tokio::test]
+async fn overwrite_gcs_the_previous_object() {
+    let e = env();
+    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+    let obj_dir = e._store.path().join("o");
+    let count = |dir: &std::path::Path| std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0);
+
+    vault.put_file("k", b"first").await.unwrap();
+    assert_eq!(count(&obj_dir), 1, "one object after first put");
+
+    // Overwriting the same path must GC the previous ciphertext, not orphan it on the
+    // untrusted backend (a private tool must not leave prior versions recoverable).
+    vault.put_file("k", b"second and longer").await.unwrap();
+    assert_eq!(count(&obj_dir), 1, "overwrite GC'd the old object — no orphan left");
+    assert_eq!(
+        vault.get_file("k").await.unwrap().as_slice(),
+        b"second and longer"
+    );
+}
+
+#[tokio::test]
+async fn cross_device_delete_removes_object_and_name_record() {
+    let store = TempDir::new().unwrap();
+    let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(store.path()));
+    let idx_a = TempDir::new().unwrap();
+    let idx_b = TempDir::new().unwrap();
+    {
+        let a = Vault::init(backend.clone(), &idx_a.path().join("a.redb"), "pw")
+            .await
+            .unwrap();
+        a.put_file("secret.txt", b"classified").await.unwrap();
+    }
+
+    // Device B: fresh empty index. Delete resolves via the name record (no rebuild),
+    // and must actually remove both the object and the name record from the backend.
+    let b = Vault::unlock(backend.clone(), &idx_b.path().join("b.redb"), "pw")
+        .await
+        .unwrap();
+    assert!(
+        b.delete_file("secret.txt").await.unwrap(),
+        "cross-device delete finds and removes it"
+    );
+    let count = |sub: &str| {
+        std::fs::read_dir(store.path().join(sub))
+            .map(|d| d.count())
+            .unwrap_or(0)
+    };
+    assert_eq!(count("o"), 0, "content object removed");
+    assert_eq!(count("n"), 0, "name record removed — nothing left behind");
+    assert!(matches!(
+        b.get_file("secret.txt").await.unwrap_err(),
+        CoreError::NotFound(_)
+    ));
+    assert!(!b.delete_file("secret.txt").await.unwrap(), "second delete is a no-op");
+}
+
 #[tokio::test]
 async fn tampered_object_is_detected_on_read() {
     let e = env();

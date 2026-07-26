@@ -71,7 +71,7 @@ pub struct Totals {
 pub async fn run(ctx: &Ctx, args: &SizeArgs) -> Result<()> {
     let target = Target::parse(args.path.as_deref(), ctx.globals.remote.as_deref())?;
     let filter = Filter::from_globals(&ctx.globals)?;
-    let mut stream = listing::open(ctx, &target, filter)?;
+    let mut stream = listing::open(ctx, &target, filter).await?;
 
     let mut totals = Totals { count: 0, bytes: 0 };
     stream.try_for_each(|entry| {

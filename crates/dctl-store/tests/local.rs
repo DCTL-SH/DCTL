@@ -48,6 +48,52 @@ async fn mismatch_commits_nothing() {
 }
 
 #[tokio::test]
+async fn put_from_path_streams_a_file_and_verifies() {
+    let dir = TempDir::new().unwrap();
+    let src = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+
+    // Larger than any internal copy buffer, to exercise the multi-block streaming path.
+    let data: Vec<u8> = (0u32..300_000).map(|i| (i % 251) as u8).collect();
+    let src_path = src.path().join("payload.bin");
+    std::fs::write(&src_path, &data).unwrap();
+
+    let key = ObjectKey::new("streamed/object.bin");
+    let outcome = fs
+        .put_from_path(&key, &src_path, &blake3(&data))
+        .await
+        .unwrap();
+    assert_eq!(outcome.size, data.len() as u64);
+    assert!(outcome.verified.matches(&blake3(&data)));
+
+    // The streamed object reads back byte-identical.
+    assert_eq!(fs.get(&key).await.unwrap(), Bytes::from(data));
+}
+
+#[tokio::test]
+async fn put_from_path_rejects_wrong_expected_hash() {
+    let dir = TempDir::new().unwrap();
+    let src = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+
+    let src_path = src.path().join("payload.bin");
+    std::fs::write(&src_path, b"the real bytes").unwrap();
+
+    let key = ObjectKey::new("wrong.bin");
+    let err = fs
+        .put_from_path(&key, &src_path, &blake3(b"some other bytes"))
+        .await
+        .unwrap_err();
+
+    // Verified-write holds on the streaming path too: mismatch commits nothing.
+    assert!(matches!(err, StoreError::ChecksumMismatch { .. }));
+    assert!(
+        !fs.exists(&key).await.unwrap(),
+        "nothing may be committed on a streaming hash mismatch"
+    );
+}
+
+#[tokio::test]
 async fn range_reads_match_slices_and_clamp() {
     let dir = TempDir::new().unwrap();
     let fs = LocalFs::new(dir.path());

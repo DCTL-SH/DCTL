@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use tokio::io::AsyncWriteExt;
 
-use crate::checksum::ContentHash;
+use crate::checksum::{ContentHash, HashAlgo, Hasher};
 use crate::error::{Result, StoreError};
 use crate::model::{ObjectKey, PutOutcome};
 
@@ -17,6 +17,10 @@ use super::LocalFs;
 
 /// Monotonic counter making temp filenames unique for concurrent writers.
 static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
+
+/// Working-buffer size for the streaming (from-path) verified write. Bounds peak
+/// memory to a constant, independent of the source file's size.
+const STREAM_BUF_LEN: usize = 128 * 1024;
 
 pub(super) async fn put(
     fs: &LocalFs,
@@ -75,6 +79,107 @@ pub(super) async fn put(
         size: data.len() as u64,
         verified: on_disk,
     })
+}
+
+/// Streaming verified write: copy the file at `source` to a temp sibling of `dest`,
+/// read it back to confirm the on-disk bytes hash to `expected`, then atomically rename.
+///
+/// Never holds the whole file in memory — the copy and the read-back both work in
+/// `STREAM_BUF_LEN` blocks, so peak memory is constant regardless of file size. Exactly
+/// like [`put`], nothing is committed unless the bytes durably on disk match `expected`;
+/// any mismatch or I/O error removes the temp and leaves no partial object. The blocking
+/// filesystem work runs on a blocking thread so it never stalls the async runtime.
+pub(super) async fn put_from_path(
+    fs: &LocalFs,
+    key: &ObjectKey,
+    source: &Path,
+    expected: &ContentHash,
+) -> Result<PutOutcome> {
+    let dest = fs.resolve(key)?;
+    let source = source.to_path_buf();
+    let expected = expected.clone();
+    tokio::task::spawn_blocking(move || put_from_path_blocking(&dest, &source, &expected))
+        .await
+        .map_err(|e| StoreError::Backend(format!("streaming verified write task failed: {e}")))?
+}
+
+/// The blocking body of [`put_from_path`]: stream-copy → sync → stream-verify → rename.
+fn put_from_path_blocking(
+    dest: &Path,
+    source: &Path,
+    expected: &ContentHash,
+) -> Result<PutOutcome> {
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = temp_path(dest);
+
+    // Stream source → temp (buffered, constant memory) and flush to stable storage.
+    if let Err(e) = stream_copy_to_temp(source, &tmp) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+
+    // Read back exactly what hit the disk and hash it — still constant memory.
+    let (on_disk, size) = match hash_file(&tmp, expected.algo) {
+        Ok(v) => v,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+    };
+    if !on_disk.matches(expected) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(StoreError::ChecksumMismatch {
+            expected: expected.hex(),
+            actual: on_disk.hex(),
+        });
+    }
+
+    // Atomically publish, then fsync the directory so the rename is durable.
+    std::fs::rename(&tmp, dest)?;
+    if let Some(parent) = dest.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+
+    Ok(PutOutcome {
+        size,
+        verified: on_disk,
+    })
+}
+
+/// Buffered copy of `source` → `tmp`, flushed and fsynced. Constant memory.
+fn stream_copy_to_temp(source: &Path, tmp: &Path) -> std::io::Result<()> {
+    let mut reader =
+        std::io::BufReader::with_capacity(STREAM_BUF_LEN, std::fs::File::open(source)?);
+    let writer = std::io::BufWriter::with_capacity(STREAM_BUF_LEN, std::fs::File::create(tmp)?);
+    let mut writer = writer;
+    std::io::copy(&mut reader, &mut writer)?;
+    let file = writer
+        .into_inner()
+        .map_err(std::io::IntoInnerError::into_error)?;
+    file.sync_all()?;
+    Ok(())
+}
+
+/// Stream `path` through a [`Hasher`], returning its digest and byte count. Constant memory.
+fn hash_file(path: &Path, algo: HashAlgo) -> std::io::Result<(ContentHash, u64)> {
+    use std::io::Read as _;
+    let mut f = std::fs::File::open(path)?;
+    let mut hasher = Hasher::new(algo);
+    let mut buf = vec![0u8; STREAM_BUF_LEN];
+    let mut total: u64 = 0;
+    loop {
+        let n = f.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+        total += n as u64;
+    }
+    Ok((hasher.finalize(), total))
 }
 
 /// A unique sibling temp path in the destination directory (same filesystem, so

@@ -69,7 +69,7 @@ pub async fn run(ctx: &Ctx, args: &LsdArgs) -> Result<()> {
     // The object filter must not carry the depth limit: `lsd` needs to see deep
     // objects in order to know that the shallow directory exists at all.
     let filter = Filter::from_globals(&ctx.globals)?.with_depth_limit(None);
-    let mut stream = listing::open(ctx, &target, filter)?;
+    let mut stream = listing::open(ctx, &target, filter).await?;
 
     let mut aggregator = Aggregator::new(target.prefix(), depth);
     let units = ctx.out.units();
@@ -82,7 +82,7 @@ pub async fn run(ctx: &Ctx, args: &LsdArgs) -> Result<()> {
                 shown += 1;
                 emitter.push(&JsonEntry::new(&dir.to_entry()))
             };
-            stream.try_for_each(|entry| aggregator.push(entry, &mut emit))?;
+            stream.try_for_each(|entry| aggregator.push(entry, &mut emit)).await?;
             aggregator.finish(&mut emit)?;
         }
         emitter.finish()?;
@@ -92,7 +92,7 @@ pub async fn run(ctx: &Ctx, args: &LsdArgs) -> Result<()> {
             ctx.out.line(line(dir, units))?;
             Ok(())
         };
-        stream.try_for_each(|entry| aggregator.push(entry, &mut emit))?;
+        stream.try_for_each(|entry| aggregator.push(entry, &mut emit)).await?;
         aggregator.finish(&mut emit)?;
     }
 

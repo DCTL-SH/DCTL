@@ -74,13 +74,19 @@ impl Stream {
     /// to stdout has already produced output for everything before the failure —
     /// which is correct: those lines were true.
     ///
+    /// Fetching a page is asynchronous — it can be a provider round trip — but
+    /// the visitor stays a plain `FnMut`, because every renderer in the family
+    /// does exactly one thing with an entry: format it and write it to an
+    /// already-open sink. Making it async would force each of them to box a
+    /// future per row of a ten-million-row listing to buy nothing.
+    ///
     /// # Errors
     /// Whatever the source or the visitor returned.
-    pub fn try_for_each<F>(&mut self, mut visit: F) -> Result<()>
+    pub async fn try_for_each<F>(&mut self, mut visit: F) -> Result<()>
     where
         F: FnMut(&Entry) -> Result<()>,
     {
-        while let Some(page) = self.pages.next_page()? {
+        while let Some(page) = self.pages.next_page().await? {
             for entry in &page {
                 self.seen += 1;
                 if !self.filter.matches(entry) {
@@ -117,27 +123,28 @@ mod tests {
         Stream::new(Box::new(pager(root, paths)), filter)
     }
 
-    fn collect(stream: &mut Stream) -> Vec<String> {
+    async fn collect(stream: &mut Stream) -> Vec<String> {
         let mut seen = Vec::new();
         stream
             .try_for_each(|entry| {
                 seen.push(entry.path().to_string());
                 Ok(())
             })
+            .await
             .expect("the pager cannot fail");
         seen
     }
 
-    #[test]
-    fn every_entry_in_scope_is_visited_in_path_order() {
+    #[tokio::test]
+    async fn every_entry_in_scope_is_visited_in_path_order() {
         let mut stream = stream("", &[("a.txt", 1), ("b/c.txt", 2), ("b/d.txt", 3)], &[]);
-        assert_eq!(collect(&mut stream), vec!["a.txt", "b/c.txt", "b/d.txt"]);
+        assert_eq!(collect(&mut stream).await, vec!["a.txt", "b/c.txt", "b/d.txt"]);
         assert_eq!(stream.matched(), 3);
         assert_eq!(stream.seen(), 3);
     }
 
-    #[test]
-    fn filtered_entries_are_counted_but_not_visited() {
+    #[tokio::test]
+    async fn filtered_entries_are_counted_but_not_visited() {
         // The distinction that lets a command say "nothing matched your filters"
         // instead of "the directory is empty".
         let mut stream = stream(
@@ -145,14 +152,14 @@ mod tests {
             &[("a.jpg", 1), ("b.txt", 2), ("c.jpg", 3)],
             &["--include", "*.jpg"],
         );
-        assert_eq!(collect(&mut stream), vec!["a.jpg", "c.jpg"]);
+        assert_eq!(collect(&mut stream).await, vec!["a.jpg", "c.jpg"]);
         assert_eq!(stream.matched(), 2);
         assert_eq!(stream.seen(), 3);
         assert!(stream.filter().is_restricting());
     }
 
-    #[test]
-    fn a_visitor_error_stops_the_listing_and_propagates() {
+    #[tokio::test]
+    async fn a_visitor_error_stops_the_listing_and_propagates() {
         // A renderer whose stdout has gone away must not keep pulling pages.
         let mut stream = stream("", &[("a", 1), ("b", 2), ("c", 3)], &[]);
         let mut visited = 0;
@@ -161,37 +168,38 @@ mod tests {
                 visited += 1;
                 Err(CliError::new(ExitCode::Uncategorised, "stdout closed"))
             })
+            .await
             .unwrap_err();
         assert_eq!(error.code(), ExitCode::Uncategorised);
         assert_eq!(visited, 1, "the loop must stop at the first failure");
     }
 
-    #[test]
-    fn an_empty_listing_visits_nothing_and_succeeds() {
+    #[tokio::test]
+    async fn an_empty_listing_visits_nothing_and_succeeds() {
         let mut stream = stream("", &[], &[]);
-        assert!(collect(&mut stream).is_empty());
+        assert!(collect(&mut stream).await.is_empty());
         assert_eq!(stream.matched(), 0);
         assert_eq!(stream.seen(), 0);
     }
 
-    #[test]
-    fn page_boundaries_are_invisible_to_a_renderer() {
+    #[tokio::test]
+    async fn page_boundaries_are_invisible_to_a_renderer() {
         let paths: Vec<(String, u64)> = (0u64..2500).map(|n| (format!("f{n:04}.bin"), n)).collect();
         let borrowed: Vec<(&str, u64)> = paths.iter().map(|(p, s)| (p.as_str(), *s)).collect();
         let mut stream = stream("", &borrowed, &[]);
         // More entries than one page holds, so this only passes if the stream
         // keeps pulling until the source is exhausted.
         assert!(paths.len() > crate::constants::LIST_PAGE_SIZE);
-        assert_eq!(collect(&mut stream).len(), paths.len());
+        assert_eq!(collect(&mut stream).await.len(), paths.len());
     }
 
-    #[test]
-    fn the_root_scopes_the_listing() {
+    #[tokio::test]
+    async fn the_root_scopes_the_listing() {
         let mut stream = stream(
             "photos",
             &[("photos/a.jpg", 1), ("photos-backup/b.jpg", 2)],
             &[],
         );
-        assert_eq!(collect(&mut stream), vec!["photos/a.jpg"]);
+        assert_eq!(collect(&mut stream).await, vec!["photos/a.jpg"]);
     }
 }

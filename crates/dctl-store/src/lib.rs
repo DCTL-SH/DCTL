@@ -21,7 +21,7 @@ pub mod s3;
 mod tls;
 
 pub use backend::Backend;
-pub use checksum::{ContentHash, HashAlgo};
+pub use checksum::{ContentHash, HashAlgo, Hasher};
 pub use error::{Result, StoreError};
 pub use local::LocalFs;
 pub use model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};

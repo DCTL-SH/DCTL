@@ -39,6 +39,7 @@ mod output;
 mod platform;
 mod remote;
 mod session;
+mod source;
 
 use clap::Parser;
 

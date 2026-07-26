@@ -47,6 +47,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 rpassword = "7"
 unicode-normalization = "0.1"
+# §5 "assigned code points only" repertoire pin. Exposes Unicode General_Category
+# with a public `UNICODE_VERSION` constant. Version 0.1.2 ships UCD **15.1.0**
+# exactly (`UNICODE_VERSION == (15, 1, 0)`); 0.1.1 is 15.0.0 and 0.1.3+ moved to
+# 16.0.0. The `=` pin is REQUIRED: a caret bump to 0.1.3/0.1.4 would silently shift
+# the frozen §5 repertoire. A version-guard (compile-time + test) fails loudly if
+# this ever resolves to anything but 15.1.0. `general-category` is the only table
+# we need (drops the emoji tables).
+unicode-properties = { version = "=0.1.2", default-features = false, features = ["general-category"] }
 bip39 = "2"
 libc = "0.2"
 subtle = "2.6"

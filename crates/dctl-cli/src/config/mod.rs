@@ -63,6 +63,8 @@ mod pair;
 mod save;
 mod validate;
 
+pub mod catalog;
+
 pub use error::ConfigError;
 pub use load::{exposed_permission_bits, load, load_for_diagnosis, load_or_default, resolve_path};
 pub use model::{Config, RemoteDef};

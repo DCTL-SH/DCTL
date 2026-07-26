@@ -46,7 +46,7 @@ pub struct LslArgs {
 pub async fn run(ctx: &Ctx, args: &LslArgs) -> Result<()> {
     let target = Target::parse(args.path.as_deref(), ctx.globals.remote.as_deref())?;
     let filter = Filter::from_globals(&ctx.globals)?;
-    let mut stream = listing::open(ctx, &target, filter)?;
+    let mut stream = listing::open(ctx, &target, filter).await?;
 
     if ctx.out.is_json() {
         // The listing family speaks one JSON vocabulary. `lsl` differs from `ls`
@@ -54,12 +54,12 @@ pub async fn run(ctx: &Ctx, args: &LslArgs) -> Result<()> {
         // learn would be a cost with no benefit, since `ModTime` is already
         // there.
         let mut emitter = Emitter::new(&ctx.out);
-        stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry)))?;
+        stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry))).await?;
         emitter.finish()?;
     } else {
         let units = ctx.out.units();
         stream.try_for_each(|entry| {
-            ctx.out.line(line(entry, units))?;
+            ctx.out.line(line(entry, units)).await?;
             Ok(())
         })?;
     }
@@ -81,7 +81,7 @@ fn line(entry: &Entry, units: Units) -> String {
 mod tests {
     use super::*;
     use crate::cli::Cli;
-    use crate::commands::listing::tests_support::{ctx, record};
+    use crate::commands::listing::tests_support::{ctx, listed};
     use crate::constants::{
         LISTING_MODTIME_COLUMN_WIDTH, LISTING_SIZE_COLUMN_WIDTH, UNKNOWN_VALUE,
     };
@@ -89,7 +89,7 @@ mod tests {
     use clap::Parser;
 
     fn at(path: &str, size: u64, modified: Option<i64>) -> Entry {
-        Entry::from_record(record(path, size, modified), "")
+        Entry::from_source(listed(path, size, modified), "")
     }
 
     #[test]

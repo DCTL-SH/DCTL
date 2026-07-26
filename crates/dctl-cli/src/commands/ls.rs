@@ -48,16 +48,16 @@ pub struct LsArgs {
 pub async fn run(ctx: &Ctx, args: &LsArgs) -> Result<()> {
     let target = Target::parse(args.path.as_deref(), ctx.globals.remote.as_deref())?;
     let filter = Filter::from_globals(&ctx.globals)?;
-    let mut stream = listing::open(ctx, &target, filter)?;
+    let mut stream = listing::open(ctx, &target, filter).await?;
 
     if ctx.out.is_json() {
         let mut emitter = Emitter::new(&ctx.out);
-        stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry)))?;
+        stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry))).await?;
         emitter.finish()?;
     } else {
         let units = ctx.out.units();
         stream.try_for_each(|entry| {
-            ctx.out.line(line(entry, units))?;
+            ctx.out.line(line(entry, units)).await?;
             Ok(())
         })?;
     }

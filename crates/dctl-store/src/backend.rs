@@ -23,6 +23,24 @@ pub trait Backend: Send + Sync {
     async fn put(&self, key: &ObjectKey, data: Bytes, expected: &ContentHash)
     -> Result<PutOutcome>;
 
+    /// Store the file at `source` under `key`, verifying it matches `expected`.
+    ///
+    /// This is the streaming counterpart of [`put`](Backend::put): it exists so a huge
+    /// file can be stored without ever holding its whole body in memory. The **provided
+    /// default** simply reads `source` into memory and delegates to [`put`], preserving
+    /// the verified-write contract for every backend unchanged — backends that can stream
+    /// straight from a path (e.g. [`LocalFs`](crate::local::LocalFs)) override this to run
+    /// at `O(buffer)` memory. (True multipart-from-file for B2/S3/R2 is a follow-up.)
+    async fn put_from_path(
+        &self,
+        key: &ObjectKey,
+        source: &std::path::Path,
+        expected: &ContentHash,
+    ) -> Result<PutOutcome> {
+        let data = tokio::fs::read(source).await?;
+        self.put(key, Bytes::from(data), expected).await
+    }
+
     /// Fetch the entire object.
     async fn get(&self, key: &ObjectKey) -> Result<Bytes>;
 

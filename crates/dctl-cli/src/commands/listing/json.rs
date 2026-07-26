@@ -89,7 +89,7 @@ impl<'a> JsonEntry<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::listing::tests_support::record;
+    use crate::commands::listing::tests_support::listed;
     use serde_json::{Value, json};
 
     fn value(entry: &Entry) -> Value {
@@ -98,7 +98,7 @@ mod tests {
 
     #[test]
     fn an_object_serialises_to_the_documented_shape() {
-        let entry = Entry::from_record(record("photos/2024/a.jpg", 1024, Some(0)), "photos");
+        let entry = Entry::from_source(listed("photos/2024/a.jpg", 1024, Some(0)), "photos");
         assert_eq!(
             value(&entry),
             json!({
@@ -115,7 +115,7 @@ mod tests {
     #[test]
     fn the_field_set_is_exactly_the_published_one() {
         // Adding a field is a compatibility change; this is the tripwire.
-        let entry = Entry::from_record(record("a.txt", 1, None), "");
+        let entry = Entry::from_source(listed("a.txt", 1, None), "");
         let Value::Object(map) = value(&entry) else {
             panic!("an entry serialises as an object");
         };
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn an_unknown_modification_time_is_null_not_the_epoch() {
-        let entry = Entry::from_record(record("a.txt", 1, None), "");
+        let entry = Entry::from_source(listed("a.txt", 1, None), "");
         assert_eq!(value(&entry)["ModTime"], Value::Null);
     }
 
@@ -152,7 +152,7 @@ mod tests {
     #[test]
     fn no_object_key_or_key_material_can_reach_the_wire() {
         // The record carries both; the shape must not be able to name them.
-        let entry = Entry::from_record(record("a.txt", 1, Some(0)), "");
+        let entry = Entry::from_source(listed("a.txt", 1, Some(0)), "");
         let encoded = serde_json::to_string(&JsonEntry::new(&entry)).unwrap();
         assert!(!encoded.contains("object_key"));
         assert!(!encoded.contains("o/a.txt"), "the object key leaked");
@@ -161,7 +161,7 @@ mod tests {
 
     #[test]
     fn a_record_at_the_listing_root_reports_its_own_name() {
-        let entry = Entry::from_record(record("a.txt", 1, None), "");
+        let entry = Entry::from_source(listed("a.txt", 1, None), "");
         let value = value(&entry);
         assert_eq!(value["Path"], "a.txt");
         assert_eq!(value["Name"], "a.txt");

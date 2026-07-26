@@ -46,6 +46,48 @@ fn rejects_invalid_paths() {
 }
 
 #[test]
+fn accepts_15_1_repertoire() {
+    // Ordinary code points assigned as of UCD 15.1 must pass the "assigned only" gate.
+    for p in [
+        "hello_world.txt",                     // ASCII
+        "caf\u{00e9}",                         // café, NFC (U+00E9 assigned since forever)
+        "\u{4e2d}\u{6587}/\u{65e5}\u{672c}",   // CJK: 中文/日本
+        "party\u{1f600}.txt",                  // 😀 U+1F600, present since Unicode 6.1 (≤15.1)
+        "vault/\u{e000}",                      // U+E000: Private Use (Co) — permanently assigned
+    ] {
+        assert!(path::normalize(p).is_ok(), "should accept {p:?}");
+    }
+}
+
+#[test]
+fn rejects_unicode_16_code_points() {
+    // U+105C0 = TODHRI LETTER A. The Todhri block (U+105C0..U+105FF) was FIRST assigned
+    // in Unicode 16.0, so it is Unassigned (Cn) in the pinned UCD 15.1 table and must be
+    // rejected: a ≥16.0 code point can NFC-normalize differently under different UCD
+    // versions → an unstable BLAKE3-keyed name/index key across devices (§5).
+    assert!(
+        path::normalize("dir/\u{105c0}").is_err(),
+        "must reject a code point first assigned in Unicode 16.0 (U+105C0 Todhri)"
+    );
+    assert!(
+        path::validate("dir/\u{105c0}").is_err(),
+        "reader-side re-validation must also reject the 16.0 code point"
+    );
+}
+
+#[test]
+fn ucd_repertoire_pinned_to_15_1() {
+    // Version guard: the assigned-code-points predicate MUST rely on UCD 15.1.0 exactly.
+    // If a dependency bump shifts the repertoire (e.g. to 16.0/17.0), this fails loudly
+    // instead of silently changing which paths are accepted (§5 FROZEN).
+    assert_eq!(
+        path::UCD_ASSIGNED_VERSION,
+        (15, 1, 0),
+        "§5 assigned-repertoire table must be pinned to Unicode 15.1.0"
+    );
+}
+
+#[test]
 fn rejects_oversized() {
     assert!(
         path::normalize(&"x".repeat(256)).is_err(),

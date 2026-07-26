@@ -17,6 +17,12 @@ dctl-store = { path = "../dctl-store" }
 dctl-meta = { path = "../dctl-meta" }
 # shared across the workspace
 blake3 = { workspace = true }
+# `crate::source` is the one read abstraction, and it is object-safe by
+# necessity — every command holds a `Box<dyn Source>` so that nothing above it
+# can tell a sealed vault from a plain store. Native `async fn` in traits does
+# not yet produce object-safe traits, so the same crate the storage layer uses
+# for `Backend` provides the boxing here.
+async-trait = { workspace = true }
 clap = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }

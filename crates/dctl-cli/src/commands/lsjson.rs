@@ -55,10 +55,10 @@ pub struct LsjsonArgs {
 pub async fn run(ctx: &Ctx, args: &LsjsonArgs) -> Result<()> {
     let target = Target::parse(args.path.as_deref(), ctx.globals.remote.as_deref())?;
     let filter = Filter::from_globals(&ctx.globals)?;
-    let mut stream = listing::open(ctx, &target, filter)?;
+    let mut stream = listing::open(ctx, &target, filter).await?;
 
     let mut emitter = Emitter::new(&ctx.out);
-    stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry)))?;
+    stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry))).await?;
     emitter.finish()?;
 
     listing::report_empty(ctx, &stream, &target);
@@ -70,7 +70,7 @@ mod tests {
     use super::*;
     use crate::cli::Cli;
     use crate::commands::listing::Entry;
-    use crate::commands::listing::tests_support::{ctx, record};
+    use crate::commands::listing::tests_support::{ctx, listed};
     use crate::exit::ExitCode;
     use clap::Parser;
     use serde_json::Value;
@@ -87,7 +87,7 @@ mod tests {
         // The contract this command exists to publish. Asserted here as well as
         // on the shape itself, because this is the command whose output people
         // write parsers against.
-        let entry = Entry::from_record(record("photos/a.jpg", 42, Some(1_704_067_200)), "photos");
+        let entry = Entry::from_source(listed("photos/a.jpg", 42, Some(1_704_067_200)), "photos");
         let value: Value = serde_json::to_value(JsonEntry::new(&entry)).unwrap();
         assert_eq!(value["Path"], "a.jpg");
         assert_eq!(value["Name"], "a.jpg");

@@ -84,6 +84,13 @@ const SHORT_PASSWORD: &str = "short";
 /// The one file every vault has and no ordinary directory has by accident.
 /// Mirrors `constants::VAULT_ENVELOPE_OBJECT_KEY`; spelled out here so the test
 /// pins the on-disk layout rather than following the code that produced it.
+/// Name given to the vault every test creates.
+///
+/// `dctl init` now registers two remotes — the sealed view and its object store
+/// — and both need names, so the tests name the vault explicitly rather than
+/// letting one be invented. The store is then `<VAULT_NAME>-store`.
+const VAULT_NAME: &str = "archive";
+
 const ENVELOPE: &str = "system/envelope.bin";
 
 /// An isolated working area for one test.
@@ -342,6 +349,7 @@ fn init_creates_a_vault_envelope_and_an_index() {
         .dctl()
         .env("DCTL_PASSWORD", GOOD_PASSWORD)
         .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
         .arg(sandbox.path("vault"))
         .assert()
         .success();
@@ -379,6 +387,7 @@ fn init_refuses_a_password_below_the_minimum_length() {
         .dctl()
         .env("DCTL_PASSWORD", SHORT_PASSWORD)
         .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
         .arg(sandbox.path("vault"))
         .assert()
         .code(1)
@@ -418,6 +427,7 @@ fn copy_into_a_directory_holding_a_vault_is_refused() {
         .dctl()
         .env("DCTL_PASSWORD", GOOD_PASSWORD)
         .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
         .arg(sandbox.path("vault"))
         .assert()
         .success();
@@ -431,8 +441,16 @@ fn copy_into_a_directory_holding_a_vault_is_refused() {
         .assert()
         // FatalError: the run cannot continue, and nothing was written.
         .code(7)
-        .stderr(predicates::str::contains("plaintext"))
-        .stderr(predicates::str::contains("it contains a vault"));
+        // The refusal names the configured remote and the remedy, rather than
+        // describing the hazard in the abstract: an operator who hits this needs
+        // to know what to type next, not what went wrong in principle.
+        .stderr(predicates::str::contains("is the object store for remote"))
+        .stderr(predicates::str::contains(VAULT_NAME))
+        // And it states the invariant outright, because the whole point is that
+        // DCTL never silently switches between sealed and plain.
+        .stderr(predicates::str::contains(
+            "decided by the remote name typed",
+        ));
 
     let vault = sandbox.path("vault");
     let files = all_files(&vault);
@@ -516,6 +534,7 @@ fn a_dry_run_init_creates_neither_a_vault_nor_an_index() {
         .env("DCTL_PASSWORD", GOOD_PASSWORD)
         .arg("--dry-run")
         .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
         .arg(sandbox.path("vault"))
         .assert()
         .success();
@@ -642,6 +661,7 @@ fn re_initialising_over_an_existing_index_exits_with_a_fatal_error() {
         .dctl()
         .env("DCTL_PASSWORD", GOOD_PASSWORD)
         .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
         .arg(sandbox.path("vault"))
         .assert()
         .code(7)
@@ -662,6 +682,7 @@ fn an_unattended_run_with_no_password_exits_with_usage() {
         .dctl()
         .arg("--no-ask-password")
         .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
         .arg(sandbox.path("vault"))
         .assert()
         .code(1)
@@ -752,6 +773,7 @@ fn init_json_reports_what_it_created() {
         .env("DCTL_PASSWORD", GOOD_PASSWORD)
         .arg("--json")
         .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
         .arg(sandbox.path("vault"))
         .assert()
         .success()
@@ -815,6 +837,7 @@ fn copy_to_a_provider_shorthand_never_lands_in_a_directory_of_that_name() {
         .dctl()
         .env("DCTL_PASSWORD", GOOD_PASSWORD)
         .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
         .arg(sandbox.path("b2"))
         .assert()
         .success();

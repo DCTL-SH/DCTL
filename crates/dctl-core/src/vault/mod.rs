@@ -4,6 +4,7 @@ mod get;
 mod layout;
 mod list;
 mod put;
+mod put_stream;
 mod restore;
 
 use std::path::Path;
@@ -93,7 +94,17 @@ impl Vault {
 
         let mut recovered: Option<Zeroizing<[u8; 32]>> = None;
         for slot in &env.slots {
-            if slot.slot_type != constants::SLOT_TYPE_PASSWORD {
+            // §8 skip rules: only attempt a slot this reader fully supports. An
+            // unsupported slot_type/flags/wrap_algo/kdf_id is SKIPPED (try the others),
+            // never a reason to reject the envelope — matching the frozen matrix and the
+            // C reference decoder. (Crucially `flags` feeds the wrap AAD and the
+            // commitment is flags-independent, so without this a future reserved-critical
+            // flag slot would wrongly unlock here while conforming readers skip it.)
+            if slot.slot_type != constants::SLOT_TYPE_PASSWORD
+                || slot.flags != 0
+                || slot.wrap_algo != constants::WRAP_ALGO_XCHACHA20_POLY1305
+                || slot.kdf_id != constants::KDF_ID_ARGON2ID
+            {
                 continue;
             }
             // Re-derive the KEK from this slot's own stored KDF params + salt. A

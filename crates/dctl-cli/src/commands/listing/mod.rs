@@ -29,12 +29,22 @@
 //!
 //! `PLAN.md` §16.2 forbids ever holding the full file list in RAM, and
 //! [`Vault::list`](dctl_core::Vault::list) currently violates that by
-//! materialising every record before returning. The boundary is drawn at
-//! [`source::Pages`] anyway: the renderers are written against a page cursor
-//! they cannot see the end of, so the day the index exposes a range scan the
-//! change is confined to one `impl` and no command is rewritten. Structuring it
-//! the other way round — renderers over a slice, "we'll stream it later" — is
-//! how a tool ends up unable to list its own dataset.
+//! materialising every record before returning. That buffer is the core's and
+//! lives in [`crate::source::vault`], which says so plainly and names what
+//! removing it takes. The boundary is drawn at [`source::Pages`] anyway: the
+//! renderers are written against a page cursor they cannot see the end of, so
+//! the day the index exposes a range scan the change is confined to one `impl`
+//! and no command is rewritten. Structuring it the other way round — renderers
+//! over a slice, "we'll stream it later" — is how a tool ends up unable to list
+//! its own dataset.
+//!
+//! ## Where the objects come from
+//!
+//! Nothing here opens a vault or builds a backend. [`source::open`] hands the
+//! target to [`crate::source::open`], which is the binary's single answer to
+//! "what does this spec address" — a sealed vault, a plain object store, or a
+//! directory on this machine. The six verbs cannot tell which they got, and
+//! therefore cannot be the place where the three drift apart.
 //!
 //! ## Order is a contract
 //!
@@ -74,11 +84,10 @@ use crate::error::Result;
 /// drift between commands.
 ///
 /// # Errors
-/// Propagates a malformed target or an unusable filter, and — until the vault
-/// engine is reachable from [`Ctx`] — the "not implemented" error described on
-/// [`source::open`].
-pub fn open(ctx: &Ctx, target: &Target, filter: Filter) -> Result<Stream> {
-    Ok(Stream::new(source::open(ctx, target)?, filter))
+/// Propagates a malformed target or an unusable filter, plus whatever opening
+/// the source reported — see [`source::open`].
+pub async fn open(ctx: &Ctx, target: &Target, filter: Filter) -> Result<Stream> {
+    Ok(Stream::new(source::open(ctx, target).await?, filter))
 }
 
 /// Say on stderr why a listing came back empty, when the reason is the filters.
@@ -111,16 +120,43 @@ mod tests {
     use super::*;
     use crate::exit::ExitCode;
 
-    #[test]
-    fn opening_a_stream_fails_loudly_rather_than_returning_an_empty_one() {
-        // The whole point of `PLAN.md` §6: a listing that cannot reach the index
-        // must not render as "the vault is empty".
-        let ctx = crate::commands::listing::tests_support::ctx(&[]);
-        let target = Target::parse(Some("vault:"), None).unwrap();
+    #[tokio::test]
+    async fn opening_a_stream_fails_loudly_rather_than_returning_an_empty_one() {
+        // The whole point of `PLAN.md` §6: a listing that cannot reach its
+        // source must not render as "the vault is empty".
+        let ctx = crate::commands::listing::tests_support::ctx(&["--no-ask-password"]);
+        let target = Target::parse(Some("nosuchremote:"), None).unwrap();
         let error = open(&ctx, &target, Filter::from_globals(&ctx.globals).unwrap())
+            .await
             .err()
-            .expect("no engine is reachable yet");
+            .expect("an unconfigured remote cannot be listed");
         assert_ne!(error.code(), ExitCode::Success);
+    }
+
+    #[tokio::test]
+    async fn a_real_directory_streams_through_the_filter() {
+        // The other half of the same promise: when the source *is* reachable,
+        // the pipeline end to end produces rows rather than a refusal.
+        let root = tempfile::TempDir::new().unwrap();
+        std::fs::write(root.path().join("a.jpg"), b"1").unwrap();
+        std::fs::write(root.path().join("b.txt"), b"22").unwrap();
+
+        let ctx = crate::commands::listing::tests_support::ctx(&["--include", "*.jpg"]);
+        let target = Target::parse(Some(&root.path().to_string_lossy()), None).unwrap();
+        let mut stream = open(&ctx, &target, Filter::from_globals(&ctx.globals).unwrap())
+            .await
+            .expect("a directory lists");
+
+        let mut seen = Vec::new();
+        stream
+            .try_for_each(|entry| {
+                seen.push(entry.path().to_string());
+                Ok(())
+            })
+            .await
+            .expect("the listing completes");
+        assert_eq!(seen, vec!["a.jpg"]);
+        assert_eq!(stream.seen(), 2, "both files were considered");
     }
 }
 
@@ -132,10 +168,10 @@ mod tests {
 #[cfg(test)]
 pub mod tests_support {
     use clap::Parser;
-    use dctl_core::Record;
 
     use crate::cli::globals::GlobalArgs;
     use crate::ctx::Ctx;
+    use crate::source;
 
     use super::entry::Entry;
     use super::source::Pager;
@@ -153,29 +189,28 @@ pub mod tests_support {
         Ctx::new(parsed.globals)
     }
 
-    /// An index record with a plausible shape, for feeding a [`Pager`].
-    pub fn record(path: &str, size: u64, modified: Option<i64>) -> Record {
-        Record {
-            path: path.to_string(),
-            object_key: format!("o/{path}"),
-            size,
-            modified_unix: modified,
-            content_hash: vec![0xab, 0xcd],
-        }
+    /// One entry with a plausible shape, as a source would have reported it.
+    ///
+    /// Carries a content hash, because the sealed source does and the renderers
+    /// that show a checksum column are the ones being tested.
+    pub fn listed(path: &str, size: u64, modified: Option<i64>) -> source::Entry {
+        source::Entry::new(path, size)
+            .with_modified(modified)
+            .with_content_hash(vec![0xab, 0xcd])
     }
 
     /// A single entry rooted at `root`.
     pub fn entry(root: &str, path: &str, size: u64) -> Entry {
-        Entry::from_record(record(path, size, Some(0)), root)
+        Entry::from_source(listed(path, size, Some(0)), root)
     }
 
     /// A pager over the given paths, in the order a sorted index would yield
     /// them.
     pub fn pager(root: &str, paths: &[(&str, u64)]) -> Pager {
-        let records = paths
+        let entries = paths
             .iter()
-            .map(|(path, size)| record(path, *size, Some(0)))
+            .map(|(path, size)| listed(path, *size, Some(0)))
             .collect();
-        Pager::new(records, root)
+        Pager::new(entries, root)
     }
 }

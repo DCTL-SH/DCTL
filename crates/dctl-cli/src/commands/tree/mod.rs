@@ -94,11 +94,11 @@ pub async fn run(ctx: &Ctx, args: &TreeArgs) -> Result<()> {
     // building, so that a directory at the boundary is still drawn even though
     // everything inside it has been pruned.
     let filter = Filter::from_globals(&ctx.globals)?.with_depth_limit(None);
-    let mut stream = listing::open(ctx, &target, filter)?;
+    let mut stream = listing::open(ctx, &target, filter).await?;
 
     if ctx.out.is_json() {
         let mut emitter = Emitter::new(&ctx.out);
-        stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry)))?;
+        stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry))).await?;
         emitter.finish()?;
         listing::report_empty(ctx, &stream, &target);
         return Ok(());

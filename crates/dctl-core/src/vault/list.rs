@@ -26,18 +26,20 @@ impl Vault {
     }
 
     /// Delete the file at `path`. Returns whether it existed. Removes the content
-    /// object, then its §5 name record, then the index record.
+    /// object, its §5 name record, and the index row — so a delete truly leaves nothing
+    /// behind on the untrusted backend.
+    ///
+    /// Resolution goes through [`Vault::lookup_object_key`] (index → authoritative name
+    /// record), so a delete works on a fresh/wiped device *before* any `rebuild_index`
+    /// — symmetric with `get_file`. `Ok(false)` only when the path is present nowhere.
     #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
     pub async fn delete_file(&self, path: &str) -> Result<bool> {
         let path = path::normalize(path)?;
-        let Some(record) = self.index.get(&path)? else {
+        let Some(object_key) = self.lookup_object_key(&path).await? else {
             tracing::debug!(%path, "delete: not present");
             return Ok(false);
         };
-        self.backend
-            .delete(&ObjectKey::new(record.object_key))
-            .await?;
-        // Remove the authoritative name record too, so a delete leaves nothing behind.
+        self.backend.delete(&ObjectKey::new(object_key)).await?;
         let name_key = self.name_keys.record_key(&path);
         self.backend.delete(&ObjectKey::new(name_key)).await?;
         self.index.delete(&path)?;

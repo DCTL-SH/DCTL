@@ -59,6 +59,15 @@ impl Backend for LocalFs {
         verified_write::put(self, key, data, expected).await
     }
 
+    async fn put_from_path(
+        &self,
+        key: &ObjectKey,
+        source: &Path,
+        expected: &ContentHash,
+    ) -> Result<PutOutcome> {
+        verified_write::put_from_path(self, key, source, expected).await
+    }
+
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
         read::get(self, key).await
     }

@@ -1,11 +1,15 @@
 //! One thing a listing can print.
 //!
-//! An [`Entry`] is the listing family's own view of an index
-//! [`Record`], narrowed to what the six renderers actually
-//! read. It deliberately drops the two fields a record carries that no listing
-//! may ever show: the wrapped DEK, which is key material, and the opaque object
-//! key, which is the metadata-privacy boundary — an object key printed next to
-//! a plaintext path in a `lsjson` dump hands an observer the mapping the whole
+//! An [`Entry`] is the listing family's own view of a
+//! [`source::Entry`](crate::source::Entry), narrowed to what the six renderers
+//! actually read and widened by the two things only a listing needs: where the
+//! listing root ended inside the path, and whether the row stands for a
+//! directory that no store actually holds.
+//!
+//! The narrowing already happened one layer down. A source entry carries no
+//! wrapped DEK and no opaque object key, because a type that cannot hold them is
+//! a type no renderer can leak them through — an object key printed next to a
+//! plaintext path in an `lsjson` dump hands an observer exactly the mapping the
 //! design exists to hide (`PLAN.md` §2, §7).
 //!
 //! ## Paths are stored whole, depth is derived
@@ -17,10 +21,9 @@
 //! the vault, and holding both spellings for ten million entries would double
 //! the only allocation on the hot path to save an integer.
 
-use dctl_core::Record;
-
 use crate::constants::{HEX_DIGITS, PATH_SEPARATOR};
 use crate::platform::path;
+use crate::source;
 
 /// One object, or one directory synthesised from the objects beneath it.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -40,23 +43,28 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// Build an entry from an index record, rooted at `root`.
+    /// Build an entry from what a source reported, rooted at `root`.
     ///
     /// `root` is the logical prefix the listing was opened at; everything after
     /// it is what filters and depth limits see. Callers are expected to have
-    /// already established that the record really is under the root — see
-    /// [`super::source::Pager`], which is where that check belongs because it is
-    /// also where a loose provider prefix match gets corrected.
+    /// already established that the entry really is under the root —
+    /// [`crate::source::Source::enumerate`] guarantees it, because that is also
+    /// where a loose byte-wise prefix match from an index or a provider gets
+    /// corrected.
+    ///
+    /// A missing content hash stays missing. A plain object store does not know
+    /// the plaintext BLAKE3 of what it holds, and rendering `""` in a checksum
+    /// column would tell an operator the object hashes to nothing.
     #[must_use]
-    pub fn from_record(record: Record, root: &str) -> Self {
-        let root_len = relative_offset(&record.path, root);
+    pub fn from_source(entry: source::Entry, root: &str) -> Self {
+        let root_len = relative_offset(&entry.path, root);
         Self {
             root_len,
-            size: record.size,
-            modified_unix: record.modified_unix,
-            content_hash: Some(hex(&record.content_hash)),
+            size: entry.size,
+            modified_unix: entry.modified_unix,
+            content_hash: entry.content_hash.as_deref().map(hex),
             is_dir: false,
-            path: record.path,
+            path: entry.path,
         }
     }
 
@@ -201,11 +209,11 @@ fn hex(bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commands::listing::tests_support::record;
+    use crate::commands::listing::tests_support::listed;
 
     #[test]
     fn an_entry_keeps_the_full_path_and_derives_the_relative_one() {
-        let entry = Entry::from_record(record("photos/2024/a.jpg", 12, Some(0)), "photos");
+        let entry = Entry::from_source(listed("photos/2024/a.jpg", 12, Some(0)), "photos");
         assert_eq!(entry.path(), "photos/2024/a.jpg");
         assert_eq!(entry.relative(), "2024/a.jpg");
         assert_eq!(entry.name(), "a.jpg");
@@ -214,15 +222,15 @@ mod tests {
 
     #[test]
     fn a_root_less_listing_is_relative_to_the_vault() {
-        let entry = Entry::from_record(record("a/b.txt", 1, None), "");
+        let entry = Entry::from_source(listed("a/b.txt", 1, None), "");
         assert_eq!(entry.relative(), "a/b.txt");
         assert_eq!(entry.depth(), 2);
     }
 
     #[test]
     fn a_trailing_separator_on_the_root_changes_nothing() {
-        let with = Entry::from_record(record("photos/a.jpg", 1, None), "photos/");
-        let without = Entry::from_record(record("photos/a.jpg", 1, None), "photos");
+        let with = Entry::from_source(listed("photos/a.jpg", 1, None), "photos/");
+        let without = Entry::from_source(listed("photos/a.jpg", 1, None), "photos");
         assert_eq!(with.relative(), without.relative());
         assert_eq!(with.relative(), "a.jpg");
     }
@@ -231,7 +239,7 @@ mod tests {
     fn a_root_that_is_the_whole_path_leaves_nothing_relative() {
         // `dctl ls vault:photos/a.jpg` addresses one object; slicing past the
         // end of the string would be the obvious way to make that panic.
-        let entry = Entry::from_record(record("photos/a.jpg", 1, None), "photos/a.jpg");
+        let entry = Entry::from_source(listed("photos/a.jpg", 1, None), "photos/a.jpg");
         assert_eq!(entry.relative(), "");
         assert_eq!(entry.depth(), 0);
     }
@@ -240,13 +248,13 @@ mod tests {
     fn a_root_that_only_looks_like_a_prefix_is_not_stripped() {
         // `photos` is not a parent of `photos-backup`, and a byte-wise strip
         // would silently produce the relative path "-backup/a.jpg".
-        let entry = Entry::from_record(record("photos-backup/a.jpg", 1, None), "photos");
+        let entry = Entry::from_source(listed("photos-backup/a.jpg", 1, None), "photos");
         assert_eq!(entry.relative(), "photos-backup/a.jpg");
     }
 
     #[test]
     fn a_multibyte_root_is_stripped_on_a_character_boundary() {
-        let entry = Entry::from_record(record("caf\u{e9}/a.jpg", 1, None), "caf\u{e9}");
+        let entry = Entry::from_source(listed("caf\u{e9}/a.jpg", 1, None), "caf\u{e9}");
         assert_eq!(entry.relative(), "a.jpg");
     }
 
@@ -254,7 +262,7 @@ mod tests {
     fn key_material_never_reaches_an_entry() {
         // The record carries a wrapped DEK and an object key; neither has an
         // accessor here, which is what keeps them out of every renderer.
-        let entry = Entry::from_record(record("a.txt", 1, None), "");
+        let entry = Entry::from_source(listed("a.txt", 1, None), "");
         let debug = format!("{entry:?}");
         assert!(!debug.contains("wrapped_dek"));
         assert!(!debug.contains("object_key"));
@@ -262,10 +270,10 @@ mod tests {
 
     #[test]
     fn parent_components_stop_before_the_file_name() {
-        let file = Entry::from_record(record("a/b/c.txt", 1, None), "");
+        let file = Entry::from_source(listed("a/b/c.txt", 1, None), "");
         assert_eq!(file.parent_components(), vec!["a", "b"]);
         // A file in the root implies no directory at all.
-        let top = Entry::from_record(record("c.txt", 1, None), "");
+        let top = Entry::from_source(listed("c.txt", 1, None), "");
         assert!(top.parent_components().is_empty());
     }
 
@@ -281,7 +289,7 @@ mod tests {
 
     #[test]
     fn content_hashes_render_as_lower_case_hex() {
-        let entry = Entry::from_record(record("a.txt", 1, None), "");
+        let entry = Entry::from_source(listed("a.txt", 1, None), "");
         assert_eq!(entry.content_hash(), Some("abcd"));
         assert_eq!(hex(&[0x00, 0x0f, 0xf0, 0xff]), "000ff0ff");
         assert_eq!(hex(&[]), "");

@@ -21,6 +21,9 @@ impl Vault {
     #[tracing::instrument(skip(self, data), fields(backend = self.backend.name(), bytes = data.len()))]
     pub async fn put_file(&self, path: &str, data: &[u8]) -> Result<()> {
         let path = path::normalize(path)?;
+        // Capture any object this path currently maps to, so an overwrite can GC the old
+        // ciphertext after the replacement is durable (never orphan a prior version).
+        let previous = self.lookup_object_key(&path).await?;
 
         // Seal into a self-describing DSF1 object (embeds its own root-wrapped DEK
         // + encrypted metadata). The backend key is the object's random file_id.
@@ -68,19 +71,37 @@ impl Vault {
         // Commit the index record (this is what makes the file "stored").
         let record = Record {
             path: path.clone(),
-            object_key,
+            object_key: object_key.clone(),
             size: data.len() as u64,
             modified_unix: now_unix(),
             content_hash: ContentHash::blake3(data).bytes,
         };
         self.index.put(&record)?;
         tracing::info!(object = %record.object_key, "file stored and index committed");
+
+        // Overwrite GC: the new mapping is durable, so delete the superseded object.
+        self.gc_superseded_object(previous, &object_key).await;
         Ok(())
+    }
+
+    /// Delete the content object a path previously mapped to, once its replacement is
+    /// durably stored (object + name record + index all committed). **Delete-last**, so a
+    /// crash or failure here only leaks storage — it can never lose the live object. A
+    /// no-op when the path is new or the object id is unchanged. A private tool must not
+    /// leave a superseded version's ciphertext on the untrusted backend indefinitely.
+    pub(super) async fn gc_superseded_object(&self, previous: Option<String>, current: &str) {
+        if let Some(old) = previous {
+            if old != current {
+                if let Err(e) = self.backend.delete(&ObjectKey::new(old)).await {
+                    tracing::warn!(error = %e, "failed to delete superseded object (storage leak)");
+                }
+            }
+        }
     }
 }
 
 /// Current unix time in seconds, if the clock is available.
-fn now_unix() -> Option<i64> {
+pub(super) fn now_unix() -> Option<i64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .ok()

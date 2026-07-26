@@ -61,3 +61,58 @@ impl ContentHash {
         self.algo == other.algo && self.bytes == other.bytes
     }
 }
+
+/// A streaming content hasher: feed bytes incrementally with [`update`](Hasher::update),
+/// then [`finalize`](Hasher::finalize) to a [`ContentHash`].
+///
+/// This is what lets a **verified write hash a file that never fully resides in RAM** —
+/// the constant-memory streaming path folds each buffer through here, so peak memory is
+/// `O(buffer)` rather than `O(file_size)`. `blake3::Hasher` carries a large internal state,
+/// so it is boxed to keep the enum's variants close in size.
+pub enum Hasher {
+    Blake3(Box<blake3::Hasher>),
+    Sha1(Sha1),
+    Sha256(Sha256),
+}
+
+impl Hasher {
+    /// A fresh streaming hasher for `algo`.
+    #[must_use]
+    pub fn new(algo: HashAlgo) -> Self {
+        match algo {
+            HashAlgo::Blake3 => Self::Blake3(Box::new(blake3::Hasher::new())),
+            HashAlgo::Sha1 => Self::Sha1(Sha1::default()),
+            HashAlgo::Sha256 => Self::Sha256(Sha256::default()),
+        }
+    }
+
+    /// Fold `data` into the running digest.
+    pub fn update(&mut self, data: &[u8]) {
+        match self {
+            Self::Blake3(h) => {
+                h.update(data);
+            }
+            Self::Sha1(h) => h.update(data),
+            Self::Sha256(h) => h.update(data),
+        }
+    }
+
+    /// Consume the hasher and return the final [`ContentHash`].
+    #[must_use]
+    pub fn finalize(self) -> ContentHash {
+        match self {
+            Self::Blake3(h) => ContentHash {
+                algo: HashAlgo::Blake3,
+                bytes: h.finalize().as_bytes().to_vec(),
+            },
+            Self::Sha1(h) => ContentHash {
+                algo: HashAlgo::Sha1,
+                bytes: h.finalize().to_vec(),
+            },
+            Self::Sha256(h) => ContentHash {
+                algo: HashAlgo::Sha256,
+                bytes: h.finalize().to_vec(),
+            },
+        }
+    }
+}

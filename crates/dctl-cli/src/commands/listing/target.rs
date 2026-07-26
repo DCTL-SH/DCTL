@@ -27,6 +27,7 @@ use crate::constants::{
 };
 use crate::error::{CliError, Result};
 use crate::platform::path;
+use crate::remote::RemoteSpec;
 
 /// A resolved listing target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -86,6 +87,31 @@ impl Target {
     #[must_use]
     pub const fn is_remote(&self) -> bool {
         matches!(self, Self::Remote { .. })
+    }
+
+    /// The same target in the vocabulary [`crate::source::open`] speaks.
+    ///
+    /// Two grammars exist because two families needed one: the transfer commands
+    /// parse a [`RemoteSpec`] from a positional argument, and the listing verbs
+    /// parse a [`Target`] from an optional one that falls back to `--remote`.
+    /// They agree on every rule that matters — a drive letter is a path on every
+    /// platform, a logical prefix is NFC and `..`-free — and this is the single
+    /// conversion between them.
+    ///
+    /// Doing it here rather than in [`super::source`] is deliberate: a second
+    /// place that turns "what the user typed" into a remote is a second place
+    /// that can decide `archive` is a relative directory, which is exactly the
+    /// class of bug that made a `copy` into a vault write into a folder called
+    /// `vault` and exit 0.
+    #[must_use]
+    pub fn spec(&self) -> RemoteSpec {
+        match self {
+            Self::Remote { remote, prefix } => RemoteSpec::Named {
+                remote: remote.clone(),
+                path: prefix.clone(),
+            },
+            Self::Local(path) => RemoteSpec::Local(path.clone()),
+        }
     }
 
     /// The target as the user would write it, for error messages and for the
