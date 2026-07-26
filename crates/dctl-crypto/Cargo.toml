@@ -1,0 +1,34 @@
+[package]
+name = "dctl-crypto"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "DCTL clean-room, streaming-first, post-quantum-ready encryption core"
+
+[dependencies]
+# crypto-specific (pinned in this crate)
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+getrandom = "0.4"
+hkdf = "0.13"
+# §12 hybrid recipient KEM: X25519 (RFC 7748) + ML-KEM-768 (FIPS 203).
+# `deterministic` exposes FIPS-203 KeyGen_internal/Encaps_internal (byte-exact,
+# clean-room reproducible); `zeroize` wipes ML-KEM decapsulation-key material.
+ml-kem = { workspace = true, features = ["deterministic", "zeroize"] }
+x25519-dalek = { workspace = true }
+# shared across the workspace
+blake3 = { workspace = true }
+sha2 = { workspace = true }
+thiserror = { workspace = true }
+zeroize = { workspace = true }
+unicode-normalization = { workspace = true }
+bip39 = { workspace = true }
+subtle = { workspace = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+# Integration tests need the `EncodedSizeUser` trait to compare ML-KEM key bytes
+# (a lib's normal deps are not in scope for its integration-test crates).
+ml-kem = { workspace = true }

@@ -1,0 +1,47 @@
+[package]
+name = "dctl-cli"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "DCTL command-line interface"
+
+# Binary name mirrors dctl_meta::BINARY_NAME (rename both together to rebrand).
+[[bin]]
+name = "dctl"
+path = "src/main.rs"
+
+[dependencies]
+dctl-core = { path = "../dctl-core" }
+dctl-store = { path = "../dctl-store" }
+dctl-meta = { path = "../dctl-meta" }
+# shared across the workspace
+blake3 = { workspace = true }
+clap = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+# `signal` powers the Ctrl-C race in main.rs: an interrupted run must exit 25,
+# never be reported as success.
+tokio = { workspace = true, features = ["signal"] }
+tracing = { workspace = true }
+# `json` provides the structured sink PLAN.md §7 requires alongside the human one.
+tracing-subscriber = { workspace = true, features = ["json"] }
+rpassword = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Plaintext held in flight between pipeline stages is wiped on drop.
+zeroize = { workspace = true }
+# CLI-specific (pinned in this crate, like dctl-crypto pins its primitives).
+# Kept here rather than in the workspace table so the presentation layer can
+# evolve without touching every other crate's dependency surface.
+clap_complete = "4"
+indicatif = "0.17"
+anstream = "0.6"
+anstyle = "1"
+toml = "0.8"
+unicode-normalization = "0.1"
+
+[dev-dependencies]
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+tempfile = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "dctl-meta"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "DCTL identity — single, renameable source for the app name, paths, and env prefix"
+
+[dependencies]
+directories = { workspace = true }

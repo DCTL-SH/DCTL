@@ -1,0 +1,22 @@
+[package]
+name = "dctl-core"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "DCTL core — the vault composing crypto, storage, and index into verified file operations"
+
+[dependencies]
+dctl-crypto = { path = "../dctl-crypto" }
+dctl-store = { path = "../dctl-store" }
+dctl-index = { path = "../dctl-index" }
+blake3 = { workspace = true }
+bytes = { workspace = true }
+hex = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }

@@ -1,0 +1,218 @@
+# dctl check
+
+Compare source and destination without transferring.
+
+## Synopsis
+
+`dctl check` compares two trees and reports how they differ. It is the safest
+command in the tool: it reads both sides, it writes nothing to either of them,
+and it cannot be talked into copying something "while it is there". The only
+thing it can create is the verdict files you explicitly ask for with
+`--combined`, `--differ`, `--match` and the `--missing-on-*` flags — everything
+else it produces goes to stdout.
+
+It exists because `PLAN.md` §13.6 is blunt about the alternative: a backup
+nobody ever compared against its source is a hope, not a backup. `check` is what
+turns the hope into a measurement.
+
+Every path lands in exactly one of five buckets:
+
+| verdict | `--combined` mark | meaning |
+|---------|:-----------------:|---------|
+| `match` | `=` | on both sides and the same |
+| `differ` | `*` | on both sides, contents disagree |
+| `missing-on-dst` | `+` | only at the source |
+| `missing-on-src` | `-` | only at the destination |
+| `error` | `!` | could not be compared — never a silent pass |
+
+The marks are rclone's, because the combined file is exactly the artefact people
+already have `awk` one-liners for.
+
+**What "the same" means is the global comparison dial**, and this is the pitfall
+worth reading twice. By default `check` compares size and modification time,
+which is cheap and catches the overwhelming majority of real differences — but
+two files can share both and still differ. `--size-only` is cheaper still and
+deliberately ignores time, for destinations whose clocks or metadata cannot be
+trusted. `--checksum` is the only mode that proves the contents match. The
+report always names which one ran and carries a `proves_contents` boolean,
+because "0 differences" is a very different claim under each; when a metadata
+comparison is in force, `check` says so on stderr under `-v`.
+
+When a comparison needs a field one side does not have — a destination with no
+recorded modification time under the default mode, or no hash under
+`--checksum` — the verdict is `error`, never a quiet fallback to a weaker
+comparison and never `match`. A comparison that downgrades itself silently is
+worse than one that fails, because it reports a guarantee it did not check.
+
+`--one-way` ignores paths that exist only at the destination. That is the right
+question to ask after a `copy`: "is everything from the source present and
+correct at the destination?" — extra files at the destination are what `copy`
+leaves behind by design. Suppressed paths are not counted at all, so they cannot
+inflate the difference total or change the exit code.
+
+**The verdict files are the point of the command in a script.** A per-verdict
+file carries bare paths, one per line, which is precisely the shape
+`--files-from` consumes, so the whole repair loop is two commands:
+
+```
+dctl check vault:media b2prod:bucket/media --missing-on-dst todo.txt
+dctl copy  vault:media b2prod:bucket/media --files-from todo.txt
+```
+
+`--combined` instead writes `<mark> <path>` for every path including matches.
+Two flags may not name the same file: interleaved verdicts cannot be told apart
+afterwards, so that is rejected up front with a usage error. Output paths are
+validated *before* anything is compared — a destination that is a directory, or
+whose parent directory does not exist, is reported immediately rather than after
+a multi-hour walk. Validation touches the filesystem only to ask those
+questions; it creates nothing, so a run that fails before it compares anything
+leaves no empty files behind for a later script to mistake for "no differences
+found". Under `--dry-run`, `check` prints a `[dry-run] would write: <path>` line
+for each requested file and creates none of them.
+
+Either side may be a remote or a local path — `check` is the one command in the
+integrity family that does not require a remote, so local-to-local comparisons
+are allowed. Following rclone's rule, `C:\data`, `d:/data` and `\\server\share`
+are treated as **local** on every platform. Remote names must be at least two
+characters, which is what makes the drive-letter rule unambiguous. Paths inside
+a vault are canonicalised (`/`-separated, NFC, no `.` or `..`); a `..` component
+is rejected.
+
+Differences are reported as exit code **6** (`partial_failure`), not 21.
+Nothing failed to authenticate — the two trees simply disagree — and conflating
+the two would send someone hunting for corruption that is not there.
+
+On stdout, text output lists only the disagreements as a `Status`/`Path` table;
+matches are counted, not listed, because a check of a million agreeing objects
+should print a summary rather than a million lines. Two trees that agree produce
+*no stdout at all*, so `dctl check src: dst: && echo clean` works. `--json`
+emits one document with `source`, `dest`, `comparison`, `proves_contents`,
+`one_way`, a `differences` array and a `summary` counting `checked`, `matched`,
+`differ`, `missing_on_src`, `missing_on_dst` and `errors` — every verdict has
+its own key, so `0` is information rather than an absent field.
+`--format json-lines` emits one difference per line and no summary.
+
+### Status in this build
+
+**`dctl check` is not implemented in this build.** Argument parsing, target
+resolution, output-file validation (including the two-flags-one-file mistake),
+the comparison logic, the file writers, the report shape in all three formats
+and the exit-code classification are written and unit-tested; the step that
+enumerates two trees is not. `dctl_core::Vault` can list one prefix, `Ctx` does
+not yet carry an unlocked vault, and there is no local walker.
+
+A complete invocation therefore validates everything it can, creates no files,
+and fails with `dctl check is not implemented in this build` and exit code
+**7**. `PLAN.md` §11 puts `ls`/`verify`/`check` in **Phase 1 (B2 MVP)**.
+
+```
+dctl check SOURCE DEST [flags]
+```
+
+## Examples
+
+Prove that a local photo library really is in the vault, contents and all.
+`--checksum` is the only comparison that answers that question; the default
+size-and-modtime comparison would answer a weaker one.
+
+```
+dctl check ./photos/2024 vault:photos/2024 --checksum
+```
+
+Compare two providers after a migration and capture the work still to do.
+`--one-way` ignores objects that exist only at B2 (older material that was never
+in the vault), and `--missing-on-dst` writes a plain path list ready for
+`--files-from`.
+
+```
+dctl check vault:media b2prod:bucket/media --one-way --missing-on-dst /var/tmp/todo.txt
+dctl copy  vault:media b2prod:bucket/media --files-from /var/tmp/todo.txt
+```
+
+A Windows local tree against a vault, capturing every verdict in one marked
+file. `C:` is a drive letter, so the first argument is a local path, not a
+remote named `C`; the same command works unchanged on a Linux build agent given
+a Linux path.
+
+```
+dctl check "C:\Users\mx\Pictures\2024" vault:photos/2024 --combined C:\Temp\check-2024.txt
+```
+
+The combined file that produces looks like this — `=` same, `*` different, `+`
+at the source only, `-` at the destination only, `!` could not be compared:
+
+```
+= 2024/IMG_4417.CR3
+* 2024/IMG_4418.CR3
++ 2024/IMG_4491.CR3
+- 2024/thumbs.db
+! 2024/IMG_4502.CR3
+```
+
+Feed a nightly comparison into a monitoring system. JSON names the comparison
+that produced the counts, so a `size-and-modtime` run can never be read as a
+checksum-verified one.
+
+```
+dctl check vault:documents ./documents --size-only --json
+```
+
+## Options
+
+```
+      --combined <FILE>         Write every path with its one-character verdict mark to FILE
+      --differ <FILE>           Write paths that exist on both sides but differ to FILE
+  -h, --help                    help for check
+      --match <FILE>            Write paths that matched to FILE
+      --missing-on-dst <FILE>   Write paths that exist only at the source to FILE
+      --missing-on-src <FILE>   Write paths that exist only at the destination to FILE
+      --one-way                 Ignore paths that exist only at the destination
+```
+
+`SOURCE` and `DEST` are both required. Each is a `REMOTE:PATH` spec or a local
+path; a bare `vault:` or a trailing separator names a whole tree.
+
+## Options inherited from parent commands
+
+Every global flag is accepted on `dctl check`. The ones that change what this
+command does are `--checksum` and `--size-only` (which select the comparison and
+are mutually exclusive), the `--include`/`--exclude`/`--filter-from`/
+`--files-from`/`--min-size`/`--max-size`/`--max-depth` filters, `--checkers`
+(how many metadata comparisons run in parallel), `--dry-run` (which suppresses
+the verdict files, this command's only mutation), and the output flags
+`--format`/`--json`/`--quiet`/`-v`. See
+[../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
+
+## Exit codes
+
+| Code | Name | When |
+|-----:|------|------|
+| 0 | `success` | The two sides agree under the active comparison. Not reachable in this build. |
+| 1 | `usage` | Unknown flag, a missing side, a path containing `..`, a remote name shorter than two characters, two verdict flags aimed at one file, or a verdict destination that is a directory. |
+| 2 | `uncategorised` | A verdict file could not be written for a reason other than a missing directory or a permission denial; or a report could not be serialised. |
+| 3 | `dir_not_found` | The parent directory of a verdict file does not exist. |
+| 6 | `partial_failure` | The run finished and the two sides disagree — `differ`, `missing-on-*` or `error` paths were found. Nothing was transferred. |
+| 7 | `fatal_error` | Returned by every complete invocation in this build (`not implemented`); also a permission denial writing a verdict file, and configuration failures. |
+| 25 | `cancelled` | Ctrl-C or SIGTERM. |
+
+In this build only **1**, **3**, **7** and **25** are reachable — output-file
+validation runs before the comparison does, so a bad `--combined` path is still
+reported properly. Codes 0, 2 and 6 need the engine work described under
+*Status in this build*.
+
+`check` never returns 21: a disagreement between two trees is not an
+authentication failure. See [../EXIT_CODES.md](../EXIT_CODES.md) for the full
+contract.
+
+## See also
+
+* [dctl verify](dctl_verify.md) — compare stored objects against the hashes the
+  vault recorded for them, rather than two trees against each other.
+* [dctl copy](dctl_copy.md) — the command that consumes a `--missing-on-dst`
+  list via `--files-from`.
+* [dctl sync](dctl_sync.md) — make the destination identical to the source.
+  Destructive: it deletes from the destination, which is exactly what `check`
+  lets you preview first.
+* [dctl scrub](dctl_scrub.md) — proactive whole-dataset verification.
+* [dctl restore](dctl_restore.md) — the restore drill `check` is the cheap
+  rehearsal for.

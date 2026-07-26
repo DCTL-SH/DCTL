@@ -1,0 +1,16 @@
+[package]
+name = "dctl-decode"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Reference decoder (dependency-free C99) + known-answer cross-validation harness"
+
+# This crate contains no production Rust — it houses the standalone C99 reference
+# decoder (`reference/dctl-decode.c`) and the KAT harness (`tests/kat.rs`) that
+# compiles it and proves it reproduces the Rust implementation bit-for-bit.
+
+[dev-dependencies]
+dctl-crypto = { path = "../dctl-crypto" }
+tempfile = { workspace = true }
+hex = { workspace = true }

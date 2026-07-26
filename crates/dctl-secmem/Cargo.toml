@@ -1,0 +1,14 @@
+[package]
+name = "dctl-secmem"
+version = "0.0.1"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "DCTL secure memory: lock key pages out of swap and crash dumps (the one audited home for unsafe FFI)"
+
+[dependencies]
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true }

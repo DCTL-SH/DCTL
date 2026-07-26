@@ -1,0 +1,196 @@
+//! Stable process exit codes (`PLAN.md` §7, §16.3).
+//!
+//! These are a **public contract**: scripts branch on them, so a code's meaning
+//! must never change once released. New conditions get new numbers.
+//!
+//! Codes 0–10 deliberately mirror rclone's taxonomy so existing automation ports
+//! across with minimal edits. Codes 20+ are DCTL-specific and cover the failures
+//! rclone has no concept of — verified-write refusal, AEAD authentication
+//! failure, index/WAL damage, and audit-chain tampering.
+//!
+//! ## Why this module allows dead code
+//!
+//! The enum is an *inventory of the contract*, not an inventory of what this
+//! build happens to emit. Three codes — 8, 9 and 10 — are produced by
+//! `--max-transfer`, `--error-on-no-transfer` and `--max-duration`, which are
+//! rclone's and which DCTL has not wired to its engine yet; [`ExitCode::all`]
+//! and [`ExitCode::describe`] feed `dctl help exitcodes` and the generator for
+//! `docs/EXIT_CODES.md`, neither of which is written.
+//!
+//! Deleting a variant because nothing constructs it today is how a published
+//! number silently changes meaning tomorrow: the next feature that needs "the
+//! run stopped at a limit" would find 8 free and take it, and every script that
+//! branches on 8 would be wrong in a way nothing detects. So the gap is held
+//! open deliberately, and the tests below assert the whole set stays unique,
+//! ordered and described. The allow is scoped to this file, which contains
+//! nothing but the contract.
+#![allow(dead_code)]
+
+/// Exit status returned to the operating system.
+///
+/// `#[repr(i32)]` so the discriminants *are* the wire values — the numbers below
+/// are the documented contract, not an implementation detail.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(i32)]
+pub enum ExitCode {
+    // ── rclone-compatible range ───────────────────────────────────────────
+    /// Completed successfully.
+    Success = 0,
+    /// Command-line syntax or usage error.
+    Usage = 1,
+    /// An error not otherwise categorised.
+    Uncategorised = 2,
+    /// A source or destination directory was not found.
+    DirNotFound = 3,
+    /// A source or destination file was not found.
+    FileNotFound = 4,
+    /// A temporary error; retries were exhausted without success.
+    TemporaryError = 5,
+    /// Less serious errors: the run finished but some files failed.
+    PartialFailure = 6,
+    /// Fatal error — the run cannot continue (bad config, disk full).
+    FatalError = 7,
+    /// `--max-transfer` limit was reached.
+    TransferLimitExceeded = 8,
+    /// Completed successfully, but no files were transferred.
+    NoFilesTransferred = 9,
+    /// `--max-duration` limit was reached.
+    DurationLimitExceeded = 10,
+
+    // ── DCTL-specific range (20+) ─────────────────────────────────────────
+    /// A verified write refused to commit: the stored bytes did not match the
+    /// expected checksum. Nothing was committed and no source was touched.
+    ChecksumMismatch = 20,
+    /// AEAD authentication failed on read — wrong key, tampered ciphertext, or
+    /// wrong context. The data was **not** served.
+    IntegrityFailure = 21,
+    /// The vault could not be unlocked: wrong password/factor, or a missing or
+    /// corrupted envelope.
+    VaultLocked = 22,
+    /// The encrypted index or write-ahead journal could not be read or written.
+    IndexError = 23,
+    /// The tamper-evident audit log failed its hash-chain verification.
+    AuditChainBroken = 24,
+    /// The operation was cancelled (Ctrl-C / SIGTERM). In-flight work was rolled
+    /// back or left resumable; nothing was reported as successful.
+    Cancelled = 25,
+}
+
+impl ExitCode {
+    /// The integer handed to the operating system.
+    #[must_use]
+    pub const fn as_i32(self) -> i32 {
+        self as i32
+    }
+
+    /// Short stable slug used in `--json` output and log records, so machine
+    /// consumers can branch on a name rather than a bare number.
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Usage => "usage",
+            Self::Uncategorised => "uncategorised",
+            Self::DirNotFound => "dir_not_found",
+            Self::FileNotFound => "file_not_found",
+            Self::TemporaryError => "temporary_error",
+            Self::PartialFailure => "partial_failure",
+            Self::FatalError => "fatal_error",
+            Self::TransferLimitExceeded => "transfer_limit_exceeded",
+            Self::NoFilesTransferred => "no_files_transferred",
+            Self::DurationLimitExceeded => "duration_limit_exceeded",
+            Self::ChecksumMismatch => "checksum_mismatch",
+            Self::IntegrityFailure => "integrity_failure",
+            Self::VaultLocked => "vault_locked",
+            Self::IndexError => "index_error",
+            Self::AuditChainBroken => "audit_chain_broken",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// One-line explanation, used by `dctl help exitcodes` and the docs
+    /// generator so the table in `docs/EXIT_CODES.md` cannot drift from the code.
+    #[must_use]
+    pub const fn describe(self) -> &'static str {
+        match self {
+            Self::Success => "Completed successfully",
+            Self::Usage => "Command-line syntax or usage error",
+            Self::Uncategorised => "Error not otherwise categorised",
+            Self::DirNotFound => "Directory not found",
+            Self::FileNotFound => "File not found",
+            Self::TemporaryError => "Temporary error; retries exhausted",
+            Self::PartialFailure => "Some files failed to transfer",
+            Self::FatalError => "Fatal error; cannot continue",
+            Self::TransferLimitExceeded => "--max-transfer limit reached",
+            Self::NoFilesTransferred => "Succeeded, but no files were transferred",
+            Self::DurationLimitExceeded => "--max-duration limit reached",
+            Self::ChecksumMismatch => "Verified write refused: checksum mismatch",
+            Self::IntegrityFailure => "AEAD authentication failed on read",
+            Self::VaultLocked => "Vault locked: wrong password or corrupt envelope",
+            Self::IndexError => "Encrypted index or journal error",
+            Self::AuditChainBroken => "Audit log hash chain verification failed",
+            Self::Cancelled => "Operation cancelled",
+        }
+    }
+
+    /// Every code, in numeric order — the single source for the docs table.
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[
+            Self::Success,
+            Self::Usage,
+            Self::Uncategorised,
+            Self::DirNotFound,
+            Self::FileNotFound,
+            Self::TemporaryError,
+            Self::PartialFailure,
+            Self::FatalError,
+            Self::TransferLimitExceeded,
+            Self::NoFilesTransferred,
+            Self::DurationLimitExceeded,
+            Self::ChecksumMismatch,
+            Self::IntegrityFailure,
+            Self::VaultLocked,
+            Self::IndexError,
+            Self::AuditChainBroken,
+            Self::Cancelled,
+        ]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExitCode;
+
+    #[test]
+    fn wire_values_are_the_documented_contract() {
+        // These numbers are published. Changing one breaks user scripts.
+        assert_eq!(ExitCode::Success.as_i32(), 0);
+        assert_eq!(ExitCode::Usage.as_i32(), 1);
+        assert_eq!(ExitCode::PartialFailure.as_i32(), 6);
+        assert_eq!(ExitCode::NoFilesTransferred.as_i32(), 9);
+        assert_eq!(ExitCode::ChecksumMismatch.as_i32(), 20);
+        assert_eq!(ExitCode::IntegrityFailure.as_i32(), 21);
+        assert_eq!(ExitCode::VaultLocked.as_i32(), 22);
+        assert_eq!(ExitCode::AuditChainBroken.as_i32(), 24);
+    }
+
+    #[test]
+    fn codes_are_unique_and_ordered() {
+        let all = ExitCode::all();
+        for pair in all.windows(2) {
+            assert!(
+                pair[0].as_i32() < pair[1].as_i32(),
+                "exit codes must be listed in strictly increasing order"
+            );
+        }
+    }
+
+    #[test]
+    fn every_code_has_a_slug_and_description() {
+        for code in ExitCode::all() {
+            assert!(!code.slug().is_empty());
+            assert!(!code.describe().is_empty());
+        }
+    }
+}

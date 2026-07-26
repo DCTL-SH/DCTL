@@ -1,0 +1,44 @@
+//! The provider-neutral storage `Backend` trait.
+
+use async_trait::async_trait;
+use bytes::Bytes;
+
+use crate::checksum::ContentHash;
+use crate::error::Result;
+use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
+
+/// A storage backend: moves opaque objects to/from a provider.
+///
+/// Two invariants every implementation must uphold:
+/// - **Verified write:** [`put`](Backend::put) must not report success unless the
+///   stored bytes match `expected`. On mismatch it must leave nothing committed.
+/// - **Range read:** [`get_range`](Backend::get_range) must return exactly the
+///   requested bytes without transferring the whole object (streaming-seek).
+#[async_trait]
+pub trait Backend: Send + Sync {
+    /// Short, stable backend identifier (e.g. `"local"`, `"b2"`).
+    fn name(&self) -> &'static str;
+
+    /// Atomically store `data` under `key`, verifying it matches `expected`.
+    async fn put(&self, key: &ObjectKey, data: Bytes, expected: &ContentHash)
+    -> Result<PutOutcome>;
+
+    /// Fetch the entire object.
+    async fn get(&self, key: &ObjectKey) -> Result<Bytes>;
+
+    /// Fetch a byte range (streaming-seek primitive). Length past EOF is clamped.
+    async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Bytes>;
+
+    /// Object metadata without transferring the body.
+    async fn head(&self, key: &ObjectKey) -> Result<ObjectMeta>;
+
+    /// Whether the object exists.
+    async fn exists(&self, key: &ObjectKey) -> Result<bool>;
+
+    /// Delete the object. Idempotent: deleting a missing object succeeds.
+    async fn delete(&self, key: &ObjectKey) -> Result<()>;
+
+    /// One page of a prefix listing. Pass the previous page's `next_cursor` to
+    /// continue; `None` starts from the beginning. Keeps memory constant.
+    async fn list_page(&self, prefix: &str, cursor: Option<String>) -> Result<Page>;
+}

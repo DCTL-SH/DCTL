@@ -1,0 +1,26 @@
+# Isolated cargo-fuzz workspace (excluded from the main build; needs nightly +
+# `cargo install cargo-fuzz`). Run: `cargo +nightly fuzz run stream_open`.
+[package]
+name = "dctl-crypto-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.dctl-crypto]
+path = ".."
+
+[[bin]]
+name = "stream_open"
+path = "fuzz_targets/stream_open.rs"
+test = false
+doc = false
+bench = false
+
+# Detach from the parent workspace so the main build never depends on nightly.
+[workspace]

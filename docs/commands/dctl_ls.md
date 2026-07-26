@@ -1,0 +1,256 @@
+# dctl ls
+
+List objects with size and path.
+
+## Synopsis
+
+`dctl ls` is the listing every other command in the family is compared against:
+one line per object, recursive by default, paths relative to the spec that was
+given. The semantics are rclone's on purpose, because `rclone ls remote:path |
+wc -l` is in a lot of people's scripts and a port should need edits to the
+remote names and nothing else.
+
+Each line is a fixed-width size column, one space, then the path:
+
+```
+  1.00 KiB 2024/shoot-notes.txt
+  12.4 MiB 2024/IMG_4417.CR3
+  14.1 MiB 2024/IMG_4418.CR3
+```
+
+The size column is ten characters wide and right-aligned, so a listing lines up
+on screen without the command having to read every object before it can print
+the first one. The path column is last and is never padded, so `awk '{print
+$NF}'` gets the path on every row. Sizes are rendered for a human and follow
+`--units`: `1.44 GiB` by default, `1.55 GB` under `--units decimal`. **Anything
+arithmetic belongs in `--json`**, where `Size` is an exact integer and always
+will be; a rounded figure quietly loses up to five per cent of a quota
+calculation.
+
+Paths are relative to the spec, exactly as rclone defines it: `dctl ls
+vault:photos` reports `2024/IMG_4417.CR3`, not `photos/2024/IMG_4417.CR3`.
+Re-address an entry by re-joining it to the spec that produced it. Name a
+directory prefix rather than a single object — a spec that names one object
+exactly (`vault:photos/a.jpg`) is accepted and lists that object, but since
+paths are relative to the spec there is nothing left to print in the path
+column.
+
+### Scope
+
+`ls` shares its scope machinery with `lsd`, `lsl`, `lsjson`, `tree` and `size`,
+so all six agree about the same vault by construction. A `--exclude` that hid a
+file from `ls` but not from `size` would make two commands disagree and leave a
+user no way to tell which one was lying.
+
+* `--include` and `--exclude` are repeatable globs. **Exclusion wins**: an entry
+  that matches any exclusion is gone regardless of what else it matches, and
+  `--include` then narrows whatever survived.
+* A pattern beginning with `/` is anchored at the listing root and matched
+  against the whole root-relative path. A pattern containing no `/` at all is
+  matched against the **file name**, at any depth — `*.jpg` means what everyone
+  assumes it means. Anything else is matched against the root-relative path and
+  against every suffix of it that starts on a component boundary, so `tmp/*`
+  finds `photos/tmp/a` as well as `tmp/a`, and never `photos-tmp/a`.
+* In the glob dialect `*` stops at a path separator and `**` crosses one; `?` is
+  one non-separator character, `[a-z]` and `[!ab]` are classes, and `\*` is a
+  literal asterisk.
+* `--min-size` / `--max-size` accept `10G`, `1.5MiB` and `off`.
+* `--max-depth N` counts from the listing root and is one-based, so
+  `--max-depth 1` means "objects sitting directly in the root". `-1` is
+  unlimited and is the default.
+* `--filter-from` and `--files-from` are **refused, not ignored** (exit 7). A
+  listing whose rule file was silently dropped looks complete, and listings are
+  what people read before deciding what to delete.
+
+### Ordering, memory and what is actually shown
+
+Entries arrive in ascending lexicographic order of logical path and are never
+repeated. Nothing is buffered between pages: the pipeline holds one page of
+1000 entries at a time, so a `dctl ls` of a ten-million-object vault costs the
+same memory as a listing of ten (`PLAN.md` §16.2). That is why the first line
+appears immediately and why `dctl ls vault: | head -5` is cheap — a closed pipe
+is treated as success, not as a write failure.
+
+An object appears in a listing only once its write was checksum-verified at the
+destination **and** durably committed to the encrypted index (`PLAN.md` §6). A
+half-finished upload, or one whose verification failed, is not in the index and
+therefore is not in the listing; the verified-write contract is what makes `ls`
+a statement about stored data rather than about attempted uploads. `ls` itself
+writes nothing, commits nothing and cannot produce a checksum-mismatch failure,
+because it never sends bytes to a provider.
+
+The mirror-image half of that contract is the one `ls` has to keep: **never
+report an outcome that did not happen.** A listing that cannot reach the index
+fails loudly with a non-zero exit code; it never renders as an empty vault. A
+script that branched on an empty listing could go on to prune a backup it
+believed had been superseded.
+
+When a listing legitimately comes back empty, `ls` says so on stderr — and
+distinguishes the two reasons, because "the directory is empty" sends a user
+looking for missing files while "your `--include` matched nothing" sends them to
+their own command line. Those notes require `-v`; stdout stays empty either way,
+so `dctl ls … | wc -l` still reports zero.
+
+`ls` mutates nothing, so `--dry-run` changes neither its output nor its exit
+code. A read-only command that printed `[dry-run] would list` would be noise,
+not safety.
+
+### Target grammar
+
+The single positional argument is `REMOTE:PATH`. If it is absent or blank the
+command falls back to `--remote` / `DCTL_REMOTE`, which goes through the same
+grammar and may itself carry a path (`--remote vault:photos`). With neither, the
+command is a usage error rather than a guess.
+
+`C:\data`, `d:/data` and `\\nas\share\photos` are **local** paths on every
+platform, checked before the colon split, so a script written on Windows behaves
+identically on a Linux build agent. Remote names need at least two characters —
+one character before a colon is always read as a drive letter — and may use
+letters, digits, `-`, `_` and `.`. The path half is canonicalised on the way in:
+`photos//2024/`, `photos/./2024` and `photos/2024` address the same prefix, an
+NFD spelling typed on macOS finds the NFC records an index written on Linux
+holds, and a `..` component is rejected rather than allowed to walk out of the
+subtree that was named.
+
+### Status in this build
+
+**`dctl ls` cannot read a vault in this build.** Spec parsing, the glob, size
+and depth filters, the ordering contract, the streaming pipeline and all three
+output formats are implemented and unit-tested; the single missing step is the
+index read itself, because the runtime context does not yet carry an unlocked
+vault handle. A complete invocation therefore fails with
+
+```
+error: vault:photos: reading the object index is not implemented in this build
+warning: The listing pipeline is complete; what is missing is the vault handle, which Ctx does not carry yet. See PLAN.md §11.
+```
+
+and exit code **7**. It deliberately does not print an empty listing. Pointing
+`ls` at a local path fails with its own distinct message, because the fix is
+different: one is "wait for a release", the other is "write a remote spec".
+
+`PLAN.md` §11 delivers this in **Phase 1 (B2 MVP)**, which is the phase that
+brings the encrypted index and names `ls` explicitly.
+
+```
+dctl ls [REMOTE:PATH] [flags]
+```
+
+## Examples
+
+The listings below are what the renderer produces. In this build every complete
+invocation stops at the index read described under *Status in this build* and
+prints the exit-7 error instead.
+
+List everything in a vault, recursively:
+
+```
+dctl ls vault:
+  4.00 KiB documents/2024-tax.pdf
+  12.4 MiB photos/2024/IMG_4417.CR3
+  14.1 MiB photos/2024/IMG_4418.CR3
+  1.20 GiB video/wedding-master.mov
+```
+
+List one subtree. Paths come back relative to the spec, so `photos/2024/` is not
+repeated on every line:
+
+```
+dctl ls vault:photos/2024
+  12.4 MiB IMG_4417.CR3
+  14.1 MiB IMG_4418.CR3
+```
+
+Count the raw files in a bucket-backed remote, larger than 8 MB, without reading
+a single object body — this is an index query, so there is no egress:
+
+```
+dctl ls b2prod:bucket/media --include "*.CR3" --min-size 8M | wc -l
+```
+
+Exclusion beats inclusion, which is what makes the pair safe to combine. Here
+`private/` is gone even though its contents are JPEGs:
+
+```
+dctl ls vault:photos --include "*.jpg" --exclude "private/**"
+```
+
+Get exact byte counts for arithmetic. The text size column is rounded on
+purpose; `--json` is where the integers live:
+
+```
+dctl ls vault:photos/2024 --json | jq '[.[].Size] | add'
+```
+
+A Windows path is local, not a remote called `C`. DCTL treats a drive letter and
+a UNC path as local on every platform, so the same script behaves the same way
+on a build agent — and refuses rather than quietly listing something else:
+
+```
+dctl ls C:\Users\mx\Pictures
+error: listing a local directory is not implemented in this build
+warning: Give a remote spec such as 'vault:photos' instead of a filesystem path.
+```
+
+A rule file is refused rather than dropped, so a listing can never look complete
+while ignoring the rules that were meant to shape it:
+
+```
+dctl ls vault:photos --filter-from rules.txt
+error: reading filter rules from a file is not implemented in this build
+warning: Pass the rules directly with --include/--exclude, which are honoured in full by the listing commands.
+```
+
+## Options
+
+```
+  -h, --help   help for ls
+```
+
+`ls` declares no flags of its own — everything that shapes a listing is a global
+flag, so the six listing verbs cannot drift apart. The positional argument is
+`[REMOTE:PATH]`, optional, and falls back to `--remote`. A second positional is
+a usage error rather than being silently ignored, so a typo in `dctl ls vault:a
+vault:b` is reported instead of hidden. `-V, --version` is propagated to every
+subcommand.
+
+## Options inherited from parent commands
+
+Every global flag is accepted. The ones that change what this command does are
+`--remote` (the default target), the filters
+`--include` / `--exclude` / `--min-size` / `--max-size` / `--max-depth`
+(`--filter-from` and `--files-from` are refused), `--format` / `--json` and
+`--units` (output shape), `--quiet` and `-v` (whether the stderr notes appear),
+and `--config` / `--index` / the `--password*` group (reaching the vault at
+all). See [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
+
+## Exit codes
+
+| Code | Name | When |
+|-----:|------|------|
+| 0 | `success` | The listing was printed, including when it was legitimately empty. Not reachable in this build. |
+| 1 | `usage` | No path and no `--remote`; a remote name shorter than two characters or containing an illegal character; a `..` component; a malformed `--include`/`--exclude` pattern or `--min-size`/`--max-size` value; an unknown flag or a second positional. |
+| 2 | `uncategorised` | A stdout write failed for a reason other than a broken pipe (a full disk on a redirected listing). A broken pipe — `\| head` — is success. |
+| 5 | `temporary_error` | The provider could not be reached and the retry budget was exhausted. Needs the engine work below. |
+| 7 | `fatal_error` | Returned by every complete invocation in this build (`reading the object index is not implemented`), by a local target, and by `--filter-from`/`--files-from`. |
+| 22 | `vault_locked` | Wrong password or second factor, or a damaged envelope. Needs the engine work below. |
+| 23 | `index_error` | The encrypted index or its journal could not be read. Needs the engine work below. |
+| 25 | `cancelled` | Ctrl-C or SIGTERM. A truncated listing is never reported as complete. |
+
+In this build only **1**, **2**, **7** and **25** are reachable; a usage error
+is always reported before the unimplemented one, so a typo in a pattern is
+diagnosed as a typo. Codes 0, 5, 22 and 23 need the index read described under
+*Status in this build*.
+
+See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
+
+## See also
+
+* [dctl lsl](dctl_lsl.md) — the same listing with a modification-time column.
+* [dctl lsjson](dctl_lsjson.md) — the same listing as JSON, whatever `--format`
+  says.
+* [dctl lsd](dctl_lsd.md) — directories only, with recursive totals.
+* [dctl tree](dctl_tree.md) — the same objects drawn as nesting.
+* [dctl size](dctl_size.md) — the object count and byte total over the same
+  scope.
+* [dctl hashsum](dctl_hashsum.md) — content hashes for the same objects.

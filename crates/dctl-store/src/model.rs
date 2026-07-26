@@ -1,0 +1,71 @@
+//! Provider-neutral data model for the storage layer.
+
+use crate::checksum::ContentHash;
+
+/// Opaque object key (path) within a backend.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ObjectKey(String);
+
+impl ObjectKey {
+    #[must_use]
+    pub fn new(key: impl Into<String>) -> Self {
+        Self(key.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for ObjectKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// A byte range for random-access reads. `length == None` means "to end".
+#[derive(Clone, Copy, Debug)]
+pub struct ByteRange {
+    pub offset: u64,
+    pub length: Option<u64>,
+}
+
+impl ByteRange {
+    #[must_use]
+    pub fn new(offset: u64, length: Option<u64>) -> Self {
+        Self { offset, length }
+    }
+
+    /// A range from `offset` to the end of the object.
+    #[must_use]
+    pub fn from_offset(offset: u64) -> Self {
+        Self {
+            offset,
+            length: None,
+        }
+    }
+}
+
+/// Metadata about a stored object.
+#[derive(Clone, Debug)]
+pub struct ObjectMeta {
+    pub key: ObjectKey,
+    pub size: u64,
+    pub modified_unix: Option<i64>,
+}
+
+/// One page of a listing — pagination keeps listings constant-memory even for
+/// millions of objects. `next_cursor == None` means the listing is exhausted.
+#[derive(Clone, Debug)]
+pub struct Page {
+    pub items: Vec<ObjectMeta>,
+    pub next_cursor: Option<String>,
+}
+
+/// Result of a verified put: the backend-confirmed size and content hash.
+#[derive(Clone, Debug)]
+pub struct PutOutcome {
+    pub size: u64,
+    pub verified: ContentHash,
+}
