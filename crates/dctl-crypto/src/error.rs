@@ -30,4 +30,53 @@ pub enum CryptoError {
     Hkdf,
 }
 
+impl CryptoError {
+    /// Stable, FFI-safe numeric error code for this variant.
+    ///
+    /// Codes are **FROZEN** (`docs/ERROR_CODES.md`): a number is never
+    /// renumbered or reused, and new variants only ever take new, unused
+    /// numbers — a one-way door like `docs/FORMAT.md` §8. The `1xxx` range is
+    /// reserved for the crypto layer. `0` is reserved for success/none and is
+    /// never returned here.
+    pub fn code(&self) -> u32 {
+        match self {
+            CryptoError::Kdf(_) => 1001,
+            CryptoError::InvalidKdfParams(_) => 1002,
+            CryptoError::Aead => 1003,
+            CryptoError::Format(_) => 1004,
+            CryptoError::Hkdf => 1005,
+        }
+    }
+}
+
 pub type Result<T> = std::result::Result<T, CryptoError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn representative_codes_are_frozen() {
+        assert_eq!(CryptoError::Kdf(String::new()).code(), 1001);
+        assert_eq!(CryptoError::Aead.code(), 1003);
+        assert_eq!(CryptoError::Hkdf.code(), 1005);
+    }
+
+    #[test]
+    fn codes_are_unique_and_in_domain() {
+        let codes = [
+            CryptoError::Kdf(String::new()).code(),
+            CryptoError::InvalidKdfParams(String::new()).code(),
+            CryptoError::Aead.code(),
+            CryptoError::Format(String::new()).code(),
+            CryptoError::Hkdf.code(),
+        ];
+        // Every crypto code lives in the 1xxx domain and is never 0 (success).
+        assert!(codes.iter().all(|c| (1001..2000).contains(c)));
+        // Unique within the crate.
+        let mut sorted = codes;
+        sorted.sort_unstable();
+        let unique = sorted.windows(2).all(|w| w[0] != w[1]);
+        assert!(unique, "duplicate crypto error codes: {sorted:?}");
+    }
+}

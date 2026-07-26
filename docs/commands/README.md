@@ -91,8 +91,9 @@ every filter — a partial replica is not a vault.
 |---------|-------------|
 | [dctl verify](dctl_verify.md) | Verify that stored objects decrypt and match their recorded hashes. |
 | [dctl check](dctl_check.md) | Compare source and destination without transferring. |
-| [dctl scrub](dctl_scrub.md) | Re-read and verify the whole dataset, repairing from redundancy. |
+| [dctl scrub](dctl_scrub.md) | Re-read and verify the whole dataset, reporting its health. |
 | [dctl hashsum](dctl_hashsum.md) | Print content hashes for objects. |
+| [dctl index](dctl_index.md) | Operate on the local index: rebuild it from the backend. |
 
 ## Audit & recovery
 

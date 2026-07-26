@@ -154,7 +154,7 @@ pub enum Command {
     /// Compare source and destination without transferring.
     Check(commands::check::CheckArgs),
 
-    /// Re-read and verify the whole dataset, repairing from redundancy.
+    /// Re-read and verify the whole dataset, reporting its health.
     Scrub(commands::scrub::ScrubArgs),
 
     /// Print content hashes for objects.

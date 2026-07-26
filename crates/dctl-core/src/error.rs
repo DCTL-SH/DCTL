@@ -26,4 +26,163 @@ pub enum CoreError {
     Index(#[from] dctl_index::IndexError),
 }
 
+/// Stable, FFI-safe classification of an error for host retry/UX decisions.
+///
+/// This is a coarse, **stable** signal (`docs/ERROR_CODES.md`): the GUI/Tauri
+/// and iOS FFI layers branch on it instead of parsing message strings. The set
+/// is intentionally small and additive-only — like the numeric [`CoreError::code`]
+/// scheme, existing meanings never change.
+///
+/// - [`Transient`](ErrorKind::Transient): worth retrying (I/O, backend/network, DB busy).
+/// - [`Permanent`](ErrorKind::Permanent): a retry cannot succeed (malformed/parse failure).
+/// - [`Usage`](ErrorKind::Usage): the caller passed something invalid (bad key/params/range).
+/// - [`Integrity`](ErrorKind::Integrity): stored bytes failed authentication/checksum (tamper/corruption).
+/// - [`Auth`](ErrorKind::Auth): wrong password/factor — re-prompt for credentials.
+/// - [`NotFound`](ErrorKind::NotFound): the requested object/path does not exist.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorKind {
+    Transient,
+    Permanent,
+    Usage,
+    Integrity,
+    Auth,
+    NotFound,
+}
+
+impl CoreError {
+    /// Stable, FFI-safe numeric error code for this error.
+    ///
+    /// Codes are **FROZEN** (`docs/ERROR_CODES.md`): a number is never
+    /// renumbered or reused, and new variants only ever take new, unused
+    /// numbers — a one-way door like `docs/FORMAT.md` §8. `0` is reserved for
+    /// success/none and is never returned here.
+    ///
+    /// `CoreError`'s own variants occupy the `4xxx` range; the wrapper variants
+    /// **delegate** to the wrapped sub-error's `code()`, so a single call on the
+    /// top-level error yields the precise stable code from anywhere in the tree
+    /// (`1xxx` crypto, `2xxx` store, `3xxx` index).
+    pub fn code(&self) -> u32 {
+        match self {
+            CoreError::Unlock => 4101,
+            CoreError::NotFound(_) => 4201,
+            CoreError::Integrity(_) => 4301,
+            CoreError::Crypto(e) => e.code(),
+            CoreError::Store(e) => e.code(),
+            CoreError::Index(e) => e.code(),
+        }
+    }
+
+    /// Stable, FFI-safe classification for host retry/UX decisions.
+    ///
+    /// Own variants map directly; wrapper variants classify the underlying
+    /// sub-error (honoring `StoreError`'s transient-vs-permanent split). Stable
+    /// and additive-only — see [`ErrorKind`] and `docs/ERROR_CODES.md`.
+    pub fn kind(&self) -> ErrorKind {
+        match self {
+            CoreError::Unlock => ErrorKind::Auth,
+            CoreError::NotFound(_) => ErrorKind::NotFound,
+            CoreError::Integrity(_) => ErrorKind::Integrity,
+            CoreError::Crypto(e) => crypto_kind(e),
+            CoreError::Store(e) => store_kind(e),
+            CoreError::Index(e) => index_kind(e),
+        }
+    }
+}
+
+/// Classify a crypto-layer error. A bare AEAD failure that reaches the top is a
+/// data-path tamper/corruption (unlock-time AEAD failures are converted to
+/// [`CoreError::Unlock`] before they surface here).
+fn crypto_kind(e: &dctl_crypto::CryptoError) -> ErrorKind {
+    use dctl_crypto::CryptoError as C;
+    match e {
+        C::InvalidKdfParams(_) => ErrorKind::Usage,
+        C::Aead => ErrorKind::Integrity,
+        C::Kdf(_) | C::Format(_) | C::Hkdf => ErrorKind::Permanent,
+    }
+}
+
+/// Classify a store-layer error, honoring the transient-vs-permanent split:
+/// I/O and backend/network faults are retriable; key/range misuse is usage;
+/// a checksum mismatch is an integrity failure; a missing object is NotFound.
+fn store_kind(e: &dctl_store::StoreError) -> ErrorKind {
+    use dctl_store::StoreError as S;
+    match e {
+        S::NotFound(_) => ErrorKind::NotFound,
+        S::ChecksumMismatch { .. } => ErrorKind::Integrity,
+        S::InvalidKey(_) | S::RangeOutOfBounds { .. } => ErrorKind::Usage,
+        S::Io(_) | S::Backend(_) => ErrorKind::Transient,
+    }
+}
+
+/// Classify an index-layer error. `Db` is treated as transient because the
+/// common multi-process case (App + File-Provider sharing one SQLCipher WAL DB)
+/// is a busy/locked contention that a retry clears; record decryption failure is
+/// an integrity failure; a serialize failure is permanent.
+fn index_kind(e: &dctl_index::IndexError) -> ErrorKind {
+    use dctl_index::IndexError as I;
+    match e {
+        I::Db(_) => ErrorKind::Transient,
+        I::Serialize => ErrorKind::Permanent,
+        I::Crypto => ErrorKind::Integrity,
+    }
+}
+
 pub type Result<T> = std::result::Result<T, CoreError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn own_codes_are_frozen() {
+        assert_eq!(CoreError::Unlock.code(), 4101);
+        assert_eq!(CoreError::NotFound(String::new()).code(), 4201);
+        assert_eq!(CoreError::Integrity(String::new()).code(), 4301);
+    }
+
+    #[test]
+    fn own_codes_are_unique_and_in_domain() {
+        let codes = [
+            CoreError::Unlock.code(),
+            CoreError::NotFound(String::new()).code(),
+            CoreError::Integrity(String::new()).code(),
+        ];
+        assert!(codes.iter().all(|c| (4000..5000).contains(c)));
+        let mut sorted = codes;
+        sorted.sort_unstable();
+        assert!(sorted.windows(2).all(|w| w[0] != w[1]));
+    }
+
+    #[test]
+    fn code_delegates_into_wrapped_sub_errors() {
+        // Store delegation: top-level code equals the underlying StoreError code.
+        let store = dctl_store::StoreError::NotFound("x".into());
+        let store_code = store.code();
+        assert_eq!(CoreError::Store(store).code(), store_code);
+        assert_eq!(CoreError::Store(dctl_store::StoreError::NotFound("x".into())).code(), 2001);
+
+        // Crypto delegation.
+        assert_eq!(CoreError::Crypto(dctl_crypto::CryptoError::Aead).code(), 1003);
+
+        // Index delegation.
+        assert_eq!(CoreError::Index(dctl_index::IndexError::Serialize).code(), 3002);
+    }
+
+    #[test]
+    fn kind_classifies_representative_variants() {
+        assert_eq!(CoreError::Unlock.kind(), ErrorKind::Auth);
+        assert_eq!(CoreError::NotFound(String::new()).kind(), ErrorKind::NotFound);
+        assert_eq!(CoreError::Integrity(String::new()).kind(), ErrorKind::Integrity);
+
+        // A transient store error classifies as Transient.
+        let transient = CoreError::Store(dctl_store::StoreError::Io(std::io::Error::other("net")));
+        assert_eq!(transient.kind(), ErrorKind::Transient);
+
+        // A store checksum mismatch is an integrity failure.
+        let corrupt = CoreError::Store(dctl_store::StoreError::ChecksumMismatch {
+            expected: String::new(),
+            actual: String::new(),
+        });
+        assert_eq!(corrupt.kind(), ErrorKind::Integrity);
+    }
+}

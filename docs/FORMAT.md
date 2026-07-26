@@ -429,7 +429,13 @@ New ids get new numbers; the above rules never change.
     target unlock time (clamped to §2 ceilings). A **portable** slot MUST be calibrated
     for the *weakest* device expected to unlock it (mobile-affordable), not the strongest
     that created it, or that device cannot open the vault.
-11. **FFI-stable errors** — stable enum variants + codes (`docs/ERROR_CODES.md`).
+11. **FFI-stable errors** — stable enum variants + frozen numeric codes so
+    GUI/Tauri and iOS FFI layers branch on a code, never on message strings.
+    Each library error exposes `code() -> u32` (`1xxx` crypto · `2xxx` store ·
+    `3xxx` index · `4xxx` core; `CoreError::code()` delegates into wrapped
+    sub-errors) plus `CoreError::kind() -> ErrorKind` for retry/UX. The numbers
+    are a frozen one-way door like §8 — never renumbered or reused, additive
+    only. Full frozen table: **`docs/ERROR_CODES.md`**.
 
 ---
 

@@ -1,6 +1,6 @@
 # dctl scrub
 
-Re-read and verify the whole dataset, repairing from redundancy.
+Re-read and verify the whole dataset, reporting its health.
 
 ## Synopsis
 
