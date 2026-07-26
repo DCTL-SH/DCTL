@@ -13,12 +13,14 @@
 //! which is what the text format is *for*. Anything arithmetic belongs in
 //! `--json`, where `Size` is an exact integer and always will be.
 //!
-//! ## Not implemented yet
+//! ## Where the objects come from
 //!
-//! Everything here runs except the read itself: see [`listing::source::open`].
-//! The command fails with a real exit code rather than printing an empty
-//! listing, because "the vault has no objects" and "DCTL could not look" must
-//! never be the same output (`PLAN.md` §6).
+//! [`listing::source::open`] — one call that reaches a sealed vault, a plain
+//! object store or a local directory through [`crate::source`], so this command
+//! never learns which it was given. When that call fails, so does the command,
+//! with a real exit code rather than an empty listing: "the vault has no
+//! objects" and "DCTL could not look" must never be the same output
+//! (`PLAN.md` §6).
 
 use clap::Args;
 
@@ -52,14 +54,18 @@ pub async fn run(ctx: &Ctx, args: &LsArgs) -> Result<()> {
 
     if ctx.out.is_json() {
         let mut emitter = Emitter::new(&ctx.out);
-        stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry))).await?;
+        stream
+            .try_for_each(|entry| emitter.push(&JsonEntry::new(entry)))
+            .await?;
         emitter.finish()?;
     } else {
         let units = ctx.out.units();
-        stream.try_for_each(|entry| {
-            ctx.out.line(line(entry, units)).await?;
-            Ok(())
-        })?;
+        stream
+            .try_for_each(|entry| {
+                ctx.out.line(line(entry, units))?;
+                Ok(())
+            })
+            .await?;
     }
 
     listing::report_empty(ctx, &stream, &target);

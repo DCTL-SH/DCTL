@@ -111,30 +111,11 @@ pub const LISTING_DIR_SUFFIX: char = '/';
 /// later without breaking a consumer that reads `Hashes.blake3`.
 pub const LISTING_HASH_ALGORITHM: &str = "blake3";
 
-/// Stage named in the "not implemented" error the listing family returns while
-/// the engine is unreachable.
-///
-/// Spelled as the *missing step* rather than as the command, because everything
-/// either side of it — argument parsing, filtering, ordering, rendering — does
-/// work, and a user who is told "`dctl ls` is not implemented" would reasonably
-/// stop reading there.
-pub const LISTING_ENGINE_STAGE: &str = "reading the object index";
-
-/// Remediation hint attached to that error.
-pub const LISTING_ENGINE_HINT: &str = "The listing pipeline is complete; what is missing is the vault handle, \
-     which Ctx does not carry yet. See PLAN.md §11.";
-
-/// Feature name reported when a listing is pointed at a local directory.
-///
-/// A bare path is a legal spec — `PLAN.md` treats local storage as a remote like
-/// any other — but the walk that would enumerate it does not exist yet, and a
-/// listing that silently produced nothing would read as "the directory is
-/// empty".
-pub const LOCAL_LISTING_FEATURE: &str = "listing a local directory";
-
-/// Remediation hint attached to [`LOCAL_LISTING_FEATURE`].
-pub const LOCAL_LISTING_HINT: &str =
-    "Give a remote spec such as 'vault:photos' instead of a filesystem path.";
+// The listing family used to carry two "not implemented" strings here — one for
+// the missing vault handle, one for a local directory it could not walk. Both
+// are gone because both gaps are closed: `crate::source` enumerates a sealed
+// vault, a plain object store and a filesystem path through one trait, so there
+// is no longer a listing target that parses and then refuses.
 
 /// Hint shown when a listing command was given neither a path nor a remote.
 pub const LISTING_TARGET_HINT: &str = "Name the remote in the command ('dctl ls vault:photos'), or set a default \
@@ -165,8 +146,38 @@ pub const HEX_DIGITS: &[u8] = b"0123456789abcdef";
 /// Label on the object-count row of `dctl size`.
 pub const SIZE_REPORT_LABEL_OBJECTS: &str = "Total objects:";
 
-/// Label on the byte-total row of `dctl size`.
-pub const SIZE_REPORT_LABEL_BYTES: &str = "Total size:";
+/// Label on the byte-total row of `dctl size`, before its basis.
+///
+/// Carries no colon of its own because the basis is inserted between the two —
+/// `Total size (plaintext): 14.0 KiB` — and a label that already ended in one
+/// would put the qualifier after the punctuation, where it reads as an
+/// afterthought rather than as part of what is being claimed.
+pub const SIZE_REPORT_LABEL_BYTES: &str = "Total size";
+
+/// Name of the basis reported for a sealed vault's byte total.
+///
+/// The sizes in a vault's index are the lengths of the files that were written,
+/// not of the sealed objects holding them, and `dctl size` says so on the line
+/// itself. Someone reconciling a vault against a provider invoice is comparing
+/// two numbers that were never meant to be equal, and the difference — envelope
+/// plus per-chunk AEAD overhead — is easy to mistake for being overcharged.
+pub const SIZE_BASIS_PLAINTEXT: &str = "plaintext";
+
+/// Name of the basis reported for a plain object store or a local directory.
+///
+/// The bytes the provider is holding, which is also the figure it bills for, so
+/// this one needs no caveat beyond naming itself.
+pub const SIZE_BASIS_STORED: &str = "stored";
+
+/// Note attached to a plaintext total, explaining what it leaves out.
+///
+/// Shown as an ordinary note rather than a warning: nothing is wrong, and a
+/// warning on every `dctl size` of a vault would train people to ignore
+/// warnings. The label on the total is the part that must always be visible;
+/// this is the elaboration for someone who wants the stored figure instead.
+pub const SIZE_PLAINTEXT_NOTE: &str = "this total is of the files as they were written; the sealed objects a \
+     provider stores and bills for are larger by the per-object encryption \
+     overhead. Measure the remote the vault stores into for that figure.";
 
 /// Unit named beside the exact byte total.
 ///
@@ -1492,6 +1503,50 @@ pub const HEALTH_DEGRADED: &str = "degraded";
 /// See [`HEALTH_HEALTHY`]. Damage found that could not be repaired.
 pub const HEALTH_DAMAGED: &str = "damaged";
 
+/// What a successful read-back proved, reported alongside a scrub's grade.
+///
+/// A sealed vault checks every byte it returns against a hash recorded at write
+/// time, so `healthy` there means *these are the bytes that were stored*. A
+/// plain object store records no such hash, so the strongest honest claim about
+/// it is *the object was still there and every byte of it came back*. Both are
+/// worth running on a schedule and they are not the same statement, so the
+/// report names which one it is rather than letting one word carry both.
+pub const ASSURANCE_AUTHENTICATED: &str = "authenticated";
+/// See [`ASSURANCE_AUTHENTICATED`]. Retrievability only: nothing to check
+/// the returned bytes against.
+pub const ASSURANCE_READ_BACK: &str = "read-back";
+
+/// Window size, in bytes, for reading an object back without buffering it.
+///
+/// A read-back exists to touch every byte, and buffering the object to do that
+/// would make `dctl scrub` fail on exactly the large objects most worth
+/// scrubbing. Eight mebibytes is large enough that the per-request overhead of a
+/// cloud `GET` is negligible against the transfer, and small enough that the
+/// ceiling is a constant a laptop does not notice however big the object is.
+pub const READ_BACK_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
+
+/// Why `--repair` cannot be honoured, and what would have to exist first.
+///
+/// Repair means rebuilding a damaged object from redundancy — the par2-style
+/// Reed-Solomon parity of `PLAN.md` §13.3. This build writes no parity, so there
+/// is nothing to rebuild from: accepting the flag and quietly doing nothing
+/// would let a run report `damaged` while the operator believed repair had been
+/// attempted and failed for some other reason.
+pub const SCRUB_REPAIR_UNAVAILABLE: &str = "--repair has nothing to rebuild from in this build";
+/// See [`SCRUB_REPAIR_UNAVAILABLE`].
+pub const SCRUB_REPAIR_UNAVAILABLE_HINT: &str = "Per-object Reed-Solomon parity is `PLAN.md` §13.3 and is not written by this \
+     build, so no redundancy exists for `--repair` to read. Re-run without it to \
+     get the health report, then restore any damaged object from another copy of \
+     the 3-2-1 set.";
+
+/// Column header for the count `dctl index rebuild` reports.
+///
+/// Follows [`INTEGRITY_COLUMN_STATUS`]'s prefixing convention: the index verbs
+/// own their own columns, so a change here cannot disturb a listing's layout.
+pub const INDEX_COLUMN_FILES: &str = "Files";
+/// See [`INDEX_COLUMN_FILES`]. The index database the rebuild wrote to.
+pub const INDEX_COLUMN_INDEX: &str = "Index";
+
 /// Column headers for the integrity family's text reports.
 ///
 /// Prefixed rather than generic (`INTEGRITY_COLUMN_PATH`, not `COLUMN_PATH`) so
@@ -2148,6 +2203,76 @@ pub const AUDIT_WRITER_HINT: &str = "No audit log exists to inspect: appending a
      today — point --audit-log at a chain written elsewhere.";
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Audit log writer — `crate::audit::write` (`PLAN.md` §7, durability from §6)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The reader above decides what a chain *means*; these decide how one is put on
+// the medium. Every value here exists to make one of two promises keepable: a
+// record is either wholly present or wholly absent, and no secret can reach the
+// file.
+
+/// Byte that terminates one record on disk.
+///
+/// The framing *is* the crash-safety mechanism: a record counts only once its
+/// terminator is durable, so a run that dies mid-append leaves a fragment with
+/// no terminator, which is unambiguously "not a record" rather than "a record
+/// that might be short". One byte, chosen because it is the one separator that
+/// `grep`, `split`, `head` and every language's line reader already agree on —
+/// the same twenty-year-decodability argument as [`AUDIT_LOG_FILE_NAME`].
+pub const AUDIT_LOG_LINE_TERMINATOR: u8 = b'\n';
+
+/// Permissions the audit log is created with, on Unix.
+///
+/// Owner-only. The log holds no keys — redaction guarantees that — but it does
+/// hold a complete history of which paths were touched, when, and how big they
+/// were, and a filename inventory is exactly the metadata the vault exists to
+/// keep private. Separate from [`CONFIG_FILE_MODE`] despite sharing a value:
+/// they protect different things and either could change without the other.
+pub const AUDIT_LOG_FILE_MODE: u32 = 0o600;
+
+/// Permissions the directory holding the audit log is created with, on Unix.
+///
+/// Owner-only, and stricter than the file needs: a directory another user can
+/// write is a directory in which the log can be replaced wholesale, which no
+/// per-file mode can prevent.
+pub const AUDIT_LOG_DIR_MODE: u32 = 0o700;
+
+/// Bytes read back from the end of the log to find the last record.
+///
+/// The writer needs exactly two facts to append: the head hash and the next
+/// index. Both live in the final record, so it reads backwards from the end
+/// rather than walking the file — an append must not become O(number of records
+/// ever written), or the millionth file in a transfer would cost a million
+/// times the first (`PLAN.md` §D10). Eight kilobytes comfortably spans a record
+/// with a long path while staying a single page-cache read.
+pub const AUDIT_TAIL_SCAN_BYTES: u64 = 8 * 1024;
+
+/// Ceiling on the backward scan when [`AUDIT_TAIL_SCAN_BYTES`] was not enough.
+///
+/// The window doubles until a complete record is framed. A bound is needed
+/// because a corrupt file — one enormous line with no terminator — would
+/// otherwise be read entirely into memory. One mebibyte is far beyond any
+/// legitimate record and small enough to fail fast on a file that is not a log.
+pub const AUDIT_TAIL_SCAN_LIMIT_BYTES: u64 = 1024 * 1024;
+
+/// Prefix used when a control character is escaped out of a record field.
+///
+/// The canonical hash string joins fields with [`AUDIT_HASH_FIELD_SEPARATOR`],
+/// so a field that contained that byte could forge a field boundary and make
+/// two different records hash identically. Rather than trust every caller, the
+/// builder escapes *every* control character to `\u` plus
+/// [`AUDIT_CONTROL_ESCAPE_WIDTH`] lower-case hex digits — a spelling a reader
+/// recognises and, unlike dropping the character, one that loses nothing.
+pub const AUDIT_CONTROL_ESCAPE_PREFIX: &str = "\\u";
+
+/// Hex digits in an escaped control character. See
+/// [`AUDIT_CONTROL_ESCAPE_PREFIX`].
+///
+/// Four is enough forever: Unicode defines no control character above U+009F,
+/// so the escape is fixed-width and therefore unambiguous to split back apart.
+pub const AUDIT_CONTROL_ESCAPE_WIDTH: usize = 4;
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Snapshots — `dctl backup --snapshot`, `dctl restore --snapshot`
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -2271,21 +2396,11 @@ pub const LOCAL_STAGING_PREFIX: &str = ".";
 /// (`PLAN.md` §6).
 pub const LOCAL_STAGING_SUFFIX: &str = ".tmp";
 
-/// Feature name reported when `cat` is asked for an object in a remote.
-///
-/// Named for the capability rather than the command, following
-/// [`TRANSFER_ENGINE_FEATURE`]: the range arithmetic, the plan and the writer all
-/// work today, and the single missing piece is the vault's ranged read.
-pub const RANGE_READ_FEATURE: &str = "reading an object out of a remote";
-
-/// Remediation hint attached to [`RANGE_READ_FEATURE`].
-///
-/// Says what already works, because the useful next step is usually to run the
-/// same command against a local path rather than to wait for a release.
-pub const RANGE_READ_HINT: &str = "Reading a remote object needs an unlocked vault and a ranged read of the \
-     chunks covering the request (PLAN.md §11), which the command context does \
-     not yet carry. `cat` works on local paths today, including --head, --tail, \
-     --offset and --count.";
+// `cat` used to carry a "reading an object out of a remote" refusal here. It is
+// gone: `crate::source` reads a sealed vault and a plain object store through
+// one trait, so `dctl cat archive:film.mkv` reads rather than refuses. What that
+// costs in memory today is documented on `commands::cat::source` instead of
+// being hidden behind a capability string.
 
 /// Feature name reported when `rcat` is asked to store a stream into a remote.
 pub const STREAM_WRITE_FEATURE: &str = "storing a stream into a remote";
@@ -3209,6 +3324,115 @@ pub const COMPLETION_INSTALL_HINTS: &[(&str, &str)] = &[
         "install with: dctl completion elvish >> ~/.config/elvish/rc.elv",
     ),
 ];
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pattern filtering (`crate::filter`)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The glob metacharacters above cover the dialect the first matcher shipped
+// with. These are the pieces the shared engine adds: brace alternation, the
+// grammar of a `--filter-from` rule file, and the ceilings that keep a pattern
+// from costing more than it is worth.
+
+/// Opens a brace alternation: `{jpg,png}` matches either word.
+///
+/// Named here beside the other metacharacters so the matcher, its diagnostics
+/// and `docs/GLOBAL_FLAGS.md` cannot drift apart — the same reason the `*`/`?`
+/// family is named rather than inlined.
+pub const GLOB_ALTERNATION_OPEN: char = '{';
+/// Closes a brace alternation opened by [`GLOB_ALTERNATION_OPEN`].
+pub const GLOB_ALTERNATION_CLOSE: char = '}';
+/// Separates the branches inside a brace alternation.
+pub const GLOB_ALTERNATION_SEPARATOR: char = ',';
+
+/// Longest pattern accepted, in characters.
+///
+/// A ceiling, not a target: the longest plausible hand-written rule is a few
+/// dozen characters, and a kilobyte is far past anything a person types while
+/// still being far below the point where compiling it is noticeable. It exists
+/// because every other bound in the matcher is expressed in terms of it — the
+/// compiled program is linear in the pattern length, so capping the input caps
+/// the work. A pattern past this length is a usage error, never a truncation:
+/// silently matching a prefix of what the user wrote is exactly the "filter
+/// quietly did something else" failure this crate refuses everywhere.
+pub const GLOB_MAX_PATTERN_CHARS: usize = 1024;
+
+/// Deepest nesting of `{…}` accepted inside one pattern.
+///
+/// Brace alternation is the only recursive construct in the dialect, so this is
+/// the bound on the parser's and the emitter's recursion depth. Sixteen is
+/// several times deeper than any legible pattern and shallow enough that the
+/// recursion cannot approach a stack limit on any supported platform.
+pub const GLOB_MAX_NESTING_DEPTH: usize = 16;
+
+/// Ceiling on the compiled matcher program, in instructions.
+///
+/// The matcher is an NFA simulated over the whole state set at once, so one
+/// match costs at most `path length × program length` character tests — there
+/// is no backtracking to blow up. This constant is therefore the *only* thing
+/// standing between a pattern and its worst case, and four instructions per
+/// pattern character is the emitter's true upper bound (a brace branch is the
+/// most expensive shape). Keeping it at four times
+/// [`GLOB_MAX_PATTERN_CHARS`] means the length check is what normally fires and
+/// this one is the backstop that cannot be reasoned away by a future emitter
+/// change.
+pub const GLOB_MAX_INSTRUCTIONS: usize = 4 * GLOB_MAX_PATTERN_CHARS;
+
+/// Marks a line in a `--filter-from` file as an inclusion.
+///
+/// `+ pattern` and `- pattern`, rclone's spelling, because a rule file is the
+/// artefact most likely to be copied verbatim from an existing rclone setup.
+pub const FILTER_RULE_INCLUDE: char = '+';
+/// Marks a line in a `--filter-from` file as an exclusion. See
+/// [`FILTER_RULE_INCLUDE`].
+pub const FILTER_RULE_EXCLUDE: char = '-';
+
+/// Discards every rule accumulated so far, as the only content of a line.
+///
+/// rclone's `!` directive. It exists so a rule file can start from a clean slate
+/// regardless of what a wrapper script put in front of it, which is the one
+/// thing a first-match-wins list cannot otherwise express.
+pub const FILTER_RULE_CLEAR: &str = "!";
+
+/// Characters that begin a comment line in a rule file or a path list.
+///
+/// Both spellings are accepted because both are muscle memory: `#` from
+/// `.gitignore`, `crontab` and every shell, `;` from INI files and from rclone's
+/// own filter files. A manifest people can annotate is a manifest people keep up
+/// to date.
+pub const FILTER_COMMENT_MARKERS: &[char] = &['#', ';'];
+
+/// Flag names as the user typed them, for the diagnostics that name them.
+///
+/// Spelled once because each appears in several messages — "which flag did you
+/// mistype", "which flag refused this file" — and a rename that reached one and
+/// not the others would send someone to the wrong flag.
+pub const FILTER_FLAG_INCLUDE: &str = "--include";
+/// See [`FILTER_FLAG_INCLUDE`].
+pub const FILTER_FLAG_EXCLUDE: &str = "--exclude";
+/// See [`FILTER_FLAG_INCLUDE`].
+pub const FILTER_FLAG_FILTER_FROM: &str = "--filter-from";
+/// See [`FILTER_FLAG_INCLUDE`].
+pub const FILTER_FLAG_FILES_FROM: &str = "--files-from";
+/// See [`FILTER_FLAG_INCLUDE`].
+pub const FILTER_FLAG_MIN_SIZE: &str = "--min-size";
+/// See [`FILTER_FLAG_INCLUDE`].
+pub const FILTER_FLAG_MAX_SIZE: &str = "--max-size";
+/// See [`FILTER_FLAG_INCLUDE`].
+pub const FILTER_FLAG_MAX_DEPTH: &str = "--max-depth";
+
+/// Advice attached to a pattern that failed to compile.
+///
+/// Every malformed-pattern report ends here because the cause is almost never
+/// the pattern the user meant to write: an unquoted `*` or `[` is expanded or
+/// eaten by the shell before DCTL ever sees the argument, so the string in the
+/// error is not the string they typed. Saying so turns a baffling message into a
+/// one-word fix.
+pub const GLOB_PATTERN_HINT: &str = "Quote the pattern so the shell does not expand or consume it: \
+     --exclude '*.tmp', not --exclude *.tmp. Within a pattern '*' stays inside \
+     one path component, '**' crosses them, '?' is one character, '[a-z]' and \
+     '[!a-z]' are classes, '{a,b}' is an alternation, and '\\' escapes any of \
+     them.";
 
 #[cfg(test)]
 mod tests {

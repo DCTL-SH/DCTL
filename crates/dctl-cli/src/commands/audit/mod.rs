@@ -19,20 +19,30 @@
 //! output is still produced — an investigator needs it — and the exit code says
 //! what it is.
 //!
+//! ## The format is not defined here
+//!
+//! [`chain`] and [`record`] are re-exported from [`crate::audit`], the home the
+//! reader shares with the writer. They are shared rather than restated because
+//! both halves have to agree exactly and forever: two definitions of a format
+//! that must round-trip is how a log becomes unverifiable — the day they drift,
+//! every record written after the drift reads as a forgery, and neither half is
+//! wrong enough to notice.
+//!
 //! ## What is implemented, and what is not
 //!
 //! The reader, the chain walk and all three renderings are complete and work on
-//! any conforming log. What does not exist yet is the **writer**: `PLAN.md` §7
-//! requires the engine to append a record after every operation, and this build
-//! does not. So a missing log is reported as
+//! any conforming log. [`crate::audit::write`] is complete and tested too, but
+//! is **not yet called** by the transfer and removal families — the append has
+//! to sit after the durable index commit (`PLAN.md` §6 step 6) in every one of
+//! them. So a missing log is still reported as
 //! [`crate::constants::AUDIT_WRITER_FEATURE`] — an error with a real exit code —
 //! rather than as "0 records, chain intact", which would be a clean bill of
 //! health for a system that has never recorded anything.
 
-pub mod chain;
+pub use crate::audit::{chain, record};
+
 pub mod export;
 pub mod list;
-pub mod record;
 pub mod source;
 pub mod verify;
 

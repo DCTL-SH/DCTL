@@ -66,7 +66,9 @@ pub fn validate(path: &str) -> Result<()> {
             return Err(err("noncharacter code point"));
         }
         if !is_assigned_15_1(ch) {
-            return Err(err("unassigned code point (outside the Unicode 15.1 repertoire)"));
+            return Err(err(
+                "unassigned code point (outside the Unicode 15.1 repertoire)",
+            ));
         }
     }
     // Windows drive-letter prefix (e.g. "C:...") on the first segment.

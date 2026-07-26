@@ -139,9 +139,76 @@ pub(super) fn open_core_streamed<F: FnMut(&[u8]) -> Result<()>>(
     dek_wrapping_key: &[u8; KEY_LEN],
     blob: &[u8],
     head: &Head,
-    mut off: usize,
+    off: usize,
     mut emit: F,
 ) -> Result<Option<Metadata>> {
+    let head_bytes = &blob[0..OBJECT_HEAD_LEN];
+
+    // DEK unwrap + metadata decode is shared verbatim with the reader path
+    // ([`super::stream::open_reader`]) so the two decoders can never drift.
+    let (dek, metadata, off) = decode_dek_and_meta(dek_wrapping_key, blob, head, off)?;
+
+    // Footer (redundant whole-object check). Hashing the borrowed ciphertext blob is
+    // O(1) extra memory, so it stays cheap even on the streaming path.
+    let footer_len = if head.flags & FLAG_FOOTER != 0 {
+        FOOTER_LEN
+    } else {
+        0
+    };
+    if blob.len() < off + footer_len {
+        return Err(CryptoError::Format("object truncated (footer)".into()));
+    }
+    let body_end = blob.len() - footer_len;
+    if footer_len != 0 {
+        let expected = blake3::hash(&blob[..body_end]);
+        if blob[body_end..] != expected.as_bytes()[..] {
+            return Err(CryptoError::Format("footer mismatch".into()));
+        }
+    }
+
+    // Chunks — decrypted and emitted one at a time, so a streaming caller never holds
+    // more than a single chunk's plaintext at once.
+    let cs = head.chunk_size as u64;
+    let mut p = off;
+    let mut produced: u64 = 0;
+    for i in 0..head.chunk_count {
+        let this_pt = chunk_plaintext_len(head.plaintext_len, cs, i) as usize;
+        let ct_len = this_pt + TAG_LEN;
+        if p + ct_len > body_end {
+            return Err(CryptoError::Format("object truncated (chunk)".into()));
+        }
+        let pt = decrypt_chunk(&dek, head, head_bytes, i, &blob[p..p + ct_len])?;
+        emit(&pt)?;
+        produced += pt.len() as u64;
+        p += ct_len;
+    }
+    if p != body_end {
+        return Err(CryptoError::Format(
+            "trailing bytes after last chunk".into(),
+        ));
+    }
+    if produced != head.plaintext_len {
+        return Err(CryptoError::Format("decrypted length mismatch".into()));
+    }
+
+    Ok(metadata)
+}
+
+/// Unwrap the DEK and decode + validate the metadata from the fixed header region of an
+/// object, starting at `off` (the `wrapped_dek` offset: 70 for `kem_id=0`, `70 + K` for
+/// `kem_id=1`). `blob` need only contain the bytes through `enc_metadata` — the reader
+/// path buffers exactly that bounded prefix (`meta_len ≤ 256 KiB`) and hands it here, so
+/// the DEK/metadata decode is byte-identical to the buffered [`open_core_streamed`].
+///
+/// Returns the unwrapped DEK (authenticating the head), the metadata (absent only for an
+/// unknown `schema_version`, skipped-and-served per §8), and the offset just past
+/// `enc_metadata` (where the first chunk begins).
+pub(super) fn decode_dek_and_meta(
+    dek_wrapping_key: &[u8; KEY_LEN],
+    blob: &[u8],
+    head: &Head,
+    mut off: usize,
+) -> Result<(Zeroizing<[u8; KEY_LEN]>, Option<Metadata>, usize)> {
     let head_bytes = &blob[0..OBJECT_HEAD_LEN];
     let dek_aad = prefixed_aad(DEK_WRAP_AAD_PREFIX, head_bytes);
     let meta_aad = prefixed_aad(META_AAD_PREFIX, head_bytes);
@@ -184,53 +251,22 @@ pub(super) fn open_core_streamed<F: FnMut(&[u8]) -> Result<()>>(
     } else {
         None
     };
+    Ok((dek, metadata, off))
+}
 
-    // Footer (redundant whole-object check). Hashing the borrowed ciphertext blob is
-    // O(1) extra memory, so it stays cheap even on the streaming path.
-    let footer_len = if head.flags & FLAG_FOOTER != 0 {
-        FOOTER_LEN
-    } else {
-        0
-    };
-    if blob.len() < off + footer_len {
-        return Err(CryptoError::Format("object truncated (footer)".into()));
-    }
-    let body_end = blob.len() - footer_len;
-    if footer_len != 0 {
-        let expected = blake3::hash(&blob[..body_end]);
-        if blob[body_end..] != expected.as_bytes()[..] {
-            return Err(CryptoError::Format("footer mismatch".into()));
-        }
-    }
-
-    // Chunks — decrypted and emitted one at a time, so a streaming caller never holds
-    // more than a single chunk's plaintext at once.
-    let cs = head.chunk_size as u64;
-    let mut p = off;
-    let mut produced: u64 = 0;
-    for i in 0..head.chunk_count {
-        let this_pt = chunk_plaintext_len(head.plaintext_len, cs, i) as usize;
-        let ct_len = this_pt + TAG_LEN;
-        if p + ct_len > body_end {
-            return Err(CryptoError::Format("object truncated (chunk)".into()));
-        }
-        let n = chunk_nonce(&head.base_nonce, i);
-        let pt =
-            aead::decrypt_with_nonce(&dek, &n, &blob[p..p + ct_len], &chunk_aad(head_bytes, i))?;
-        emit(&pt)?;
-        produced += pt.len() as u64;
-        p += ct_len;
-    }
-    if p != body_end {
-        return Err(CryptoError::Format(
-            "trailing bytes after last chunk".into(),
-        ));
-    }
-    if produced != head.plaintext_len {
-        return Err(CryptoError::Format("decrypted length mismatch".into()));
-    }
-
-    Ok(metadata)
+/// Decrypt + tag-verify chunk `index` (`ct_and_tag = ct(this_pt) ‖ tag(16)`) under `dek`,
+/// deriving the chunk nonce (`base_nonce` with `bytes[0..8] XOR= index`) and AAD
+/// (`head ‖ index`) exactly as §3 specifies. Shared by the buffered
+/// [`open_core_streamed`] and the reader path so both paths verify chunks identically.
+pub(super) fn decrypt_chunk(
+    dek: &[u8; KEY_LEN],
+    head: &Head,
+    head_bytes: &[u8],
+    index: u64,
+    ct_and_tag: &[u8],
+) -> Result<Zeroizing<Vec<u8>>> {
+    let n = chunk_nonce(&head.base_nonce, index);
+    aead::decrypt_with_nonce(dek, &n, ct_and_tag, &chunk_aad(head_bytes, index))
 }
 
 /// Buffered reader for both `kem_id` paths: opens an object fully into RAM. Thin wrapper

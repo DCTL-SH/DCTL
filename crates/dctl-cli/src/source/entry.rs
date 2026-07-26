@@ -134,7 +134,9 @@ mod tests {
     #[test]
     fn a_modification_time_passes_through_in_both_states() {
         assert_eq!(
-            Entry::new("a", 0).with_modified(Some(1_700_000_000)).modified_unix,
+            Entry::new("a", 0)
+                .with_modified(Some(1_700_000_000))
+                .modified_unix,
             Some(1_700_000_000)
         );
         assert_eq!(Entry::new("a", 0).with_modified(None).modified_unix, None);
@@ -145,9 +147,16 @@ mod tests {
         // The index really does hold empty hashes — a record warmed from the
         // authoritative name record has no plaintext hash yet. Rendering that as
         // a checksum would tell an operator the object hashes to nothing.
-        assert_eq!(Entry::new("a", 0).with_content_hash(Vec::new()).content_hash, None);
         assert_eq!(
-            Entry::new("a", 0).with_content_hash(vec![0xab, 0xcd]).content_hash,
+            Entry::new("a", 0)
+                .with_content_hash(Vec::new())
+                .content_hash,
+            None
+        );
+        assert_eq!(
+            Entry::new("a", 0)
+                .with_content_hash(vec![0xab, 0xcd])
+                .content_hash,
             Some(vec![0xab, 0xcd])
         );
     }

@@ -1,10 +1,17 @@
 //! The one way anything in this binary reads stored data.
 //!
 //! Every read-side verb — `ls`, `lsd`, `lsl`, `lsjson`, `tree`, `size`, `cat`,
-//! and the integrity family behind them — needs exactly two capabilities: *tell
-//! me what is under this prefix*, and *give me these bytes*. Those are the two
-//! methods on [`Source`], and there are exactly two implementations of it: a
-//! sealed vault ([`vault`]) and a plain object store ([`plain`]).
+//! and the integrity family behind them — needs three capabilities: *tell me
+//! what is under this prefix*, *give me these bytes*, and *prove these bytes are
+//! still intact without handing them to me*. Those are the methods on
+//! [`Source`], and there are exactly two implementations of it: a sealed vault
+//! ([`vault`]) and a plain object store ([`plain`]).
+//!
+//! The third is [`Source::verify`], and it is separate from
+//! [`Source::read`] because a scrub must touch every byte of a fifty-gigabyte
+//! object without ever holding one. What a pass *means* differs between the two
+//! implementations, sharply and unavoidably, so the claim is a value the caller
+//! receives rather than an assumption it makes — see [`assurance`].
 //!
 //! ## Why one abstraction rather than a branch per command
 //!
@@ -69,13 +76,17 @@
 //! be fed straight to a read without a conversion step that only one of the two
 //! implementations would get right.
 
+pub mod assurance;
 pub mod entry;
 pub mod open;
 pub mod plain;
+pub mod sizes;
 pub mod vault;
 
+pub use assurance::Assurance;
 pub use entry::Entry;
 pub use open::open;
+pub use sizes::Sizes;
 
 use async_trait::async_trait;
 use zeroize::Zeroizing;
@@ -135,6 +146,17 @@ pub trait Source: Send + Sync {
     /// Whatever the index or provider reported while opening the listing.
     async fn enumerate(&self, prefix: &str) -> Result<Box<dyn Entries>>;
 
+    /// What the `size` on every [`Entry`] this source yields measures.
+    ///
+    /// Not a way to ask which implementation is in hand — see [`sizes`] — but
+    /// the unit the numbers are in, which `dctl size` has to print because it
+    /// reduces a whole vault to one figure that people reconcile against a
+    /// provider invoice. A total that does not say whether it counted plaintext
+    /// or ciphertext is a number two readers will read two ways, and `PLAN.md`
+    /// §6's rule against misreporting covers being ambiguous just as much as it
+    /// covers being wrong.
+    fn sizes(&self) -> Sizes;
+
     /// Read one object whole.
     ///
     /// # Errors
@@ -178,4 +200,38 @@ pub trait Source: Send + Sync {
     /// # Errors
     /// Whatever the index or provider reported while looking.
     async fn stat(&self, path: &str) -> Result<Option<Entry>>;
+
+    /// Re-read one object end to end and prove it is intact, without
+    /// materialising it.
+    ///
+    /// This is what `dctl scrub` runs, and the reason it is not
+    /// [`Source::read`] with the result thrown away: memory here is O(chunk) or
+    /// O(window), never O(object), so a fifty-gigabyte object is scrubbed on a
+    /// laptop. Nothing is returned on success because there is nothing a caller
+    /// should do with the bytes — asking for them is what `read` is for, and a
+    /// verification that also handed back plaintext would be one refactor away
+    /// from serving data that failed the check.
+    ///
+    /// **What a pass proves depends on the source** ([`Source::assurance`]).
+    /// A sealed vault authenticates every chunk against a key and compares the
+    /// object's own recorded content hash; a plain store has nothing to compare
+    /// against and can only establish that every byte came back. Callers that
+    /// publish a verdict must publish the assurance with it.
+    ///
+    /// # Errors
+    /// [`ExitCode::FileNotFound`](crate::exit::ExitCode::FileNotFound) when the
+    /// object is gone,
+    /// [`ExitCode::IntegrityFailure`](crate::exit::ExitCode::IntegrityFailure)
+    /// when its bytes are not the bytes that were stored, and
+    /// [`ExitCode::TemporaryError`](crate::exit::ExitCode::TemporaryError) when
+    /// the provider never answered. Those three are different findings and a
+    /// caller is expected to keep them apart.
+    async fn verify(&self, path: &str) -> Result<()>;
+
+    /// The strongest claim a successful [`Source::verify`] supports here.
+    ///
+    /// Synchronous and infallible: it is a property of the *kind* of source, not
+    /// of any object in it, so a report can state what a run will prove before
+    /// the run starts rather than after the bill arrives.
+    fn assurance(&self) -> Assurance;
 }

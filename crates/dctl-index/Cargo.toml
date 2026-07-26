@@ -9,11 +9,16 @@ description = "DCTL encrypted, metadata-private index mapping logical paths to s
 [dependencies]
 dctl-crypto = { path = "../dctl-crypto" }
 blake3 = { workspace = true }
-redb = { workspace = true }
+rusqlite = { workspace = true }
 serde = { workspace = true }
 postcard = { workspace = true }
 thiserror = { workspace = true }
 zeroize = { workspace = true }
+hex = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# Used only by the at-rest/order tests to reproduce the on-disk storage key
+# (BLAKE3_keyed(HKDF(subkey,"index-keying-v1"), path)) and assert ascending order.
+dctl-crypto = { path = "../dctl-crypto" }
+blake3 = { workspace = true }

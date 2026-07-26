@@ -155,7 +155,7 @@ mod tests {
                 prev: previous.clone(),
                 ..AuditRecord::default()
             };
-            record.hash = record.computed_hash();
+            record.hash = chain::compute_hash(&record);
             previous.clone_from(&record.hash);
             records.push(record);
         }

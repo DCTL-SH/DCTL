@@ -3,97 +3,139 @@
 //! Every argument is *pre-flighted* before a single byte reaches stdout: the
 //! object is located, its size is read, and the requested span is resolved
 //! against that size. Only when every argument has survived does the command
-//! start writing. That ordering is deliberate — `dctl cat a.bin vault:b.bin >
+//! start writing. That ordering is deliberate — `dctl cat a.bin archive:b.bin >
 //! out` must not emit half a stream and then fail, because a truncated file that
 //! *looks* complete is exactly the false success `PLAN.md` §6 exists to prevent.
 //!
-//! Pre-flight is also where the engine boundary sits. A **local** path is fully
-//! implemented: the file is seekable, so `--offset` is a real `seek` and
-//! `--count` a real limit, and no bytes outside the range are ever read. A
-//! **remote** object needs an unlocked vault and a ranged read of the stored
-//! chunks that cover the slice; that call does not exist yet, so pre-flight fails
-//! with [`CliError::unimplemented`] before anything is written, printed or
-//! promised.
+//! ## Two origins, one pre-flight
+//!
+//! A **local** path is measured with `stat` and read with a `seek` plus a
+//! bounded read: memory is one buffer, and `--offset 40G` on a film costs one
+//! syscall.
+//!
+//! A **remote** object is measured with [`Source::stat`] and read with
+//! [`Source::read`] or [`Source::read_range`] on the binary's one read
+//! abstraction, which is what makes `dctl cat archive:film.mkv` and
+//! `dctl cat archive-store:<key>` both work without this file knowing which is
+//! which.
+//!
+//! ## What a remote read costs, stated plainly
+//!
+//! [`Source::read`] hands back bytes, not a reader, so the requested window is
+//! held in memory while it is written. For a plain object store that is a
+//! choice this file makes; for a sealed vault it is not, because
+//! [`Vault::get_file`](dctl_core::Vault::get_file) is the only read `dctl-core`
+//! exposes and it decrypts whole objects. So `dctl cat archive:film.mkv` needs
+//! room for the film, and `dctl cat archive:film.mkv --head 1M` needs room for a
+//! megabyte.
+//!
+//! That is a real limit and it is written down rather than discovered: the
+//! alternative is a command that works in every test and dies on the one file
+//! anybody cared about. It disappears when `dctl-core` grows a chunked reader —
+//! at which point [`Reader`] gains a third variant and nothing above it changes.
+//!
+//! Buffering is *not* how the range flags are honoured. `--offset` and `--count`
+//! resolve to a window that is passed down as a window, so a plain store serves
+//! it with a genuine ranged request rather than reading and discarding.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
+use std::sync::Arc;
 
-use crate::commands::pipeline::{ObjectSpec, at_path, command_name};
-use crate::constants::{RANGE_READ_FEATURE, RANGE_READ_HINT};
+use zeroize::Zeroizing;
+
+use crate::commands::pipeline::{ObjectSpec, at_path};
 use crate::error::{CliError, Result};
+use crate::exit::ExitCode;
+use crate::source::Source as ReadSource;
 
+use super::opened::Opened;
 use super::range::{Slice, Span};
 
 /// A located object plus the slice of it the caller asked for.
-#[derive(Debug)]
 pub struct Source {
     spec: ObjectSpec,
     size: u64,
     slice: Slice,
+    /// The source to read a remote object through, or `None` for a local path.
+    ///
+    /// Held per argument rather than looked up again at read time so that the
+    /// handle proven to work during pre-flight is the handle that is used —
+    /// re-resolving between the check and the read is how a command ends up
+    /// having validated something it did not go on to read.
+    origin: Option<Arc<dyn ReadSource>>,
 }
 
 impl Source {
     /// Locate the object, read its size, and resolve `span` against it.
     ///
     /// # Errors
-    /// [`crate::exit::ExitCode::FileNotFound`] when a local path does not exist,
-    /// [`crate::exit::ExitCode::Usage`] when it is a directory or names no
-    /// object, and [`crate::exit::ExitCode::FatalError`] for a remote object,
-    /// whose ranged read the engine cannot yet perform.
-    pub fn preflight(spec: ObjectSpec, span: Span) -> Result<Self> {
+    /// [`ExitCode::FileNotFound`] when a local path or a remote object does not
+    /// exist, [`ExitCode::Usage`] when the argument is a directory or names a
+    /// remote but no object, and whatever opening the remote reported.
+    pub async fn preflight(spec: ObjectSpec, span: Span, opened: &mut Opened<'_>) -> Result<Self> {
         if spec.is_bare_remote() {
             return Err(
                 CliError::usage(format!("'{spec}' names a remote but no object"))
-                    .with_hint("Name the object to write, for example 'vault:notes/today.md'."),
+                    .with_hint("Name the object to write, for example 'archive:notes/today.md'."),
             );
         }
 
-        if !spec.is_local() {
-            return Err(CliError::unimplemented(format!(
-                "{RANGE_READ_FEATURE} ({})",
-                command_name("cat")
-            ))
-            .with_hint(RANGE_READ_HINT));
-        }
+        let Some(remote) = spec.remote() else {
+            let size = local_size(&spec)?;
+            return Ok(Self {
+                slice: span.resolve(size),
+                spec,
+                size,
+                origin: None,
+            });
+        };
 
-        let size = local_size(&spec)?;
+        let source = opened.get(remote).await?;
+        let size = remote_size(&spec, source.as_ref()).await?;
         Ok(Self {
             slice: span.resolve(size),
             spec,
             size,
+            origin: Some(source),
         })
     }
 
-    /// Open a reader positioned at the start of the slice and limited to its
-    /// length.
+    /// Open a reader over exactly the slice this source resolved to.
     ///
     /// # Errors
-    /// Any failure to open or seek the underlying file.
-    pub fn open(&self) -> Result<Reader> {
-        // Unreachable while `preflight` refuses remotes, but written as a refusal
-        // rather than an assertion: a future engine wires the remote arm in here,
-        // and until it does the honest answer is still an error.
-        if !self.spec.is_local() {
-            return Err(CliError::unimplemented(format!(
-                "{RANGE_READ_FEATURE} ({})",
-                command_name("cat")
-            ))
-            .with_hint(RANGE_READ_HINT));
-        }
+    /// Any failure to open, seek or read the underlying object — including a
+    /// vault object whose bytes fail authentication, which is reported and
+    /// **not** returned.
+    pub async fn open(&self) -> Result<Reader> {
+        let Some(source) = &self.origin else {
+            let path = self.spec.local_path();
+            let mut file = File::open(&path).map_err(|error| at_path(&path, error))?;
 
-        let path = self.spec.local_path();
-        let mut file = File::open(&path).map_err(|error| at_path(&path, error))?;
+            // Skipped at offset zero, which is the overwhelmingly common case
+            // and the one where the syscall would buy nothing.
+            if self.slice.start > 0 {
+                file.seek(SeekFrom::Start(self.slice.start))
+                    .map_err(|error| at_path(&path, error))?;
+            }
 
-        // Skipped at offset zero, which is the overwhelmingly common case and
-        // the one where the syscall would buy nothing.
-        if self.slice.start > 0 {
-            file.seek(SeekFrom::Start(self.slice.start))
-                .map_err(|error| at_path(&path, error))?;
-        }
+            return Ok(Reader::Local(file.take(self.slice.length)));
+        };
 
-        Ok(Reader {
-            inner: file.take(self.slice.length),
-        })
+        // Whole-object and windowed reads are genuinely different calls, not one
+        // with default arguments. A vault serves a window by decrypting the
+        // whole object and copying the slice out, so asking for the whole object
+        // when that is what is wanted saves a second full-size allocation — and
+        // a plain store answers `read` with one request either way.
+        let bytes = if self.slice.start == 0 && self.slice.length == self.size {
+            source.read(self.spec.path()).await?
+        } else {
+            source
+                .read_range(self.spec.path(), self.slice.start, Some(self.slice.length))
+                .await?
+        };
+
+        Ok(Reader::Buffered { bytes, position: 0 })
     }
 
     /// The specification this source came from.
@@ -117,16 +159,61 @@ impl Source {
 
 /// A bounded reader over one object's slice.
 ///
-/// A newtype rather than a bare [`std::io::Take`] so that adding the remote arm
-/// changes this one type and nothing else: the copy loop consuming it only ever
-/// sees a [`Read`].
-pub struct Reader {
-    inner: io::Take<File>,
+/// An enum rather than a trait object because the two arms have genuinely
+/// different lifetimes — one owns a file handle, the other owns bytes that must
+/// be wiped when it dies — and the copy loop consuming it only ever sees a
+/// [`Read`].
+pub enum Reader {
+    /// A seekable file, read straight through at O(buffer) memory.
+    Local(io::Take<File>),
+
+    /// Bytes already fetched. See the module documentation for what this costs
+    /// and why the alternative does not exist yet.
+    ///
+    /// [`Zeroizing`] because these may be a vault's plaintext, and `PLAN.md` §7
+    /// wants it gone from memory when the reader dies rather than left in a
+    /// freed page.
+    Buffered {
+        bytes: Zeroizing<Vec<u8>>,
+        position: usize,
+    },
 }
 
 impl Read for Reader {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.inner.read(buffer)
+        match self {
+            Self::Local(file) => file.read(buffer),
+            Self::Buffered { bytes, position } => {
+                let remaining = bytes.get(*position..).unwrap_or(&[]);
+                let taken = remaining.len().min(buffer.len());
+                buffer
+                    .get_mut(..taken)
+                    .unwrap_or(&mut [])
+                    .copy_from_slice(remaining.get(..taken).unwrap_or(&[]));
+                *position += taken;
+                Ok(taken)
+            }
+        }
+    }
+}
+
+/// Stat a remote object, refusing one the source cannot describe.
+///
+/// A vault answers this from its index, so an object written on another machine
+/// and never listed here reports absent even though a read would succeed through
+/// the authoritative name record. The hint names the remedy for that case
+/// explicitly, because "not found" for a file the user knows they stored is the
+/// most alarming message this command can produce.
+async fn remote_size(spec: &ObjectSpec, source: &dyn ReadSource) -> Result<u64> {
+    match source.stat(spec.path()).await? {
+        Some(entry) => Ok(entry.size),
+        None => Err(
+            CliError::new(ExitCode::FileNotFound, format!("'{spec}' is not there")).with_hint(
+                "Check the path with `dctl ls`. If the object was written from \
+                 another machine, this machine's index has not seen it yet — \
+                 `dctl index rebuild` rescans the store.",
+            ),
+        ),
     }
 }
 
@@ -164,10 +251,22 @@ fn local_size(spec: &ObjectSpec) -> Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::exit::ExitCode;
+    use crate::cli::GlobalArgs;
+    use crate::ctx::Ctx;
+    use clap::Parser;
     use std::io::Write;
     use std::path::Path;
     use tempfile::tempdir;
+
+    #[derive(Parser, Debug)]
+    struct Harness {
+        #[command(flatten)]
+        globals: GlobalArgs,
+    }
+
+    fn ctx() -> Ctx {
+        Ctx::new(Harness::parse_from(["dctl", "--no-ask-password"]).globals)
+    }
 
     fn spec(text: &str) -> ObjectSpec {
         ObjectSpec::parse(text).unwrap()
@@ -180,23 +279,29 @@ mod tests {
         path.to_string_lossy().into_owned()
     }
 
-    #[test]
-    fn a_local_file_is_measured_and_sliced() {
+    /// Pre-flight one argument with a cache nothing else has touched.
+    async fn preflight(context: &Ctx, text: &str, span: Span) -> Result<Source> {
+        let mut opened = Opened::new(context);
+        Source::preflight(spec(text), span, &mut opened).await
+    }
+
+    #[tokio::test]
+    async fn a_local_file_is_measured_and_sliced() {
         let dir = tempdir().unwrap();
         let path = file_with(dir.path(), "a.bin", b"0123456789");
 
-        let source = Source::preflight(spec(&path), Span::WHOLE).unwrap();
+        let source = preflight(&ctx(), &path, Span::WHOLE).await.unwrap();
         assert_eq!(source.size(), 10);
         assert_eq!(source.slice().length, 10);
     }
 
-    #[test]
-    fn a_slice_reads_only_the_bytes_it_covers() {
+    #[tokio::test]
+    async fn a_slice_reads_only_the_bytes_it_covers() {
         let dir = tempdir().unwrap();
         let path = file_with(dir.path(), "a.bin", b"0123456789");
         let span = Span::from_flags(None, Some(4), None, None).unwrap();
 
-        let source = Source::preflight(spec(&path), span).unwrap();
+        let source = preflight(&ctx(), &path, span).await.unwrap();
         assert_eq!(
             source.slice(),
             Slice {
@@ -206,29 +311,32 @@ mod tests {
         );
 
         let mut read = Vec::new();
-        source.open().unwrap().read_to_end(&mut read).unwrap();
+        source.open().await.unwrap().read_to_end(&mut read).unwrap();
         assert_eq!(read, b"6789", "the seek and the limit must both apply");
     }
 
-    #[test]
-    fn an_empty_slice_reads_nothing() {
+    #[tokio::test]
+    async fn an_empty_slice_reads_nothing() {
         let dir = tempdir().unwrap();
         let path = file_with(dir.path(), "a.bin", b"0123456789");
         let span = Span::from_flags(Some(0), None, None, None).unwrap();
 
-        let source = Source::preflight(spec(&path), span).unwrap();
+        let source = preflight(&ctx(), &path, span).await.unwrap();
         assert!(source.slice().is_empty());
 
         let mut read = Vec::new();
-        source.open().unwrap().read_to_end(&mut read).unwrap();
+        source.open().await.unwrap().read_to_end(&mut read).unwrap();
         assert!(read.is_empty());
     }
 
-    #[test]
-    fn a_missing_file_is_file_not_found_with_its_path_quoted() {
+    #[tokio::test]
+    async fn a_missing_file_is_file_not_found_with_its_path_quoted() {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("nope.bin");
-        let error = Source::preflight(spec(&missing.to_string_lossy()), Span::WHOLE).unwrap_err();
+        let error = preflight(&ctx(), &missing.to_string_lossy(), Span::WHOLE)
+            .await
+            .err()
+            .expect("a missing file must fail");
 
         assert_eq!(error.code(), ExitCode::FileNotFound);
         assert!(
@@ -240,28 +348,36 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn a_device_is_refused_rather_than_read_as_empty() {
+    #[tokio::test]
+    async fn a_device_is_refused_rather_than_read_as_empty() {
         // /dev/null stats as zero bytes, so every range flag would resolve to
         // "nothing" and the command would look like it succeeded.
-        let error = Source::preflight(spec("/dev/null"), Span::WHOLE).unwrap_err();
+        let error = preflight(&ctx(), "/dev/null", Span::WHOLE)
+            .await
+            .err()
+            .expect("a device must be refused");
         assert_eq!(error.code(), ExitCode::Usage);
         assert!(error.hint().is_some());
     }
 
-    #[test]
-    fn a_directory_is_a_usage_error() {
+    #[tokio::test]
+    async fn a_directory_is_a_usage_error() {
         let dir = tempdir().unwrap();
-        let error =
-            Source::preflight(spec(&dir.path().to_string_lossy()), Span::WHOLE).unwrap_err();
+        let error = preflight(&ctx(), &dir.path().to_string_lossy(), Span::WHOLE)
+            .await
+            .err()
+            .expect("a directory must be refused");
         assert_eq!(error.code(), ExitCode::Usage);
     }
 
-    #[test]
-    fn a_remote_object_fails_loudly_rather_than_silently() {
-        // The engine cannot range-read a vault yet. That must surface as an
-        // error with a real exit code, never as an empty successful stream.
-        let error = Source::preflight(spec("vault:film.mkv"), Span::WHOLE).unwrap_err();
+    #[tokio::test]
+    async fn an_unconfigured_remote_fails_loudly_rather_than_silently() {
+        // It must surface as an error with a real exit code, never as an empty
+        // successful stream.
+        let error = preflight(&ctx(), "nosuchremote:film.mkv", Span::WHOLE)
+            .await
+            .err()
+            .expect("an unconfigured remote cannot be read");
         assert_eq!(error.code(), ExitCode::FatalError);
         assert_ne!(error.code(), ExitCode::Success);
         assert!(
@@ -270,9 +386,44 @@ mod tests {
         );
     }
 
-    #[test]
-    fn a_bare_remote_names_no_object_to_write() {
-        let error = Source::preflight(spec("vault:"), Span::WHOLE).unwrap_err();
+    #[tokio::test]
+    async fn a_bare_remote_names_no_object_to_write() {
+        let error = preflight(&ctx(), "archive:", Span::WHOLE)
+            .await
+            .err()
+            .expect("a bare remote names no object");
         assert_eq!(error.code(), ExitCode::Usage);
+    }
+
+    #[test]
+    fn a_buffered_reader_hands_back_every_byte_once() {
+        // The remote arm's reader, exercised without a remote: a short output
+        // buffer must not lose, repeat or overrun.
+        let mut reader = Reader::Buffered {
+            bytes: Zeroizing::new(b"0123456789".to_vec()),
+            position: 0,
+        };
+        let mut out = Vec::new();
+        let mut window = [0_u8; 3];
+        loop {
+            let taken = reader.read(&mut window).unwrap();
+            if taken == 0 {
+                break;
+            }
+            out.extend_from_slice(&window[..taken]);
+        }
+        assert_eq!(out, b"0123456789");
+
+        // An exhausted reader keeps reporting end-of-stream.
+        assert_eq!(reader.read(&mut window).unwrap(), 0);
+    }
+
+    #[test]
+    fn an_empty_buffered_reader_is_immediately_at_the_end() {
+        let mut reader = Reader::Buffered {
+            bytes: Zeroizing::new(Vec::new()),
+            position: 0,
+        };
+        assert_eq!(reader.read(&mut [0_u8; 4]).unwrap(), 0);
     }
 }

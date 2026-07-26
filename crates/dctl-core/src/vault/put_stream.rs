@@ -193,6 +193,6 @@ fn hash_reader<R: Read>(r: &mut R) -> Result<ContentHash> {
 }
 
 /// Map a filesystem error into a [`CoreError`] without a dedicated I/O variant.
-fn io_err(e: std::io::Error) -> CoreError {
+pub(super) fn io_err(e: std::io::Error) -> CoreError {
     CoreError::Store(dctl_store::StoreError::Io(e))
 }

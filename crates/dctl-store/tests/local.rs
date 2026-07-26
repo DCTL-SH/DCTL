@@ -94,6 +94,33 @@ async fn put_from_path_rejects_wrong_expected_hash() {
 }
 
 #[tokio::test]
+async fn get_to_path_streams_a_file_correctly() {
+    let dir = TempDir::new().unwrap();
+    let out = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+
+    // Larger than the internal copy buffer, to exercise the multi-block streaming path.
+    let data: Vec<u8> = (0u32..300_000).map(|i| (i % 251) as u8).collect();
+    let key = ObjectKey::new("streamed/object.bin");
+    fs.put(&key, Bytes::from(data.clone()), &blake3(&data))
+        .await
+        .unwrap();
+
+    // Streaming download reproduces the object byte-for-byte, creating parent dirs.
+    let dest = out.path().join("nested/copy.bin");
+    fs.get_to_path(&key, &dest).await.unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), data);
+
+    // A missing object surfaces as NotFound, like `get`.
+    assert!(matches!(
+        fs.get_to_path(&ObjectKey::new("absent.bin"), &out.path().join("x"))
+            .await
+            .unwrap_err(),
+        StoreError::NotFound(_)
+    ));
+}
+
+#[tokio::test]
 async fn range_reads_match_slices_and_clamp() {
     let dir = TempDir::new().unwrap();
     let fs = LocalFs::new(dir.path());

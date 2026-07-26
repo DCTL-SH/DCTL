@@ -158,6 +158,102 @@ fn open_stream_rejects_truncation() {
     );
 }
 
+/// `open_reader` (reader-based, constant-memory) is byte-parity with the buffered `open`
+/// across boundary sizes AND a multi-chunk ~200 KiB object at chunk 64, reading a `Cursor`
+/// over objects from BOTH the buffered `seal` and the streaming `seal_stream`.
+#[test]
+fn open_reader_byte_parity_with_open() {
+    let root = keys::generate_key();
+    let cs = 64u32;
+    let sizes = [0usize, 1, 63, 64, 65, 1000, 200 * 1024];
+    for len in sizes {
+        let data = plaintext(len);
+        let meta = Metadata::new("dir/clip.mov");
+
+        let from_buffer = object::seal(&root, &data, &meta, cs).expect("seal");
+        let from_stream = seal_stream_vec(&root, &data, &meta, cs);
+
+        for (label, obj) in [("buffer", &from_buffer), ("stream", &from_stream)] {
+            // Buffered `open` is the oracle.
+            let want = object::open(&root, obj).expect("open");
+
+            // `open_reader` over a Cursor must match it byte-for-byte.
+            let mut cur = Cursor::new(obj.clone());
+            let mut got = Vec::new();
+            let md = object::open_reader(&root, &mut cur, &mut got)
+                .unwrap_or_else(|_| panic!("open_reader {label} len={len}"));
+            assert_eq!(got.as_slice(), data.as_slice(), "{label} len={len}");
+
+            let md = md.expect("metadata present");
+            let want_md = want.metadata.expect("buffered metadata");
+            assert_eq!(md.size, len as u64, "{label} len={len}");
+            assert_eq!(md.path_hint, "dir/clip.mov", "{label} len={len}");
+            assert_eq!(
+                md.content_blake3, want_md.content_blake3,
+                "{label} len={len}"
+            );
+        }
+    }
+}
+
+/// `open_reader` verifies every chunk tag: a flipped chunk byte is rejected even after the
+/// whole-object footer is recomputed to match, so the per-chunk Poly1305 tag is the gate.
+#[test]
+fn open_reader_rejects_tampered_chunk() {
+    let root = keys::generate_key();
+    let data = plaintext(200);
+    let cs = 64u32;
+    let obj = seal_stream_vec(&root, &data, &Metadata::new("f"), cs);
+
+    // Sanity: the untouched object reads out.
+    let mut ok = Vec::new();
+    assert!(object::open_reader(&root, &mut Cursor::new(obj.clone()), &mut ok).is_ok());
+
+    // Flip a byte in the first chunk ciphertext, then refresh the footer over the tampered
+    // body so the redundant footer check can't be what rejects it.
+    let meta_len = u32::from_le_bytes([obj[142], obj[143], obj[144], obj[145]]) as usize;
+    let first_chunk_off = 146 + meta_len;
+    let mut t = obj.clone();
+    t[first_chunk_off + 1] ^= 0xFF;
+    let body_end = t.len() - 32;
+    let refreshed = blake3::hash(&t[..body_end]);
+    t[body_end..].copy_from_slice(refreshed.as_bytes());
+
+    let mut sink = Vec::new();
+    assert!(
+        object::open_reader(&root, &mut Cursor::new(t), &mut sink).is_err(),
+        "tampered chunk must fail its Poly1305 tag"
+    );
+}
+
+/// `open_reader` rejects truncation (a chunk's ciphertext/tag is cut short).
+#[test]
+fn open_reader_rejects_truncation() {
+    let root = keys::generate_key();
+    let data = plaintext(200);
+    let obj = seal_stream_vec(&root, &data, &Metadata::new("f"), 64);
+    let truncated = obj[..obj.len() - 50].to_vec();
+    let mut sink = Vec::new();
+    assert!(
+        object::open_reader(&root, &mut Cursor::new(truncated), &mut sink).is_err(),
+        "truncated object must be rejected"
+    );
+}
+
+/// `open_reader` rejects trailing bytes appended after a complete object.
+#[test]
+fn open_reader_rejects_trailing_bytes() {
+    let root = keys::generate_key();
+    let data = plaintext(129);
+    let mut obj = seal_stream_vec(&root, &data, &Metadata::new("f"), 64);
+    obj.extend_from_slice(b"garbage");
+    let mut sink = Vec::new();
+    assert!(
+        object::open_reader(&root, &mut Cursor::new(obj), &mut sink).is_err(),
+        "bytes past the declared end must be rejected"
+    );
+}
+
 /// A wrong `plaintext_len` (not matching the bytes the reader yields) is rejected up front.
 #[test]
 fn seal_stream_rejects_length_mismatch() {

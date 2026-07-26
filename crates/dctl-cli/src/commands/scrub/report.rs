@@ -34,6 +34,7 @@ use crate::constants::{
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
 use crate::output::{Align, Border, Column, Format, Out, Table, size};
+use crate::source::Assurance;
 
 /// One damaged object, and what was done about it.
 #[derive(Clone, Debug, Serialize)]
@@ -96,6 +97,15 @@ pub struct Report {
     pub health: &'static str,
     /// Which `--verify` strength the objects were read under.
     pub verify_mode: String,
+    /// What a clean read actually proved: `authenticated` or `read-back`.
+    ///
+    /// Carried beside the strength because the two answer different questions
+    /// and only both together are a complete claim. `verify_mode` says *how much
+    /// was read*; this says *what the reading could prove*. A full read of a
+    /// remote that records no hashes is still only a retrievability check, and
+    /// `healthy` over one of those must not be mistaken for `healthy` over a
+    /// vault (`PLAN.md` §6).
+    pub assurance: &'static str,
     /// The share of the dataset this run read.
     pub sample_percent: u8,
     /// The sampling seed, in hex, so a sampled run can be replayed exactly.
@@ -119,6 +129,7 @@ impl Report {
     pub fn new(
         target: impl Into<String>,
         verify_mode: impl Into<String>,
+        assurance: Assurance,
         sample_percent: u8,
         seed: u64,
         repair_enabled: bool,
@@ -127,6 +138,7 @@ impl Report {
             target: target.into(),
             health: HEALTH_HEALTHY,
             verify_mode: verify_mode.into(),
+            assurance: assurance.slug(),
             sample_percent,
             seed: format!("{seed:016x}"),
             repair_enabled,
@@ -279,7 +291,14 @@ mod tests {
     }
 
     fn clean() -> Report {
-        let mut report = Report::new("vault:", "strict", 100, 0x0123_4567_89ab_cdef, false);
+        let mut report = Report::new(
+            "vault:",
+            "strict",
+            Assurance::Authenticated,
+            100,
+            0x0123_4567_89ab_cdef,
+            false,
+        );
         report.push(Record::new("a.jpg", Verdict::Ok, 1024));
         report.push(Record::new("b.jpg", Verdict::Ok, 2048));
         report
@@ -349,13 +368,28 @@ mod tests {
     #[test]
     fn skipped_objects_are_counted_so_coverage_cannot_be_overstated() {
         // "healthy" over a 10% sample is a claim about a tenth of the vault.
-        let mut report = Report::new("vault:", "sample", 10, 7, false);
+        let mut report = Report::new("vault:", "sample", Assurance::Authenticated, 10, 7, false);
         report.push(Record::new("a", Verdict::Ok, 1));
         report.skip();
         report.skip();
         assert_eq!(report.coverage.scanned, 1);
         assert_eq!(report.coverage.skipped, 2);
         assert_eq!(report.sample_percent, 10);
+    }
+
+    #[test]
+    fn a_grade_always_says_what_the_reading_could_prove() {
+        // `healthy` over a remote that records no hashes is a statement about
+        // retrievability, not about the bytes. The report has to carry the
+        // difference or the weaker claim reads as the stronger one.
+        let mut report = Report::new("store:", "strict", Assurance::ReadBack, 100, 0, false);
+        report.push(Record::new("a", Verdict::Ok, 1));
+        assert_eq!(report.health, HEALTH_HEALTHY);
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(&report.render(&out(Format::Json)).unwrap()).unwrap();
+        assert_eq!(parsed["assurance"], Assurance::ReadBack.slug());
+        assert_ne!(parsed["assurance"], Assurance::Authenticated.slug());
     }
 
     #[test]
@@ -369,6 +403,7 @@ mod tests {
         assert_eq!(parsed["target"], "vault:");
         assert_eq!(parsed["health"], HEALTH_DAMAGED);
         assert_eq!(parsed["verify_mode"], "strict");
+        assert_eq!(parsed["assurance"], Assurance::Authenticated.slug());
         assert_eq!(parsed["sample_percent"], 100);
         assert_eq!(parsed["seed"], "0123456789abcdef");
         assert_eq!(parsed["stopped_early"], true);

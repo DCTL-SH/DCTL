@@ -25,9 +25,11 @@
 //! [`JsonEntry`], including why `Path` is relative
 //! and why no object key ever appears in it.
 //!
-//! ## Not implemented yet
+//! ## Where the objects come from
 //!
-//! The read itself: see [`listing::source::open`].
+//! [`listing::source::open`] — one call that reaches a sealed vault, a plain
+//! object store or a local directory through [`crate::source`], so this command
+//! never learns which it was given.
 
 use clap::Args;
 
@@ -58,7 +60,9 @@ pub async fn run(ctx: &Ctx, args: &LsjsonArgs) -> Result<()> {
     let mut stream = listing::open(ctx, &target, filter).await?;
 
     let mut emitter = Emitter::new(&ctx.out);
-    stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry))).await?;
+    stream
+        .try_for_each(|entry| emitter.push(&JsonEntry::new(entry)))
+        .await?;
     emitter.finish()?;
 
     listing::report_empty(ctx, &stream, &target);

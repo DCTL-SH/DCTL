@@ -18,4 +18,4 @@ pub use head::{Head, parse_head};
 pub use meta::{Metadata, build_metadata, parse_metadata};
 pub use recipient::{open_as_recipient, seal_to_recipients};
 pub use seal::{Opened, open, seal};
-pub use stream::{open_stream, seal_stream};
+pub use stream::{open_reader, open_stream, seal_stream};

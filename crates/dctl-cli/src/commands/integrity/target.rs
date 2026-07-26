@@ -35,6 +35,7 @@ use std::path::PathBuf;
 use crate::constants::{MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, REMOTE_SEPARATOR};
 use crate::error::{CliError, Result};
 use crate::platform::path as logical;
+use crate::remote::RemoteSpec;
 
 /// Windows' path separator, accepted in a spec typed by a Windows user.
 const WINDOWS_SEPARATOR: char = '\\';
@@ -141,6 +142,49 @@ impl Target {
     #[must_use]
     pub fn local_path(&self) -> Option<PathBuf> {
         self.remote.is_none().then(|| PathBuf::from(&self.path))
+    }
+
+    /// The same target in the vocabulary [`crate::source::open`] speaks.
+    ///
+    /// The integrity verbs parse their own [`Target`] because they take one or
+    /// two mandatory positional arguments and need the tree/object distinction;
+    /// the listing verbs parse [`crate::commands::listing::Target`] because
+    /// theirs is optional and falls back to `--remote`. Both apply the same
+    /// rules — a drive letter is local on every platform, a logical path is NFC
+    /// and `..`-free — and this is the one conversion out of this family's
+    /// spelling into the source layer's.
+    ///
+    /// It is a method here rather than a `From` impl written at the call sites
+    /// for the reason [`crate::source::open`] takes a parsed spec at all: a
+    /// remote's name has no colon, so anything that re-parses one turns
+    /// `archive:` into the *directory* `archive`, which lists empty and exits 0.
+    #[must_use]
+    pub fn spec(&self) -> RemoteSpec {
+        match &self.remote {
+            Some(remote) => RemoteSpec::Named {
+                remote: remote.clone(),
+                path: self.path.clone(),
+            },
+            // The local path is the source's root, so the whole of it goes into
+            // the spec and none of it into the prefix — see [`Target::prefix`].
+            None => RemoteSpec::Local(PathBuf::from(&self.path)),
+        }
+    }
+
+    /// The logical prefix a source opened on [`Target::spec`] should be scoped
+    /// to.
+    ///
+    /// Empty for a local target, and that is not an oversight: a
+    /// [`RemoteSpec::Local`] addresses a *directory*, so the scoping has already
+    /// been applied by pointing the source at it. Passing the same path again as
+    /// a prefix would look for `./photos/./photos` and find nothing, while
+    /// reporting an empty tree as though the directory were empty.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        match &self.remote {
+            Some(_) => &self.path,
+            None => "",
+        }
     }
 
     /// The remote name, or a usage error naming the command that requires one.
@@ -303,6 +347,49 @@ mod tests {
         assert_eq!(
             Target::parse(r"vault:photos\2024").unwrap().path(),
             "photos/2024"
+        );
+    }
+
+    #[test]
+    fn a_target_converts_to_the_spec_the_source_layer_speaks() {
+        // Both halves have to survive. A remote that lost its prefix would
+        // scrub the whole vault when one directory was named, and a local path
+        // that became a named remote would send the run hunting configuration
+        // that does not exist.
+        let remote = Target::parse("vault:photos/2024").unwrap();
+        assert_eq!(
+            remote.spec(),
+            RemoteSpec::Named {
+                remote: "vault".into(),
+                path: "photos/2024".into(),
+            }
+        );
+        assert_eq!(remote.prefix(), "photos/2024");
+
+        let whole = Target::parse("vault:").unwrap();
+        assert_eq!(
+            whole.spec(),
+            RemoteSpec::Named {
+                remote: "vault".into(),
+                path: String::new(),
+            }
+        );
+        assert_eq!(whole.prefix(), "");
+    }
+
+    #[test]
+    fn a_local_target_carries_its_whole_path_into_the_spec_and_none_into_the_prefix() {
+        // Scoping a local source twice — once by pointing it at the directory
+        // and again by prefix — would look for `./photos/./photos` and report an
+        // empty tree rather than the files that are there.
+        let local = Target::parse("./photos").unwrap();
+        assert_eq!(local.spec(), RemoteSpec::Local(PathBuf::from("./photos")));
+        assert_eq!(local.prefix(), "");
+
+        // The drive-letter rule survives the conversion on every platform.
+        assert_eq!(
+            Target::parse(r"C:\data").unwrap().spec(),
+            RemoteSpec::Local(PathBuf::from(r"C:\data"))
         );
     }
 

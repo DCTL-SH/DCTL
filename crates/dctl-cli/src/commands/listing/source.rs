@@ -31,6 +31,7 @@ use async_trait::async_trait;
 use crate::constants::LIST_PAGE_SIZE;
 use crate::ctx::Ctx;
 use crate::error::Result;
+#[cfg(test)]
 use crate::platform::path;
 use crate::source::{self, Entries};
 
@@ -54,6 +55,16 @@ pub trait Pages: Send {
     /// that looked complete would be the worst possible output of a tool whose
     /// central promise is not to misreport (`PLAN.md` §6).
     async fn next_page(&mut self) -> Result<Option<Vec<Entry>>>;
+
+    /// What the sizes on this listing's entries measure.
+    ///
+    /// Carried up from [`crate::source::Source::sizes`] untouched. Only `size`
+    /// reads it — the per-object verbs render a length beside the path it
+    /// belongs to, which is unambiguous on its own — but it is exposed here
+    /// rather than fetched separately so that the figure and its unit come from
+    /// the same source that produced the entries. A basis looked up a second
+    /// time is a basis that can end up describing a different listing.
+    fn sizes(&self) -> source::Sizes;
 }
 
 /// A page cursor over the binary's one read abstraction.
@@ -63,10 +74,11 @@ pub trait Pages: Send {
 /// vault and the open index the cursor reads through. Dropping it early would
 /// work today — the sealed cursor buffers — and would break on the day that
 /// buffering is removed, which is the worst possible moment to discover an
-/// ownership assumption.
+/// ownership assumption. It is also what answers [`Pages::sizes`], so the unit
+/// a total is reported in comes from the same object that produced the numbers.
 pub struct Streamed {
     /// Kept alive for the lifetime of the listing. See above.
-    _source: Box<dyn source::Source>,
+    source: Box<dyn source::Source>,
     entries: Box<dyn Entries>,
     root: String,
     page_size: usize,
@@ -76,7 +88,7 @@ impl Streamed {
     /// Batch `entries` into pages, rooted at `root`.
     fn new(source: Box<dyn source::Source>, entries: Box<dyn Entries>, root: &str) -> Self {
         Self {
-            _source: source,
+            source,
             entries,
             root: root.to_string(),
             // A zero page would make `next_page` return an empty page forever.
@@ -103,22 +115,32 @@ impl Pages for Streamed {
             Ok(Some(page))
         }
     }
+
+    fn sizes(&self) -> source::Sizes {
+        self.source.sizes()
+    }
 }
 
 /// A cursor over entries already in memory.
 ///
-/// Not a production path: it is how the renderers' own tests drive a listing
-/// whose contents they chose, without a vault, a backend or a temporary
-/// directory. It keeps the whole-component root check a real source performs, so
-/// that a test exercising prefix scoping exercises the same rule.
+/// Not a production path, and `cfg(test)` so that it cannot quietly become one:
+/// it is how the renderers' own tests drive a listing whose contents they chose,
+/// without a vault, a backend or a temporary directory. It keeps the
+/// whole-component root check a real source performs, so a test exercising
+/// prefix scoping exercises the same rule the real thing applies.
+#[cfg(test)]
 pub struct Pager {
     /// Remaining entries, reversed so that a page is a run of cheap pops rather
     /// than an O(n) drain from the front.
     remaining: Vec<source::Entry>,
     root: String,
     page_size: usize,
+    /// The basis this pager claims for its sizes. Defaults to the plain one,
+    /// which is what a fixture of made-up numbers most resembles.
+    sizes: source::Sizes,
 }
 
+#[cfg(test)]
 impl Pager {
     /// Page over `entries`, which must be sorted ascending by path, at the
     /// default page size.
@@ -144,10 +166,22 @@ impl Pager {
             root: root.into(),
             // A zero page would make `next_page` return an empty page forever.
             page_size: page_size.max(1),
+            sizes: source::Sizes::Stored,
         }
+    }
+
+    /// Claim a different basis for the sizes this pager yields.
+    ///
+    /// Lets `size`'s tests assert on the sealed wording without unlocking a
+    /// vault, which is the only difference the basis makes to any renderer.
+    #[must_use]
+    pub const fn with_sizes(mut self, sizes: source::Sizes) -> Self {
+        self.sizes = sizes;
+        self
     }
 }
 
+#[cfg(test)]
 #[async_trait]
 impl Pages for Pager {
     async fn next_page(&mut self) -> Result<Option<Vec<Entry>>> {
@@ -173,6 +207,10 @@ impl Pages for Pager {
         } else {
             Ok(Some(page))
         }
+    }
+
+    fn sizes(&self) -> source::Sizes {
+        self.sizes
     }
 }
 
@@ -282,6 +320,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_basis_of_the_sizes_travels_with_the_listing() {
+        // `size` prints this word beside a number a user reconciles against an
+        // invoice, so it has to arrive from the same object that produced the
+        // number rather than being decided again further up.
+        let entries = vec![listed("a.txt", 1, None)];
+        assert_eq!(
+            Pager::new(entries.clone(), "").sizes(),
+            source::Sizes::Stored
+        );
+        assert_eq!(
+            Pager::new(entries, "")
+                .with_sizes(source::Sizes::Plaintext)
+                .sizes(),
+            source::Sizes::Plaintext
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sealed_listing_reports_plaintext_sizes_and_a_plain_one_stored() {
+        // End to end through `open`, so the wiring from `Source::sizes` to the
+        // page cursor is exercised rather than assumed. Same directory of bytes,
+        // two views, two honest answers about what their numbers mean.
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        let index = dir.path().join("index.redb");
+
+        {
+            use std::sync::Arc;
+            let backend: std::sync::Arc<dyn dctl_store::Backend> =
+                Arc::new(dctl_store::LocalFs::new(&store));
+            let vault = dctl_core::Vault::init(backend, &index, "pw").await.unwrap();
+            vault.put_file("a.txt", b"hello").await.unwrap();
+        }
+
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.store]\ntype = \"local\"\npath = {:?}\nrequire_vault = true\n\n\
+                 [remotes.archive]\ntype = \"vault\"\nbase = \"store\"\n",
+                store.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let context = ctx(&[
+            "--config",
+            &config.to_string_lossy(),
+            "--index",
+            &index.to_string_lossy(),
+            "--password",
+            "pw",
+        ]);
+
+        let sealed = open(&context, &Target::parse(Some("archive:"), None).unwrap())
+            .await
+            .expect("the vault lists");
+        assert_eq!(sealed.sizes(), source::Sizes::Plaintext);
+
+        let plain = open(&context, &Target::parse(Some("store:"), None).unwrap())
+            .await
+            .expect("the store lists");
+        assert_eq!(plain.sizes(), source::Sizes::Stored);
+    }
+
+    #[tokio::test]
     async fn entries_are_rooted_at_the_listing_prefix() {
         let mut pager = Pager::new(vec![listed("photos/2024/a.jpg", 1, None)], "photos");
         let page = pager.next_page().await.unwrap().expect("one page");
@@ -310,6 +415,100 @@ mod tests {
             .await
             .expect("an empty directory still lists");
         assert!(drain(pages.as_mut()).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_named_plain_remote_lists_through_its_configuration() {
+        // `dctl ls store:photos` — a configured remote, resolved from a real
+        // file, scoped to a prefix. No vault, so no password anywhere.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("photos")).unwrap();
+        std::fs::write(root.join("photos/a.jpg"), b"1").unwrap();
+        std::fs::write(root.join("other.txt"), b"2").unwrap();
+
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.store]\ntype = \"local\"\npath = {:?}\n",
+                root.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let context = ctx(&["--config", &config.to_string_lossy()]);
+        let target = Target::parse(Some("store:photos"), None).unwrap();
+        let mut pages = open(&context, &target).await.expect("the remote lists");
+        assert_eq!(drain(pages.as_mut()).await, vec!["photos/a.jpg"]);
+    }
+
+    #[tokio::test]
+    async fn a_sealed_vault_lists_the_plaintext_paths_of_what_it_holds() {
+        // The gap this whole abstraction exists to close: `dctl ls archive:`
+        // used to answer "reading the object index is not implemented".
+        //
+        // Everything below is real — a sealed vault written through
+        // `Vault::put_file`, a configuration file naming the pair `dctl init`
+        // registers, and an unlock through the ordinary password ladder. What
+        // comes back is the *plaintext* paths, which is the difference between
+        // the sealed view and the store view of the same directory of bytes.
+        use std::sync::Arc;
+
+        use dctl_core::Vault;
+        use dctl_store::{Backend, LocalFs};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        let index = dir.path().join("index.redb");
+
+        {
+            let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(&store));
+            let vault = Vault::init(backend, &index, "pw").await.unwrap();
+            vault.put_file("photos/a.jpg", b"aaa").await.unwrap();
+            vault.put_file("notes.txt", b"n").await.unwrap();
+        }
+
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.store]\ntype = \"local\"\npath = {:?}\nrequire_vault = true\n\n\
+                 [remotes.archive]\ntype = \"vault\"\nbase = \"store\"\n",
+                store.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let context = ctx(&[
+            "--config",
+            &config.to_string_lossy(),
+            "--index",
+            &index.to_string_lossy(),
+            "--password",
+            "pw",
+        ]);
+
+        let target = Target::parse(Some("archive:"), None).unwrap();
+        let mut pages = open(&context, &target).await.expect("the vault lists");
+        assert_eq!(
+            drain(pages.as_mut()).await,
+            vec!["notes.txt", "photos/a.jpg"]
+        );
+
+        // The same bytes through the store remote are opaque keys instead —
+        // one rule, two honest views, and neither leaks the other's names.
+        let store_target = Target::parse(Some("store:"), None).unwrap();
+        let mut store_pages = open(&context, &store_target)
+            .await
+            .expect("the store lists");
+        let keys = drain(store_pages.as_mut()).await;
+        assert!(!keys.is_empty(), "the sealed objects are really there");
+        assert!(
+            !keys.iter().any(|key| key.contains("photos")),
+            "a plaintext path leaked into the object view: {keys:?}"
+        );
     }
 
     #[tokio::test]

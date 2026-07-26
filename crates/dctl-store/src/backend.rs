@@ -44,6 +44,24 @@ pub trait Backend: Send + Sync {
     /// Fetch the entire object.
     async fn get(&self, key: &ObjectKey) -> Result<Bytes>;
 
+    /// Download the object at `key` to the local file `dest`, streaming.
+    ///
+    /// This is the streaming counterpart of [`get`](Backend::get): it exists so a huge
+    /// object can be read to disk without ever holding its whole body in memory. The
+    /// **provided default** simply calls [`get`] and writes the returned bytes to `dest`,
+    /// so every backend has a correct implementation unchanged — backends that can stream
+    /// straight to a path (e.g. [`LocalFs`](crate::local::LocalFs)) override this to run at
+    /// `O(buffer)` memory. (True streaming download for B2/S3/R2 is a follow-up; they keep
+    /// the buffered default for now.)
+    async fn get_to_path(&self, key: &ObjectKey, dest: &std::path::Path) -> Result<()> {
+        let bytes = self.get(key).await?;
+        if let Some(parent) = dest.parent() {
+            tokio::fs::create_dir_all(parent).await?;
+        }
+        tokio::fs::write(dest, &bytes).await?;
+        Ok(())
+    }
+
     /// Fetch a byte range (streaming-seek primitive). Length past EOF is clamped.
     async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Bytes>;
 

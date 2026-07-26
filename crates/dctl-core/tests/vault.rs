@@ -212,6 +212,122 @@ async fn put_file_from_path_streams_multichunk_roundtrip() {
 }
 
 #[tokio::test]
+async fn get_file_to_path_streams_multichunk_roundtrip() {
+    let e = env();
+
+    // A >1 MiB source (default chunk is 1 MiB) → genuinely multi-chunk.
+    let src = TempDir::new().unwrap();
+    let src_path = src.path().join("clip.bin");
+    let data = pseudo_random(1024 * 1024 + 4_096);
+    std::fs::write(&src_path, &data).unwrap();
+
+    let out = TempDir::new().unwrap();
+    let dest = out.path().join("nested/decrypted.bin");
+
+    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+    vault
+        .put_file_from_path("videos/clip.bin", &src_path)
+        .await
+        .unwrap();
+
+    // Streaming read to a file yields a byte-identical destination (parent auto-created).
+    vault
+        .get_file_to_path("videos/clip.bin", &dest)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), data);
+
+    // Round-trips through a fresh unlock too (index reopened from disk).
+    drop(vault);
+    let vault = Vault::unlock(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+    let dest2 = out.path().join("again.bin");
+    vault
+        .get_file_to_path("videos/clip.bin", &dest2)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read(&dest2).unwrap(), data);
+}
+
+#[tokio::test]
+async fn get_file_to_path_tamper_errors_and_leaves_no_dest() {
+    let e = env();
+    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+    vault
+        .put_file("photos/a.jpg", b"the quick brown fox jumps over")
+        .await
+        .unwrap();
+
+    // Corrupt the stored content object directly on disk (under the "o/" prefix).
+    let object_dir = e._store.path().join("o");
+    let entry = std::fs::read_dir(&object_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap();
+    let mut bytes = std::fs::read(entry.path()).unwrap();
+    let mid = bytes.len() / 2;
+    bytes[mid] ^= 0xFF;
+    std::fs::write(entry.path(), bytes).unwrap();
+
+    let out = TempDir::new().unwrap();
+    let dest = out.path().join("decrypted.bin");
+    assert!(
+        vault.get_file_to_path("photos/a.jpg", &dest).await.is_err(),
+        "a tampered object must be rejected"
+    );
+    assert!(
+        !dest.exists(),
+        "no dest file (not even a partial one) may be left behind on failure"
+    );
+}
+
+#[tokio::test]
+async fn get_file_to_path_cross_device_via_name_record() {
+    // Device A stores; device B reads to a file with a brand-new empty index, resolving
+    // the object purely through the authoritative §5 name record.
+    let store = TempDir::new().unwrap();
+    let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(store.path()));
+    let idx_a = TempDir::new().unwrap();
+    let idx_b = TempDir::new().unwrap();
+
+    let src = TempDir::new().unwrap();
+    let src_path = src.path().join("movie.bin");
+    let data = pseudo_random(1024 * 1024 + 777);
+    std::fs::write(&src_path, &data).unwrap();
+
+    {
+        let a = Vault::init(backend.clone(), &idx_a.path().join("a.redb"), "pw")
+            .await
+            .unwrap();
+        a.put_file_from_path("media/movie.bin", &src_path)
+            .await
+            .unwrap();
+    }
+
+    let b = Vault::unlock(backend.clone(), &idx_b.path().join("b.redb"), "pw")
+        .await
+        .unwrap();
+    let out = TempDir::new().unwrap();
+    let dest = out.path().join("movie.bin");
+    b.get_file_to_path("media/movie.bin", &dest).await.unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), data);
+
+    // A path that was never stored has no name record to resolve → NotFound.
+    assert!(matches!(
+        b.get_file_to_path("media/nope.bin", &out.path().join("x"))
+            .await
+            .unwrap_err(),
+        CoreError::NotFound(_)
+    ));
+}
+
+#[tokio::test]
 async fn stream_and_buffered_puts_interoperate() {
     let e = env();
     let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
@@ -256,7 +372,11 @@ async fn overwrite_gcs_the_previous_object() {
     // Overwriting the same path must GC the previous ciphertext, not orphan it on the
     // untrusted backend (a private tool must not leave prior versions recoverable).
     vault.put_file("k", b"second and longer").await.unwrap();
-    assert_eq!(count(&obj_dir), 1, "overwrite GC'd the old object — no orphan left");
+    assert_eq!(
+        count(&obj_dir),
+        1,
+        "overwrite GC'd the old object — no orphan left"
+    );
     assert_eq!(
         vault.get_file("k").await.unwrap().as_slice(),
         b"second and longer"
@@ -296,7 +416,10 @@ async fn cross_device_delete_removes_object_and_name_record() {
         b.get_file("secret.txt").await.unwrap_err(),
         CoreError::NotFound(_)
     ));
-    assert!(!b.delete_file("secret.txt").await.unwrap(), "second delete is a no-op");
+    assert!(
+        !b.delete_file("secret.txt").await.unwrap(),
+        "second delete is a no-op"
+    );
 }
 
 #[tokio::test]

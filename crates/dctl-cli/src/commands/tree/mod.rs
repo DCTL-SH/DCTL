@@ -38,9 +38,11 @@
 //! consumer that wants a tree can build one; a consumer that wants records
 //! should not have to walk one.
 //!
-//! ## Not implemented yet
+//! ## Where the objects come from
 //!
-//! The read itself: see [`listing::source::open`].
+//! [`listing::source::open`] — one call that reaches a sealed vault, a plain
+//! object store or a local directory through [`crate::source`], so this command
+//! never learns which it was given.
 
 pub mod glyphs;
 pub mod node;
@@ -98,17 +100,21 @@ pub async fn run(ctx: &Ctx, args: &TreeArgs) -> Result<()> {
 
     if ctx.out.is_json() {
         let mut emitter = Emitter::new(&ctx.out);
-        stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry))).await?;
+        stream
+            .try_for_each(|entry| emitter.push(&JsonEntry::new(entry)))
+            .await?;
         emitter.finish()?;
         listing::report_empty(ctx, &stream, &target);
         return Ok(());
     }
 
     let mut tree = Tree::new(root_label(&target), depth);
-    stream.try_for_each(|entry| {
-        tree.insert(entry.relative(), entry.size());
-        Ok(())
-    })?;
+    stream
+        .try_for_each(|entry| {
+            tree.insert(entry.relative(), entry.size());
+            Ok(())
+        })
+        .await?;
 
     let mut emit = |line: &str| -> Result<()> {
         ctx.out.line(line)?;

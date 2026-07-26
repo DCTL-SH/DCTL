@@ -17,9 +17,11 @@
 //! placeholder padded to the same width, rather than the epoch. `1970-01-01` is
 //! a claim; the placeholder is the truth.
 //!
-//! ## Not implemented yet
+//! ## Where the objects come from
 //!
-//! The read itself: see [`listing::source::open`].
+//! [`listing::source::open`] — one call that reaches a sealed vault, a plain
+//! object store or a local directory through [`crate::source`], so this command
+//! never learns which it was given.
 
 use clap::Args;
 
@@ -54,14 +56,18 @@ pub async fn run(ctx: &Ctx, args: &LslArgs) -> Result<()> {
         // learn would be a cost with no benefit, since `ModTime` is already
         // there.
         let mut emitter = Emitter::new(&ctx.out);
-        stream.try_for_each(|entry| emitter.push(&JsonEntry::new(entry))).await?;
+        stream
+            .try_for_each(|entry| emitter.push(&JsonEntry::new(entry)))
+            .await?;
         emitter.finish()?;
     } else {
         let units = ctx.out.units();
-        stream.try_for_each(|entry| {
-            ctx.out.line(line(entry, units)).await?;
-            Ok(())
-        })?;
+        stream
+            .try_for_each(|entry| {
+                ctx.out.line(line(entry, units))?;
+                Ok(())
+            })
+            .await?;
     }
 
     listing::report_empty(ctx, &stream, &target);

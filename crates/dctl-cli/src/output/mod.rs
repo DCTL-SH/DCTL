@@ -18,6 +18,8 @@
 //! * [`color`], [`progress`], [`size`], [`stats`], [`table`] — the palette, the
 //!   live display, human-readable quantities, the counters they read, and
 //!   column alignment.
+//! * [`hex`] — how a digest is spelled. Presentation, but the machine-readable
+//!   kind: `sha256sum -c` and a `--checksum` comparison both depend on it.
 //!
 //! This file deliberately contains no logic: it declares the submodules and
 //! re-exports the handful of types commands actually name, so a command writes
@@ -27,6 +29,7 @@
 
 pub mod color;
 pub mod format;
+pub mod hex;
 pub mod progress;
 pub mod sink;
 pub mod size;

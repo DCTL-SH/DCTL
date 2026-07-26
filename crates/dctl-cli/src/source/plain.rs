@@ -36,12 +36,14 @@ use dctl_store::{Backend, ByteRange, ObjectKey, ObjectMeta, StoreError};
 use zeroize::Zeroizing;
 
 use crate::config::Config;
-use crate::error::Result;
+use crate::constants::READ_BACK_WINDOW_BYTES;
+use crate::error::{CliError, Result};
+use crate::exit::ExitCode;
 use crate::platform::path;
 use crate::remote::RemoteSpec;
 
 use super::entry::Entry;
-use super::{Entries, Source};
+use super::{Assurance, Entries, Sizes, Source};
 
 /// An object store, read without interpretation.
 pub struct PlainSource {
@@ -88,6 +90,14 @@ impl Source for PlainSource {
         }))
     }
 
+    fn sizes(&self) -> Sizes {
+        // Whatever the provider reported for the object, unaltered — which for
+        // a vault's store remote means the *sealed* length, overhead included.
+        // That is the honest answer for this view: nothing here decrypts, so
+        // nothing here knows a plaintext length to report instead.
+        Sizes::Stored
+    }
+
     async fn read(&self, path: &str) -> Result<Zeroizing<Vec<u8>>> {
         let bytes = self.backend.get(&ObjectKey::new(path)).await?;
         Ok(Zeroizing::new(bytes.to_vec()))
@@ -122,6 +132,58 @@ impl Source for PlainSource {
             Err(StoreError::NotFound(_)) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    async fn verify(&self, path: &str) -> Result<()> {
+        let key = ObjectKey::new(path);
+        // `head` first, so an object that is simply gone is reported as
+        // *missing* rather than as a failed read — those are different findings
+        // and they send an operator to different places.
+        let meta = self.backend.head(&key).await?;
+
+        // Ranged reads rather than one `get`, because the point of a read-back
+        // is to touch every byte and a `get` would buffer them all to do it.
+        // A scrub of a store holding fifty-gigabyte sealed objects has to cost
+        // one window of memory, not one object.
+        let mut offset = 0;
+        while offset < meta.size {
+            let window = READ_BACK_WINDOW_BYTES.min(meta.size - offset);
+            let bytes = self
+                .backend
+                .get_range(&key, ByteRange::new(offset, Some(window)))
+                .await?;
+
+            // A store that hands back nothing while claiming there is more has
+            // contradicted its own `head`, and the object is shorter than the
+            // provider says it is. Believing the loop condition instead would
+            // spin forever; believing the provider would report an object as
+            // healthy after reading a prefix of it. Neither is acceptable, so
+            // the disagreement itself is the finding.
+            if bytes.is_empty() {
+                return Err(CliError::new(
+                    ExitCode::IntegrityFailure,
+                    format!(
+                        "'{path}' ended after {offset} bytes but the remote reports \
+                         {} — the object is truncated",
+                        meta.size
+                    ),
+                )
+                .with_hint(
+                    "The remote's own metadata disagrees with what it will serve. \
+                     Restore this object from another copy.",
+                ));
+            }
+            offset += bytes.len() as u64;
+        }
+        Ok(())
+    }
+
+    fn assurance(&self) -> Assurance {
+        // Nothing here recorded a hash of what was written, so nothing here can
+        // compare against one. A clean read-back proves the object is still
+        // retrievable in full; it does not prove the bytes are unchanged, and
+        // reporting otherwise would be inventing a guarantee.
+        Assurance::ReadBack
     }
 }
 
@@ -337,22 +399,46 @@ mod tests {
         let source = &fixture.source;
 
         assert_eq!(
-            source.read_range("a.bin", 4, Some(3)).await.unwrap().as_slice(),
+            source
+                .read_range("a.bin", 4, Some(3))
+                .await
+                .unwrap()
+                .as_slice(),
             b"456"
         );
         assert_eq!(
-            source.read_range("a.bin", 7, None).await.unwrap().as_slice(),
+            source
+                .read_range("a.bin", 7, None)
+                .await
+                .unwrap()
+                .as_slice(),
             b"789"
         );
         assert_eq!(
-            source.read_range("a.bin", 8, Some(999)).await.unwrap().as_slice(),
+            source
+                .read_range("a.bin", 8, Some(999))
+                .await
+                .unwrap()
+                .as_slice(),
             b"89"
         );
         // Past the end is a short read, matching what the trait promises and
         // what a seek on a local file does — the backend's own refusal is
         // softened here rather than in each caller.
-        assert!(source.read_range("a.bin", 10, Some(5)).await.unwrap().is_empty());
-        assert!(source.read_range("a.bin", 4_000, None).await.unwrap().is_empty());
+        assert!(
+            source
+                .read_range("a.bin", 10, Some(5))
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            source
+                .read_range("a.bin", 4_000, None)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]

@@ -1,53 +1,112 @@
-//! The encrypted index over stored objects.
+//! The encrypted index over stored objects, backed by SQLCipher.
+//!
+//! Storage is a single SQLCipher database (SQLite with whole-database AEAD
+//! encryption). Two independent, defence-in-depth encryption layers are kept —
+//! matching the previous backend exactly (docs/FORMAT.md §9.4/§9.5, §5):
+//!
+//! 1. **Whole-DB (SQLCipher):** every page is encrypted under a raw 32-byte key
+//!    derived from the index sub-key, so a stolen `.db`/`.db-wal` file is opaque.
+//! 2. **Per-row (application AEAD):** the primary key is a keyed BLAKE3 hash of the
+//!    path and the value is XChaCha20-Poly1305-sealed, so even a *decrypted* page
+//!    reveals neither the plaintext path nor any metadata (metadata-private at rest).
+//!
+//! The store is multi-process-safe (`journal_mode = WAL` + a `busy_timeout`) so an
+//! iOS App and its File-Provider extension can share one App-Group database. Within
+//! a process the single connection is guarded by a mutex so `Index` stays
+//! `Send + Sync` (identical to the previous backend, which `dctl-core` relies on to
+//! hold `&Vault` across `.await`).
 
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 use dctl_crypto::aead;
 use dctl_crypto::keys::derive_subkey;
-use redb::{Database, ReadableTable, ReadableTableMetadata, TableDefinition};
+use rusqlite::{Connection, OptionalExtension};
 use zeroize::Zeroizing;
 
 use crate::error::{IndexError, Result};
 use crate::keying::index_key;
 use crate::record::Record;
 
-/// Table mapping a 32-byte keyed-hash of the path to the AEAD-encrypted record.
-const RECORDS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("records");
+/// Wait up to this long for a competing writer (another process/thread) before
+/// surfacing `SQLITE_BUSY`. WAL admits concurrent readers alongside a single
+/// writer, so this only bounds the rare writer-vs-writer overlap between the App
+/// and its File-Provider extension.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// An encrypted, metadata-private index over stored objects.
 ///
 /// Constructed from the vault's index sub-key (`HKDF(root, "index")`), from which
-/// two independent keys are derived: one for keying (hashing paths into database
-/// keys) and one for encrypting record values.
+/// three independent sub-keys are derived: one keys the path→row hash, one seals
+/// each row value, and one is the SQLCipher whole-database key.
 pub struct Index {
-    db: Database,
+    conn: Mutex<Connection>,
     keying_key: Zeroizing<[u8; 32]>,
     enc_key: Zeroizing<[u8; 32]>,
 }
 
 impl Index {
     /// Open (or create) an index database at `path`.
+    ///
+    /// On an existing database opened with the **wrong** sub-key the SQLCipher key
+    /// is wrong and the first page read (setting the journal mode) fails to decrypt
+    /// the header — this returns [`IndexError::Db`] (`SQLITE_NOTADB`) rather than
+    /// exposing any rows.
     pub fn open(path: &Path, index_subkey: &[u8; 32]) -> Result<Self> {
-        let db = Database::create(path).map_err(|e| IndexError::Db(e.to_string()))?;
-
-        // Ensure the table exists so read-only transactions on a fresh db succeed.
-        let tx = db
-            .begin_write()
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        tx.open_table(RECORDS)
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        tx.commit().map_err(|e| IndexError::Db(e.to_string()))?;
-
         let keying_key =
             derive_subkey(index_subkey, b"index-keying-v1").map_err(|_| IndexError::Crypto)?;
         let enc_key =
             derive_subkey(index_subkey, b"index-encryption-v1").map_err(|_| IndexError::Crypto)?;
+        // Whole-DB SQLCipher key: a THIRD, domain-separated sub-key so the page-cipher
+        // key is cryptographically independent of the row-hash and row-AEAD keys.
+        let db_key =
+            derive_subkey(index_subkey, b"index-sqlcipher-v1").map_err(|_| IndexError::Crypto)?;
+
+        let conn = Connection::open(path)?;
+
+        // `PRAGMA key` MUST be the first statement on the connection. The raw-key form
+        // `"x'<hex>'"` makes SQLCipher use the 32 bytes directly and skip its PBKDF2 —
+        // the sub-key is already a strong HKDF-SHA512 output, so the KDF adds nothing.
+        // The hex alphabet cannot contain a quote, so the interpolation is
+        // injection-free; the assembled SQL (which carries the key) is zeroized on drop.
+        let key_pragma = Zeroizing::new(format!(
+            "PRAGMA key = \"x'{}'\";",
+            hex::encode(db_key.as_slice())
+        ));
+        conn.execute_batch(&key_pragma)?;
+
+        // Multi-process safety: `busy_timeout` absorbs brief writer overlap instead of
+        // erroring immediately, and WAL lets the App + File-Provider extension read
+        // concurrently with a single writer. SQLCipher encrypts WAL frames too, so
+        // nothing leaks via the `-wal` sidecar. Setting the journal mode reads the DB
+        // header, so on a wrong key the open fails here with `SQLITE_NOTADB`.
+        conn.busy_timeout(BUSY_TIMEOUT)?;
+        conn.execute_batch("PRAGMA journal_mode = WAL;")?;
+
+        // key BLOB = BLAKE3_keyed(keying-key, NFC(path)); value BLOB = AEAD(row bytes).
+        // WITHOUT ROWID clusters storage on the key, so `ORDER BY key` (ascending byte
+        // order) streams rows in the same order the previous key-ordered B-tree did.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS records(\
+                 key   BLOB PRIMARY KEY NOT NULL, \
+                 value BLOB NOT NULL\
+             ) WITHOUT ROWID;",
+        )?;
 
         Ok(Self {
-            db,
+            conn: Mutex::new(conn),
             keying_key,
             enc_key,
         })
+    }
+
+    /// Lock the single connection. Poisoning can only follow a panic while the guard
+    /// is held; lib code forbids panics, but we still map it rather than `unwrap`.
+    fn lock(&self) -> Result<MutexGuard<'_, Connection>> {
+        self.conn
+            .lock()
+            .map_err(|_| IndexError::Db("index connection mutex poisoned".into()))
     }
 
     /// Insert or replace the record for its path.
@@ -57,40 +116,31 @@ impl Index {
         let blob =
             aead::encrypt(&self.enc_key, &plaintext, &key).map_err(|_| IndexError::Crypto)?;
 
-        let tx = self
-            .db
-            .begin_write()
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        {
-            let mut table = tx
-                .open_table(RECORDS)
-                .map_err(|e| IndexError::Db(e.to_string()))?;
-            table
-                .insert(key.as_slice(), blob.as_slice())
-                .map_err(|e| IndexError::Db(e.to_string()))?;
-        }
-        tx.commit().map_err(|e| IndexError::Db(e.to_string()))?;
+        let conn = self.lock()?;
+        conn.execute(
+            "INSERT INTO records(key, value) VALUES(?1, ?2) \
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value;",
+            rusqlite::params![&key[..], &blob[..]],
+        )?;
         Ok(())
     }
 
     /// Look up the record for `path`.
     pub fn get(&self, path: &str) -> Result<Option<Record>> {
         let key = index_key(&self.keying_key, path);
-        let tx = self
-            .db
-            .begin_read()
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        let table = tx
-            .open_table(RECORDS)
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        let Some(guard) = table
-            .get(key.as_slice())
-            .map_err(|e| IndexError::Db(e.to_string()))?
-        else {
+        let conn = self.lock()?;
+        let value: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT value FROM records WHERE key = ?1;",
+                rusqlite::params![&key[..]],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(value) = value else {
             return Ok(None);
         };
         let plaintext =
-            aead::decrypt(&self.enc_key, guard.value(), &key).map_err(|_| IndexError::Crypto)?;
+            aead::decrypt(&self.enc_key, &value, &key).map_err(|_| IndexError::Crypto)?;
         let record: Record = postcard::from_bytes(&plaintext).map_err(|_| IndexError::Serialize)?;
         Ok(Some(record))
     }
@@ -98,50 +148,33 @@ impl Index {
     /// Whether a record exists for `path` (no decryption).
     pub fn contains(&self, path: &str) -> Result<bool> {
         let key = index_key(&self.keying_key, path);
-        let tx = self
-            .db
-            .begin_read()
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        let table = tx
-            .open_table(RECORDS)
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        Ok(table
-            .get(key.as_slice())
-            .map_err(|e| IndexError::Db(e.to_string()))?
-            .is_some())
+        let conn = self.lock()?;
+        let found: Option<i64> = conn
+            .query_row(
+                "SELECT 1 FROM records WHERE key = ?1;",
+                rusqlite::params![&key[..]],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(found.is_some())
     }
 
     /// Remove the record for `path`. Returns whether a record was present.
     pub fn delete(&self, path: &str) -> Result<bool> {
         let key = index_key(&self.keying_key, path);
-        let tx = self
-            .db
-            .begin_write()
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        let existed;
-        {
-            let mut table = tx
-                .open_table(RECORDS)
-                .map_err(|e| IndexError::Db(e.to_string()))?;
-            existed = table
-                .remove(key.as_slice())
-                .map_err(|e| IndexError::Db(e.to_string()))?
-                .is_some();
-        }
-        tx.commit().map_err(|e| IndexError::Db(e.to_string()))?;
-        Ok(existed)
+        let conn = self.lock()?;
+        let changed = conn.execute(
+            "DELETE FROM records WHERE key = ?1;",
+            rusqlite::params![&key[..]],
+        )?;
+        Ok(changed > 0)
     }
 
     /// Number of records.
     pub fn count(&self) -> Result<u64> {
-        let tx = self
-            .db
-            .begin_read()
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        let table = tx
-            .open_table(RECORDS)
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        table.len().map_err(|e| IndexError::Db(e.to_string()))
+        let conn = self.lock()?;
+        let n: i64 = conn.query_row("SELECT COUNT(*) FROM records;", [], |row| row.get(0))?;
+        Ok(n.max(0) as u64)
     }
 
     /// Decrypt and return all records. O(n); prefer [`for_each`](Index::for_each)
@@ -156,19 +189,16 @@ impl Index {
     }
 
     /// Invoke `f` for each decrypted record; stop early if `f` returns `false`.
-    /// Constant-memory streaming enumeration (millions-of-files safe).
+    /// Rows stream in ascending key order (constant-memory; millions-of-files safe).
     pub fn for_each(&self, mut f: impl FnMut(Record) -> bool) -> Result<()> {
-        let tx = self
-            .db
-            .begin_read()
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        let table = tx
-            .open_table(RECORDS)
-            .map_err(|e| IndexError::Db(e.to_string()))?;
-        for entry in table.iter().map_err(|e| IndexError::Db(e.to_string()))? {
-            let (key_guard, value_guard) = entry.map_err(|e| IndexError::Db(e.to_string()))?;
-            let plaintext = aead::decrypt(&self.enc_key, value_guard.value(), key_guard.value())
-                .map_err(|_| IndexError::Crypto)?;
+        let conn = self.lock()?;
+        let mut stmt = conn.prepare("SELECT key, value FROM records ORDER BY key ASC;")?;
+        let mut rows = stmt.query([])?;
+        while let Some(row) = rows.next()? {
+            let key: Vec<u8> = row.get(0)?;
+            let value: Vec<u8> = row.get(1)?;
+            let plaintext =
+                aead::decrypt(&self.enc_key, &value, &key).map_err(|_| IndexError::Crypto)?;
             let record: Record =
                 postcard::from_bytes(&plaintext).map_err(|_| IndexError::Serialize)?;
             if !f(record) {

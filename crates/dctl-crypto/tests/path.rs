@@ -49,11 +49,11 @@ fn rejects_invalid_paths() {
 fn accepts_15_1_repertoire() {
     // Ordinary code points assigned as of UCD 15.1 must pass the "assigned only" gate.
     for p in [
-        "hello_world.txt",                     // ASCII
-        "caf\u{00e9}",                         // café, NFC (U+00E9 assigned since forever)
-        "\u{4e2d}\u{6587}/\u{65e5}\u{672c}",   // CJK: 中文/日本
-        "party\u{1f600}.txt",                  // 😀 U+1F600, present since Unicode 6.1 (≤15.1)
-        "vault/\u{e000}",                      // U+E000: Private Use (Co) — permanently assigned
+        "hello_world.txt",                   // ASCII
+        "caf\u{00e9}",                       // café, NFC (U+00E9 assigned since forever)
+        "\u{4e2d}\u{6587}/\u{65e5}\u{672c}", // CJK: 中文/日本
+        "party\u{1f600}.txt",                // 😀 U+1F600, present since Unicode 6.1 (≤15.1)
+        "vault/\u{e000}",                    // U+E000: Private Use (Co) — permanently assigned
     ] {
         assert!(path::normalize(p).is_ok(), "should accept {p:?}");
     }

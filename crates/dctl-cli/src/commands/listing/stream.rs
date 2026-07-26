@@ -22,6 +22,7 @@
 
 use crate::error::Result;
 use crate::logging::fields;
+use crate::source::Sizes;
 
 use super::entry::Entry;
 use super::filter::Filter;
@@ -65,6 +66,15 @@ impl Stream {
     #[must_use]
     pub const fn seen(&self) -> u64 {
         self.seen
+    }
+
+    /// What the sizes on this stream's entries measure.
+    ///
+    /// Filtering changes which objects are counted, never the unit they are
+    /// counted in, so this passes straight through from the source.
+    #[must_use]
+    pub fn sizes(&self) -> Sizes {
+        self.pages.sizes()
     }
 
     /// Call `visit` for every entry in scope, in path order.
@@ -138,7 +148,10 @@ mod tests {
     #[tokio::test]
     async fn every_entry_in_scope_is_visited_in_path_order() {
         let mut stream = stream("", &[("a.txt", 1), ("b/c.txt", 2), ("b/d.txt", 3)], &[]);
-        assert_eq!(collect(&mut stream).await, vec!["a.txt", "b/c.txt", "b/d.txt"]);
+        assert_eq!(
+            collect(&mut stream).await,
+            vec!["a.txt", "b/c.txt", "b/d.txt"]
+        );
         assert_eq!(stream.matched(), 3);
         assert_eq!(stream.seen(), 3);
     }
@@ -191,6 +204,24 @@ mod tests {
         // keeps pulling until the source is exhausted.
         assert!(paths.len() > crate::constants::LIST_PAGE_SIZE);
         assert_eq!(collect(&mut stream).await.len(), paths.len());
+    }
+
+    #[tokio::test]
+    async fn filtering_changes_which_objects_are_counted_never_the_unit() {
+        // `dctl size --include "*.jpg"` measures fewer files, not different
+        // bytes, so the basis has to survive the filter untouched — otherwise
+        // the label on the total would describe the source rather than the sum.
+        let filter = Filter::from_globals(&ctx(&["--include", "*.jpg"]).globals).unwrap();
+        let pages = pager("", &[("a.jpg", 1), ("b.txt", 2)]).with_sizes(Sizes::Plaintext);
+        let mut stream = Stream::new(Box::new(pages), filter);
+
+        assert_eq!(stream.sizes(), Sizes::Plaintext);
+        assert_eq!(collect(&mut stream).await, vec!["a.jpg"]);
+        assert_eq!(
+            stream.sizes(),
+            Sizes::Plaintext,
+            "the basis must not drift as the listing is consumed"
+        );
     }
 
     #[tokio::test]

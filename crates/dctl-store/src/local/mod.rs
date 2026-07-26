@@ -72,6 +72,10 @@ impl Backend for LocalFs {
         read::get(self, key).await
     }
 
+    async fn get_to_path(&self, key: &ObjectKey, dest: &Path) -> Result<()> {
+        read::get_to_path(self, key, dest).await
+    }
+
     async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Bytes> {
         read::get_range(self, key, range).await
     }

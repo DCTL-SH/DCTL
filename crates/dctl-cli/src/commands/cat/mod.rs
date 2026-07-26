@@ -10,9 +10,9 @@
 //! * **A closed pipe is success.** `dctl cat big.mkv | head -c 1M` exits 0. The
 //!   reasoning lives in [`sink`], which owns that rule.
 //! * **Ranges are ranges, not read-and-discard.** `--offset`/`--count` resolve to
-//!   a byte window ([`range`]) that becomes a `seek` on a local file and, once
-//!   the engine exposes it, a ranged read of exactly the stored chunks covering
-//!   the window. Seeking 40 GB into a film costs one request, not 40 GB.
+//!   a byte window ([`range`]) that becomes a `seek` on a local file and a
+//!   ranged read on a remote one. Against a plain object store, seeking 40 GB
+//!   into a film costs one request rather than 40 GB of transfer.
 //! * **Every argument is pre-flighted before any byte is written.** A run that
 //!   emitted half a stream and then failed would leave a redirected file that
 //!   looks complete and is not — the false success `PLAN.md` §6 forbids.
@@ -22,12 +22,13 @@
 //!   read-and-report — which is also how you verify that an object can be read
 //!   end to end without spooling it anywhere.
 //!
-//! **Engine reality.** Local paths are fully implemented, including every range
-//! flag: a bare path is part of the documented path model, and a local file is
-//! seekable. Remote objects need an unlocked vault and a ranged read, which
-//! `dctl-core` does not expose yet; those invocations parse, validate, resolve
-//! their range and then fail with a real exit code rather than printing anything.
+//! **Engine reality.** Local paths, plain remotes and sealed vaults all read,
+//! through [`crate::source`] — this file never learns which it was handed. One
+//! cost differs and is documented rather than hidden: a remote read buffers the
+//! requested window, because that is the only shape `dctl_core::Vault` offers.
+//! [`source`] states exactly what that means and when it goes away.
 
+mod opened;
 mod range;
 mod sink;
 mod source;
@@ -43,6 +44,7 @@ use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::output::{Format, Units, size};
 
+use opened::Opened;
 use range::Span;
 use sink::{Flow, Sink};
 use source::Source;
@@ -103,9 +105,13 @@ pub async fn run(ctx: &Ctx, args: &CatArgs) -> Result<()> {
 
     // Locate and measure everything first. Nothing is written until every
     // argument has been proven readable.
+    //
+    // The cache is what keeps `dctl cat archive:a archive:b` to one unlock and
+    // therefore one password prompt; it lives no longer than this call.
+    let mut opened = Opened::new(ctx);
     let mut sources = Vec::with_capacity(args.paths.len());
     for path in &args.paths {
-        sources.push(Source::preflight(ObjectSpec::parse(path)?, span)?);
+        sources.push(Source::preflight(ObjectSpec::parse(path)?, span, &mut opened).await?);
     }
 
     ctx.stats.add_total_files(sources.len() as u64);
@@ -120,14 +126,14 @@ pub async fn run(ctx: &Ctx, args: &CatArgs) -> Result<()> {
     // through exactly the same path and drops them at the last step, so what it
     // proves about an object is what a real read would find.
     if args.discard {
-        stream(ctx, args, &sources, &mut Sink::writing(io::sink()))
+        stream(ctx, args, &sources, &mut Sink::writing(io::sink())).await
     } else {
-        stream(ctx, args, &sources, &mut Sink::writing(io::stdout().lock()))
+        stream(ctx, args, &sources, &mut Sink::writing(io::stdout().lock())).await
     }
 }
 
 /// Copy every source into `sink`, reporting as the active format requires.
-fn stream<W: Write>(
+async fn stream<W: Write>(
     ctx: &Ctx,
     args: &CatArgs,
     sources: &[Source],
@@ -147,7 +153,7 @@ fn stream<W: Write>(
         let flow = if source.slice().is_empty() {
             Flow::Continue
         } else {
-            let mut reader = source.open()?;
+            let mut reader = source.open().await?;
             sink.drain(&mut reader, &mut buffer)?
         };
 
@@ -361,13 +367,89 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_remote_object_is_refused_before_anything_is_written() {
-        // PLAN.md §6: never report work that did not happen. The engine cannot
-        // range-read a vault yet, so this must be a loud failure.
-        let parsed = parse(&["cat", "vault:film.mkv"]);
+    async fn an_unresolvable_remote_is_refused_before_anything_is_written() {
+        // PLAN.md §6: never report work that did not happen. A remote nothing
+        // can resolve must be a loud failure, not an empty successful stream.
+        let parsed = parse(&["cat", "nosuchremote:film.mkv", "--no-ask-password"]);
         let error = run(&ctx_for(&parsed), parsed.args()).await.unwrap_err();
         assert_eq!(error.code(), ExitCode::FatalError);
         assert!(error.hint().is_some());
+    }
+
+    /// A configuration file naming one plain `local` remote over `root`.
+    ///
+    /// Plain rather than sealed on purpose: it exercises the whole remote path —
+    /// spec parsing, source resolution, `stat`, `read` and `read_range` — with
+    /// no password anywhere, which is what makes it a test rather than a manual
+    /// procedure. The sealed half of the same trait is covered against a real
+    /// vault in `crate::source::vault`.
+    fn config_naming(dir: &Path, root: &Path) -> String {
+        let path = dir.join("config.toml");
+        fs::write(
+            &path,
+            format!(
+                "[remotes.store]\ntype = \"local\"\npath = {:?}\n",
+                root.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[tokio::test]
+    async fn a_remote_object_is_read_through_the_one_source_abstraction() {
+        let dir = tempdir().unwrap();
+        let store = dir.path().join("store");
+        fs::create_dir_all(&store).unwrap();
+        fs::write(store.join("a.bin"), b"0123456789").unwrap();
+        let config = config_naming(dir.path(), &store);
+
+        let parsed = parse(&["cat", "store:a.bin", "--discard", "--config", &config]);
+        let ctx = ctx_for(&parsed);
+        run(&ctx, parsed.args()).await.unwrap();
+
+        assert_eq!(ctx.stats.snapshot().bytes_transferred, 10);
+        assert_eq!(ctx.stats.snapshot().errors, 0);
+    }
+
+    #[tokio::test]
+    async fn a_window_on_a_remote_object_reads_only_that_window() {
+        // The reason `read_range` exists: `--tail` must not pull the object.
+        let dir = tempdir().unwrap();
+        let store = dir.path().join("store");
+        fs::create_dir_all(&store).unwrap();
+        fs::write(store.join("a.bin"), [0_u8; 1000]).unwrap();
+        let config = config_naming(dir.path(), &store);
+
+        let parsed = parse(&[
+            "cat",
+            "store:a.bin",
+            "--tail",
+            "40",
+            "--discard",
+            "--config",
+            &config,
+        ]);
+        let ctx = ctx_for(&parsed);
+        run(&ctx, parsed.args()).await.unwrap();
+
+        assert_eq!(ctx.stats.snapshot().bytes_transferred, 40);
+    }
+
+    #[tokio::test]
+    async fn a_missing_remote_object_is_file_not_found_rather_than_an_empty_stream() {
+        let dir = tempdir().unwrap();
+        let store = dir.path().join("store");
+        fs::create_dir_all(&store).unwrap();
+        let config = config_naming(dir.path(), &store);
+
+        let parsed = parse(&["cat", "store:nope.bin", "--discard", "--config", &config]);
+        let ctx = ctx_for(&parsed);
+        let error = run(&ctx, parsed.args()).await.unwrap_err();
+
+        assert_eq!(error.code(), ExitCode::FileNotFound);
+        assert!(error.hint().is_some());
+        assert_eq!(ctx.stats.snapshot().bytes_transferred, 0);
     }
 
     #[tokio::test]
@@ -376,7 +458,7 @@ mod tests {
         // argument is unreadable, or the redirected file looks complete.
         let dir = tempdir().unwrap();
         let good = seed(dir.path(), "a.bin", b"hello");
-        let parsed = parse(&["cat", &good, "vault:b.bin", "--discard"]);
+        let parsed = parse(&["cat", &good, "nosuchremote:b.bin", "--discard"]);
         let ctx = ctx_for(&parsed);
 
         assert!(run(&ctx, parsed.args()).await.is_err());
@@ -452,12 +534,21 @@ mod tests {
         }
     }
 
-    #[test]
-    fn the_json_record_names_what_happened_and_what_did_not() {
+    /// Pre-flight one local argument, with a cache nothing else has touched.
+    async fn preflight(context: &Ctx, spec: ObjectSpec, span: Span) -> Source {
+        let mut opened = Opened::new(context);
+        Source::preflight(spec, span, &mut opened)
+            .await
+            .expect("a local file pre-flights")
+    }
+
+    #[tokio::test]
+    async fn the_json_record_names_what_happened_and_what_did_not() {
         let dir = tempdir().unwrap();
         let path = seed(dir.path(), "a.bin", &[0_u8; 10]);
         let spec = ObjectSpec::parse(&path).unwrap();
-        let source = Source::preflight(spec, Span::WHOLE).unwrap();
+        let context = ctx_for(&parse(&["cat", &path]));
+        let source = preflight(&context, spec, Span::WHOLE).await;
 
         let value = serde_json::to_value(Record::of(&source, 10, false)).unwrap();
         assert_eq!(value["size"], 10);
@@ -474,17 +565,18 @@ mod tests {
         assert_eq!(planned["dry_run"], true);
     }
 
-    #[test]
-    fn the_plan_description_names_the_window_only_when_there_is_one() {
+    #[tokio::test]
+    async fn the_plan_description_names_the_window_only_when_there_is_one() {
         let dir = tempdir().unwrap();
         let path = seed(dir.path(), "a.bin", &[0_u8; 10]);
         let spec = ObjectSpec::parse(&path).unwrap();
+        let context = ctx_for(&parse(&["cat", &path]));
 
-        let whole = Source::preflight(spec.clone(), Span::WHOLE).unwrap();
+        let whole = preflight(&context, spec.clone(), Span::WHOLE).await;
         assert!(!describe(&whole, Units::Binary).contains("bytes"));
 
         let span = Span::from_flags(Some(4), None, None, None).unwrap();
-        let part = Source::preflight(spec, span).unwrap();
+        let part = preflight(&context, spec, span).await;
         assert!(describe(&part, Units::Binary).contains("bytes 0..4"));
     }
 }

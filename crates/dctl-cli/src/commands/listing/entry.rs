@@ -21,7 +21,8 @@
 //! the vault, and holding both spellings for ten million entries would double
 //! the only allocation on the hot path to save an integer.
 
-use crate::constants::{HEX_DIGITS, PATH_SEPARATOR};
+use crate::constants::PATH_SEPARATOR;
+use crate::output::hex;
 use crate::platform::path;
 use crate::source;
 
@@ -62,7 +63,7 @@ impl Entry {
             root_len,
             size: entry.size,
             modified_unix: entry.modified_unix,
-            content_hash: entry.content_hash.as_deref().map(hex),
+            content_hash: entry.content_hash.as_deref().map(hex::encode),
             is_dir: false,
             path: entry.path,
         }
@@ -184,28 +185,6 @@ fn relative_offset(full: &str, root: &str) -> usize {
     }
 }
 
-/// Lower-case hex encoding of a digest.
-fn hex(bytes: &[u8]) -> String {
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        // The index is a nibble, so it is always in range; the fallback exists
-        // only because the crate may not panic.
-        out.push(char::from(
-            HEX_DIGITS
-                .get(usize::from(byte >> 4))
-                .copied()
-                .unwrap_or(b'?'),
-        ));
-        out.push(char::from(
-            HEX_DIGITS
-                .get(usize::from(byte & 0x0f))
-                .copied()
-                .unwrap_or(b'?'),
-        ));
-    }
-    out
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -291,7 +270,5 @@ mod tests {
     fn content_hashes_render_as_lower_case_hex() {
         let entry = Entry::from_source(listed("a.txt", 1, None), "");
         assert_eq!(entry.content_hash(), Some("abcd"));
-        assert_eq!(hex(&[0x00, 0x0f, 0xf0, 0xff]), "000ff0ff");
-        assert_eq!(hex(&[]), "");
     }
 }

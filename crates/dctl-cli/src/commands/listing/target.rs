@@ -84,6 +84,15 @@ impl Target {
     }
 
     /// Whether this target names a configured remote.
+    ///
+    /// `cfg(test)` deliberately. Production used to branch on it — a local
+    /// target was refused, a remote one was listed — and that branch is gone:
+    /// [`crate::source::open`] answers for both, so a listing verb that could
+    /// still ask would be a listing verb that could grow a second answer. What
+    /// remains is the grammar's own observation point, and the grammar is worth
+    /// testing exhaustively because `C:\data` being read as a remote is the
+    /// mistake that writes to the wrong side of a transfer.
+    #[cfg(test)]
     #[must_use]
     pub const fn is_remote(&self) -> bool {
         matches!(self, Self::Remote { .. })
@@ -323,6 +332,38 @@ mod tests {
         assert_eq!(
             Target::parse(Some("v:photos"), None).unwrap(),
             Target::Local(PathBuf::from("v:photos"))
+        );
+    }
+
+    #[test]
+    fn a_target_converts_to_the_spec_the_source_layer_speaks() {
+        // Both halves must survive: a remote that lost its prefix would list the
+        // whole vault, and a local path that became a named remote would send
+        // the run looking for configuration that does not exist.
+        assert_eq!(
+            Target::parse(Some("vault:photos/2024"), None)
+                .unwrap()
+                .spec(),
+            RemoteSpec::Named {
+                remote: "vault".into(),
+                path: "photos/2024".into(),
+            }
+        );
+        assert_eq!(
+            Target::parse(Some("vault:"), None).unwrap().spec(),
+            RemoteSpec::Named {
+                remote: "vault".into(),
+                path: String::new(),
+            }
+        );
+        assert_eq!(
+            Target::parse(Some("/srv/photos"), None).unwrap().spec(),
+            RemoteSpec::Local(PathBuf::from("/srv/photos"))
+        );
+        // The drive-letter rule survives the conversion on every platform.
+        assert_eq!(
+            Target::parse(Some(r"C:\data"), None).unwrap().spec(),
+            RemoteSpec::Local(PathBuf::from(r"C:\data"))
         );
     }
 

@@ -8,12 +8,22 @@
 //!
 //! What a run does:
 //!
-//! 1. walk the vault's index and select the objects the plan covers;
-//! 2. read each one back and authenticate it at the global `--verify` strength;
-//! 3. with `--repair`, rebuild damaged objects from redundancy or parity;
-//! 4. report a health grade — `healthy`, `degraded` or `damaged` — together with
-//!    *how much of the dataset was actually read*, so the grade cannot be
-//!    mistaken for a claim about the part that was skipped.
+//! 1. walk the remote and select the objects the plan covers;
+//! 2. read each one back in full and check it as strongly as that remote allows;
+//! 3. report a health grade — `healthy`, `degraded` or `damaged` — together with
+//!    *how much of the dataset was actually read* and *what the reading proved*,
+//!    so the grade cannot be mistaken for a claim about the part that was
+//!    skipped, or for a stronger claim than the remote can support.
+//!
+//! ## `--repair` is refused, not ignored
+//!
+//! Repair means rebuilding a damaged object from redundancy — the par2-style
+//! Reed-Solomon parity of `PLAN.md` §13.3 — and this build writes no parity, so
+//! there is nothing to rebuild from. The flag is therefore **refused with an
+//! error** rather than accepted and quietly dropped: a run that printed
+//! `damaged` after silently doing nothing would leave the operator believing a
+//! repair had been attempted and failed for some other reason, which is worse
+//! than being told plainly that the capability is not there yet.
 //!
 //! Damage that could not be repaired ends the process with
 //! [`ExitCode::IntegrityFailure`](crate::exit::ExitCode::IntegrityFailure) (21).
@@ -28,30 +38,45 @@
 //! successive scrubs cover different slices instead of reading the same tenth
 //! forever. See [`plan`].
 //!
-//! ## What this build can do
+//! ## What a pass proves, and why the report says so
 //!
-//! Argument parsing, target resolution, the sampling and error-budget logic in
-//! [`plan`], the health grading and report shape in [`report`], the `--repair`
-//! dry-run interlock, and the exit-code classification are implemented and
-//! tested here. Reading objects back is not: `dctl_core::Vault` has no
-//! prefix-wide verification entry point and `Ctx` does not yet carry an unlocked
-//! vault, so `run` builds and reports the plan and then returns
-//! [`CliError::unimplemented`] rather than printing a health grade it never
-//! measured — which would be precisely the lie this command exists to prevent.
+//! A sealed vault checks every chunk's authentication tag and the object's own
+//! recorded content hash, so `healthy` there means *these are the bytes that
+//! were written*. A plain remote — including the object store a vault's
+//! ciphertext lives in — records no hash of its own, so the strongest honest
+//! claim is *the object was still there and every byte of it came back*. That is
+//! genuinely useful (it is how a replica quietly losing objects is caught) and it
+//! is not the same statement, so the report carries which one it is. See
+//! [`crate::source::Assurance`].
+//!
+//! ## The `--verify` dial
+//!
+//! Every selected object is read back **in full**, whatever `--verify` says.
+//! There is no provider-checksum comparison behind a scrub in this build — the
+//! only integrity primitives `dctl_core` exposes read the object — so a cheaper
+//! strength cannot be honoured. The run warns when one was asked for, and the
+//! report records the strength that actually ran rather than the one requested,
+//! because a report naming a check that did not happen is the misreport
+//! `PLAN.md` §6 forbids.
 
+pub mod engine;
 pub mod plan;
 pub mod report;
 
 use clap::Args;
 
+use crate::cli::VerifyMode;
 use crate::commands::integrity::{Target, command_name, mode};
+use crate::commands::listing::Filter;
 use crate::constants::{
     SCRUB_FULL_SAMPLE_PERCENT, SCRUB_MAX_ERRORS_UNLIMITED, SCRUB_MIN_SAMPLE_PERCENT,
+    SCRUB_REPAIR_UNAVAILABLE, SCRUB_REPAIR_UNAVAILABLE_HINT,
 };
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 
 use plan::Plan;
+use report::Report;
 
 /// The verb this module implements, used in messages that name the command.
 const VERB: &str = "scrub";
@@ -65,8 +90,10 @@ pub struct ScrubArgs {
 
     /// Rebuild damaged objects from redundancy or parity where possible.
     ///
-    /// The only part of a scrub that writes anything, and therefore the only
-    /// part `--dry-run` suppresses.
+    /// Refused by this build: no redundancy is written for it to read. The flag
+    /// stays declared so the refusal names it and explains what would have to
+    /// exist first — silently accepting a flag that does nothing is how an
+    /// operator comes to believe a repair was attempted.
     #[arg(long)]
     pub repair: bool,
 
@@ -95,35 +122,69 @@ pub struct ScrubArgs {
 /// Re-read and verify a dataset, reporting its health.
 ///
 /// # Errors
-/// [`CliError::usage`] for a malformed or local target or an out-of-range
-/// sample; the integrity family's classified failure when unrepaired damage is
-/// found; and [`CliError::unimplemented`] until the engine can read objects back
-/// — see the module documentation.
+/// [`CliError::usage`] for a malformed or local target, an out-of-range sample,
+/// or `--repair`, which this build cannot honour; whatever opening the remote
+/// reported; and the integrity family's classified failure when damage is found
+/// — [`ExitCode::IntegrityFailure`](crate::exit::ExitCode::IntegrityFailure) for
+/// objects that did not authenticate, and the availability codes for objects
+/// that were missing or unreachable.
 pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
     let command = command_name(VERB);
     let target = Target::parse(&args.target)?;
-    // A scrub compares stored objects against the hashes the vault recorded for
-    // them; a local directory has no such record.
+    // A scrub reads stored objects back from a remote. A local directory is not
+    // a remote holding a copy of anything, so there is nothing here to scrub —
+    // and saying so beats reporting "0 objects, healthy".
     target.require_remote(&command)?;
 
-    // Repair is this command's only mutation, so it is resolved *before* the
-    // plan is built: a plan that still claimed to repair under `--dry-run`
-    // would be one call away from writing.
-    let repair = if args.repair && ctx.is_dry_run() {
-        ctx.dry_run_notice("repair damaged objects in", &target.to_string());
-        false
-    } else {
-        args.repair
-    };
+    // Refused before anything opens, so the run never gets far enough to look
+    // like it tried. `--dry-run` does not soften this: a dry run of an
+    // impossible operation is still impossible, and printing "would repair"
+    // would promise a capability that does not exist.
+    if args.repair {
+        return Err(
+            CliError::usage(SCRUB_REPAIR_UNAVAILABLE).with_hint(SCRUB_REPAIR_UNAVAILABLE_HINT)
+        );
+    }
 
-    let plan = Plan::seeded(args.sample_percent, args.max_errors, repair)?;
-    let strength = ctx.verify_mode();
+    // `false`, and not `args.repair`: the plan carries what will happen, and
+    // nothing in this build repairs.
+    let plan = Plan::seeded(args.sample_percent, args.max_errors, false)?;
 
+    // Compiled before the remote opens, so a malformed `--include` fails before
+    // a password is asked for.
+    let filter = Filter::from_globals(&ctx.globals)?;
+
+    let source = crate::source::open(ctx, &target.spec()).await?;
+    let assurance = source.assurance();
+
+    // Every object is read back in full, so the strength that ran is `strict`
+    // whatever was asked for. Reporting the requested one instead would name a
+    // check that did not happen.
+    let performed = VerifyMode::Strict;
     ctx.out.info(format!(
         "{command}: {target} at --verify={} — {}",
-        mode::slug(strength),
-        mode::describe(strength)
+        mode::slug(performed),
+        mode::describe(performed)
     ));
+
+    let requested = ctx.verify_mode();
+    if !mode::proves_whole_plaintext(requested) {
+        ctx.out.warn(format!(
+            "--verify={} asks for a cheaper check than a scrub can perform in this \
+             build: there is no provider-checksum comparison behind `{command}`, so \
+             every selected object is read back in full",
+            mode::slug(requested)
+        ));
+    }
+    if !assurance.detects_corruption() {
+        // The grade would otherwise be read as a statement about the bytes, and
+        // this remote cannot make one.
+        ctx.out.warn(format!(
+            "'{target}' records no hash of its own — {}",
+            assurance.describe()
+        ));
+    }
+
     if plan.is_full() {
         ctx.out.info("reading every object in the dataset");
     } else {
@@ -143,12 +204,27 @@ pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
             plan.max_errors()
         ));
     }
-    if plan.repairs() {
-        ctx.out
-            .info("damaged objects will be rebuilt from redundancy where possible");
-    }
 
-    Err(CliError::unimplemented(command))
+    let mut report = Report::new(
+        target.to_string(),
+        mode::slug(performed),
+        assurance,
+        plan.sample_percent(),
+        plan.seed(),
+        plan.repairs(),
+    );
+    engine::scrub(
+        ctx,
+        source.as_ref(),
+        target.prefix(),
+        &filter,
+        &plan,
+        &mut report,
+    )
+    .await?;
+
+    report.emit(&ctx.out)?;
+    report.outcome().map_or(Ok(()), Err)
 }
 
 #[cfg(test)]
@@ -210,46 +286,161 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dry_run_turns_repair_off_before_the_plan_exists() {
-        // The interlock this test guards: under --dry-run the plan must not
-        // carry permission to write, however the run body evolves.
+    async fn repair_is_refused_rather_than_quietly_ignored() {
+        // Accepting the flag and doing nothing would leave the operator
+        // believing a repair was attempted and failed for some other reason.
+        let (ctx, args) = parse(&["scrub", "vault:", "--repair"]);
+        let error = run(&ctx, &args).await.unwrap_err();
+        assert_eq!(error.code(), ExitCode::Usage);
+        assert!(error.message().contains("--repair"));
+        // The refusal has to name what would have to exist first.
+        let hint = error.hint().expect("a refusal must say what to do next");
+        assert!(hint.contains("§13.3"), "got: {hint}");
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_does_not_soften_the_repair_refusal() {
+        // A dry run of an impossible operation is still impossible, and
+        // "[dry-run] would repair" would promise a capability that is not there.
         let (ctx, args) = parse(&["scrub", "vault:", "--repair", "--dry-run"]);
         assert!(ctx.is_dry_run());
-        let repair = args.repair && !ctx.is_dry_run();
-        assert!(!repair);
-        let plan = Plan::seeded(args.sample_percent, args.max_errors, repair).unwrap();
-        assert!(!plan.repairs());
-        assert!(run(&ctx, &args).await.is_err());
+        assert_eq!(run(&ctx, &args).await.unwrap_err().code(), ExitCode::Usage);
     }
 
     #[tokio::test]
-    async fn repair_is_carried_through_when_it_is_not_a_dry_run() {
-        let (ctx, args) = parse(&["scrub", "vault:", "--repair"]);
-        assert!(!ctx.is_dry_run());
-        let plan = Plan::seeded(args.sample_percent, args.max_errors, args.repair).unwrap();
-        assert!(plan.repairs());
-    }
-
-    #[tokio::test]
-    async fn unimplemented_work_is_an_error_not_a_health_grade() {
+    async fn an_unresolvable_remote_is_an_error_rather_than_a_health_grade() {
         // Printing "healthy" for a dataset nothing read would be the exact lie
         // this command exists to prevent.
-        let (ctx, args) = parse(&["scrub", "vault:"]);
+        let (ctx, args) = parse(&["scrub", "nosuchremote:", "--no-ask-password"]);
         let error = run(&ctx, &args).await.unwrap_err();
         assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(error.message().contains(&command_name(VERB)));
+        assert!(error.message().contains("nosuchremote"));
+    }
+
+    /// A configured plain remote over a temporary directory, plus the argument
+    /// that points DCTL at the configuration naming it.
+    fn plain_remote(files: &[(&str, &[u8])]) -> (tempfile::TempDir, String) {
+        let dir = tempfile::TempDir::new().expect("a temporary directory");
+        let root = dir.path().join("root");
+        for (relative, bytes) in files {
+            let path = root.join(relative);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("the parent directory is created");
+            }
+            std::fs::write(&path, bytes).expect("the fixture file is written");
+        }
+        std::fs::create_dir_all(&root).expect("the root exists even when empty");
+
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.store]\ntype = \"local\"\npath = {:?}\n",
+                root.to_string_lossy()
+            ),
+        )
+        .expect("the configuration is written");
+        let path = config.to_string_lossy().into_owned();
+        (dir, path)
+    }
+
+    #[tokio::test]
+    async fn a_clean_remote_scrubs_to_healthy_and_exits_zero() {
+        let (_dir, config) = plain_remote(&[("a.txt", b"1"), ("sub/b.txt", b"22")]);
+        let (ctx, args) = parse(&["scrub", "store:", "--config", &config]);
+        run(&ctx, &args)
+            .await
+            .expect("an intact remote must not fail the run");
+    }
+
+    #[tokio::test]
+    async fn a_prefix_scrubs_only_what_is_under_it() {
+        let (_dir, config) = plain_remote(&[("photos/a.jpg", b"1"), ("other/b.jpg", b"2")]);
+        let (ctx, args) = parse(&["scrub", "store:photos", "--config", &config]);
+        run(&ctx, &args).await.expect("the prefix reads back clean");
     }
 
     #[tokio::test]
     async fn every_output_format_is_accepted() {
+        let (_dir, config) = plain_remote(&[("a.txt", b"1")]);
         for format in [&["--json"][..], &["--format", "json-lines"][..], &[][..]] {
-            let mut argv = vec!["scrub", "vault:"];
+            let mut argv = vec!["scrub", "store:", "--config", config.as_str()];
             argv.extend_from_slice(format);
             let (ctx, args) = parse(&argv);
-            assert_eq!(
-                run(&ctx, &args).await.unwrap_err().code(),
-                ExitCode::FatalError
-            );
+            run(&ctx, &args)
+                .await
+                .expect("the format must not change the outcome");
         }
+    }
+
+    #[tokio::test]
+    async fn a_sealed_vault_scrubs_end_to_end_and_reports_damage() {
+        // The whole command, wired: configuration, vault chain, unlock, index
+        // walk, authenticated read-back, grade, exit code.
+        use std::sync::Arc;
+
+        use dctl_core::Vault;
+        use dctl_store::{Backend, LocalFs};
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        let index = dir.path().join("index.redb");
+
+        {
+            let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(&store));
+            let vault = Vault::init(backend, &index, "pw").await.unwrap();
+            vault.put_file("photos/a.jpg", b"aaa").await.unwrap();
+            vault.put_file("notes.txt", b"n").await.unwrap();
+        }
+
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.store]\ntype = \"local\"\npath = {:?}\nrequire_vault = true\n\n\
+                 [remotes.archive]\ntype = \"vault\"\nbase = \"store\"\n",
+                store.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let config = config.to_string_lossy().into_owned();
+        let index = index.to_string_lossy().into_owned();
+        let argv = [
+            "scrub",
+            "archive:",
+            "--config",
+            &config,
+            "--index",
+            &index,
+            "--password",
+            "pw",
+        ];
+
+        let (ctx, args) = parse(&argv);
+        run(&ctx, &args)
+            .await
+            .expect("an intact vault scrubs healthy");
+
+        // Now damage what the provider is holding, reaching past DCTL entirely,
+        // and confirm the same command notices.
+        for entry in std::fs::read_dir(store.join("o")).unwrap() {
+            let path = entry.unwrap().path();
+            let length = std::fs::metadata(&path).unwrap().len();
+            std::fs::write(&path, vec![0xA5; length as usize]).unwrap();
+        }
+
+        let (ctx, args) = parse(&argv);
+        let error = run(&ctx, &args)
+            .await
+            .expect_err("damaged objects must fail the run");
+        assert_eq!(error.code(), ExitCode::IntegrityFailure);
+        assert_eq!(error.code().as_i32(), 21);
+        assert!(
+            error.message().contains("NOT served"),
+            "got: {}",
+            error.message()
+        );
     }
 }

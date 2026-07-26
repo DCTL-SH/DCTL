@@ -30,9 +30,11 @@
 //! top-level directory whose files all live two levels down would report as
 //! empty — and only the *reporting* is truncated.
 //!
-//! ## Not implemented yet
+//! ## Where the objects come from
 //!
-//! The read itself: see [`listing::source::open`].
+//! [`listing::source::open`] — one call that reaches a sealed vault, a plain
+//! object store or a local directory through [`crate::source`], so this command
+//! never learns which it was given.
 
 use clap::Args;
 
@@ -82,7 +84,9 @@ pub async fn run(ctx: &Ctx, args: &LsdArgs) -> Result<()> {
                 shown += 1;
                 emitter.push(&JsonEntry::new(&dir.to_entry()))
             };
-            stream.try_for_each(|entry| aggregator.push(entry, &mut emit)).await?;
+            stream
+                .try_for_each(|entry| aggregator.push(entry, &mut emit))
+                .await?;
             aggregator.finish(&mut emit)?;
         }
         emitter.finish()?;
@@ -92,7 +96,9 @@ pub async fn run(ctx: &Ctx, args: &LsdArgs) -> Result<()> {
             ctx.out.line(line(dir, units))?;
             Ok(())
         };
-        stream.try_for_each(|entry| aggregator.push(entry, &mut emit)).await?;
+        stream
+            .try_for_each(|entry| aggregator.push(entry, &mut emit))
+            .await?;
         aggregator.finish(&mut emit)?;
     }
 

@@ -57,7 +57,7 @@ use crate::remote::RemoteSpec;
 use crate::session::{self, Session};
 
 use super::entry::Entry;
-use super::{Entries, Source};
+use super::{Assurance, Entries, Sizes, Source};
 
 /// A vault, unlocked, presented as a readable source.
 pub struct VaultSource {
@@ -129,6 +129,15 @@ impl Source for VaultSource {
         Ok(Box::new(Buffered { entries }))
     }
 
+    fn sizes(&self) -> Sizes {
+        // `Record::size` is the length of the file that was sealed, never of the
+        // object holding it: the index is written from the plaintext, and the
+        // ciphertext length would have to be asked of the provider one object at
+        // a time. Saying so is what keeps `dctl size archive:` from being read
+        // as a storage bill.
+        Sizes::Plaintext
+    }
+
     async fn read(&self, path: &str) -> Result<Zeroizing<Vec<u8>>> {
         self.whole(path).await
     }
@@ -162,6 +171,23 @@ impl Source for VaultSource {
             .into_iter()
             .find(|record| record.path == query)
             .map(from_record))
+    }
+
+    async fn verify(&self, path: &str) -> Result<()> {
+        // The one read on this side that is *not* O(object):
+        // `Vault::verify_file` stream-decrypts into a sink, so every chunk tag
+        // and the footer are checked at O(chunk) plaintext memory. That is what
+        // makes a scrub of a vault full of multi-gigabyte videos possible at
+        // all, and it is why this method exists instead of `read`-and-discard.
+        Ok(self.session.vault.verify_file(path).await?)
+    }
+
+    fn assurance(&self) -> Assurance {
+        // The vault recorded a plaintext BLAKE3 under the object's own DEK at
+        // write time, and every chunk carries an authentication tag. A pass here
+        // is a statement about the bytes that were written, not merely about the
+        // bytes that came back.
+        Assurance::Authenticated
     }
 }
 
@@ -205,7 +231,9 @@ fn slice(plaintext: &[u8], offset: u64, length: Option<u64>) -> Zeroizing<Vec<u8
     // `usize` on a 32-bit host is narrower than the `u64` the flags parse into,
     // so a saturating conversion is what keeps an absurd `--offset` from
     // wrapping to a small one and returning the wrong bytes.
-    let start = usize::try_from(offset).unwrap_or(usize::MAX).min(plaintext.len());
+    let start = usize::try_from(offset)
+        .unwrap_or(usize::MAX)
+        .min(plaintext.len());
     let available = plaintext.len() - start;
     let taken = length
         .map_or(available, |len| usize::try_from(len).unwrap_or(usize::MAX))
@@ -322,11 +350,7 @@ mod tests {
     async fn an_entry_carries_the_plaintext_size_and_hash() {
         let fixture = vault_with(&[("a.txt", b"hello")]).await;
         let mut cursor = fixture.source.enumerate("").await.expect("a listing");
-        let entry = cursor
-            .next()
-            .await
-            .expect("no failure")
-            .expect("one entry");
+        let entry = cursor.next().await.expect("no failure").expect("one entry");
 
         // The plaintext length, not the sealed object's — otherwise `ls` and
         // `cat | wc -c` disagree about the same file.
@@ -370,25 +394,45 @@ mod tests {
         let source = &fixture.source;
 
         assert_eq!(
-            source.read_range("a.bin", 4, Some(3)).await.unwrap().as_slice(),
+            source
+                .read_range("a.bin", 4, Some(3))
+                .await
+                .unwrap()
+                .as_slice(),
             b"456"
         );
         // No length means "to the end".
         assert_eq!(
-            source.read_range("a.bin", 7, None).await.unwrap().as_slice(),
+            source
+                .read_range("a.bin", 7, None)
+                .await
+                .unwrap()
+                .as_slice(),
             b"789"
         );
         // A window longer than what is left is clamped, not refused.
         assert_eq!(
-            source.read_range("a.bin", 8, Some(999)).await.unwrap().as_slice(),
+            source
+                .read_range("a.bin", 8, Some(999))
+                .await
+                .unwrap()
+                .as_slice(),
             b"89"
         );
         // An offset at or past the end yields nothing, exactly as a seek would.
         assert!(
-            source.read_range("a.bin", 10, Some(5)).await.unwrap().is_empty()
+            source
+                .read_range("a.bin", 10, Some(5))
+                .await
+                .unwrap()
+                .is_empty()
         );
         assert!(
-            source.read_range("a.bin", 4_000, None).await.unwrap().is_empty()
+            source
+                .read_range("a.bin", 4_000, None)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

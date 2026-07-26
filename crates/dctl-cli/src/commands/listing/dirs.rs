@@ -6,6 +6,16 @@
 //! somewhere, and doing it once here is what keeps `lsd` and `tree` from
 //! disagreeing about whether an empty prefix is a directory.
 //!
+//! A **sealed vault** has even less to work with. It stores no directory
+//! objects and no directory records: the index holds one row per file, keyed by
+//! its logical path, and there is nothing in it that says `photos/2024` was ever
+//! a thing a user made. So what `dctl lsd archive:` reports is not a listing of
+//! anything stored — it is a *grouping of the logical paths* the index yielded,
+//! by their leading components, computed here as those paths stream past. That
+//! is the only definition available, and it is the same one applied to a plain
+//! store and to a local directory, which is why the three views of a tree agree
+//! about its shape.
+//!
 //! ## Streaming, given sorted input
 //!
 //! The source contract (see [`super::source`]) is that entries arrive in

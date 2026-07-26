@@ -1,16 +1,35 @@
-//! Walking the hash chain, and saying exactly where it breaks.
+//! The hash-chain rule: how an entry's hash is computed, and how a chain is
+//! walked and verified.
 //!
-//! This is the evidence half of `PLAN.md` §7. Every record carries the previous
-//! record's hash, so the log can only be appended to: editing an entry changes
-//! its hash, which orphans the entry after it, and re-deriving the rest of the
-//! chain is the work an attacker would have to do — and would still leave the
-//! head hash different from whatever was published or mirrored.
+//! This is the evidence half of `PLAN.md` §7, and the only place in DCTL that
+//! decides what a record's hash *means*. The writer seals a record here and the
+//! reader checks it here, against the same function — two implementations of a
+//! rule that must round-trip is how a log becomes unverifiable.
 //!
-//! **A break is a security event, not a parse error.** The walk therefore stops
-//! at the first one and reports the *exact position*: which record, what was
-//! expected, what was found, and which of the four ways a chain can fail it was.
-//! "The audit log is corrupt" is not an answer anybody can investigate; "record
-//! 4 991 links to a hash no record produces" is.
+//! ## The canonical form is the contract
+//!
+//! A chain is only evidence if two implementations agree, byte for byte, on what
+//! is hashed. Serialising the JSON and hashing *that* would not do: JSON object
+//! key order, whitespace and number formatting are all free choices, so a
+//! re-serialisation could differ from what the writer hashed and every record
+//! would look forged. So the hash covers an explicit, ordered,
+//! separator-joined string built by [`canonical`] — one field per position,
+//! always the same order, joined by a control character no field is allowed to
+//! contain ([`AUDIT_HASH_FIELD_SEPARATOR`]).
+//!
+//! That separator choice is the anti-forgery property. If a path could contain
+//! the separator, a record with path `a` and op `b` would hash identically to
+//! one with path `a␟b` and an empty op — and an attacker who can choose a
+//! filename could rewrite history without breaking the chain. Control characters
+//! are rejected by `crate::platform::names` and escaped unconditionally by
+//! [`super::redaction`], so no field value can reach across a boundary.
+//!
+//! ## A break is a security event, not a parse error
+//!
+//! The walk stops at the first one and reports the *exact position*: which
+//! record, what was expected, what was found, and which of the four ways a chain
+//! can fail it was. "The audit log is corrupt" is not an answer anybody can
+//! investigate; "record 4 991 links to a hash no record produces" is.
 //!
 //! The walk stops rather than continuing because everything after a break is
 //! unattested: once one link is wrong, the records beyond it prove nothing about
@@ -32,20 +51,107 @@
 //! re-hashed forgery shows up as a link break at the *following* record, and
 //! reporting "record 42's content was edited" when the truth is "record 41 was
 //! deleted" would send an investigator to the wrong place.
+//!
+//! ## What this cannot detect
+//!
+//! Truncation of the tail. Removing the last *n* records leaves a chain that
+//! verifies perfectly, because nothing inside the log attests to its own length.
+//! Detecting that needs an anchor kept somewhere the writer cannot reach — the
+//! encrypted remote mirror §7 mentions, or a periodically published head hash,
+//! which is why [`Verified`] reports the head rather than only a verdict. Saying
+//! so here is deliberate: an evidence tool that overstates what it proves is
+//! worse than one that proves less.
 
 use std::fmt;
 
 use serde::Serialize;
 
-use crate::constants::{AUDIT_CHAIN_FIRST_INDEX, AUDIT_CHAIN_GENESIS_PREV};
+use crate::constants::{
+    AUDIT_CHAIN_FIRST_INDEX, AUDIT_CHAIN_GENESIS_PREV, AUDIT_HASH_FIELD_SEPARATOR,
+};
 
-use super::record::{AuditRecord, is_well_formed_hash};
+use super::record::{AuditRecord, Entry, is_well_formed_hash};
 
 /// Names of the two hash-bearing fields, spelled exactly as the record spells
 /// them, so a `MalformedHash` report can be matched against the file by eye.
 const FIELD_PREV: &str = "prev";
 /// See [`FIELD_PREV`].
 const FIELD_HASH: &str = "hash";
+
+/// The exact byte string a record's hash covers.
+///
+/// `prev` is included, and comes first, which is what chains the records:
+/// changing any earlier record changes its hash, which changes this record's
+/// `prev`, which changes this record's hash, all the way to the head. An
+/// attacker who edits one entry has to re-derive every entry after it.
+///
+/// The field order here is a **frozen wire contract** — it is specified in
+/// `docs/AUDIT_LOG.md` so that a chain can be verified in twenty years with a
+/// short script and no DCTL binary. Reordering it, or inserting a field, would
+/// invalidate every chain ever written.
+#[must_use]
+pub fn canonical(record: &AuditRecord) -> String {
+    // Built as an explicit ordered list rather than a format string: the order
+    // *is* the contract, and a list makes an accidental reordering or omission
+    // visible at a glance.
+    let index = record.index.to_string();
+    let size = record.size.to_string();
+    let separator = AUDIT_HASH_FIELD_SEPARATOR.to_string();
+
+    [
+        record.prev.as_str(),
+        index.as_str(),
+        record.time.as_str(),
+        record.op.as_str(),
+        record.result.as_str(),
+        record.path.as_str(),
+        size.as_str(),
+        record.plaintext_hash.as_str(),
+        record.ciphertext_hash.as_str(),
+        record.remote.as_str(),
+    ]
+    .join(separator.as_str())
+}
+
+/// The hash a record *should* carry, recomputed from its content.
+///
+/// Lower-case hex. A conforming writer may spell it either way — comparisons in
+/// [`verify`] are case-insensitive — but DCTL writes one spelling so that two
+/// records with identical content are byte-identical on disk.
+#[must_use]
+pub fn compute_hash(record: &AuditRecord) -> String {
+    blake3::hash(canonical(record).as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+/// Place an entry at `index`, link it to `previous`, and seal it.
+///
+/// This is the *only* way a record acquires its position and its hash. The
+/// caller supplies what happened; the chain supplies where it happened and what
+/// attests to it — see [`super::record::Entry`] for why those are kept apart.
+///
+/// See the note at the top of [`super::write`] for why nothing outside the
+/// tests calls this yet.
+#[allow(dead_code)]
+#[must_use]
+pub fn seal(entry: &Entry, index: u64, previous: &str) -> AuditRecord {
+    let mut record = AuditRecord {
+        index,
+        time: entry.time_field().to_string(),
+        op: entry.op_field().to_string(),
+        result: entry.result_field().to_string(),
+        path: entry.path_field().to_string(),
+        size: entry.size_field(),
+        plaintext_hash: entry.plaintext_hash_field().to_string(),
+        ciphertext_hash: entry.ciphertext_hash_field().to_string(),
+        remote: entry.remote_field().to_string(),
+        prev: previous.to_string(),
+        hash: String::new(),
+    };
+    record.hash = compute_hash(&record);
+    record
+}
 
 /// How a chain failed.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -133,7 +239,7 @@ pub struct Verified {
 /// # Errors
 /// Returns the first [`Break`]. An empty log verifies: it is a log to which
 /// nothing has been appended, which is a different claim from "nothing
-/// happened" — see the truncation note in [`super::record`].
+/// happened" — see the truncation note in this module's documentation.
 pub fn verify(records: &[AuditRecord]) -> Result<Verified, Break> {
     let mut previous_hash = AUDIT_CHAIN_GENESIS_PREV.to_string();
 
@@ -173,7 +279,7 @@ pub fn verify(records: &[AuditRecord]) -> Result<Verified, Break> {
         }
 
         // 4. And finally the content the hash claims to cover.
-        let computed = record.computed_hash();
+        let computed = compute_hash(record);
         if !record.hash.eq_ignore_ascii_case(&computed) {
             return Err(at(BreakKind::ContentMismatch {
                 expected: computed,
@@ -195,7 +301,25 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
     use super::*;
+    use crate::commands::touch::timestamp::Timestamp;
     use crate::constants::HASH_HEX_LEN_BLAKE3;
+    use crate::exit::ExitCode;
+
+    fn record() -> AuditRecord {
+        AuditRecord {
+            index: 0,
+            time: "2026-07-26T14:30:00Z".into(),
+            op: "copy".into(),
+            result: "success".into(),
+            path: "photos/2024/a.jpg".into(),
+            size: 1024,
+            plaintext_hash: "aa".repeat(32),
+            ciphertext_hash: "bb".repeat(32),
+            remote: "vault".into(),
+            prev: AUDIT_CHAIN_GENESIS_PREV.into(),
+            hash: String::new(),
+        }
+    }
 
     /// Build a sealed chain of `count` records, each correctly linked.
     ///
@@ -221,9 +345,9 @@ mod tests {
                 hash: String::new(),
             };
             record.hash = if upper {
-                record.computed_hash().to_uppercase()
+                compute_hash(&record).to_uppercase()
             } else {
-                record.computed_hash()
+                compute_hash(&record)
             };
             previous.clone_from(&record.hash);
             records.push(record);
@@ -233,6 +357,125 @@ mod tests {
 
     fn chain(count: u64) -> Vec<AuditRecord> {
         chain_with(count, false)
+    }
+
+    /// A single-field edit, used to prove the hash covers that field.
+    type Mutation = Box<dyn Fn(&mut AuditRecord)>;
+
+    #[test]
+    fn a_records_hash_covers_every_field() {
+        // Any change to any field must change the hash, or that field could be
+        // rewritten without breaking the chain.
+        let baseline = compute_hash(&record());
+
+        let mutations: Vec<Mutation> = vec![
+            Box::new(|r| r.index += 1),
+            Box::new(|r| r.time.push('!')),
+            Box::new(|r| r.op = "delete".into()),
+            Box::new(|r| r.result = "partial_failure".into()),
+            Box::new(|r| r.path = "photos/2024/b.jpg".into()),
+            Box::new(|r| r.size += 1),
+            Box::new(|r| r.plaintext_hash = "cc".repeat(32)),
+            Box::new(|r| r.ciphertext_hash = "dd".repeat(32)),
+            Box::new(|r| r.remote = "backup".into()),
+            Box::new(|r| r.prev = "ee".repeat(32)),
+        ];
+
+        for (position, mutate) in mutations.iter().enumerate() {
+            let mut mutated = record();
+            mutate(&mut mutated);
+            assert_ne!(
+                compute_hash(&mutated),
+                baseline,
+                "field {position} is outside the hash"
+            );
+        }
+    }
+
+    #[test]
+    fn the_hash_is_stable_across_recomputation() {
+        let record = record();
+        assert_eq!(compute_hash(&record), compute_hash(&record));
+        assert_eq!(compute_hash(&record).len(), HASH_HEX_LEN_BLAKE3);
+        assert!(is_well_formed_hash(&compute_hash(&record)));
+        // One spelling on disk, so identical content is byte-identical.
+        assert_eq!(compute_hash(&record), compute_hash(&record).to_lowercase());
+    }
+
+    #[test]
+    fn a_field_cannot_reach_across_a_separator() {
+        // The forgery this blocks: moving text from one field into the next so
+        // two different records serialise to the same bytes.
+        let mut shifted = record();
+        shifted.op = format!("copy{AUDIT_HASH_FIELD_SEPARATOR}success");
+        shifted.result = String::new();
+        assert_ne!(compute_hash(&shifted), compute_hash(&record()));
+        // And the separator itself is a character no legal field may contain.
+        assert!(AUDIT_HASH_FIELD_SEPARATOR.is_control());
+    }
+
+    #[test]
+    fn the_canonical_form_lists_every_field_once_in_a_frozen_order() {
+        let canonical = canonical(&record());
+        let fields: Vec<&str> = canonical.split(AUDIT_HASH_FIELD_SEPARATOR).collect();
+        assert_eq!(fields.len(), 10, "prev + 9 record fields");
+        // This order is documented in docs/AUDIT_LOG.md and is frozen: changing
+        // it invalidates every chain ever written.
+        assert_eq!(
+            fields,
+            vec![
+                AUDIT_CHAIN_GENESIS_PREV,
+                "0",
+                "2026-07-26T14:30:00Z",
+                "copy",
+                "success",
+                "photos/2024/a.jpg",
+                "1024",
+                &"aa".repeat(32),
+                &"bb".repeat(32),
+                "vault",
+            ]
+        );
+    }
+
+    #[test]
+    fn sealing_assigns_the_position_and_the_hash_the_caller_cannot_choose() {
+        let entry = Entry::at("copy", ExitCode::Success, Timestamp::parse("@0").unwrap())
+            .path("photos/a.jpg")
+            .size(7)
+            .remote("vault");
+
+        let sealed = seal(&entry, 4, &"ab".repeat(32));
+        assert_eq!(sealed.index, 4);
+        assert_eq!(sealed.prev, "ab".repeat(32));
+        assert_eq!(sealed.hash, compute_hash(&sealed));
+        // And the content the caller *did* supply is carried through untouched.
+        assert_eq!(sealed.op, "copy");
+        assert_eq!(sealed.result, ExitCode::Success.slug());
+        assert_eq!(sealed.time, "1970-01-01T00:00:00Z");
+        assert_eq!(sealed.path, "photos/a.jpg");
+        assert_eq!(sealed.size, 7);
+        assert_eq!(sealed.remote, "vault");
+    }
+
+    #[test]
+    fn a_sealed_run_of_entries_verifies_as_a_chain() {
+        // The round trip that matters: what the writer seals is what the reader
+        // accepts, checked against the same rule rather than a restatement.
+        let mut records = Vec::new();
+        let mut previous = AUDIT_CHAIN_GENESIS_PREV.to_string();
+        for index in 0..5 {
+            let entry = Entry::at("copy", ExitCode::Success, Timestamp::parse("@0").unwrap())
+                .path(&format!("photos/{index}.jpg"))
+                .size(index);
+            let sealed = seal(&entry, index, &previous);
+            previous.clone_from(&sealed.hash);
+            records.push(sealed);
+        }
+
+        let verified = verify(&records).unwrap();
+        assert_eq!(verified.records, 5);
+        assert_eq!(verified.head, records[4].hash);
     }
 
     #[test]
@@ -258,7 +501,7 @@ mod tests {
         // A genesis record that links elsewhere is a chain with its head cut off.
         let mut records = chain(3);
         records[0].prev = "cc".repeat(32);
-        records[0].hash = records[0].computed_hash();
+        records[0].hash = compute_hash(&records[0]);
 
         let broken = verify(&records).unwrap_err();
         assert_eq!(broken.position, 0);
@@ -286,7 +529,7 @@ mod tests {
         // "does each record hash to its content" check would miss entirely.
         let mut records = chain(6);
         records[2].path = "photos/forged.jpg".into();
-        records[2].hash = records[2].computed_hash();
+        records[2].hash = compute_hash(&records[2]);
 
         let broken = verify(&records).unwrap_err();
         assert_eq!(broken.position, 3, "the orphan is the evidence");
