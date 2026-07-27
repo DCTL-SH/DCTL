@@ -26,8 +26,8 @@
 #![allow(dead_code)]
 
 use crate::constants::{
-    INTEGRITY_FAILURE_HINT, INTEGRITY_NOT_SERVED_NOTICE, VERDICT_CORRUPT, VERDICT_MISSING,
-    VERDICT_OK, VERDICT_UNREADABLE,
+    INTEGRITY_FAILURE_HINT, INTEGRITY_NOT_SERVED_NOTICE, INTEGRITY_NOTHING_VERIFIED,
+    VERDICT_CORRUPT, VERDICT_MISSING, VERDICT_OK, VERDICT_UNREADABLE,
 };
 use crate::error::CliError;
 use crate::exit::ExitCode;
@@ -152,6 +152,32 @@ pub fn failure(worst: Verdict, failed: u64, examined: u64) -> Option<CliError> {
     };
 
     Some(CliError::new(worst.exit_code(), message).with_hint(hint_for(worst)))
+}
+
+/// The error that ends a run which examined nothing at all.
+///
+/// Not a failure — nothing broke, and the operator asked for a check of a place
+/// with nothing in it — but not a pass either.
+/// [`ExitCode::NoFilesTransferred`] (9) is already published as "succeeded, but
+/// the run did no work", which is exactly the claim: this run proved nothing.
+///
+/// It lives here because `verify` and `scrub` must not answer the question
+/// differently. They did: a `scrub` over a mistyped prefix exited 9 and said so,
+/// while a `verify` over the same prefix exited 0 and — at the default verbosity
+/// — printed nothing on either stream, because its notice was an
+/// [`Out::info`](crate::output::Out::info). A cron entry calling the second could
+/// verify nothing every night and stay green for years, and the first anybody
+/// would hear of it is a restore.
+///
+/// `cause` is the verb's own: which of the several routes to zero coverage this
+/// run took decides what the operator should do next, and only the verb knows.
+#[must_use]
+pub fn nothing_examined(cause: &str, hint: &'static str) -> CliError {
+    CliError::new(
+        ExitCode::NoFilesTransferred,
+        format!("{INTEGRITY_NOTHING_VERIFIED}: {cause}"),
+    )
+    .with_hint(hint)
 }
 
 /// The error for a single object that failed authentication.

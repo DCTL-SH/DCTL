@@ -99,7 +99,15 @@ impl Scan {
 pub fn walk(root: &Path, selection: &Selection, follow_links: bool) -> Scan {
     let mut scan = Scan::default();
 
-    match std::fs::symlink_metadata(root) {
+    // `metadata` rather than `symlink_metadata`: the root is the one path the
+    // operator typed, and resolving it is a different question from whether a
+    // link *found during the walk* is followed — `--follow-symlinks` still
+    // decides that one, below. A link named as the root used to fall past the
+    // single-file arm into the directory walk and fail with `Not a directory`,
+    // backing nothing up. See
+    // [`crate::commands::transfer::listing`], where the same conflation lost data
+    // rather than merely reporting a problem.
+    match std::fs::metadata(root) {
         Err(error) => {
             scan.problems.push(Problem {
                 path: root.display().to_string(),
@@ -358,6 +366,42 @@ mod tests {
         let scan = walk(&dir.path().join("a.txt"), &selection(&[]), false);
         assert_eq!(paths(&scan), vec!["a.txt"]);
         assert_eq!(scan.total_bytes(), 4);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_single_file_root_reached_through_a_symlink_scans_as_that_file() {
+        // `dctl backup /var/log/current vault:` where `current` is a link to
+        // today's file. The root is the path the operator typed, so it is
+        // resolved; links *found during the walk* still obey `--follow-symlinks`.
+        // Before this, `symlink_metadata` said "not a file", the scan tried to
+        // read it as a directory, and the run reported `Not a directory` with
+        // nothing backed up.
+        let dir = tree();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(dir.path().join("a.txt"), &link).unwrap();
+
+        let scan = walk(&link, &Selection::default(), false);
+        assert!(scan.problems.is_empty(), "{:?}", scan.problems);
+        assert_eq!(paths(&scan), ["link.txt"]);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_directory_root_reached_through_a_symlink_scans_the_tree_beneath_it() {
+        // Already true, and asserted so that resolving the root above cannot be
+        // undone by a later change that treats both walkers' roots alike.
+        let dir = tree();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link = elsewhere.path().join("link-to-tree");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+
+        let scan = walk(&link, &Selection::default(), false);
+        assert!(scan.problems.is_empty(), "{:?}", scan.problems);
+        assert_eq!(
+            paths(&scan),
+            ["a.txt", "b.txt", "nested/c.txt", "nested/deep/d.txt"]
+        );
     }
 
     #[test]

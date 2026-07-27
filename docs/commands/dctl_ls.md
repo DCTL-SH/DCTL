@@ -97,16 +97,22 @@ a wrong password is exit **22**, an unreadable index is **23**, an unknown remot
 is **7**. A script that branched on an empty listing could go on to prune a
 backup it believed had been superseded.
 
-**Where that does not yet hold: a local path that does not exist.** `dctl ls
-./nope` prints nothing and exits **0**, with only a `-v` note on stderr; so do
-`lsl`, `lsjson`, `lsd`, `tree` and `size` over the same target. Exit **3**
-(`dir_not_found`) is the code for it, and the removal family already uses it —
-`dctl purge vault:absent` exits 3 — but the listing family does not consult the
-filesystem before reporting an empty result. Until it does, **do not branch on an
-empty local listing**; the empty answer and the mistyped-path answer are the same
-answer. A vault prefix that holds nothing is genuinely empty and exit 0 is
-correct there, which is why the two cases have to be separated rather than made
-uniform.
+**That now holds for a local path too.** `dctl ls ./nope` exits **3**
+(`dir_not_found`) and says the path does not exist; so do `lsl`, `lsjson`, `lsd`,
+`tree` and `size` over the same target. It used to print nothing and exit **0**,
+with only a `-v` note on stderr — the same answer as an empty directory, and
+indistinguishable from "the backups are gone" on a machine where the volume
+simply was not mounted. A local path that is a *file* rather than a directory is
+a usage error (**1**) naming it, instead of the walk's raw
+`io error: Not a directory (os error 20)` at exit 2.
+
+A vault prefix that holds nothing is a different case and still exits **0**: in a
+vault a path exists exactly while an object is stored under it — the same stance
+`dctl mkdir` and `dctl rmdir` take — so an empty listing there is a real answer
+rather than an unread one. That is why the check applies only to local targets.
+
+The existence check resolves symbolic links, so `dctl ls /data` where
+`/data -> /mnt/disk/data` lists the tree it points at.
 
 When a listing legitimately comes back empty, `ls` says so on stderr — and
 distinguishes the two reasons, because "the directory is empty" sends a user
@@ -213,9 +219,9 @@ dctl ls C:\Users\mx\Pictures
   3.40 MiB holiday/IMG_0002.JPG
 ```
 
-On a machine where that path does not exist the listing is empty and the exit
-code is **0**, not 3 — see *Ordering, memory and what is actually shown* before
-you let a script read anything into an empty local listing.
+On a machine where that path does not exist the run exits **3**
+(`dir_not_found`) and prints nothing on stdout, so a script cannot read a missing
+volume as an empty one.
 
 A rule file shapes the listing, in file order. It is read by the same engine
 `dctl copy` uses, so the objects `ls` shows are the objects the transfer that
@@ -263,8 +269,9 @@ all). See [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | The listing was printed, including when it was legitimately empty — **and, for now, also when a local path does not exist**; see *Ordering, memory and what is actually shown*. |
-| 1 | `usage` | No path and no `--remote`; a remote name shorter than two characters or containing an illegal character; a `..` component; a malformed `--include`/`--exclude` pattern or `--min-size`/`--max-size` value; an unknown flag or a second positional. |
+| 0 | `success` | The listing was printed, including when it was legitimately empty — an empty *vault* prefix is a real answer. |
+| 1 | `usage` | No path and no `--remote`; a remote name shorter than two characters or containing an illegal character; a `..` component; a malformed `--include`/`--exclude` pattern or `--min-size`/`--max-size` value; an unknown flag or a second positional; a local path that exists and is not a directory. |
+| 3 | `dir_not_found` | A local path that does not exist. Nothing was read, so this is never reported as an empty tree. |
 | 2 | `uncategorised` | A stdout write failed for a reason other than a broken pipe (a full disk on a redirected listing). A broken pipe — `\| head` — is success. |
 | 5 | `temporary_error` | The provider could not be reached and the retry budget was exhausted. |
 | 7 | `fatal_error` | The remote name is not configured and is not a known provider (`unknown remote 'x'`). |
@@ -274,9 +281,7 @@ all). See [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
 
 All of these are reachable. A usage error is reported before anything else is
 attempted, so a typo in a pattern is diagnosed as a typo rather than as a failure
-to reach the vault. Exit **3** is the one code in the contract this command does
-not yet produce, and *Ordering, memory and what is actually shown* says where it
-is missing.
+to reach the vault.
 
 See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 

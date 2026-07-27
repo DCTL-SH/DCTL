@@ -175,6 +175,7 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     // still not be treated as permission to claim the work was done, which is
     // why there is no dry-run branch here at all: the command simply runs.
     let mut report = Report::new(target.to_string(), mode::slug(performed));
+    report.filters_restricted(filter.is_restricting());
     engine::verify(
         ctx,
         source.as_ref(),
@@ -185,30 +186,8 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     )
     .await?;
 
-    if report.summary.examined == 0 {
-        empty_notice(ctx, &target, &filter);
-    }
-
     report.emit(&ctx.out)?;
     report.outcome().map_or(Ok(()), Err)
-}
-
-/// Say on stderr why nothing was examined.
-///
-/// "Nothing is there" and "nothing survived your filters" both produce a run
-/// that verified zero objects and exited zero, and they call for completely
-/// different actions — so a `verify` that could not tell them apart would be an
-/// integrity command that reports a clean bill of health for a target it never
-/// looked at.
-fn empty_notice(ctx: &Ctx, target: &Target, filter: &Filter) {
-    if filter.is_restricting() {
-        ctx.out.info(format!(
-            "no objects under '{target}' matched the active filters, so nothing was verified"
-        ));
-    } else {
-        ctx.out
-            .info(format!("no objects under '{target}' to verify"));
-    }
 }
 
 #[cfg(test)]
@@ -355,6 +334,56 @@ mod tests {
                 .await
                 .expect("the format must not change the outcome");
         }
+    }
+
+    #[tokio::test]
+    async fn a_target_holding_nothing_does_not_report_a_clean_bill_of_health() {
+        // `dctl verify archive:` over a real dataset and `dctl verify
+        // archive:typo` over nothing were the same silent exit zero — and at the
+        // default verbosity the second printed *nothing at all* on either stream,
+        // because the notice explaining it was an `info`. A cron entry could
+        // verify nothing every night and stay green for years. `dctl scrub`
+        // already exits 9 for exactly this; the two integrity verbs must not
+        // disagree about what "nothing was read" means.
+        let (_dir, config) = plain_remote(&[("kept.txt", b"payload")]);
+        let (ctx, args) = parse(&["verify", "store:nowhere", "--config", &config]);
+
+        let error = run(&ctx, &args)
+            .await
+            .expect_err("verifying nothing is not a pass");
+        assert_eq!(error.code(), ExitCode::NoFilesTransferred);
+        assert_eq!(error.code().as_i32(), 9);
+        assert!(
+            error.message().contains("nothing was verified"),
+            "the message must say no verification happened: {}",
+            error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn filters_that_admit_nothing_are_named_rather_than_read_as_success() {
+        // The same exit code, a different next action: the prefix is fine and the
+        // operator's own `--include` is what emptied the run. Reporting one cause
+        // for both would send somebody hunting a missing dataset that is there.
+        let (_dir, config) = plain_remote(&[("kept.txt", b"payload")]);
+        let (ctx, args) = parse(&[
+            "verify",
+            "store:",
+            "--config",
+            &config,
+            "--include",
+            "*.nothing",
+        ]);
+
+        let error = run(&ctx, &args)
+            .await
+            .expect_err("filters that admit nothing verify nothing");
+        assert_eq!(error.code(), ExitCode::NoFilesTransferred);
+        assert!(
+            error.message().contains("filter"),
+            "the cause must name the filters: {}",
+            error.message()
+        );
     }
 
     #[tokio::test]

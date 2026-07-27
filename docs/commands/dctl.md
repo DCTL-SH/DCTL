@@ -548,8 +548,8 @@ Codes 0–10 mirror rclone's taxonomy so existing automation ports across. Codes
 | 6 | `partial_failure` | Some files failed to transfer. |
 | 7 | `fatal_error` | Fatal error; cannot continue. |
 | 8 | `transfer_limit_exceeded` | `--max-transfer` limit reached. |
-| 9 | `no_files_transferred` | Succeeded, but the run did no work. `dctl scrub` returns it when the run read no object at all. |
-| 10 | `duration_limit_exceeded` | `--max-duration` limit reached. |
+| 9 | `no_files_transferred` | Succeeded, but the run did no work. `dctl scrub` and `dctl verify` return it when the run read no object at all, and `dctl restore` when it wrote no file. No transfer verb returns it. |
+| 10 | `duration_limit_exceeded` | Reserved. `--max-duration` is not a flag in this build, so nothing produces this code yet — see [../EXIT_CODES.md](../EXIT_CODES.md). |
 | 20 | `checksum_mismatch` | Verified write refused: checksum mismatch. Nothing was committed. |
 | 21 | `integrity_failure` | AEAD authentication failed on read. The data was **not** served. |
 | 22 | `vault_locked` | Vault locked: wrong password or corrupt envelope. |

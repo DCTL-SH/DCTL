@@ -149,16 +149,77 @@ impl Report {
             CliError::new(
                 ExitCode::PartialFailure,
                 format!(
-                    "{differences} of {} paths differ between '{}' and '{}'",
-                    self.summary.checked, self.source, self.dest
+                    "{differences} of {} paths {} between '{}' and '{}'",
+                    self.summary.checked,
+                    self.finding_verb(),
+                    self.source,
+                    self.dest
                 ),
             )
-            .with_hint(
-                "Nothing was transferred: `check` only compares. Re-run with \
-                 --missing-on-dst FILE to capture a list you can feed to \
-                 `dctl copy --files-from`.",
-            ),
+            .with_hint(self.remedy()),
         )
+    }
+
+    /// How to describe the findings, given what they actually are.
+    ///
+    /// The report used to say "differ" for all four kinds, and contradicted its
+    /// own JSON doing it: a `check` against a vault whose index had been rebuilt
+    /// — no sizes, no modification times, so the default comparison cannot be
+    /// made on either field — announced "4 of 4 paths differ" directly above a
+    /// summary reading `"differ": 0, "errors": 4`, for two trees that
+    /// `--checksum` confirmed were byte-identical a second later. Naming the
+    /// wrong finding is not a wording problem: it is what decides whether the
+    /// reader goes looking for damage or for a missing measurement.
+    ///
+    /// "differ" survives as the wording for the case where everything really did
+    /// differ, because that is the common case and it reads best.
+    fn finding_verb(&self) -> String {
+        let summary = &self.summary;
+        let mut kinds: Vec<&'static str> = Vec::new();
+        if summary.differ > 0 {
+            kinds.push("differ");
+        }
+        if summary.missing_on_dst > 0 {
+            kinds.push("are missing at the destination");
+        }
+        if summary.missing_on_src > 0 {
+            kinds.push("are missing at the source");
+        }
+        if summary.errors > 0 {
+            kinds.push("could not be compared");
+        }
+        match kinds.len() {
+            0 | 1 => kinds.first().unwrap_or(&"differ").to_string(),
+            _ => format!("did not match: {}", kinds.join(", ")),
+        }
+    }
+
+    /// The remedy that fits what was found.
+    ///
+    /// `--missing-on-dst` captures a list to feed `dctl copy --files-from`, which
+    /// is exactly right for a file the destination does not have and useless for
+    /// one that could not be compared. It was given for both, so the one finding
+    /// with a real remedy — a comparison the two sides do not carry the fields
+    /// for — was answered with advice that does nothing.
+    fn remedy(&self) -> String {
+        let mut remedy = "Nothing was transferred: `check` only compares.".to_string();
+        if self.summary.missing_on_dst > 0 {
+            remedy.push_str(
+                " Re-run with --missing-on-dst FILE to capture a list you can \
+                 feed to `dctl copy --files-from`.",
+            );
+        }
+        if self.summary.errors > 0 {
+            remedy.push_str(
+                " A path that could not be compared is one where at least one \
+                 side does not carry the fields this comparison needs — most \
+                 often a vault whose index was rebuilt, which records no size \
+                 and no modification time. `--checksum` compares content hashes, \
+                 which both sides do have, and answers the question this run \
+                 could not.",
+            );
+        }
+        remedy
     }
 
     /// What a clean run says for itself, on stderr.
@@ -338,6 +399,74 @@ mod tests {
         assert_ne!(error.code(), ExitCode::IntegrityFailure);
         assert!(error.message().contains("4 of 5"));
         assert!(error.hint().is_some());
+    }
+
+    #[test]
+    fn a_finding_that_is_not_a_difference_is_not_called_one() {
+        // The report contradicted itself. Against a vault whose index had been
+        // rebuilt — no sizes, no modification times, so the default comparison
+        // cannot be made — every path came back `error` and the run announced
+        // "4 of 4 paths differ", with `"differ": 0` in its own JSON one line
+        // above. The two trees were byte-identical, which `--checksum` confirmed
+        // immediately. Naming the wrong finding sends the reader to the wrong fix.
+        let mut report = Report::new("./src", "archive:", Comparison::SizeAndModTime, false);
+        for path in ["a", "b"] {
+            report.push(Record::new(path, Difference::Error));
+        }
+
+        let error = report.outcome().expect("findings must be reported");
+        assert_eq!(error.code(), ExitCode::PartialFailure);
+        assert!(
+            !error.message().contains("differ"),
+            "nothing differed: {}",
+            error.message()
+        );
+        assert!(
+            error.message().contains("could not be compared"),
+            "the message must name what actually happened: {}",
+            error.message()
+        );
+    }
+
+    #[test]
+    fn a_hint_names_only_the_remedy_that_fits_what_was_found() {
+        // `--missing-on-dst` captures a list to feed `dctl copy --files-from`,
+        // which is the right advice for a file the destination does not have and
+        // useless for one that could not be compared. The hint gave it for both.
+        let mut incomparable = Report::new("./src", "archive:", Comparison::SizeAndModTime, false);
+        incomparable.push(Record::new("a", Difference::Error));
+        let hint = incomparable
+            .outcome()
+            .and_then(|error| error.hint().map(str::to_string))
+            .expect("a finding carries a hint");
+        assert!(
+            !hint.contains("--missing-on-dst"),
+            "nothing is missing: {hint}"
+        );
+        assert!(hint.contains("--checksum"), "{hint}");
+
+        let mut missing = Report::new("./src", "archive:", Comparison::SizeAndModTime, false);
+        missing.push(Record::new("a", Difference::MissingOnDst));
+        let hint = missing
+            .outcome()
+            .and_then(|error| error.hint().map(str::to_string))
+            .expect("a finding carries a hint");
+        assert!(hint.contains("--missing-on-dst"), "{hint}");
+    }
+
+    #[test]
+    fn a_run_where_everything_really_did_differ_still_says_differ() {
+        // The wording is chosen from the tally, so the plain case must not have
+        // been lost to the general one.
+        let mut report = Report::new("./src", "./dst", Comparison::Checksum, false);
+        report.push(Record::new("a", Difference::Differ));
+        report.push(Record::new("b", Difference::Match));
+        let error = report.outcome().expect("a difference is a finding");
+        assert!(
+            error.message().contains("1 of 2 paths differ"),
+            "{}",
+            error.message()
+        );
     }
 
     #[test]

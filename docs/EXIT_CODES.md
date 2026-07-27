@@ -451,13 +451,28 @@ defined and reserved but not yet produced: `--max-transfer` is parsed but not
 enforced, and `--max-duration` is not yet a flag. They are listed here because
 the numbers are already committed to and will not be reused for anything else.
 
-Code 9 (`no_files_transferred`) **is** produced today, by
-[`dctl scrub`](commands/dctl_scrub.md): a run that read no object at all reports
-grade `unverified` and exits 9 rather than 0. Nothing failed — the prefix matched
-nothing, or the dataset is empty, or the filters or `--sample-percent` admitted
-nothing — but nothing was proved either, and a scheduled scrub that stays green
-while verifying nothing is the failure that discipline exists to prevent. No
-transfer verb produces it yet.
+Code 9 (`no_files_transferred`) **is** produced today, by the three commands
+whose entire product is a claim that data is there:
+
+* [`dctl scrub`](commands/dctl_scrub.md) — a run that read no object at all
+  reports grade `unverified` and exits 9 rather than 0.
+* [`dctl verify`](commands/dctl_verify.md) — a run that examined no object exits
+  9 and says `nothing was verified: <cause>`.
+* [`dctl restore`](commands/dctl_restore.md) — a run that wrote no file exits 9
+  and says `nothing was restored: <cause>`, on a real run and on a `--dry-run`
+  alike.
+
+Nothing failed in any of them — the prefix matched nothing, or the dataset is
+empty, or the filters admitted nothing — but nothing was proved either, and a
+scheduled check that stays green while verifying nothing is the failure that
+discipline exists to prevent. `verify` used to exit **0** for this and, at the
+default verbosity, print nothing on either stream; `restore` used to exit **0**
+with a warning. Both are now the same answer `scrub` has always given.
+
+**No transfer verb produces it**, and that is deliberate rather than unfinished.
+`dctl copy`, `dctl backup` and `dctl sync` over a source that legitimately holds
+no files are correct no-ops that a schedule runs every day, and turning a quiet
+Sunday into a non-zero exit would train operators to ignore the code.
 
 Individual commands document which codes they can actually return today — see the
 **Exit codes** section of each page under [commands/](commands/).

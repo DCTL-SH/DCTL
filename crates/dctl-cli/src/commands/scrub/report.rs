@@ -21,7 +21,7 @@ use serde::Serialize;
 use crate::commands::integrity::failure::{self, Verdict};
 use crate::constants::{
     HEALTH_DAMAGED, HEALTH_DEGRADED, HEALTH_HEALTHY, HEALTH_UNVERIFIED, INTEGRITY_COLUMN_PATH,
-    INTEGRITY_COLUMN_SIZE, INTEGRITY_COLUMN_STATUS, SCRUB_NOTHING_VERIFIED,
+    INTEGRITY_COLUMN_SIZE, INTEGRITY_COLUMN_STATUS, INTEGRITY_NOTHING_VERIFIED,
     SCRUB_NOTHING_VERIFIED_HINT,
 };
 use crate::error::{CliError, Result};
@@ -321,16 +321,10 @@ impl Report {
         }
 
         if self.coverage.scanned == 0 {
-            return Some(
-                CliError::new(
-                    ExitCode::NoFilesTransferred,
-                    format!(
-                        "{SCRUB_NOTHING_VERIFIED}: {}",
-                        self.nothing_verified_cause()
-                    ),
-                )
-                .with_hint(SCRUB_NOTHING_VERIFIED_HINT),
-            );
+            return Some(failure::nothing_examined(
+                &self.nothing_verified_cause(),
+                SCRUB_NOTHING_VERIFIED_HINT,
+            ));
         }
 
         None
@@ -379,7 +373,7 @@ impl Report {
             // "0 objects, 0 B, healthy" is the sentence this whole change exists
             // to delete.
             return format!(
-                "{}: {SCRUB_NOTHING_VERIFIED} — {}",
+                "{}: {INTEGRITY_NOTHING_VERIFIED} — {}",
                 self.health,
                 self.nothing_verified_cause()
             );
@@ -691,7 +685,7 @@ mod tests {
             .expect("a run that verified nothing must not exit zero");
         assert_eq!(error.code(), ExitCode::NoFilesTransferred);
         assert_eq!(error.code().as_i32(), 9);
-        assert!(error.message().contains(SCRUB_NOTHING_VERIFIED));
+        assert!(error.message().contains(INTEGRITY_NOTHING_VERIFIED));
         // And it names the target, so the operator can see it was the prefix.
         assert!(
             error.message().contains("vault:typo"),

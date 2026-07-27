@@ -372,6 +372,97 @@ fn copy_leaves_destination_only_files_where_sync_would_delete_them() {
     );
 }
 
+#[test]
+#[cfg(unix)]
+fn a_source_root_reached_through_a_symlink_is_walked_rather_than_skipped() {
+    // `/data -> /mnt/disk/data` is an ordinary layout, and the root is the one
+    // path the operator typed. It used to list as an empty tree, because the
+    // never-follow-symlinks rule — which exists to stop a walk wandering out of
+    // the tree it was given — was applied to the walk's starting point as well.
+    //
+    // The result was a silent no-op: `copy` stored nothing and printed
+    // `Files: 0 / 0  Errors: 0` with exit 0. `dctl ls`, `dctl size`, `dctl tree`
+    // and `dctl check` all followed the same link, so the tree the operator was
+    // shown was not the tree the transfer walked.
+    let sandbox = Sandbox::new();
+    sandbox.write("real/a.txt", b"through a link");
+    sandbox.write("real/nested/b.txt", b"and a nested one");
+    std::os::unix::fs::symlink(sandbox.path("real"), sandbox.path("link"))
+        .expect("create the symlink to the source tree");
+
+    sandbox
+        .dctl()
+        .arg("copy")
+        .arg(sandbox.path("link"))
+        .arg(sandbox.path("dst"))
+        .assert()
+        .success();
+
+    assert_eq!(sandbox.read("dst/a.txt"), b"through a link");
+    assert_eq!(sandbox.read("dst/nested/b.txt"), b"and a nested one");
+}
+
+#[test]
+#[cfg(unix)]
+fn a_symlink_inside_the_tree_is_still_never_followed() {
+    // The other half of the rule, asserted beside it so that following the root
+    // cannot be mistaken for permission to follow links found during the walk.
+    // A link to an ancestor would loop forever, and a link out of the tree would
+    // copy data the user never named.
+    let sandbox = Sandbox::new();
+    sandbox.write("real/a.txt", b"named by the walk");
+    sandbox.write("outside/secret.txt", b"never named by the user");
+    std::os::unix::fs::symlink(sandbox.path("outside"), sandbox.path("real/escape"))
+        .expect("create the outward symlink");
+
+    sandbox
+        .dctl()
+        .arg("copy")
+        .arg(sandbox.path("real"))
+        .arg(sandbox.path("dst"))
+        .assert()
+        .success();
+
+    assert_eq!(sandbox.read("dst/a.txt"), b"named by the walk");
+    assert!(
+        !sandbox.exists("dst/escape"),
+        "a link found during the walk must not carry data from outside the tree"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn sync_from_a_symlinked_source_root_does_not_empty_the_destination() {
+    // The data-loss shape of the same defect, and the reason it is pinned end to
+    // end rather than only in the walker's unit tests. A source root that listed
+    // as empty made `sync --force` delete every file at the destination and exit
+    // 0 with `Errors: 0` — `--force` being exactly how an unattended backup runs,
+    // and the empty-source guard being the only thing between the two.
+    let sandbox = Sandbox::new();
+    sandbox.write("real/keep.txt", b"still here");
+    sandbox.write("real/also.txt", b"also still here");
+    sandbox.write("dst/keep.txt", b"still here");
+    sandbox.write("dst/also.txt", b"also still here");
+    std::os::unix::fs::symlink(sandbox.path("real"), sandbox.path("link"))
+        .expect("create the symlink to the source tree");
+
+    sandbox
+        .dctl()
+        .arg("sync")
+        .arg("--force")
+        .arg(sandbox.path("link"))
+        .arg(sandbox.path("dst"))
+        .assert()
+        .success();
+
+    assert_eq!(
+        sandbox.read("dst/keep.txt"),
+        b"still here",
+        "a readable source must never be read as permission to empty the destination"
+    );
+    assert_eq!(sandbox.read("dst/also.txt"), b"also still here");
+}
+
 // ── 4. init ───────────────────────────────────────────────────────────────────
 
 #[test]

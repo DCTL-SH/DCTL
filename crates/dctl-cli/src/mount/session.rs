@@ -69,6 +69,36 @@ use crate::source::Source;
 use super::config::MountConfig;
 use super::fs::VaultFs;
 
+/// What [`Mounted`] needs from the thing that detaches a filesystem.
+///
+/// A trait with exactly one implementation in production, and it exists for one
+/// reason: `fuser::SessionUnmounter` can only be obtained from a live
+/// `fuser::Session`, so with it named directly in the struct there was no way to
+/// build a [`Mounted`] in a test, and therefore no way to assert what
+/// [`Mounted::run`] *does with* the detach it performs.
+///
+/// That gap was real. The whole of `cc05f90` — "earn the word unmounted instead
+/// of assuming it" — is [`Mounted::run`] consulting
+/// [`Mounted::confirm_detached`] before it reports anything, and deleting that
+/// one call restored the original defect with the entire test suite still green:
+/// the nine tests in [`super::detached`] pin the *predicate*, and nothing pinned
+/// the *call*. A regression test that a one-line deletion walks straight past is
+/// not a regression test.
+pub trait Detacher: Send {
+    /// Detach the filesystem. Returning `Ok` means a detach was *requested*, not
+    /// that the mountpoint is free — which is precisely why the caller checks.
+    ///
+    /// # Errors
+    /// Whatever the platform's unmount path reported.
+    fn unmount(&mut self) -> io::Result<()>;
+}
+
+impl Detacher for SessionUnmounter {
+    fn unmount(&mut self) -> io::Result<()> {
+        Self::unmount(self)
+    }
+}
+
 /// A filesystem currently attached to a mountpoint.
 ///
 /// Holding one of these means a mount exists. Dropping one detaches it — which
@@ -80,9 +110,10 @@ pub struct Mounted {
     /// [`Option`] because [`Mounted::run`] takes it to join, and `Drop` must
     /// still be able to tell whether there is anything left to wait for.
     session: Option<JoinHandle<io::Result<()>>>,
-    /// Detaches the filesystem. Cloneable across threads by design, so the
-    /// signal path and `Drop` can both reach it.
-    unmounter: SessionUnmounter,
+    /// Detaches the filesystem. Boxed rather than named concretely so that
+    /// [`Mounted::run`]'s decision can be exercised without a kernel — see
+    /// [`Detacher`].
+    unmounter: Box<dyn Detacher>,
     mountpoint: PathBuf,
     /// The device the mountpoint reported *before* the filesystem was attached.
     ///
@@ -144,7 +175,7 @@ pub fn mount(
     match thread {
         Ok(session) => Ok(Mounted {
             session: Some(session),
-            unmounter,
+            unmounter: Box::new(unmounter),
             mountpoint: mountpoint.to_path_buf(),
             bare_device,
             detached: false,
@@ -687,6 +718,74 @@ mod tests {
         assert_eq!(error.code(), ExitCode::FatalError);
         assert!(error.message().contains("/mnt/vault"));
         assert!(error.hint().is_some());
+    }
+
+    /// A detacher that does nothing, for a `Mounted` with no filesystem behind
+    /// it. The session field is `None` in these tests, so there is nothing to
+    /// detach and nothing for this to do — its whole purpose is to let a
+    /// [`Mounted`] exist off a kernel.
+    struct NoDetach;
+
+    impl Detacher for NoDetach {
+        fn unmount(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A `Mounted` over a real directory, with no filesystem attached, that
+    /// believes the mountpoint's bare device is `bare`.
+    ///
+    /// `session: None` makes `wait_for_session` return immediately, so `run`
+    /// reaches its decision without a thread — and the decision is the whole
+    /// subject of these two tests.
+    fn unattached(mountpoint: &Path, bare: Option<u64>) -> Mounted {
+        Mounted {
+            session: None,
+            unmounter: Box::new(NoDetach),
+            mountpoint: mountpoint.to_path_buf(),
+            bare_device: bare,
+            detached: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_session_that_ended_over_a_mountpoint_that_never_came_free_is_refused() {
+        // The regression `cc05f90` fixed, asserted at the level it happened:
+        // `unmount` answers "a detach was requested", so `run` must check the
+        // mountpoint before it says the word. Told that the bare device is some
+        // other number, `run` can only conclude the mountpoint is still carrying
+        // a filesystem — and must refuse rather than print `unmounted`.
+        //
+        // Deleting the `confirm_detached` call from `run` makes this pass a
+        // success where a refusal is owed, which the predicate's own tests in
+        // `super::detached` cannot see.
+        let dir = tempfile::tempdir().unwrap();
+        let real = super::super::detached::device_of(dir.path()).unwrap();
+
+        let error = unattached(dir.path(), Some(real.wrapping_add(1)))
+            .run()
+            .await
+            .expect_err("a mountpoint that is still attached is not an unmount");
+        assert_eq!(error.code(), ExitCode::Uncategorised);
+        assert!(
+            error.message().contains("still attached"),
+            "the message must say what is wrong: {}",
+            error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_session_that_ended_over_a_mountpoint_that_came_free_succeeds() {
+        // The other half, so the refusal above cannot be satisfied by refusing
+        // everything: measured against its own device, the mountpoint is free and
+        // the run ends cleanly.
+        let dir = tempfile::tempdir().unwrap();
+        let real = super::super::detached::device_of(dir.path()).unwrap();
+
+        unattached(dir.path(), Some(real))
+            .run()
+            .await
+            .expect("a mountpoint back on its own device is unmounted");
     }
 
     #[test]

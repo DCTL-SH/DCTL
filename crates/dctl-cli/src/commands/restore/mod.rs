@@ -60,6 +60,7 @@ use clap::Args;
 use crate::constants::{
     PLAN_ACTION_OVERWRITE, PLAN_ACTION_RESTORE, PLAN_ACTION_SKIP, PLAN_REASON_EXISTS,
     POINT_IN_TIME_FEATURE, POINT_IN_TIME_HINT, PREFLIGHT_SEVERITY_BLOCKING, REMOTE_SEPARATOR,
+    RESTORE_NOTHING_RESTORED, RESTORE_NOTHING_RESTORED_HINT,
 };
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
@@ -165,16 +166,11 @@ pub async fn run(ctx: &Ctx, args: &RestoreArgs) -> Result<()> {
     let findings = preflight::inspect(&paths, Some(&args.destination), Audience::ThisPlatform);
 
     let plan = build_plan(&target, &candidates, &findings);
-    if plan.is_empty() {
-        // Said out loud: "no output and exit 0" reads as success, and a restore
-        // that wrote nothing is exactly the case worth noticing. The two reasons
-        // are worded differently because they have different fixes.
-        ctx.out.warn(if selection.is_restricting() {
-            format!("nothing to restore under {target}: every path was excluded by the filters")
-        } else {
-            format!("nothing to restore under {target}")
-        });
-    }
+    // An empty plan ends the run below, after the report has been emitted, so a
+    // `--json` consumer still receives the document that says `"files": 0`.
+    let nothing_to_restore = plan
+        .is_empty()
+        .then(|| nothing_restored(&target, &selection));
     warn_about_unmeasured(ctx, &candidates);
 
     ctx.stats.set_total_files(plan.len() as u64);
@@ -223,6 +219,17 @@ pub async fn run(ctx: &Ctx, args: &RestoreArgs) -> Result<()> {
         ));
     }
 
+    // After the report, so the document and the plan table are both emitted, and
+    // before the overwrite gate, which has nothing to gate.
+    //
+    // A dry run lands here too. A rehearsal that reports success for a restore
+    // which would write nothing is the same misreport as the real run making the
+    // claim, one step earlier — and `--dry-run` is exactly how a runbook step is
+    // checked before it is trusted.
+    if let Some(error) = nothing_to_restore {
+        return Err(error);
+    }
+
     gate_overwrites(ctx, args, plan.count(PLAN_ACTION_OVERWRITE))?;
 
     if ctx.is_dry_run() {
@@ -230,6 +237,38 @@ pub async fn run(ctx: &Ctx, args: &RestoreArgs) -> Result<()> {
     }
 
     write_everything(ctx, &archive, &candidates, &findings).await
+}
+
+/// The error that ends a restore which wrote no file.
+///
+/// Not a failure — nothing broke — but not a success either, and
+/// [`ExitCode::NoFilesTransferred`] (9) is already published as "succeeded, but
+/// the run did no work". `dctl scrub` and `dctl verify` end a run that covered
+/// nothing the same way, through
+/// [`integrity::failure::nothing_examined`](crate::commands::integrity::failure::nothing_examined);
+/// this is the write-side spelling of the same rule, and it is separate only
+/// because "verified" is the wrong word for a restore.
+///
+/// The two causes are worded differently because they have different fixes: a
+/// prefix that matches nothing is a typo or a backup that never ran, and filters
+/// that admit nothing are the operator's own command line.
+///
+/// The transfer verbs deliberately do **not** do this. `dctl copy`, `dctl backup`
+/// and `dctl sync` over a source that legitimately holds no files are correct
+/// no-ops that a schedule runs every day, and turning a quiet Sunday into a
+/// non-zero exit would train operators to ignore the code. The rule is about the
+/// verbs whose entire product is a claim that data is there.
+fn nothing_restored(target: &Target, selection: &Selection) -> CliError {
+    let cause = if selection.is_restricting() {
+        format!("every path under '{target}' was excluded by the filters")
+    } else {
+        format!("no object was listed under '{target}'")
+    };
+    CliError::new(
+        ExitCode::NoFilesTransferred,
+        format!("{RESTORE_NOTHING_RESTORED}: {cause}"),
+    )
+    .with_hint(RESTORE_NOTHING_RESTORED_HINT)
 }
 
 /// Everything under the named tree that survives the filters.
@@ -914,6 +953,131 @@ mod tests {
             restored["2024/a.jpg"],
             std::fs::read(source.path().join("photos/2024/a.jpg")).unwrap()
         );
+    }
+
+    #[tokio::test]
+    async fn a_restore_that_wrote_nothing_does_not_exit_zero() {
+        // The disaster-recovery verb, on the day it matters: `dctl restore
+        // archive:typo /out` created nothing, warned on stderr, and exited 0 —
+        // so a scripted drill, a runbook step and a monitor all read it as a
+        // successful restore. `dctl scrub` and `dctl verify` already answer this
+        // with exit 9, "succeeded, but the run did no work"; a restore of nothing
+        // is the same claim and must not be the only one of the three that is
+        // silent about it.
+        let vault = Vaulted::new().await;
+        let source = source_tree();
+        let out = tempfile::tempdir().unwrap();
+
+        backup::run(
+            &vault.ctx(&[]),
+            &BackupArgs {
+                source: source.path().to_path_buf(),
+                destination: "archive:".into(),
+                snapshot: false,
+                snapshot_name: None,
+                follow_symlinks: false,
+                strict_names: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let ctx = vault.ctx(&[]);
+        let error = run(
+            &ctx,
+            &RestoreArgs {
+                source: "archive:nowhere".into(),
+                destination: out.path().to_path_buf(),
+                snapshot: None,
+                at: None,
+                skip_unwritable: false,
+                overwrite: false,
+            },
+        )
+        .await
+        .expect_err("restoring nothing is not a successful restore");
+
+        assert_eq!(error.code(), ExitCode::NoFilesTransferred);
+        assert_eq!(error.code().as_i32(), 9);
+        assert!(
+            error.message().contains("nothing was restored"),
+            "the message must say no file was written: {}",
+            error.message()
+        );
+        assert!(
+            snapshot_tree(out.path()).is_empty(),
+            "and nothing may have been written"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_restore_emptied_by_its_filters_names_the_filters() {
+        // Same exit code, different next action: the vault holds the files and
+        // the operator's own `--include` removed them. Reporting a missing
+        // dataset for that would send somebody hunting a backup that is there.
+        let vault = Vaulted::new().await;
+        let source = source_tree();
+        let out = tempfile::tempdir().unwrap();
+
+        backup::run(
+            &vault.ctx(&[]),
+            &BackupArgs {
+                source: source.path().to_path_buf(),
+                destination: "archive:".into(),
+                snapshot: false,
+                snapshot_name: None,
+                follow_symlinks: false,
+                strict_names: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let ctx = vault.ctx(&["--include", "*.nothing"]);
+        let error = run(
+            &ctx,
+            &RestoreArgs {
+                source: "archive:".into(),
+                destination: out.path().to_path_buf(),
+                snapshot: None,
+                at: None,
+                skip_unwritable: false,
+                overwrite: false,
+            },
+        )
+        .await
+        .expect_err("filters that admit nothing restore nothing");
+
+        assert_eq!(error.code(), ExitCode::NoFilesTransferred);
+        assert!(
+            error.message().contains("filter"),
+            "the cause must name the filters: {}",
+            error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_of_a_restore_that_would_write_nothing_says_so_too() {
+        // A rehearsal that reports success for a restore which would write
+        // nothing is the misreport the real run was just taught not to make.
+        let vault = Vaulted::new().await;
+        let out = tempfile::tempdir().unwrap();
+
+        let ctx = vault.ctx(&["--dry-run"]);
+        let error = run(
+            &ctx,
+            &RestoreArgs {
+                source: "archive:nowhere".into(),
+                destination: out.path().to_path_buf(),
+                snapshot: None,
+                at: None,
+                skip_unwritable: false,
+                overwrite: false,
+            },
+        )
+        .await
+        .expect_err("a rehearsal of nothing is not a rehearsal of a restore");
+        assert_eq!(error.code(), ExitCode::NoFilesTransferred);
     }
 
     #[tokio::test]

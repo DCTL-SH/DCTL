@@ -30,9 +30,11 @@ use async_trait::async_trait;
 
 use crate::constants::LIST_PAGE_SIZE;
 use crate::ctx::Ctx;
-use crate::error::Result;
+use crate::error::{CliError, Result};
+use crate::exit::ExitCode;
 #[cfg(test)]
 use crate::platform::path;
+use crate::remote::RemoteSpec;
 use crate::source::{self, Entries};
 
 use super::entry::Entry;
@@ -234,9 +236,57 @@ impl Pages for Pager {
 /// [`ExitCode::FatalError`]: crate::exit::ExitCode::FatalError
 /// [`ExitCode::VaultLocked`]: crate::exit::ExitCode::VaultLocked
 pub async fn open(ctx: &Ctx, target: &Target) -> Result<Box<dyn Pages>> {
+    require_readable_tree(target)?;
     let source = source::open(ctx, &target.spec()).await?;
     let entries = source.enumerate(target.prefix()).await?;
     Ok(Box::new(Streamed::new(source, entries, target.prefix())))
+}
+
+/// Refuse a local target that is not a tree, before anything is enumerated.
+///
+/// The doc comment above says "never an empty listing", and for a local path it
+/// was not true. `dctl-store`'s directory walk treats `ENOENT` on the root as the
+/// end of the walk — correct for a directory that vanished *during* one, wrong
+/// for a root that was never there — so `dctl ls /srv/backups` on a machine where
+/// the volume is not mounted printed nothing on either stream and exited **0**.
+/// That is the same answer as an empty directory and indistinguishable from "the
+/// backups are gone", and the listing family is the family people check with.
+/// Every transfer verb already refuses the same path with
+/// [`ExitCode::DirNotFound`].
+///
+/// A file gets its own refusal rather than the walk's raw
+/// `io error: Not a directory (os error 20)` at exit 2, "uncategorised": the
+/// command knows exactly what the mistake was and can say it.
+///
+/// Only local targets are checked. A remote prefix does not exist as a thing —
+/// in a vault a path exists exactly while an object is stored under it, which is
+/// the same stance `dctl mkdir` and `dctl rmdir` take — so an empty listing there
+/// is a real answer rather than an unread one.
+///
+/// `metadata` rather than `symlink_metadata`, matching every other walker: the
+/// root is the one path the operator typed, and `/data -> /mnt/disk/data` is an
+/// ordinary layout.
+fn require_readable_tree(target: &Target) -> Result<()> {
+    let RemoteSpec::Local(path) = target.spec() else {
+        return Ok(());
+    };
+    match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_dir() => Ok(()),
+        Ok(_) => Err(
+            CliError::usage(format!("'{}' is not a directory", path.display())).with_hint(
+                "A listing walks a tree. Name the directory that holds this file, or \
+             use `dctl cat` to read the file itself.",
+            ),
+        ),
+        Err(error) => Err(CliError::new(
+            ExitCode::DirNotFound,
+            format!("'{}' does not exist: {error}", path.display()),
+        )
+        .with_hint(
+            "Nothing was read, so this is not an empty tree. Check the path, and \
+             check that the volume holding it is mounted.",
+        )),
+    }
 }
 
 #[cfg(test)]

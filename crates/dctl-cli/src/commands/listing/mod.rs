@@ -142,6 +142,69 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_local_path_that_does_not_exist_is_refused_rather_than_listed_as_empty() {
+        // `dctl ls /srv/backups` on a machine where the volume is not mounted
+        // printed nothing on either stream and exited 0 — the same answer as an
+        // empty directory, and indistinguishable from "the backups are gone".
+        // Every transfer verb already exits 3 for this path; the listing family
+        // was the one that did not, and it is the family people check with.
+        let root = tempfile::TempDir::new().unwrap();
+        let missing = root.path().join("never-existed");
+        let ctx = crate::commands::listing::tests_support::ctx(&[]);
+        let target = Target::parse(Some(&missing.to_string_lossy()), None).unwrap();
+
+        let error = open(&ctx, &target, Filter::from_globals(&ctx.globals).unwrap())
+            .await
+            .err()
+            .expect("a path that is not there cannot be listed");
+        assert_eq!(error.code(), ExitCode::DirNotFound);
+    }
+
+    #[tokio::test]
+    async fn a_local_path_that_is_a_file_says_so_instead_of_leaking_an_errno() {
+        // It answered `io error: Not a directory (os error 20)` with exit 2,
+        // "uncategorised" — a diagnosis the reader has to make themselves, for a
+        // mistake the command can name exactly.
+        let root = tempfile::TempDir::new().unwrap();
+        let file = root.path().join("notes.txt");
+        std::fs::write(&file, b"x").unwrap();
+        let ctx = crate::commands::listing::tests_support::ctx(&[]);
+        let target = Target::parse(Some(&file.to_string_lossy()), None).unwrap();
+
+        let error = open(&ctx, &target, Filter::from_globals(&ctx.globals).unwrap())
+            .await
+            .err()
+            .expect("a file is not a tree");
+        assert_eq!(error.code(), ExitCode::Usage);
+        assert!(
+            error.message().contains("not a directory"),
+            "{}",
+            error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_local_directory_reached_through_a_symlink_is_still_listed() {
+        // The existence check resolves links, matching every other walker: the
+        // root is the path the operator typed.
+        let root = tempfile::TempDir::new().unwrap();
+        let real = root.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        std::fs::write(real.join("a.txt"), b"1").unwrap();
+        let link = root.path().join("link");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        #[cfg(not(unix))]
+        std::os::windows::fs::symlink_dir(&real, &link).unwrap();
+
+        let ctx = crate::commands::listing::tests_support::ctx(&[]);
+        let target = Target::parse(Some(&link.to_string_lossy()), None).unwrap();
+        open(&ctx, &target, Filter::from_globals(&ctx.globals).unwrap())
+            .await
+            .expect("a symlinked directory is a directory");
+    }
+
+    #[tokio::test]
     async fn a_real_directory_streams_through_the_filter() {
         // The other half of the same promise: when the source *is* reachable,
         // the pipeline end to end produces rows rather than a refusal.

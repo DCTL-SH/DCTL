@@ -175,12 +175,23 @@ an exclusion. A pattern that will not *compile* is a usage error (exit **1**)
 before anything is listed, because a run that proceeded with a rule the operator
 believes is in force is the data-loss case.
 
-**Omissions are announced.** Symbolic links are never followed — a link to an
-ancestor makes a walk loop forever and a link out of the tree copies data nobody
-named — and filenames that are not valid UTF-8 cannot be stored. Both are
-counted and warned about on stderr rather than passed over quietly, because
-finding out from a restore is far too late. Names are NFC-normalised on their
-way into a vault, so a file typed on macOS and on Linux becomes one object.
+**Omissions are announced.** Symbolic links *found during the walk* are never
+followed — a link to an ancestor makes a walk loop forever and a link out of the
+tree copies data nobody named — and filenames that are not valid UTF-8 cannot be
+stored. Both are counted and warned about on stderr rather than passed over
+quietly, because finding out from a restore is far too late. Names are
+NFC-normalised on their way into a vault, so a file typed on macOS and on Linux
+becomes one object.
+
+**The source you name is not one of them.** `dctl copy /data vault:` where
+`/data -> /mnt/disk/data` walks the tree the link points at. The root is entered
+exactly once and it is what you typed, so neither reason above applies to it; a
+dangling link names nothing and is reported as a missing source (exit **3**),
+never as an empty tree. Skipping the root instead was a data-loss path: the copy
+stored nothing and printed `Files: 0 / 0  Errors: 0` with exit 0, and
+`dctl sync --force` over the same source read that emptiness as permission to
+delete every object at the destination — while `dctl ls`, `dctl size`,
+`dctl tree` and `dctl check` all followed the link and showed the files.
 
 **`--dry-run` is authoritative.** The plan is a pure function of two listings and
 a policy: no I/O, no clock, no mutation. The same value is either printed for

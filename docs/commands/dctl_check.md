@@ -277,7 +277,7 @@ without buying back the memory the streaming walk exists to avoid.
 | 1 | `usage` | Unknown flag, a missing side, a path containing `..`, a remote name shorter than two characters, two verdict flags aimed at one file, or a verdict destination that is a directory. |
 | 2 | `uncategorised` | A verdict file could not be written for a reason other than a missing directory or a permission denial; or a report could not be serialised. |
 | 3 | `dir_not_found` | The parent directory of a verdict file does not exist. |
-| 6 | `partial_failure` | The run finished and the two sides disagree — `differ`, `missing-on-*` or `error` paths were found. Nothing was transferred. |
+| 6 | `partial_failure` | The run finished and the two sides disagree — `differ`, `missing-on-*` or `error` paths were found. Nothing was transferred. The message names the findings it actually has: an `error` path is one that *could not be compared*, not one that differs, and saying "differ" for it contradicted the `"differ": 0` in the run's own JSON. The hint follows the same rule — `--missing-on-dst` is offered only when something is missing, and a path that could not be compared is answered with `--checksum`, which compares fields both sides always have. |
 | 7 | `fatal_error` | A side that could not be opened — an unresolvable remote, an unreadable configuration, or `--filter-from`/`--files-from`; also a permission denial writing a verdict file. |
 | 22 | `vault_locked` | A sealed side would not unlock. |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. |

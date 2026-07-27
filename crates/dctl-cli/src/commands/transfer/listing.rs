@@ -409,8 +409,36 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
     // then both spellings have already become one string.
     let mut collisions = crate::platform::collision::Detector::new();
 
-    let Ok(metadata) = fs::symlink_metadata(root) else {
+    // The link a walk *starts from* is not the links it *finds*, and applying
+    // one rule to both was a data-loss path.
+    //
+    // [`WALK_FOLLOW_SYMLINKS`] exists for two reasons, and neither reaches the
+    // root: a link pointing at one of its own ancestors turns a walk into an
+    // infinite loop, and a link pointing outside the transfer root copies data
+    // the user never named. The root is entered exactly once, and it *is* what
+    // the user named — `/data -> /mnt/disk/data` is an ordinary layout, not an
+    // escape from a tree.
+    //
+    // Refusing it produced an empty listing with `exists = true`, so `dctl copy`
+    // stored nothing and printed `Files: 0 / 0  Errors: 0` with exit 0, and
+    // `dctl sync --force` read the same emptiness as permission to delete every
+    // object at the destination. `dctl ls`, `dctl size`, `dctl tree`, `dctl
+    // check` and `dctl backup` all resolved the root already, so the tree the
+    // operator was shown was not the tree the transfer walked.
+    let Ok(named) = fs::symlink_metadata(root) else {
         return Ok(listing);
+    };
+    let metadata = if named.file_type().is_symlink() {
+        // A link with nothing behind it names nothing. It is the same missing
+        // source as any other unreadable path — reported as "does not exist"
+        // rather than as a tree that legitimately holds no files, which is the
+        // distinction `sync` deletes on.
+        let Ok(target) = fs::metadata(root) else {
+            return Ok(listing);
+        };
+        target
+    } else {
+        named
     };
     listing.exists = true;
 
@@ -435,8 +463,10 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
     }
 
     if !metadata.is_dir() {
-        // A symlink, socket, device or FIFO named directly. Nothing to walk.
-        listing.symlinks_skipped += u64::from(metadata.file_type().is_symlink());
+        // A socket, device or FIFO named directly: there is no tree beneath it
+        // and no bytes a transfer could carry. Not counted as a skipped link,
+        // because it is not one — the root's link, if there was one, has already
+        // been resolved above.
         return Ok(listing);
     }
 
@@ -761,6 +791,68 @@ mod tests {
         assert_eq!(listing.symlinks_skipped, 1);
         assert!(listing.has_omissions());
         assert_eq!(paths(&listing), ["a.txt", "sub/b.txt", "sub/deep/c.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_root_reached_through_a_symlink_is_walked_rather_than_skipped() {
+        // The link the walk starts from is not the links it finds. `/data ->
+        // /mnt/disk/data` is an ordinary layout and the root is the one path the
+        // operator typed; refusing it produced an empty listing, which `copy`
+        // reported as a successful transfer of nothing and `sync` read as
+        // permission to delete everything at the destination.
+        let dir = tree();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link = elsewhere.path().join("link-to-tree");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+
+        let listing = source(&ctx(&[]), &RemoteSpec::Local(link), &ListOptions::default())
+            .await
+            .unwrap();
+
+        assert!(listing.exists);
+        assert_eq!(
+            listing.symlinks_skipped, 0,
+            "the root was followed, so nothing was skipped"
+        );
+        assert!(!listing.has_omissions());
+        assert_eq!(paths(&listing), ["a.txt", "sub/b.txt", "sub/deep/c.txt"]);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_single_file_reached_through_a_symlink_lists_under_the_name_that_was_typed() {
+        // The logical path is the name the operator wrote, not the link target's:
+        // `dctl copy /tmp/latest.log archive:` must store `latest.log`, which is
+        // the only spelling they can name it by afterwards.
+        let dir = tree();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let link = elsewhere.path().join("named.txt");
+        std::os::unix::fs::symlink(dir.path().join("a.txt"), &link).unwrap();
+
+        let listing = source(&ctx(&[]), &RemoteSpec::Local(link), &ListOptions::default())
+            .await
+            .unwrap();
+
+        assert!(listing.is_single_file);
+        assert_eq!(paths(&listing), ["named.txt"]);
+        assert_eq!(listing.entries[0].size, Some(1), "the size is the target's");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_root_that_is_a_dangling_symlink_is_a_missing_source_not_an_empty_one() {
+        // A link with nothing behind it names nothing. Reporting it as an empty
+        // tree is the failure this whole family has: `sync` would treat it as a
+        // source that legitimately holds no files.
+        let dir = tempfile::tempdir().unwrap();
+        let link = dir.path().join("dangling");
+        std::os::unix::fs::symlink(dir.path().join("nowhere"), &link).unwrap();
+
+        let error = source(&ctx(&[]), &RemoteSpec::Local(link), &ListOptions::default())
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), ExitCode::DirNotFound);
     }
 
     #[cfg(unix)]

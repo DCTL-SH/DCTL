@@ -36,6 +36,14 @@ Each refusal below is a usage error (exit 1) raised before anything is modified.
   tree is a real thing to want and DCTL's job is to make it explicit rather than
   impossible. To remove a tree on purpose, [`purge`](dctl_purge.md) is the
   command that says so in its name.
+
+  That guard is the last line, not the first: it only fires because the *listing*
+  is honest about what it found. A source root reached through a symbolic link
+  used to list as empty — `/data -> /mnt/disk/data` walked to nothing — and
+  `sync --force` then deleted every object at the destination and exited 0 with
+  `Errors: 0`. The walk now resolves the root it was given; links found *inside*
+  the tree are still never followed. See
+  [`copy` → *Omissions are announced*](dctl_copy.md).
 * **Source and destination are the same place.** Structural equality catches the
   obvious case and canonicalisation catches `photos` versus `./photos` and a
   symlinked duplicate. A sync onto itself would be a race between listing a tree

@@ -314,11 +314,12 @@ empty one means "computed, and there is nothing to restore".
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | Every planned object was restored and verified, or a `--dry-run` completed with nothing blocked. |
+| 0 | `success` | Every planned object was restored and verified, and at least one was; or a `--dry-run` that would restore at least one file completed with nothing blocked. |
 | 1 | `usage` | A local path where the vault operand belongs (`C:\Backups`, `/srv/in`), a missing operand, a destination that exists and is not a directory, an unparseable `--at`, an invalid `--snapshot` name, `--at` together with `--snapshot`, an unparseable or crossed `--min-size`/`--max-size`, a negative `--max-depth`, a `--files-from` line containing `..`, or `--interactive` with no terminal to prompt on. |
 | 2 | `uncategorised` | An I/O error, other than "not found" or "permission denied", reading a `--files-from` list. |
 | 4 | `file_not_found` | A `--files-from` list does not exist. |
 | 6 | `partial_failure` | At least one object could not be restored. The rest were, and each failure was named. |
+| 9 | `no_files_transferred` | The run wrote **no file**: the prefix matched nothing, the vault is empty, or the filters excluded every path. Nothing failed; nothing was restored either, and a drill scripted on exit 0 would have read a mistyped prefix as a successful restore. A `--dry-run` that would write nothing returns it too. |
 | 7 | `fatal_error` | `--at`/`--snapshot` was given; at least one path cannot be written here and `--skip-unwritable` was not given; the restore would replace existing files and `--overwrite` was not given; `--immutable` was given and it would replace something; or the remote is not configured. |
 | 20 | `checksum_mismatch` | An object did not verify as it landed. **No file was left under its name.** |
 | 21 | `integrity_failure` | AEAD authentication failed on read — wrong key, tampered ciphertext, or wrong context. **The data was not served**, and no file was written. |

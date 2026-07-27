@@ -190,6 +190,43 @@ fn rust_files(root: &Path) -> Vec<PathBuf> {
     files
 }
 
+/// Join a Rust string's line continuations, so a wrapped literal scans as the
+/// one line the compiler sees.
+///
+/// `mentions_on` works a line at a time, and a long hint in `constants.rs` is
+/// wrapped with `\` at the end of each source line — which is not a line break
+/// at all: the compiler drops it *and* the next line's leading whitespace. So a
+/// mention that straddled a wrap was invisible to a scan of the file's lines,
+/// and one had been sitting in [`crate::constants::REPLICATE_STORE_HINT`]
+/// telling operators to write `bucket=BUCKET` on a `local` remote, which answers
+/// `unknown field `bucket``.
+///
+/// Every joined span keeps the line number it *started* on, because that is
+/// where a reader will look for it.
+fn join_continuations(text: &str) -> Vec<(usize, String)> {
+    let mut joined: Vec<(usize, String)> = Vec::new();
+    let mut pending: Option<(usize, String)> = None;
+    for (number, line) in text.lines().enumerate() {
+        let continues = line.trim_end().ends_with('\\');
+        let piece = if continues {
+            line.trim_end().trim_end_matches('\\')
+        } else {
+            line
+        };
+        match &mut pending {
+            // Rust drops the leading whitespace of a continued line, so the two
+            // halves of a wrapped word have to meet with nothing between them.
+            Some((_, accumulated)) => accumulated.push_str(piece.trim_start()),
+            None => pending = Some((number, piece.to_string())),
+        }
+        if !continues && let Some(entry) = pending.take() {
+            joined.push(entry);
+        }
+    }
+    joined.extend(pending);
+    joined
+}
+
 /// Every mention in the crate's source, paired with where it was written.
 ///
 /// Reads the source from `CARGO_MANIFEST_DIR` rather than from a macro over the
@@ -211,8 +248,8 @@ fn every_mention() -> Vec<(String, String)> {
         if SCANNER_PATHS.contains(&shown.as_str()) {
             continue;
         }
-        for (number, line) in text.lines().enumerate() {
-            for mention in mentions_on(line) {
+        for (number, line) in join_continuations(&text) {
+            for mention in mentions_on(&line) {
                 found.push((mention, format!("src/{shown}:{}", number + 1)));
             }
         }
@@ -220,9 +257,126 @@ fn every_mention() -> Vec<(String, String)> {
     found
 }
 
+/// Which providers a `KEY=VALUE` written in prose is making a claim about.
+///
+/// Three cases, and collapsing any two of them makes the scan either miss the
+/// defect it exists for or shout about correct prose:
+///
+/// * `dctl config create NAME s3 bucket=B` names the type, so only `s3` matters.
+/// * `dctl config create NAME TYPE bucket=B` is a *template* claiming to work
+///   for any type, so every type has to define the key. This is the one that
+///   catches the real defect.
+/// * `dctl config update b2prod bucket=films` names a remote, not a type. The
+///   text cannot say which provider it is, so any provider defining the key is
+///   enough — demanding all of them would forbid every worked example of
+///   changing a bucket.
+#[derive(Debug, PartialEq, Eq)]
+enum SettingScope {
+    /// One named provider type.
+    Type(String),
+    /// A template over every provider type.
+    EveryType,
+    /// An existing remote whose type the text does not state.
+    SomeType,
+}
+
+/// Whether `setting` is one the providers in `scope` actually define.
+///
+/// One level below [`names_a_real_command`], and the same failure: a hint that
+/// tells the operator to run `dctl config create NAME TYPE bucket=BUCKET
+/// require_vault=true` names a real command and a real subcommand, so the
+/// command scan passes it — and against a `local` store it answers
+/// "unknown field bucket", which is a hint that cannot be obeyed. The keys
+/// differ per provider (`path` on `local`, `bucket` on `b2`, `s3` and `r2`,
+/// `host` and `base` on `sftp`), and a template that writes one of them is
+/// making a claim about all of them.
+///
+/// Asked of [`crate::commands::config::settings::build`] rather than of a list,
+/// for [`super::mentions`]'s reason: a hand-kept list of settings would drift
+/// from the model exactly the way the hints drifted from the commands. Only
+/// "unknown field" counts — a missing *required* setting means the key was
+/// understood, which is the whole of the claim a `KEY=VALUE` in prose makes.
+fn names_a_real_setting(setting: &str, scope: &SettingScope) -> bool {
+    let all = crate::commands::config::settings::known_types();
+    let types: Vec<&'static str> = match scope {
+        SettingScope::Type(named) => all.into_iter().filter(|known| known == named).collect(),
+        SettingScope::EveryType | SettingScope::SomeType => all,
+    };
+    // A type this build does not have is the command scan's problem, not this
+    // one's; refusing here would report the same finding twice in two voices.
+    if types.is_empty() {
+        return true;
+    }
+
+    let mut assignments = std::collections::BTreeMap::new();
+    assignments.insert(setting.to_string(), "x".to_string());
+    let defines =
+        |known: &'static str| match crate::commands::config::settings::build(known, &assignments) {
+            Ok(_) => true,
+            Err(error) => !error
+                .message()
+                .contains(&format!("unknown field `{setting}`")),
+        };
+
+    match scope {
+        SettingScope::EveryType => types.into_iter().all(defines),
+        SettingScope::Type(_) | SettingScope::SomeType => types.into_iter().any(defines),
+    }
+}
+
+/// The `KEY=VALUE` settings a mention writes down, and who they are claimed for.
+///
+/// Only `dctl config create` and `dctl config update` take settings; a
+/// `key=value` anywhere else is not one.
+fn settings_in(mention: &str) -> Option<(SettingScope, Vec<String>)> {
+    let words: Vec<&str> = mention.split_whitespace().collect();
+    if words.first() != Some(&"dctl") || words.get(1) != Some(&"config") {
+        return None;
+    }
+    let scope = match words.get(2) {
+        // `create NAME TYPE …` states the type — unless the word in that
+        // position is a metavariable, which makes it a template.
+        Some(&"create") => words
+            .get(4)
+            .filter(|word| {
+                word.starts_with(|c: char| c.is_ascii_lowercase())
+                    && word
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+            })
+            .map_or(SettingScope::EveryType, |word| {
+                SettingScope::Type((*word).to_string())
+            }),
+        // `update NAME …` names a remote, whose type the text does not carry.
+        Some(&"update") => SettingScope::SomeType,
+        _ => return None,
+    };
+
+    // `[key=value ...]`, `{key}=VALUE` and `KEY=VALUE` describe the *shape* of an
+    // assignment rather than making one, exactly as a `<TYPE>` metavariable
+    // describes the shape of a command line. A setting name is verb-shaped —
+    // lowercase ASCII and underscores, starting with a letter — because that is
+    // what every field in `config::model` is.
+    let keys: Vec<String> = words
+        .iter()
+        .filter_map(|word| word.split_once('='))
+        .map(|(key, _)| key.to_string())
+        .filter(|key| {
+            key.starts_with(|c: char| c.is_ascii_lowercase())
+                && key
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+        })
+        .collect();
+    (!keys.is_empty()).then_some((scope, keys))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EXEMPT, every_mention, mentions_on, names_a_real_command};
+    use super::{
+        EXEMPT, SettingScope, every_mention, mentions_on, names_a_real_command,
+        names_a_real_setting, settings_in,
+    };
 
     /// How many mentions the crate is known to carry, rounded down.
     ///
@@ -304,6 +458,110 @@ mod tests {
                 .any(|(mention, _)| mention.starts_with("dctl index rebuild")),
             "the scan must see nested subcommands, not just top-level verbs"
         );
+    }
+
+    #[test]
+    fn every_setting_a_hint_writes_down_is_a_setting_some_provider_defines() {
+        // The command-name scan passed `dctl config create NAME TYPE
+        // bucket=BUCKET require_vault=true` — the verb is real — and following it
+        // against a `local` replica answered `unknown field `bucket``. A hint is
+        // the one instruction somebody will follow at the moment they are least
+        // able to evaluate it; naming a setting the provider does not have wastes
+        // it exactly the way naming a command that does not exist does.
+        let mut wrong = Vec::new();
+        for (mention, at) in every_mention() {
+            let Some((scope, keys)) = settings_in(&mention) else {
+                continue;
+            };
+            for key in keys {
+                if !names_a_real_setting(&key, &scope) {
+                    wrong.push(format!(
+                        "{at}: `{mention}` writes `{key}=`, which {} define",
+                        match &scope {
+                            SettingScope::Type(named) => format!("`{named}` does not"),
+                            SettingScope::EveryType =>
+                                "not every provider this template claims to cover does".to_string(),
+                            SettingScope::SomeType => "no provider does".to_string(),
+                        }
+                    ));
+                }
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn a_mention_wrapped_across_a_string_continuation_is_still_seen() {
+        // The blind spot that hid a wrong hint for as long as it existed: the
+        // scan read source lines, and a long constant is wrapped with `\` — which
+        // the compiler removes along with the next line's indentation, so the
+        // mention only exists once the two are joined.
+        let source =
+            "pub const H: &str = \"run `dctl config create NAME s3 \\\\\n     bucket=B` first\";";
+        let joined = super::join_continuations(source);
+        assert_eq!(joined.len(), 1, "the wrap is not a line break");
+        assert_eq!(
+            super::mentions_on(&joined[0].1),
+            ["dctl config create NAME s3 bucket=B"]
+        );
+        assert_eq!(joined[0].0, 0, "reported where the span starts");
+    }
+
+    #[test]
+    fn a_setting_that_no_provider_defines_is_actually_detected() {
+        // The scan above is only worth its runtime if it can fail. Both shapes
+        // are checked: a key no provider has, and a key that exists but not on
+        // the type the mention named.
+        assert!(!names_a_real_setting(
+            "no_such_setting",
+            &SettingScope::SomeType
+        ));
+        assert!(!names_a_real_setting(
+            "bucket",
+            &SettingScope::Type("local".into())
+        ));
+        assert!(names_a_real_setting(
+            "bucket",
+            &SettingScope::Type("s3".into())
+        ));
+        assert!(names_a_real_setting(
+            "path",
+            &SettingScope::Type("local".into())
+        ));
+        // A remote whose type the text does not state: one provider is enough.
+        assert!(names_a_real_setting("bucket", &SettingScope::SomeType));
+        // Universal: every provider defines `verify`, so a template may write it.
+        assert!(names_a_real_setting("verify", &SettingScope::EveryType));
+        // Not universal: `local` has no bucket and the vault wrapper has no
+        // `require_vault`, so a template writing either is wrong for a type it
+        // claims to cover.
+        assert!(!names_a_real_setting("bucket", &SettingScope::EveryType));
+        assert!(!names_a_real_setting(
+            "chunk_size",
+            &SettingScope::EveryType
+        ));
+    }
+
+    #[test]
+    fn settings_are_read_only_out_of_the_two_subcommands_that_take_them() {
+        // `dctl copy a=b c` is not a settings assignment, and reading it as one
+        // would make the scan noisy enough to be switched off.
+        assert!(settings_in("dctl copy src=x dst").is_none());
+        assert!(settings_in("dctl config list").is_none());
+        assert_eq!(
+            settings_in("dctl config create NAME s3 bucket=B"),
+            Some((SettingScope::Type("s3".into()), vec!["bucket".to_string()]))
+        );
+        assert_eq!(
+            settings_in("dctl config create NAME TYPE bucket=B"),
+            Some((SettingScope::EveryType, vec!["bucket".to_string()]))
+        );
+        assert_eq!(
+            settings_in("dctl config update NAME require_vault=true"),
+            Some((SettingScope::SomeType, vec!["require_vault".to_string()]))
+        );
+        // A metavariable in the settings position is a shape, not an assignment.
+        assert!(settings_in("dctl config create NAME TYPE [key=value ...]").is_none());
     }
 
     #[test]

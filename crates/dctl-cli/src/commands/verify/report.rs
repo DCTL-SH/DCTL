@@ -19,7 +19,7 @@ use serde::Serialize;
 use crate::commands::integrity::failure::{self, Verdict};
 use crate::constants::{
     INTEGRITY_COLUMN_DETAIL, INTEGRITY_COLUMN_PATH, INTEGRITY_COLUMN_SIZE, INTEGRITY_COLUMN_STATUS,
-    UNKNOWN_VALUE,
+    UNKNOWN_VALUE, VERIFY_NOTHING_VERIFIED_HINT,
 };
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -121,6 +121,15 @@ pub struct Report {
     /// consumer to trust it over the records it came from.
     #[serde(skip)]
     worst: Verdict,
+    /// Whether the run's filters could have removed objects from it.
+    ///
+    /// Only ever read when the run examined nothing, and only to decide which of
+    /// two completely different next actions to name: a prefix that matches
+    /// nothing is a typo or a backup that never ran, and filters that admit
+    /// nothing are the operator's own command line. Not serialised — it says
+    /// nothing about what was verified, which is what the document is for.
+    #[serde(skip)]
+    filters_restricted: bool,
 }
 
 impl Report {
@@ -134,7 +143,14 @@ impl Report {
             objects: Vec::new(),
             summary: Summary::default(),
             worst: Verdict::Ok,
+            filters_restricted: false,
         }
+    }
+
+    /// Record that filters were in force, so a run that examined nothing can say
+    /// which kind of nothing it found.
+    pub const fn filters_restricted(&mut self, restricted: bool) {
+        self.filters_restricted = restricted;
     }
 
     /// Note that the run stopped at the first failure.
@@ -185,12 +201,61 @@ impl Report {
 
     /// The error this run ends with, or `None` when everything verified.
     ///
-    /// Delegating to [`failure::failure`] rather than building an error here is
-    /// what guarantees `verify` and `scrub` fail identically: one wording, one
-    /// exit code, one hint.
+    /// Delegating to [`failure`] rather than building an error here is what
+    /// guarantees `verify` and `scrub` fail identically: one wording, one exit
+    /// code, one hint.
+    ///
+    /// ## Reading nothing is not passing
+    ///
+    /// A run that examined zero objects exits
+    /// [`ExitCode::NoFilesTransferred`] (9), not `0` — the same answer
+    /// [`super::super::scrub`] has always given, and the reason it gives it. This
+    /// command exited `0` for it, and at the default verbosity printed *nothing
+    /// at all* on either stream: the notice naming the cause went through
+    /// [`Out::info`](crate::output::Out::info), which is silent below `-v`, and
+    /// the table renders empty with no rows. `dctl verify archive:` over a real
+    /// dataset and `dctl verify archive:typo` over nothing were therefore
+    /// indistinguishable to a script, to a monitor, and to a person.
+    ///
+    /// Health is a claim about objects that were read. Over zero objects there is
+    /// no claim to make, and exiting zero for it is the misreport `PLAN.md` §6
+    /// forbids.
     #[must_use]
     pub fn outcome(&self) -> Option<CliError> {
-        failure::failure(self.worst, self.summary.failed, self.summary.examined)
+        // Damage first: a run that found damage plainly examined something, and
+        // a corrupt object outranks any statement about coverage.
+        if let Some(error) =
+            failure::failure(self.worst, self.summary.failed, self.summary.examined)
+        {
+            return Some(error);
+        }
+
+        if self.summary.examined == 0 {
+            return Some(failure::nothing_examined(
+                &self.nothing_verified_cause(),
+                VERIFY_NOTHING_VERIFIED_HINT,
+            ));
+        }
+
+        None
+    }
+
+    /// Why this run examined nothing, in the words of whichever cause applied.
+    ///
+    /// Two causes reach the same exit code and want different next actions: a
+    /// prefix that matches nothing is a typo or a dataset that was never written,
+    /// and filters that admit nothing are the operator's own command line.
+    /// Reporting one for the other sends somebody hunting a missing backup that
+    /// is sitting there.
+    fn nothing_verified_cause(&self) -> String {
+        if self.filters_restricted {
+            format!(
+                "no object under '{}' matched the active filters",
+                self.target
+            )
+        } else {
+            format!("no object was listed under '{}'", self.target)
+        }
     }
 
     /// Whether any record carries a detail, and therefore whether the text table

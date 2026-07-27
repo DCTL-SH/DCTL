@@ -1712,15 +1712,52 @@ pub const HEALTH_DAMAGED: &str = "damaged";
 /// text reader, a JSON consumer and a shell all learn the same thing.
 pub const HEALTH_UNVERIFIED: &str = "unverified";
 
-/// What a scrub says when it covered nothing.
+/// What an integrity run says when it covered nothing.
 ///
 /// The phrase is short and quotable because it is the one line that has to
 /// survive being pasted into a ticket without its context: not "0 objects", a
 /// figure a reader's eye slides over, but a sentence stating that no verification
 /// happened.
-pub const SCRUB_NOTHING_VERIFIED: &str = "nothing was verified";
+///
+/// Shared by `dctl scrub` and `dctl verify` rather than spelled once per verb.
+/// The two disagreeing was a real defect: `scrub` exited 9 over an empty target
+/// while `verify` exited 0 and, at the default verbosity, printed nothing at all
+/// — so which of the two commands a monitoring job happened to call decided
+/// whether "there is nothing here" was reported or swallowed.
+pub const INTEGRITY_NOTHING_VERIFIED: &str = "nothing was verified";
 
-/// See [`SCRUB_NOTHING_VERIFIED`]. What to do about a scrub that covered nothing.
+/// See [`INTEGRITY_NOTHING_VERIFIED`]. What to do about a `verify` that covered
+/// nothing.
+///
+/// Deliberately not [`SCRUB_NOTHING_VERIFIED_HINT`]: that one ends by naming
+/// `--sample-percent`, which is a `scrub` flag. A hint that names a flag the
+/// command does not have is the failure `crate::cli::mentions` exists to stop,
+/// one level down from the command name.
+pub const VERIFY_NOTHING_VERIFIED_HINT: &str = "Check the prefix with `dctl ls REMOTE:` — a path that matches no object \
+     verifies nothing. If the listing is empty too, the dataset is empty or this \
+     machine's index has not seen it (`dctl index rebuild REMOTE:`). \
+     `--include`, `--exclude` and `--files-from` also narrow what a run covers.";
+
+/// What a restore says when it wrote no file at all.
+///
+/// The counterpart of [`INTEGRITY_NOTHING_VERIFIED`], and it travels with the
+/// same exit code for the same reason: `dctl restore archive:typo /out` created
+/// nothing and exited `0`, so a scripted drill, a runbook step and a monitor all
+/// read a mistyped prefix as a successful restore. A restore's product is the
+/// files it wrote; over zero files there is no product and no success to report.
+///
+/// Worded as a statement about the run rather than about the target, because it
+/// is the line that gets pasted into a ticket without its context.
+pub const RESTORE_NOTHING_RESTORED: &str = "nothing was restored";
+
+/// See [`RESTORE_NOTHING_RESTORED`]. What to do about a restore that wrote
+/// nothing.
+pub const RESTORE_NOTHING_RESTORED_HINT: &str = "Check the path with `dctl ls REMOTE:` — a prefix that matches no object \
+     restores nothing. If the listing is empty too, the vault is empty or this \
+     machine's index has not seen it (`dctl index rebuild REMOTE:`). \
+     `--include`, `--exclude` and `--files-from` also narrow what a run covers.";
+
+/// See [`INTEGRITY_NOTHING_VERIFIED`]. What to do about a scrub that covered nothing.
 ///
 /// Names the three things that actually cause it, in the order they are worth
 /// checking: the prefix is the usual answer, an empty dataset is the alarming
@@ -2407,12 +2444,25 @@ pub const REPLICATE_SUBPATH_HINT: &str = "Replication copies a whole object stor
 /// alternative reading of "it is empty, so it must be the new replica" is
 /// precisely the auto-detection invariant I4 forbids, and an operator who is
 /// refused without being told the spelling will reach for `--force` instead.
+///
+/// `require_vault=true` is the only setting spelled out, and that is deliberate.
+/// It is the one every provider defines; the setting that says *where* differs
+/// per provider — `path` on `local`, `bucket` on `b2`, `s3` and `r2`, `host` and
+/// `base` on `sftp` — and this hint used to write `bucket=BUCKET` for all of
+/// them. Followed literally against a local replica it produced
+/// `unknown field 'bucket'`, which is a hint that cannot be obeyed: the same
+/// failure [`crate::cli::mentions`] exists to stop, one level below the command
+/// name. An existing remote is pointed at `dctl config update`, which needs no
+/// location at all.
 pub const REPLICATE_STORE_HINT: &str = "`dctl replicate` moves a vault's opaque objects between two object stores, so \
      both ends must be one. A store registered by `dctl init` already declares \
-     itself; declare another with `dctl config create NAME TYPE bucket=BUCKET \
-     require_vault=true`, or address a location that already holds a vault's \
-     envelope. Refusing an undeclared, empty location is what stops a vault's \
-     object tree being written over an ordinary directory.";
+     itself; declare an existing remote one with `dctl config update NAME \
+     require_vault=true`, add `require_vault=true` to the settings of a new one \
+     (`dctl config providers` lists the types, and `dctl config show` on a \
+     working store names the settings its type takes), or address a location \
+     that already holds a vault's envelope. Refusing an undeclared, empty \
+     location is what stops a vault's object tree being written over an ordinary \
+     directory.";
 
 /// Remediation attached to a source and destination that are the same place.
 pub const REPLICATE_SAME_STORE_HINT: &str = "A replica has to be somewhere else to be a replica. Check the two remote \
@@ -5090,9 +5140,9 @@ mod tests {
         // The phrase is quoted in a message somebody pastes into a ticket
         // without its context, so it has to state that no verification happened
         // rather than leave that to be inferred from a zero.
-        assert!(SCRUB_NOTHING_VERIFIED.contains("nothing"));
+        assert!(INTEGRITY_NOTHING_VERIFIED.contains("nothing"));
         assert!(
-            !SCRUB_NOTHING_VERIFIED.contains('0'),
+            !INTEGRITY_NOTHING_VERIFIED.contains('0'),
             "a figure is not a sentence"
         );
         // And the hint has to name the prefix first: it is the usual cause, and

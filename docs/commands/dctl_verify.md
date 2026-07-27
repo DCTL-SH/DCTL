@@ -225,7 +225,8 @@ for the full list.
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | Every object examined verified. |
+| 0 | `success` | Every object examined verified, and at least one was. |
+| 9 | `no_files_transferred` | The run examined **no object**: the prefix matched nothing, the dataset is empty, or the filters admitted nothing. Nothing failed and nothing was proved; the message names which cause applied. `dctl scrub` answers the same condition the same way. |
 | 1 | `usage` | Unknown flag, missing target, a local target, a remote name shorter than two characters, or a path containing `..`. |
 | 2 | `uncategorised` | The report could not be serialised. Not reachable for these types in practice. |
 | 4 | `file_not_found` | The worst verdict was `missing`: objects are in the index but absent at the provider. |
@@ -234,9 +235,7 @@ for the full list.
 | 21 | `integrity_failure` | At least one object failed authentication. **The data was NOT served.** |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. Nothing in flight was reported as complete. |
 
-In this build only **1**, **7** and **25** are reachable. The verdict-driven
-codes — 0, 4, 5 and 21 — are implemented and unit-tested but need the engine work
-described under *Status in this build* before a run can produce them.
+All of these are reachable.
 
 Codes 0–10 mirror rclone's taxonomy; 20+ are DCTL's own. See
 [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
