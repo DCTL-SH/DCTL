@@ -21,7 +21,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use crate::commands::pipeline::at_path;
-use crate::constants::{LOCAL_STAGING_PREFIX, LOCAL_STAGING_SUFFIX, STREAM_CHUNK_BYTES};
+use crate::constants::STREAM_CHUNK_BYTES;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 
@@ -66,7 +66,7 @@ impl Staging {
     /// own directory is the one place already known to be writable if the
     /// operation is to succeed at all.
     fn create(destination: &Path) -> Result<Self> {
-        let Some(name) = destination.file_name().and_then(|name| name.to_str()) else {
+        let Some(_name) = destination.file_name().and_then(|name| name.to_str()) else {
             return Err(CliError::usage(format!(
                 "'{}' does not name a file",
                 destination.display()
@@ -87,12 +87,11 @@ impl Staging {
             }
         }
 
-        let directory = parent_of(destination);
-        let staging = directory.join(format!(
-            "{LOCAL_STAGING_PREFIX}{name}.{}.{}{LOCAL_STAGING_SUFFIX}",
-            dctl_meta::BINARY_NAME,
-            std::process::id()
-        ));
+        // The staging name comes from `dctl_store::staging`, shared with every
+        // other verified write in the workspace. A destination directory can
+        // also be a configured `local:` remote, and a staging spelling the
+        // backend's listing did not recognise would be enumerated as an object.
+        let staging = dctl_store::staging::staging_sibling(destination);
 
         let file = File::create(&staging).map_err(|error| at_path(&staging, error))?;
 
@@ -216,12 +215,7 @@ mod tests {
         let leftovers: Vec<_> = fs::read_dir(dir.path())
             .unwrap()
             .filter_map(std::result::Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .contains(LOCAL_STAGING_SUFFIX)
-            })
+            .filter(|entry| dctl_store::is_staging_name(&entry.file_name().to_string_lossy()))
             .collect();
         assert!(leftovers.is_empty(), "staging file survived the commit");
     }

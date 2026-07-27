@@ -4,7 +4,6 @@
 //! a failure at any step leaves no partial or committed object.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytes::Bytes;
 use tokio::io::AsyncWriteExt;
@@ -14,9 +13,6 @@ use crate::error::{Result, StoreError};
 use crate::model::{ObjectKey, PutOutcome};
 
 use super::LocalFs;
-
-/// Monotonic counter making temp filenames unique for concurrent writers.
-static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Working-buffer size for the streaming (from-path) verified write. Bounds peak
 /// memory to a constant, independent of the source file's size.
@@ -182,17 +178,11 @@ fn hash_file(path: &Path, algo: HashAlgo) -> std::io::Result<(ContentHash, u64)>
     Ok((hasher.finalize(), total))
 }
 
-/// A unique sibling temp path in the destination directory (same filesystem, so
-/// the final rename is atomic).
+/// A unique sibling staging path in the destination directory.
+///
+/// The naming rule — and the reason it no longer embeds the destination's own
+/// name — lives in [`crate::staging`], because a spelling the writer invents and
+/// the listing walk half-remembers is what made real files invisible.
 fn temp_path(dest: &Path) -> PathBuf {
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let parent = dest
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let name = dest.file_name().map_or_else(
-        || "object".to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
-    parent.join(format!("{name}.tmp.{pid}.{seq}"))
+    crate::staging::staging_sibling(dest)
 }

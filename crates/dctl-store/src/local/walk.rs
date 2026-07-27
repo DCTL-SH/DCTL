@@ -66,8 +66,8 @@ pub(super) async fn list_page(fs: &LocalFs, prefix: &str, cursor: Option<String>
 }
 
 /// Iteratively walk `root`, returning forward-slash-relative keys of regular
-/// files (skipping in-flight temp files). Iterative (stack-based) to avoid async
-/// recursion.
+/// files (skipping in-flight staging files). Iterative (stack-based) to avoid
+/// async recursion.
 async fn collect_keys(root: &Path) -> Result<Vec<String>> {
     let mut out = Vec::new();
     let mut stack = vec![root.to_path_buf()];
@@ -84,9 +84,13 @@ async fn collect_keys(root: &Path) -> Result<Vec<String>> {
             if file_type.is_dir() {
                 stack.push(path);
             } else if file_type.is_file() {
+                // One rule, one implementation, in `crate::staging`: a prefix
+                // test on the file's own name. The substring test this replaced
+                // hid `report.tmp.2024.csv` from every listing, so `copy` said
+                // `Files: 5 / 5, Errors: 0` and left it behind.
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if name.contains(".tmp.") {
-                        continue; // in-flight verified-write temp file
+                    if crate::staging::is_staging_name(name) {
+                        continue; // an in-flight verified write, never committed
                     }
                 }
                 if let Ok(rel) = path.strip_prefix(root) {

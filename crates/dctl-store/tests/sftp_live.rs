@@ -14,9 +14,11 @@
 //! (default `~/dctl-sftp-livetest`). Everything the test creates lives under a
 //! per-run subdirectory that is removed at the end.
 //!
-//! LIVE VERIFICATION STATUS: pending. This has NOT yet been run against a live host
-//! — it never runs in CI (no `DCTL_SFTP_HOST` → skipped; `#[ignore]` keeps it out of
-//! the default run). Run the command above against `lsx-001` to verify.
+//! LIVE VERIFICATION STATUS: **run**, on 2026-07-27, against a real `sshd` +
+//! `internal-sftp` subsystem on lsx-002 (`DCTL_SFTP_HOST=sftpprobe`). It still
+//! never runs in CI — no `DCTL_SFTP_HOST` means it is skipped, and `#[ignore]`
+//! keeps it out of the default run — so this line is the only record that it has
+//! been exercised. Re-run it after any change to `sftp/`, and update the date.
 
 use bytes::Bytes;
 use dctl_store::{
@@ -218,6 +220,52 @@ async fn sftp_full_round_trip() {
             .iter()
             .all(|m| m.key.as_str().starts_with("nested/"))
     );
+
+    // ---- a real file whose name looks temporary survives the round trip -------
+    //
+    // The data-loss defect this guards against, over a real sshd. The listing
+    // walk used to skip any name containing `.tmp.`, so `report.tmp.2024.csv`
+    // was stored, was readable by key, and was **absent from every listing** —
+    // `dctl copy sfp: /restore` reported `Files: 5 / 5, Errors: 0` and left it
+    // behind, `sync` never removed it from a destination, and `purge` reported
+    // success over it.
+    //
+    // The 245-byte name is the other half: the old staging spelling appended a
+    // suffix to the *filename*, so a name the server accepts as final exceeded
+    // NAME_MAX as a staging file and the upload failed with `Bad message` — on
+    // some nights only, because the suffix embedded the process id.
+    let awkward: Vec<(ObjectKey, Bytes)> = vec![
+        (
+            ObjectKey::new("looks/report.tmp.2024.csv"),
+            Bytes::from_static(b"IMPORTANT USER DATA"),
+        ),
+        (
+            ObjectKey::new("looks/db.tmp.2024-07-27.sql"),
+            Bytes::from_static(b"a database dump"),
+        ),
+        (
+            ObjectKey::new(format!("looks/{}", "n".repeat(245))),
+            Bytes::from_static(b"a name at the filesystem limit"),
+        ),
+    ];
+    for (key, body) in &awkward {
+        sftp.put(key, body.clone(), &blake3(body))
+            .await
+            .unwrap_or_else(|error| panic!("{key} must be storable: {error}"));
+    }
+    let looks = sftp.list_page("looks/", None).await.unwrap();
+    let seen: Vec<String> = looks.items.iter().map(|m| m.key.to_string()).collect();
+    for (key, body) in &awkward {
+        assert!(
+            seen.iter().any(|k| k == key.as_str()),
+            "{key} was stored and is invisible to every listing: {seen:?}"
+        );
+        assert_eq!(&sftp.get(key).await.unwrap(), body);
+    }
+    assert_eq!(seen.len(), awkward.len());
+    for (key, _) in &awkward {
+        sftp.delete(key).await.unwrap();
+    }
 
     // ---- delete is idempotent and really removes the object --------------------
     sftp.delete(&small_key).await.unwrap();

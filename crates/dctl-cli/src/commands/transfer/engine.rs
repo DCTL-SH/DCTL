@@ -140,10 +140,9 @@ use crate::audit::record::Direction as AuditDirection;
 use crate::cli::VerifyMode;
 use crate::commands::pipeline::command_name;
 use crate::constants::{
-    LOCAL_STAGING_SUFFIX, REMOTE_SEPARATOR, TRANSFER_ENGINE_HINT,
-    TRANSFER_REMOTE_TO_REMOTE_FEATURE, TRANSFER_REMOTE_TO_REMOTE_HINT,
-    TRANSFER_SEALED_REMOTE_TO_REMOTE_FEATURE, TRANSFER_SEALED_REMOTE_TO_REMOTE_HINT,
-    TRANSFER_WHOLE_FILE_LIMIT,
+    REMOTE_SEPARATOR, TRANSFER_ENGINE_HINT, TRANSFER_REMOTE_TO_REMOTE_FEATURE,
+    TRANSFER_REMOTE_TO_REMOTE_HINT, TRANSFER_SEALED_REMOTE_TO_REMOTE_FEATURE,
+    TRANSFER_SEALED_REMOTE_TO_REMOTE_HINT, TRANSFER_WHOLE_FILE_LIMIT,
 };
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
@@ -1099,22 +1098,16 @@ async fn fill(staging: &std::path::Path, bytes: &[u8], modified: Modified) -> Re
 }
 
 /// A staging path beside the destination, on the same filesystem so the rename
-/// is atomic. The pid and a counter keep concurrent writers apart.
+/// is atomic.
+///
+/// The naming rule is [`dctl_store::staging`]'s, not one invented here. A
+/// download destination can perfectly well be inside a directory that is also a
+/// configured `local:` remote, and a staging file that the backend's listing did
+/// not recognise as one would be enumerated as an object — a half-written file
+/// nothing ever reported as stored, offered as data. Four spellings of "this is
+/// mine" is what let a real `report.tmp.2024.csv` be hidden instead.
 fn staging_path(dest: &std::path::Path) -> PathBuf {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static SEQ: AtomicU64 = AtomicU64::new(0);
-
-    let seq = SEQ.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let name = dest.file_name().map_or_else(
-        || std::ffi::OsString::from("object"),
-        std::ffi::OsStr::to_os_string,
-    );
-    let mut staged = name;
-    staged.push(format!("{LOCAL_STAGING_SUFFIX}.{pid}.{seq}"));
-
-    dest.parent()
-        .map_or_else(|| PathBuf::from(&staged), |parent| parent.join(&staged))
+    dctl_store::staging::staging_sibling(dest)
 }
 
 /// Sync the directory containing `path`, so a rename into it is durable.

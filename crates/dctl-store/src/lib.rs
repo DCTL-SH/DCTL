@@ -19,6 +19,7 @@ pub mod model;
 pub mod r2;
 pub mod s3;
 pub mod sftp;
+pub mod staging;
 mod streaming;
 mod tls;
 
@@ -30,3 +31,4 @@ pub use model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 pub use r2::R2Backend;
 pub use s3::{S3Backend, S3Config};
 pub use sftp::{SftpBackend, SftpConfig};
+pub use staging::{STAGING_NAME_PREFIX, is_staging_name};

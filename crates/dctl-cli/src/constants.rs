@@ -2852,22 +2852,12 @@ pub const PREFLIGHT_PROBLEM_PATH_TOO_LONG: &str = "path-too-long";
 /// every path in the tool.
 pub const STREAM_CHUNK_BYTES: usize = 256 * 1024;
 
-/// Prefix of the staging name a local `rcat` writes before renaming into place.
-///
-/// A leading dot hides the partial file from ordinary listings and from most
-/// indexing and backup daemons — which matters because a staging file is, by
-/// definition, a file whose contents are not yet trustworthy.
-pub const LOCAL_STAGING_PREFIX: &str = ".";
-
-/// Suffix of that staging name.
-///
-/// The binary's own name and the process id are inserted before it at run time,
-/// so a stray staging file names the tool and the run that owns it without
-/// hard-coding a brand [`dctl_meta`] is free to change. Finding one after a crash
-/// is then unambiguous *and* safe: the rename into the final name is the commit,
-/// so anything still carrying this suffix was never reported as stored
-/// (`PLAN.md` §6).
-pub const LOCAL_STAGING_SUFFIX: &str = ".tmp";
+// The two constants that used to spell a local staging name — a `"."` prefix and
+// a `".tmp"` suffix — are gone. There is now exactly one staging-name rule in the
+// workspace, `dctl_store::staging`, and every verified write in every crate uses
+// it. Four spellings and two half-remembered recognisers is what let a real file
+// called `report.tmp.2024.csv` be dropped from every listing while `copy`
+// reported `Files: 5 / 5, Errors: 0`.
 
 // `cat` used to carry a "reading an object out of a remote" refusal here. It is
 // gone: `crate::source` reads a sealed vault and a plain object store through
@@ -3936,14 +3926,11 @@ pub const PURGE_SCOPE_SUBTREE: &str = "everything under this path";
 /// accumulate a bill.
 pub const CLEANUP_DEFAULT_MIN_AGE: &str = "24h";
 
-/// Key infix that marks an object as staged rather than committed.
-///
-/// `PLAN.md` §6 step 3 stages every upload under a temporary key and only makes
-/// it visible after the checksum matches, so an interrupted write leaves an
-/// object carrying this marker behind. It is the remote-side twin of
-/// [`LOCAL_STAGING_SUFFIX`], and `cleanup`'s `staging` class is defined as
-/// "objects whose key contains it".
-pub const CLEANUP_STAGING_MARKER: &str = ".tmp.";
+// `CLEANUP_STAGING_MARKER` used to live here, spelling `".tmp."` — the key infix
+// `cleanup --class staging` matched. It is gone, and deliberately not replaced by
+// another constant in this crate: `dctl_store::STAGING_NAME_PREFIX` is the one
+// name a staged object wears, and `cleanup` reports that value directly. A
+// constant here would be a second opinion that could drift from the writers'.
 
 /// Hint appended to an age-parsing failure, showing one example of each shape.
 ///
@@ -5679,11 +5666,26 @@ mod tests {
     }
 
     #[test]
-    fn the_cleanup_staging_marker_matches_the_local_one() {
-        // The remote marker is the local suffix with the key separator that
-        // follows it; if one is renamed the other has to move with it.
-        assert!(CLEANUP_STAGING_MARKER.starts_with(LOCAL_STAGING_SUFFIX));
+    fn the_cleanup_age_examples_include_the_default() {
         assert!(CLEANUP_AGE_PARSE_EXAMPLES.contains(CLEANUP_DEFAULT_MIN_AGE));
+    }
+
+    #[test]
+    fn nothing_here_holds_a_second_opinion_about_staging_names() {
+        // `dctl_store::staging` owns the rule, and this crate must not carry a
+        // constant that could drift from it. Two spellings of "this file is
+        // DCTL's own" is how a user's `report.tmp.2024.csv` came to be hidden
+        // from every listing by one half of the tool and swept as debris by the
+        // other.
+        // The needle is assembled rather than written out, because this test
+        // reads its own file and a literal would match itself.
+        let needle = format!("LOCAL{}STAGING", "_");
+        let source = include_str!("constants.rs");
+        assert!(
+            !source.contains(&needle),
+            "a local staging spelling has reappeared in constants.rs"
+        );
+        assert!(dctl_store::STAGING_NAME_PREFIX.starts_with('.'));
     }
 
     #[test]

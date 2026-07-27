@@ -235,3 +235,112 @@ async fn rejects_path_traversal_keys() {
         .unwrap_err();
     assert!(matches!(err, StoreError::InvalidKey(_)));
 }
+
+/// Real filenames that the old substring rule (`name.contains(".tmp.")`) treated
+/// as DCTL's own half-written objects and hid from every listing.
+///
+/// Each spelling is one somebody actually uses: a dated temp convention, a
+/// Postgres dump pipeline, an Office lock file that gets backed up with the tree,
+/// and — the two that matter most for an upgrade — the staging names *older DCTL
+/// builds themselves wrote*, which are ordinary files as far as this build is
+/// concerned and must restore whole.
+const NAMES_THAT_LOOK_TEMPORARY: &[&str] = &[
+    "report.tmp.2024.csv",
+    "db.tmp.2024-07-27.sql",
+    "~$report.tmp.docx",
+    "nested/dir/client.tmp.2024.dat",
+    "photo.jpg.tmp.4711.0",
+    "photo.jpg.dctltmp.4711.0",
+];
+
+#[tokio::test]
+async fn a_file_whose_name_looks_temporary_survives_a_whole_round_trip() {
+    // The data-loss defect this closes, end to end on a real filesystem.
+    //
+    // Under the substring rule every one of these was stored, was readable by
+    // key, and was **absent from every listing**. So `dctl copy remote: /out`
+    // reported `Files: 5 / 5, Errors: 0`, exit 0, and left them behind; `sync`
+    // never removed them from a destination; `purge` reported success over them;
+    // and `scrub` called the remote healthy without reading them. Nothing in the
+    // product ever said a word.
+    let dir = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+
+    for name in NAMES_THAT_LOOK_TEMPORARY {
+        let key = ObjectKey::new((*name).to_string());
+        let body = Bytes::from(format!("IMPORTANT USER DATA in {name}"));
+        fs.put(&key, body.clone(), &blake3(&body)).await.unwrap();
+        assert_eq!(fs.get(&key).await.unwrap(), body, "{name}");
+    }
+
+    let listed: Vec<String> = fs
+        .list_page("", None)
+        .await
+        .unwrap()
+        .items
+        .iter()
+        .map(|meta| meta.key.to_string())
+        .collect();
+
+    for name in NAMES_THAT_LOOK_TEMPORARY {
+        assert!(
+            listed.iter().any(|key| key == name),
+            "{name} was stored and is unreachable through a listing; \
+             every command that enumerates would silently omit it. Listed: {listed:?}"
+        );
+    }
+    assert_eq!(listed.len(), NAMES_THAT_LOOK_TEMPORARY.len());
+}
+
+#[tokio::test]
+async fn a_staging_file_left_by_a_crash_is_not_listed_as_an_object() {
+    // The other half of the same rule, so closing the data-loss hole cannot be
+    // "stop skipping anything". A staging file was never committed and was never
+    // reported to anybody as stored, so a listing that showed it would invent an
+    // object out of a half-written upload.
+    let dir = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+
+    let real = ObjectKey::new("kept.bin");
+    let body = Bytes::from_static(b"committed");
+    fs.put(&real, body.clone(), &blake3(&body)).await.unwrap();
+
+    // Exactly what a SIGKILL between the write and the rename leaves behind.
+    let abandoned = dir
+        .path()
+        .join(format!("{}9999.0", dctl_store::STAGING_NAME_PREFIX));
+    std::fs::write(&abandoned, b"half an upload").unwrap();
+    assert!(abandoned.exists());
+
+    let listed: Vec<String> = fs
+        .list_page("", None)
+        .await
+        .unwrap()
+        .items
+        .iter()
+        .map(|meta| meta.key.to_string())
+        .collect();
+    assert_eq!(listed, vec!["kept.bin".to_string()]);
+}
+
+#[tokio::test]
+async fn a_name_at_the_filesystem_limit_is_storable() {
+    // The staging name no longer carries the object's own name, so a filename
+    // that is legal on the filesystem is storable. The old spelling appended a
+    // suffix to the *filename*, which pushed a 245-byte name past NAME_MAX as a
+    // staging file — and because the suffix embedded the process id, the cutoff
+    // moved between runs and the same backup failed on some nights only.
+    let dir = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+
+    // 250 bytes: legal everywhere NAME_MAX is 255, and long enough that any
+    // suffix carrying a pid would have overflowed it.
+    let key = ObjectKey::new("x".repeat(250));
+    let body = Bytes::from_static(b"at the limit");
+
+    fs.put(&key, body.clone(), &blake3(&body))
+        .await
+        .expect("a name the filesystem accepts must be storable");
+    assert_eq!(fs.get(&key).await.unwrap(), body);
+    assert_eq!(fs.list_page("", None).await.unwrap().items.len(), 1);
+}

@@ -7,7 +7,6 @@
 //! fixed-size buffers so peak memory is `O(part_size)` regardless of object size.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Result, StoreError};
 
@@ -18,9 +17,6 @@ const STREAM_BUF_LEN: usize = 128 * 1024;
 /// upload. Both S3 and B2 reject an upload with more than this many parts, so part
 /// size must grow with the object to keep the count at or below this ceiling.
 pub(crate) const MAX_PARTS: u64 = 10_000;
-
-/// Monotonic counter making temp filenames unique for concurrent downloads.
-static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// One part's placement within the source file, for a multipart upload.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,16 +223,7 @@ async fn copy_body(
 /// A unique sibling temp path in `dest`'s directory (same filesystem, so the final
 /// rename is atomic).
 fn temp_sibling(dest: &Path) -> PathBuf {
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let parent = dest
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let name = dest.file_name().map_or_else(
-        || "object".to_string(),
-        |n| n.to_string_lossy().into_owned(),
-    );
-    parent.join(format!("{name}.dctltmp.{pid}.{seq}"))
+    crate::staging::staging_sibling(dest)
 }
 
 #[cfg(test)]

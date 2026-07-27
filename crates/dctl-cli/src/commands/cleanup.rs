@@ -5,7 +5,7 @@
 //! invisible in a listing and all of which is billed for:
 //!
 //! * **Stale staging objects.** A staged upload that never reached its commit is
-//!   left under a temporary key carrying [`CLEANUP_STAGING_MARKER`]. The
+//!   left under a staging name `dctl_store::staging` reserves. The
 //!   verified-write contract deliberately writes to a temporary key first, so
 //!   this litter is a *consequence* of the durability guarantee, not a bug.
 //! * **Orphaned content objects.** A sealed object stored by a write that never
@@ -44,8 +44,8 @@
 use clap::Args;
 
 use crate::constants::{
-    CLEANUP_DEFAULT_MIN_AGE, CLEANUP_STAGING_MARKER, REMOTE_ROOT_VALUE_NAME,
-    REMOVAL_ACTION_CLEANUP, REMOVAL_LABEL_CLASSES, REMOVAL_LABEL_MIN_AGE, REMOVAL_LIST_SEPARATOR,
+    CLEANUP_DEFAULT_MIN_AGE, REMOTE_ROOT_VALUE_NAME, REMOVAL_ACTION_CLEANUP, REMOVAL_LABEL_CLASSES,
+    REMOVAL_LABEL_MIN_AGE, REMOVAL_LIST_SEPARATOR,
 };
 use crate::ctx::Ctx;
 use crate::error::Result;
@@ -162,7 +162,7 @@ pub async fn run(ctx: &Ctx, args: &CleanupArgs) -> Result<()> {
         options: CleanupOptions {
             classes: args.selected(),
             min_age_secs: min_age.as_secs(),
-            staging_marker: CLEANUP_STAGING_MARKER,
+            staging_marker: dctl_store::STAGING_NAME_PREFIX,
         },
         operation: Operation::Cleanup {
             classes: args.selected(),
@@ -204,7 +204,7 @@ mod tests {
         CleanupOptions {
             classes: parsed.args.selected(),
             min_age_secs: parse_age(&parsed.args.min_age).unwrap().as_secs(),
-            staging_marker: CLEANUP_STAGING_MARKER,
+            staging_marker: dctl_store::STAGING_NAME_PREFIX,
         }
     }
 
@@ -283,7 +283,10 @@ mod tests {
         assert_eq!(value["command"], COMMAND);
         assert_eq!(value["options"]["classes"][0], "staging");
         assert_eq!(value["options"]["min_age_secs"], 7200);
-        assert_eq!(value["options"]["staging_marker"], CLEANUP_STAGING_MARKER);
+        assert_eq!(
+            value["options"]["staging_marker"],
+            dctl_store::STAGING_NAME_PREFIX
+        );
         assert!(value.get("filters").is_none());
     }
 

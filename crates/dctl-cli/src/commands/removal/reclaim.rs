@@ -7,10 +7,10 @@
 //! ## The classes, and what each one really is
 //!
 //! * **staging** — an object left under a temporary key by a write that never
-//!   reached its commit. `PLAN.md` §6 step 3 stages an upload under a key
-//!   carrying [`CLEANUP_STAGING_MARKER`] and only makes it live once the
-//!   checksum matches, so this litter is a *consequence* of the durability
-//!   guarantee rather than a bug in it.
+//!   reached its commit. `PLAN.md` §6 step 3 stages an upload under a name
+//!   `dctl_store::staging` reserves and only makes it live once the checksum
+//!   matches, so this litter is a *consequence* of the durability guarantee
+//!   rather than a bug in it.
 //! * **orphans** — a content object no index row refers to. This is exactly what
 //!   a verified write that aborted after storing the ciphertext leaves behind
 //!   (`PLAN.md` §6 steps 3–6: the object is written, then the name record, then
@@ -36,23 +36,33 @@
 //! none of it, and exits 6. Anything else would either cry wolf on every default
 //! run or silently swallow a request.
 //!
-//! ## A blind spot in the staging sweep on `local:`, stated rather than hidden
+//! ## The staging sweep cannot see a filesystem backend's debris — OPEN
 //!
-//! Discovery of debris can only go through [`Backend::list_page`], and
-//! [`LocalFs`](dctl_store::LocalFs) **deliberately omits keys containing
-//! `.tmp.`** from its listing — its walker calls them "in-flight verified-write
-//! temp files" and skips them. So on a `local:` store the transfer engine's
-//! staged keys (which carry `.tmp.` as an infix) are invisible to this sweep,
-//! and to `dctl ls archive-store:`, and to everything else in the binary. The
-//! `rcat` staging spelling, which merely *ends* with
-//! [`LOCAL_STAGING_SUFFIX`], is listed and is swept.
+//! Discovery of debris can only go through [`Backend::list_page`], and the
+//! filesystem-shaped backends — [`LocalFs`](dctl_store::LocalFs) and sftp —
+//! **deliberately omit staging files** from their listings, because a staging
+//! file is a write that never committed and listing one would offer a
+//! half-written upload as an object. So on `local:` and `sftp:` the debris this
+//! class exists to reclaim is invisible to it, and
+//! `dctl cleanup remote: --class staging` reports `OK removed: 0 object(s)` over
+//! a directory that may hold hundreds of gigabytes of abandoned uploads.
 //!
-//! This layer cannot fix that and does not pretend to: it reclaims exactly what
+//! **That report is a false all-clear, and it is not fixed here.** A nightly
+//! backup over a flaky link leaks one full-size staging file per interruption,
+//! and every night this command says there is nothing to reclaim while the
+//! remote disk fills.
+//!
+//! This layer cannot fix it and does not pretend to: it reclaims exactly what
 //! the backend was willing to show it, and reports exactly what it reclaimed.
-//! The fix belongs in `dctl-store` — either the walker stops filtering, or
-//! `Backend` grows a way to ask for staged keys on purpose. Special-casing the
-//! backend's name here would be a second, contradictory opinion about which keys
-//! exist, which is worse than the gap.
+//! The fix belongs in `dctl-store` — `Backend` needs a way to enumerate staging
+//! debris *on purpose*, separate from the object listing, so the two questions
+//! ("what is stored?" and "what did we abandon?") stop sharing one answer.
+//! Special-casing a backend's name here would be a second, contradictory opinion
+//! about which keys exist, and a second opinion about exactly that is what put a
+//! user's `report.tmp.2024.csv` in the bin.
+//!
+//! The object stores are unaffected: b2, s3 and r2 stage under a key their own
+//! listing returns, so this class sweeps them correctly.
 //!
 //! ## Why the orphan sweep proves the index is complete first
 //!
@@ -92,9 +102,8 @@ use serde::Serialize;
 use crate::audit::record::Entry as AuditEntry;
 use crate::audit::sink;
 use crate::constants::{
-    CLEANUP_STAGING_MARKER, CLEANUP_STALE_INDEX_HINT, LOCAL_STAGING_SUFFIX, REMOVAL_ENGINE_HINT,
-    REMOVAL_ENGINE_MISSING, REMOVAL_KIND_ORPHAN, REMOVAL_KIND_STAGING, UNKNOWN_VALUE,
-    VAULT_NAME_KEY_PREFIX, VAULT_OBJECT_KEY_PREFIX,
+    CLEANUP_STALE_INDEX_HINT, REMOVAL_ENGINE_HINT, REMOVAL_ENGINE_MISSING, REMOVAL_KIND_ORPHAN,
+    REMOVAL_KIND_STAGING, UNKNOWN_VALUE, VAULT_NAME_KEY_PREFIX, VAULT_OBJECT_KEY_PREFIX,
 };
 use crate::ctx::Ctx;
 use crate::error::Result;
@@ -468,13 +477,19 @@ impl Store {
 
 /// Whether a backend key marks a staged, uncommitted object.
 ///
-/// Two spellings because two writers produce them: a remote staged upload
-/// carries [`CLEANUP_STAGING_MARKER`] as an infix, and a local staging file
-/// carries [`LOCAL_STAGING_SUFFIX`] at the end. Both mean the same thing — the
-/// rename or the commit that would have made these bytes real never happened —
-/// so both are swept by one class rather than by two the user has to know about.
+/// Asks [`dctl_store::is_staging_name`] about the key's **last component**, which
+/// is the one place in the workspace that decides what a staging file is called.
+/// This function used to hold a second opinion — `key.contains(".tmp.")` — and a
+/// second opinion about which keys are DCTL's own is precisely how a user's
+/// `report.tmp.2024.csv` came to be swept up as debris by one half of the tool
+/// and hidden from listings by the other.
+///
+/// The last component rather than the whole key: a staging file is a sibling of
+/// the object it stages, so the marker is on the file's own name. Testing the
+/// whole key would let a *directory* called `.dctl-staging.x` condemn everything
+/// beneath it.
 fn is_staged(key: &str) -> bool {
-    key.contains(CLEANUP_STAGING_MARKER) || key.ends_with(LOCAL_STAGING_SUFFIX)
+    dctl_store::is_staging_name(key.rsplit('/').next().unwrap_or(key))
 }
 
 /// How long ago `entry` was last written, or [`None`] if that is not knowable.
@@ -541,8 +556,22 @@ mod tests {
 
     #[test]
     fn a_staged_key_is_recognised_in_both_spellings() {
-        assert!(is_staged(&format!("o/ab12{CLEANUP_STAGING_MARKER}9182")));
-        assert!(is_staged(&format!("photos/a.jpg{LOCAL_STAGING_SUFFIX}")));
+        assert!(is_staged(&format!(
+            "o/{}",
+            dctl_store::staging::staging_name()
+        )));
+        assert!(is_staged(&dctl_store::staging::staging_name()));
+        // And the defect this class used to carry in the other direction: a
+        // user's file must never be swept as debris because its name happens to
+        // read like one. `dctl cleanup` deletes what it matches.
+        for real in [
+            "report.tmp.2024.csv",
+            "db.tmp.2024-07-27.sql",
+            "photos/~$notes.tmp.docx",
+            "photo.jpg.tmp.4711.0",
+        ] {
+            assert!(!is_staged(real), "{real} would be deleted as debris");
+        }
         // And an ordinary object is not, however suggestive its name.
         assert!(!is_staged("o/abcdef0123456789"));
         assert!(!is_staged("notes/tmp/a.txt"));

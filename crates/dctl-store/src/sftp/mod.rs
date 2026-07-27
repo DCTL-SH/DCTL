@@ -22,7 +22,8 @@
 //!
 //! # Verified write & atomicity
 //!
-//! Every write stages to a unique temp sibling (`<key>.tmp.<pid>.<seq>`), is
+//! Every write stages to a unique sibling in the object's own directory
+//! (`crate::staging`), is
 //! flushed with the `fsync@openssh.com` extension when the server supports it, and
 //! is only then atomically renamed onto the final path (`posix-rename@openssh.com`
 //! when available). Nothing is committed unless the bytes hash to `expected`, so a
@@ -475,8 +476,12 @@ impl Backend for SftpBackend {
                 match entry.file_type() {
                     Some(ft) if ft.is_dir() => stack.push((open_child, key_child)),
                     Some(ft) if ft.is_file() => {
-                        if name.contains(".tmp.") {
-                            continue; // in-flight verified-write staging file
+                        // One rule, one implementation, in `crate::staging`.
+                        // The substring test this replaced hid every object
+                        // whose name contained `.tmp.` from `ls`, `size`,
+                        // `scrub`, `copy`, `sync` and `purge` alike.
+                        if crate::staging::is_staging_name(&name) {
+                            continue; // an in-flight verified write, never committed
                         }
                         let md = entry.metadata();
                         found.push((

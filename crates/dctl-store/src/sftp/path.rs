@@ -6,14 +6,9 @@
 //! create, and how a byte total splits into bounded transfer chunks.
 
 use std::path::{Component, Path};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::{Result, StoreError};
 use crate::model::ObjectKey;
-
-/// Monotonic counter making temp filenames unique across concurrent writers in
-/// this process. Combined with the PID it is unique across processes too.
-static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 /// Normalize a configured `base` into a remote path string with no trailing slash.
 ///
@@ -134,12 +129,17 @@ pub(super) fn ancestor_dirs(path: &str) -> Vec<String> {
     out
 }
 
-/// A unique temp sibling path for the atomic-write staging file: `<final>.tmp.<pid>.<seq>`.
+/// A unique staging sibling for the atomic write, in the object's own directory.
+///
+/// The naming rule lives in [`crate::staging`] and is shared with the local
+/// backend. It deliberately carries no trace of the object being staged: the old
+/// spelling appended a suffix to the *filename*, so a 245-byte name exceeded
+/// `NAME_MAX` as a staging file while being perfectly legal as a final one — and
+/// the cutoff moved with the process id's digit count, so the same backup failed
+/// on some nights and not others.
 #[must_use]
 pub(super) fn temp_path(final_path: &str) -> String {
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    format!("{final_path}.tmp.{pid}.{seq}")
+    crate::staging::staging_sibling_remote(final_path)
 }
 
 /// A single bounded transfer span: a byte `offset` and `len`.
@@ -313,8 +313,16 @@ mod tests {
         let a = temp_path("dir/obj.bin");
         let b = temp_path("dir/obj.bin");
         assert_ne!(a, b, "temp paths must be unique per call");
-        assert!(a.starts_with("dir/obj.bin.tmp."));
-        // The listing walk skips these staging files by this marker.
-        assert!(a.contains(".tmp."));
+        assert!(
+            a.starts_with("dir/"),
+            "the rename must stay in one directory"
+        );
+        // Recognised by the one shared rule, and carrying nothing of the object
+        // it stages — which is what stops a long filename from being
+        // un-storable and what stops a real `.tmp.` file from being hidden.
+        assert!(crate::staging::is_staging_name(
+            a.rsplit('/').next().unwrap_or_default()
+        ));
+        assert!(!a.contains("obj.bin"));
     }
 }

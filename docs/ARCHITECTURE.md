@@ -251,6 +251,25 @@ are lowercase hex.
 head — path-independent and rename-stable, so renaming a file rewrites only its
 `n/*` record, never the (possibly multi-GB) `o/*` payload.
 
+#### One reserved name: `.dctl-staging.*`
+
+Every verified write in the workspace stages its bytes beside the object under a
+name beginning `.dctl-staging.` and `rename`s onto the final name once the stored
+bytes have been checked. The rename is the commit, so a crash leaves a staging
+file, and a staging file is a write that was never reported to anybody as stored.
+**A key whose last component begins with that prefix is therefore not listed as
+an object**, on any backend.
+
+That is a namespace DCTL claims, and it matters on a **plain** remote, where the
+backend key space is the user's own paths: a file literally named
+`.dctl-staging.something` would not appear in a listing.
+
+The claim is deliberately narrow and it replaced one that was not. The rule used
+to be "any name containing `.tmp.`", applied as a substring test, which hid real
+files — `report.tmp.2024.csv`, `db.tmp.2024-07-27.sql`, Office's own
+`~$report.tmp.docx` — from every listing while `copy` reported `Files: 5 / 5,
+Errors: 0`. One rule, one implementation, in `dctl_store::staging`.
+
 ---
 
 ## 4. Two invariants, stated precisely

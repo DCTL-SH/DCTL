@@ -9,7 +9,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use dctl_crypto::constants::{FILE_ID_LEN, KEM_ID_HYBRID, KEM_ID_NONE, KEY_LEN, OBJECT_HEAD_LEN};
 use dctl_crypto::object::{self, Metadata};
@@ -24,9 +23,6 @@ use crate::range::{self, RangeReader};
 
 /// Working-buffer size for the streaming decrypt-to-disk copy.
 const STREAM_BUF_LEN: usize = 128 * 1024;
-
-/// Monotonic counter making the plaintext temp filename unique for concurrent readers.
-static TMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 impl Vault {
     /// Resolve a normalized path to its backend object key, **without side effects**.
@@ -570,15 +566,7 @@ fn stream_decrypt_to_tmp(
 /// A unique temp sibling of `dest` in the same directory, so the final publish is an
 /// atomic same-filesystem rename.
 fn temp_sibling(dest: &Path) -> PathBuf {
-    let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let pid = std::process::id();
-    let parent = dest
-        .parent()
-        .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
-    let name = dest
-        .file_name()
-        .map_or_else(|| "out".to_string(), |n| n.to_string_lossy().into_owned());
-    parent.join(format!("{name}.dctl-tmp.{pid}.{seq}"))
+    dctl_store::staging::staging_sibling(dest)
 }
 
 /// A [`Write`] tee that folds every written byte into a [`Hasher`] before passing it to
