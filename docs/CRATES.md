@@ -154,7 +154,7 @@ X25519 + ML-KEM-768 recipient layer. The normative layout it implements is
 | Module | Purpose | Notable public symbols |
 |--------|---------|------------------------|
 | `constants` | Frozen, brand-neutral format IDs | `ENVELOPE_MAGIC = b"DKE1"`, `OBJECT_MAGIC = b"DSF1"`, `ALGO_XCHACHA20_POLY1305`, `KEM_ID_NONE`/`KEM_ID_HYBRID`, `OBJECT_HEAD_LEN = 68`, `SLOT_TYPE_{DEVICE,PASSWORD,MNEMONIC,SHAMIR}`, `INFO_{INDEX,CACHE,AUDIT,NAME_HASH,…}` domain-separation labels |
-| `kdf` | Argon2id KEK derivation + calibration | `derive_kek`, `derive_kek_with_params`, `calibrate` → `CalibratedParams`, `validate_params`, `normalize_passphrase`, `generate_salt`, `generate_mnemonic`, `derive_kek_from_mnemonic` |
+| `kdf` | Argon2id KEK derivation + cost policy + calibration | `Cost` (`PRODUCTION`, `shipped()`, `is_production()`, `validate()`), `derive_kek`, `derive_kek_from_mnemonic`, `calibrate` → `Cost`, `normalize_passphrase`, `generate_salt`, `generate_mnemonic`, `validate_mnemonic`, `gate` (the build-time cost gate — see [SECURITY.md § 2.1.1](./SECURITY.md#211-the-reduced-test-cost-and-why-a-shipped-build-cannot-write-it)) |
 | `envelope` | `DKE1` slot-list envelope | `Envelope`, `Slot`, `parse`, `serialize`, `wrap_slot`, `unwrap_slot`, `generate_vault_id`, `WRAPPED_ROOT_LEN` |
 | `keys` | Root key + HKDF sub-keys | `generate_key`, `derive_subkey`, `derive_subkey_from_ikm` |
 | `aead` | Context-bound XChaCha20-Poly1305 | `encrypt`, `decrypt`, `encrypt_with_nonce`, `decrypt_with_nonce`, `NONCE_LEN`, `TAG_LEN` |

@@ -8,6 +8,10 @@
 //! **Portable slots:** calibrate for the WEAKEST device expected to unlock the vault
 //! (mobile-affordable), never the strongest that created it — otherwise that device
 //! cannot afford the memory/time to open it (cross-device requirement, §9.10).
+//!
+//! This measures a device; it is not the build-time choice between the shipped
+//! and the reduced cost. That one is [`super::gate`], and nothing here can reach
+//! below the frozen floor.
 
 use std::time::{Duration, Instant};
 
@@ -17,29 +21,34 @@ use crate::constants::{
 };
 use crate::error::Result;
 
+use super::cost::Cost;
 use super::derive::argon2id;
 
 /// Probe memory cost (KiB) used to estimate this device's Argon2 throughput (64 MiB).
 const PROBE_M_COST: u32 = 65_536;
 
-/// Calibrated Argon2id parameters (always within the frozen ceilings).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CalibratedParams {
-    pub m_cost: u32,
-    pub t_cost: u32,
-    pub p_lanes: u32,
-}
-
 /// Calibrate Argon2id params to approximately `target` on this device, clamped to the
 /// frozen ceilings. `p_lanes` is clamped to `1..=8`.
-pub fn calibrate(target: Duration, p_lanes: u32) -> Result<CalibratedParams> {
+///
+/// # Errors
+/// Whatever the probe derivation fails with — the probe runs the real KDF, so a
+/// machine that cannot afford 64 MiB is reported rather than guessed around.
+pub fn calibrate(target: Duration, p_lanes: u32) -> Result<Cost> {
     let p = p_lanes.clamp(1, ARGON2_MAX_P_LANES);
     let t = DEFAULT_ARGON2_T_COST.max(1);
 
     // One probe run to estimate throughput (Argon2 time ≈ linear in m·t).
     let salt = [0u8; 16];
     let start = Instant::now();
-    let _ = argon2id(b"dctl-argon2-calibration-probe", &salt, PROBE_M_COST, t, p)?;
+    let _ = argon2id(
+        b"dctl-argon2-calibration-probe",
+        &salt,
+        Cost {
+            m_cost: PROBE_M_COST,
+            t_cost: t,
+            p_lanes: p,
+        },
+    )?;
     let elapsed = start.elapsed().as_secs_f64().max(1e-6);
     let target_s = target.as_secs_f64();
     let ratio = target_s / elapsed;
@@ -60,7 +69,7 @@ pub fn calibrate(target: Duration, p_lanes: u32) -> Result<CalibratedParams> {
         t
     };
 
-    Ok(CalibratedParams {
+    Ok(Cost {
         m_cost: m,
         t_cost: t_final.max(1),
         p_lanes: p,

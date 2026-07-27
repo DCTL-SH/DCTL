@@ -676,6 +676,7 @@ dependencies = [
  "proptest",
  "sha2",
  "subtle",
+ "tempfile",
  "thiserror 2.0.19",
  "unicode-normalization",
  "unicode-properties",

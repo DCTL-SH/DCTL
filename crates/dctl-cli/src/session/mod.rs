@@ -34,6 +34,7 @@
 
 pub mod factor;
 pub mod index;
+pub mod kdf_cost;
 pub mod open;
 pub mod password;
 pub mod phrase;

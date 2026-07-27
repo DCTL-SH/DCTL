@@ -7,16 +7,23 @@
 //! before the (expensive) KDF runs, since envelope params come from untrusted
 //! storage. Changing the hash, concatenation order, or normalization would
 //! re-derive a different KEK, so those choices are frozen.
+//!
+//! Every entry point takes an explicit [`Cost`]. There is deliberately no
+//! "derive at the usual cost" convenience: a call site that did not name its
+//! parameters would inherit whatever the build happened to select, which is the
+//! one thing the gate in [`super::gate`] exists to prevent from spreading past
+//! the single place that decides it.
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
 
 use crate::constants::{
-    ARGON2_MAX_M_COST, ARGON2_MAX_P_LANES, ARGON2_MAX_T_COST, ARGON2_MIN_M_COST,
-    DEFAULT_ARGON2_M_COST, DEFAULT_ARGON2_P_LANES, DEFAULT_ARGON2_T_COST, KEY_LEN,
+    ARGON2_MAX_M_COST, ARGON2_MAX_P_LANES, ARGON2_MAX_T_COST, ARGON2_MIN_M_COST, KEY_LEN,
 };
 use crate::error::{CryptoError, Result};
+
+use super::cost::Cost;
 
 /// NFC-normalize a passphrase to its canonical UTF-8 bytes, wiped on drop.
 #[must_use]
@@ -24,9 +31,12 @@ pub fn normalize_passphrase(passphrase: &str) -> Zeroizing<Vec<u8>> {
     Zeroizing::new(passphrase.nfc().collect::<String>().into_bytes())
 }
 
-/// Validate Argon2id cost parameters against the mandatory ceilings. Callers MUST
-/// call this (or a function that does) before running Argon2id on untrusted params.
-pub fn validate_params(m_cost: u32, t_cost: u32, p_lanes: u32) -> Result<()> {
+/// Validate Argon2id cost parameters against the mandatory ceilings.
+///
+/// Reached through [`Cost::validate`], and through every derivation below, so
+/// that params read from untrusted storage are checked before Argon2id ever
+/// runs on them.
+pub(crate) fn validate_params(m_cost: u32, t_cost: u32, p_lanes: u32) -> Result<()> {
     let m_ok = (ARGON2_MIN_M_COST..=ARGON2_MAX_M_COST).contains(&m_cost);
     let t_ok = (1..=ARGON2_MAX_T_COST).contains(&t_cost);
     let p_ok = (1..=ARGON2_MAX_P_LANES).contains(&p_lanes);
@@ -40,15 +50,9 @@ pub fn validate_params(m_cost: u32, t_cost: u32, p_lanes: u32) -> Result<()> {
 }
 
 /// Run Argon2id over `secret` (already-normalized bytes) with validated params.
-pub(crate) fn argon2id(
-    secret: &[u8],
-    salt: &[u8],
-    m_cost: u32,
-    t_cost: u32,
-    p_lanes: u32,
-) -> Result<Zeroizing<[u8; KEY_LEN]>> {
-    validate_params(m_cost, t_cost, p_lanes)?;
-    let params = Params::new(m_cost, t_cost, p_lanes, Some(KEY_LEN))
+pub(crate) fn argon2id(secret: &[u8], salt: &[u8], cost: Cost) -> Result<Zeroizing<[u8; KEY_LEN]>> {
+    cost.validate()?;
+    let params = Params::new(cost.m_cost, cost.t_cost, cost.p_lanes, Some(KEY_LEN))
         .map_err(|e| CryptoError::Kdf(e.to_string()))?;
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut out: Zeroizing<[u8; KEY_LEN]> = Zeroizing::new([0u8; KEY_LEN]);
@@ -58,35 +62,25 @@ pub(crate) fn argon2id(
     Ok(out)
 }
 
-/// Derive the KEK from a passphrase (+ optional factor) and salt, default params.
+/// Derive the KEK from a passphrase (+ optional factor), salt and cost.
+///
+/// Input = NFC(passphrase) ‖ BLAKE3(factor)?. `cost` is the slot's own recorded
+/// cost when re-deriving, or [`Cost::shipped`] when writing a new slot.
+///
+/// # Errors
+/// [`CryptoError::InvalidKdfParams`] if `cost` is outside the frozen §2 range —
+/// checked before the expensive derivation, because these parameters arrive
+/// from storage an attacker may control. [`CryptoError::Kdf`] if Argon2id
+/// itself refuses the combination.
 pub fn derive_kek(
     passphrase: &str,
     factor: Option<&[u8]>,
     salt: &[u8],
-) -> Result<Zeroizing<[u8; KEY_LEN]>> {
-    derive_kek_with_params(
-        passphrase,
-        factor,
-        salt,
-        DEFAULT_ARGON2_M_COST,
-        DEFAULT_ARGON2_T_COST,
-        DEFAULT_ARGON2_P_LANES,
-    )
-}
-
-/// Derive the KEK with explicit Argon2id parameters (re-deriving from the params
-/// stored in an envelope slot). Input = NFC(passphrase) ‖ BLAKE3(factor)?.
-pub fn derive_kek_with_params(
-    passphrase: &str,
-    factor: Option<&[u8]>,
-    salt: &[u8],
-    m_cost: u32,
-    t_cost: u32,
-    p_lanes: u32,
+    cost: Cost,
 ) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     let mut input: Zeroizing<Vec<u8>> = normalize_passphrase(passphrase);
     if let Some(factor) = factor {
         input.extend_from_slice(blake3::hash(factor).as_bytes());
     }
-    argon2id(&input, salt, m_cost, t_cost, p_lanes)
+    argon2id(&input, salt, cost)
 }

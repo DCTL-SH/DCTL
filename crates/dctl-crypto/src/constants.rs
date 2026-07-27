@@ -351,6 +351,35 @@ pub const ARGON2_MAX_T_COST: u32 = 16;
 /// Maximum Argon2id parallelism lanes.
 pub const ARGON2_MAX_P_LANES: u32 = 8;
 
+// Reduced Argon2id cost for builds that are not shipped (`kdf::Cost::TEST`).
+//
+// DCTL's own suite creates and opens hundreds of vaults per run, and at the
+// shipped cost that is minutes of Argon2id per test file — enough that changing
+// this project became expensive, which is its own kind of defect. An envelope
+// records the parameters it was written with, so a vault written at the floor is
+// opened at the floor and every assertion in the suite is unchanged; only the
+// wall clock moves.
+//
+// That property is also why these numbers are dangerous, and why nothing at run
+// time can select them: a vault created under them is permanently
+// brute-forceable and looks completely ordinary. `kdf::gate` decides from
+// Cargo's `PROFILE` at build time, and a shipped build has no path that reaches
+// them.
+//
+// They are the *floor the format allows* rather than an arbitrary small number:
+// the cheapest legal cost is the fastest, and pinning the suite to it means the
+// suite is continuously proving that a decoder accepts the minimum §2 permits.
+
+/// Argon2id memory cost (KiB) a non-shipped build writes — the frozen §2 floor.
+pub const TEST_ARGON2_M_COST: u32 = ARGON2_MIN_M_COST;
+/// Argon2id time cost a non-shipped build writes — one pass, the format minimum.
+pub const TEST_ARGON2_T_COST: u32 = 1;
+/// Argon2id lanes a non-shipped build writes — one lane, the format minimum.
+///
+/// Also what keeps [`TEST_ARGON2_M_COST`] legal: RFC 9106 requires `m >= 8*p`,
+/// and the §2 floor of 8 KiB satisfies that for exactly one lane.
+pub const TEST_ARGON2_P_LANES: u32 = 1;
+
 /// Default chunk size for the media/streaming profile (1 MiB — FORMAT.md §7:
 /// keeps player probes/seeks cheap and per-chunk memory low for FUSE/File-Provider).
 pub const DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024;

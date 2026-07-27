@@ -76,24 +76,16 @@ impl UnlockKey<'_> {
         if slot.slot_type != self.slot_type() {
             return None;
         }
+        let cost = kdf::Cost {
+            m_cost: slot.m_cost,
+            t_cost: slot.t_cost,
+            p_lanes: slot.p_lanes,
+        };
         match self {
-            Self::Password(password) => kdf::derive_kek_with_params(
-                password,
-                None,
-                &slot.salt,
-                slot.m_cost,
-                slot.t_cost,
-                slot.p_lanes,
-            )
-            .ok(),
-            Self::RecoveryPhrase(phrase) => kdf::derive_kek_from_mnemonic(
-                phrase,
-                &slot.salt,
-                slot.m_cost,
-                slot.t_cost,
-                slot.p_lanes,
-            )
-            .ok(),
+            Self::Password(password) => kdf::derive_kek(password, None, &slot.salt, cost).ok(),
+            Self::RecoveryPhrase(phrase) => {
+                kdf::derive_kek_from_mnemonic(phrase, &slot.salt, cost).ok()
+            }
         }
     }
 }

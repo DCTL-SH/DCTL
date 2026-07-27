@@ -92,6 +92,50 @@ RAM or hours of CPU just to attempt an unlock. `validate_params` enforces frozen
 (`ARGON2_MIN_M_COST=8`, `ARGON2_MAX_M_COST=1 048 576` KiB = 1 GiB, `t ≤ 16`, `p ≤ 8`) and
 is called *before* the KDF runs.
 
+#### 2.1.1 The reduced test cost, and why a shipped build cannot write it
+
+DCTL's own suite creates and opens hundreds of vaults per run. At 128 MiB × t=3 that was
+**863 seconds for one test file**, which made the project expensive to change — a defect in
+its own right. A build that is **not** `--release` therefore writes the frozen §2 floor
+(`m = 8 KiB, t = 1, p = 1`) into new slots instead. Nothing else changes: a slot carries the
+parameters it was written with, so every assertion in the suite is identical and only the
+clock moves.
+
+That is a real weakening. A vault created under it has a brute-forceable password, opens
+normally forever, and never looks wrong again — so **which cost a build writes is not a
+setting anybody can reach**. Every mechanism that can be influenced from outside the source
+tree was rejected:
+
+| Mechanism | Rejected because |
+|---|---|
+| Cargo feature | settable with `--features`, and unified across the whole dependency graph |
+| environment variable | chosen by whoever runs the binary — exactly who Argon2id defends against |
+| CLI flag | the same, and documented |
+| `cfg(debug_assertions)` alone | forced on in a release build by `RUSTFLAGS="-C debug-assertions=on"` or `[profile.release] debug-assertions = true` |
+| any custom `cfg` | settable with `--cfg` |
+
+Instead the cost is fixed at **build time** by
+[`kdf/gate.rs`](../crates/dctl-crypto/src/kdf/gate.rs) from Cargo's `PROFILE`, which Cargo
+computes itself, hands only to build scripts, and does not let the environment override —
+and it is baked in as **generated source**, not as a `cfg`, so there is nothing on a command
+line to flip. A **second, independent** gate (`const _: () = assert!(…)` in
+[`kdf/cost.rs`](../crates/dctl-crypto/src/kdf/cost.rs)) refuses to *compile* the reduced cost
+into any build without debug assertions. Reaching it requires editing the source tree.
+
+[`tests/kdf_cost.rs`](../crates/dctl-crypto/tests/kdf_cost.rs) checks every link, including
+by building a probe crate under `PROFILE=debug cargo build --release` and under forced debug
+assertions, and — the one that settles it — by compiling this crate with `--release` and
+asking the resulting binary which cost it would write.
+
+**The residual, stated plainly.** A binary somebody compiled *themselves* without
+`--release` — including `cargo install --debug` — does write reduced-cost vaults. That is
+the intended behaviour, not an oversight: the guarantee is about what a **released** DCTL
+can be made to do, and no distributed artifact is built that way. It is also why such a
+build says so twice — as a `cargo::warning` when it is compiled, and again from `dctl init`
+(and the password replacement inside `dctl vault recover`) at the moment a slot is created,
+naming both costs and the command that fixes it. That is the last moment anyone can be told,
+because the parameters are permanent from then on.
+
 ### 2.2 KEK → root key (DKE1 slot envelope)
 
 The envelope ([`FORMAT.md §2`](./FORMAT.md#2-envelope-dke1--self-delimiting-key-slot-list),

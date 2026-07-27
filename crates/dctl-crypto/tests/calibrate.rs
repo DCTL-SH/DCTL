@@ -22,7 +22,7 @@ fn calibrate_stays_within_frozen_ceilings() {
     );
     assert_eq!(p.p_lanes, 4);
     // The calibrated params must be accepted by the KDF validator.
-    assert!(kdf::validate_params(p.m_cost, p.t_cost, p.p_lanes).is_ok());
+    assert!(p.validate().is_ok());
 }
 
 #[test]

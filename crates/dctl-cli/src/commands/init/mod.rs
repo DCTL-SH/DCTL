@@ -177,6 +177,11 @@ pub async fn run(ctx: &Ctx, args: &InitArgs) -> Result<()> {
     let occupant = envelope::probe(&backend).await?;
     let action = refuse_existing_vault(ctx, &plan, occupant)?;
 
+    // Before the confirmation, not after: a build that writes a reduced
+    // key-derivation cost is a reason to decline, and a warning printed after
+    // the prompt would arrive one keystroke too late.
+    crate::session::kdf_cost::warn_if_reduced(ctx);
+
     if !ctx.confirm_destructive(action, &plan.base)? {
         return Err(CliError::new(
             ExitCode::Cancelled,

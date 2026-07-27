@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use dctl_core::{Modified, UnlockKey, Vault};
+use dctl_core::{KdfCost, Modified, UnlockKey, Vault};
 use dctl_store::{Backend, LocalFs, ObjectKey};
 use tempfile::TempDir;
 
@@ -398,10 +398,20 @@ async fn the_envelope_matches_the_table_the_format_document_publishes() {
     // has silently drifted from the encoder is worse than no document, because
     // it will be believed.
     let e = env();
+    // At the *published* cost, named here rather than inherited from the build.
+    // §2.1 prints m=131072 / t=3 / p=4 in its worked example; a conformance test
+    // that read those figures back out of whichever profile it happened to be
+    // compiled in would be agreeing with the encoder instead of with the
+    // document, which is the one thing this file exists not to do.
     drop(
-        Vault::init(e.backend.clone(), &e.index_path, PASSWORD)
-            .await
-            .unwrap(),
+        Vault::init_with_cost(
+            e.backend.clone(),
+            &e.index_path,
+            PASSWORD,
+            KdfCost::PRODUCTION,
+        )
+        .await
+        .unwrap(),
     );
     let bytes = e
         .backend

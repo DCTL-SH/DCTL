@@ -102,16 +102,23 @@ cargo test --workspace
 cargo test -p dctl-crypto
 cargo test -p dctl-core
 
-# The CLI end-to-end suite (slow — see below)
+# The CLI end-to-end suite (end-to-end, still seconds — see below)
 cargo test -p dctl-cli
 ```
 
 A few things worth knowing before you run the suite:
 
-- **The `dctl-cli` suite is slow by design.** Each CLI test spins up a real vault,
-  and vault init runs **Argon2id** — an intentionally expensive, memory-hard KDF.
-  Per-test key derivation dominates the wall-clock time. This is expected; the
-  library crates run quickly by comparison.
+- **The suite runs at a reduced KDF cost; a release build cannot.** Each CLI test
+  spins up a real vault, and at the shipped Argon2id cost (128 MiB, t=3, p=4) key
+  derivation dominated everything: `tests/invariant_i4` alone took **863 seconds**.
+  A build that is not `--release` therefore writes the frozen `FORMAT.md` §2 floor
+  into new slots, which takes the same file to **5.5 seconds** with every assertion
+  unchanged — an envelope records the parameters it was written with, so nothing
+  downstream can tell the difference. The choice is made at build time from Cargo's
+  `PROFILE` and is reachable by no feature, flag, environment variable or `cfg`; see
+  [SECURITY.md § 2.1.1](./SECURITY.md#211-the-reduced-test-cost-and-why-a-shipped-build-cannot-write-it)
+  and `crates/dctl-crypto/src/kdf/gate.rs`. `cargo test --release` runs the identical
+  suite at the shipped cost — the slow way to double-check a change to the KDF itself.
 
 - **The C reference-decoder KAT proves format stability.** `dctl-decode` cross-
   validates the Rust encoder against a standalone **C99** decoder using

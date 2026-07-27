@@ -5,6 +5,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "DCTL clean-room, streaming-first, post-quantum-ready encryption core"
+# Named explicitly rather than left to Cargo's auto-detection. This build script
+# is the whole of the KDF-cost gate (`src/kdf/gate.rs`): a package that silently
+# stopped having one would silently start shipping whatever `OUT_DIR` last held,
+# so its presence is stated where a reviewer of the manifest can see it.
+build = "build.rs"
 
 [dependencies]
 # crypto-specific (pinned in this crate)
@@ -37,3 +42,6 @@ proptest = { workspace = true }
 # Integration tests need the `EncodedSizeUser` trait to compare ML-KEM key bytes
 # (a lib's normal deps are not in scope for its integration-test crates).
 ml-kem = { workspace = true }
+# `tests/kdf_cost.rs` builds a throwaway crate of its own to observe what Cargo
+# reports in `PROFILE`, which is the external fact the KDF-cost gate stands on.
+tempfile = { workspace = true }

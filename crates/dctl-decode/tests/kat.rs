@@ -24,7 +24,7 @@ use std::process::Command;
 
 use dctl_crypto::constants::{KDF_ID_ARGON2ID, SLOT_TYPE_PASSWORD};
 use dctl_crypto::envelope::{Envelope, generate_vault_id, serialize, wrap_slot};
-use dctl_crypto::kdf::{derive_kek_with_params, generate_salt};
+use dctl_crypto::kdf::{Cost, derive_kek, generate_salt};
 use dctl_crypto::object::{Metadata, seal, seal_stream};
 use tempfile::TempDir;
 
@@ -33,9 +33,11 @@ const RFC9106_ARGON2ID_TAG: &str =
 
 /// Small Argon2id params (m=64 KiB, t=1, p=1) — keep password-mode KATs fast while
 /// still exercising the full derive-KEK-then-unwrap-root chain against the C port.
-const KAT_M_COST: u32 = 64;
-const KAT_T_COST: u32 = 1;
-const KAT_P_LANES: u32 = 1;
+const KAT_COST: Cost = Cost {
+    m_cost: 64,
+    t_cost: 1,
+    p_lanes: 1,
+};
 
 // ───────────────────────────────── test harness helpers ─────────────────────────
 
@@ -104,18 +106,16 @@ fn seal_obj_stream(root: &[u8; 32], pt: &[u8], chunk_size: u32) -> Vec<u8> {
 fn make_envelope(password: &str, root: &[u8; 32]) -> Vec<u8> {
     let vault_id = generate_vault_id();
     let salt = generate_salt();
-    let kek: [u8; 32] =
-        *derive_kek_with_params(password, None, &salt, KAT_M_COST, KAT_T_COST, KAT_P_LANES)
-            .expect("derive_kek");
+    let kek: [u8; 32] = *derive_kek(password, None, &salt, KAT_COST).expect("derive_kek");
     let slot = wrap_slot(
         &kek,
         root,
         &vault_id,
         SLOT_TYPE_PASSWORD,
         KDF_ID_ARGON2ID,
-        KAT_M_COST,
-        KAT_T_COST,
-        KAT_P_LANES,
+        KAT_COST.m_cost,
+        KAT_COST.t_cost,
+        KAT_COST.p_lanes,
         salt.to_vec(),
         Vec::new(),
     )

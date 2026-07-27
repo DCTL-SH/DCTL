@@ -27,6 +27,16 @@ mod vault;
 /// [`Vault::fetch_recipient`] speak in (`dctl_core::kem::Drk1Public`).
 pub use dctl_crypto::kem;
 pub use dctl_index::Record;
+
+/// The Argon2id cost a new vault's key slots are wrapped at.
+///
+/// Re-exported because a host has two reasons to name it and neither is served
+/// by reaching past this crate: [`Vault::init_with_cost`] takes one, and a host
+/// that offers "create a vault" to a human has to be able to ask
+/// [`KdfCost::is_production`] whether the build it is running would produce a
+/// real vault or a test one. That question has to be answerable at the moment of
+/// creation, because the answer is baked into the envelope from then on.
+pub use dctl_crypto::kdf::Cost as KdfCost;
 pub use error::{CoreError, Result};
 pub use vault::{Modified, NewVault, UnlockKey, Vault};
 

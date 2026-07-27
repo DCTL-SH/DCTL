@@ -175,6 +175,12 @@ pub async fn run(ctx: &Ctx, args: &RecoverArgs) -> Result<()> {
         return Report::new(target.to_string(), true, false).emit(ctx);
     }
 
+    // The replacement slot is written at this build's shipped cost, so the
+    // disclosure `dctl init` makes belongs here too: a recovery performed with a
+    // reduced-cost build leaves the vault with a cheap password slot beside its
+    // original, correctly-costed ones, and nothing afterwards looks wrong.
+    crate::session::kdf_cost::warn_if_reduced(ctx);
+
     // Read after the unlock succeeded. Asking somebody to choose and confirm a
     // new password and *then* telling them their phrase did not work is a
     // cruelty with no upside — the phrase is the thing that might fail here.

@@ -71,17 +71,23 @@ impl Vault {
             return Err(CoreError::Unlock);
         }
 
+        // Today's shipped cost, not the one the old slot carried. A password
+        // change writes a *new* slot, and a vault created years ago on a slower
+        // machine should not hold this build's replacement down to that
+        // machine's figure. Every other slot keeps its own, which is the whole
+        // point of the parameters being per-slot.
+        let cost = kdf::Cost::shipped();
         let salt = kdf::generate_salt();
-        let kek = kdf::derive_kek(new_password, None, &salt)?;
+        let kek = kdf::derive_kek(new_password, None, &salt, cost)?;
         let replacement = envelope::wrap_slot(
             &kek,
             self.root()?,
             &self.vault_id,
             constants::SLOT_TYPE_PASSWORD,
             constants::KDF_ID_ARGON2ID,
-            constants::DEFAULT_ARGON2_M_COST,
-            constants::DEFAULT_ARGON2_T_COST,
-            constants::DEFAULT_ARGON2_P_LANES,
+            cost.m_cost,
+            cost.t_cost,
+            cost.p_lanes,
             salt.to_vec(),
             Vec::new(),
         )?;

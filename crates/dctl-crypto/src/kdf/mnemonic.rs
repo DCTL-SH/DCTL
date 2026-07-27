@@ -17,6 +17,7 @@ use zeroize::Zeroizing;
 use crate::constants::{KEY_LEN, RECOVERY_MNEMONIC_ENTROPY_BYTES};
 use crate::error::{CryptoError, Result};
 
+use super::cost::Cost;
 use super::derive::argon2id;
 
 /// Parse a BIP-39 mnemonic, checking its word list **and its checksum**.
@@ -46,17 +47,21 @@ pub fn validate_mnemonic(mnemonic: &str) -> Result<()> {
     parse(mnemonic).map(|_| ())
 }
 
-/// Derive a KEK from a BIP-39 mnemonic + salt + validated Argon2id params.
+/// Derive a KEK from a BIP-39 mnemonic, a salt and a validated Argon2id cost.
+///
+/// # Errors
+/// [`CryptoError::Kdf`] for a phrase that is not well-formed BIP-39, and
+/// [`CryptoError::InvalidKdfParams`] for a `cost` outside the frozen §2 range —
+/// both before Argon2id runs, since a recovery-phrase slot's parameters come
+/// from the same untrusted envelope as a password slot's.
 pub fn derive_kek_from_mnemonic(
     mnemonic: &str,
     salt: &[u8],
-    m_cost: u32,
-    t_cost: u32,
-    p_lanes: u32,
+    cost: Cost,
 ) -> Result<Zeroizing<[u8; KEY_LEN]>> {
     let parsed = parse(mnemonic)?;
     let seed = Zeroizing::new(parsed.to_seed(""));
-    argon2id(&seed[..], salt, m_cost, t_cost, p_lanes)
+    argon2id(&seed[..], salt, cost)
 }
 
 /// Generate a fresh 24-word (256-bit) BIP-39 recovery mnemonic, wiped on drop.
@@ -73,17 +78,22 @@ mod tests {
     use super::*;
     use crate::constants::{DEFAULT_SALT_LEN, RECOVERY_MNEMONIC_WORDS};
 
-    /// Argon2id parameters deliberately far below the production defaults.
+    /// Argon2id parameters deliberately far below the production cost.
     ///
     /// These tests are about the *mnemonic* — word count, checksum, whitespace
-    /// tolerance — and the shipped defaults would spend 128 MiB and several
-    /// hundred milliseconds per derivation to prove nothing extra. The
-    /// production values are exercised where they matter, by the vault tests
-    /// that create real envelopes.
-    const CHEAP: (u32, u32, u32) = (64, 1, 1);
+    /// tolerance — and the shipped cost would spend 128 MiB and several hundred
+    /// milliseconds per derivation to prove nothing extra. Named here rather
+    /// than taken from [`Cost::shipped`] so the figure does not move with the
+    /// build profile; the production one is pinned where it matters, by
+    /// `dctl-core`'s envelope-conformance test.
+    const CHEAP: Cost = Cost {
+        m_cost: 64,
+        t_cost: 1,
+        p_lanes: 1,
+    };
 
     fn kek_with_salt(phrase: &str, salt: u8) -> Result<Zeroizing<[u8; KEY_LEN]>> {
-        derive_kek_from_mnemonic(phrase, &[salt; DEFAULT_SALT_LEN], CHEAP.0, CHEAP.1, CHEAP.2)
+        derive_kek_from_mnemonic(phrase, &[salt; DEFAULT_SALT_LEN], CHEAP)
     }
 
     fn kek(phrase: &str) -> Result<Zeroizing<[u8; KEY_LEN]>> {

@@ -82,6 +82,33 @@ impl Vault {
         index_path: &Path,
         password: &str,
     ) -> Result<NewVault> {
+        Self::init_with_cost(backend, index_path, password, kdf::Cost::shipped()).await
+    }
+
+    /// Initialize a vault whose slots are wrapped at an explicitly chosen
+    /// Argon2id `cost`, rather than at this build's shipped one.
+    ///
+    /// The cost is a **creation-time policy decision** that the envelope then
+    /// carries forever (`docs/FORMAT.md` §2). That is what makes §9.10's
+    /// per-device calibration adoptable without a format change, and it is why
+    /// the value is worth being able to name: the conformance tests use this to
+    /// pin the exact figures §2.1 publishes regardless of which profile they
+    /// were compiled in, and a host with a calibration policy of its own is the
+    /// other caller it is for.
+    ///
+    /// [`Vault::init`] is the ordinary entry point and supplies
+    /// [`kdf::Cost::shipped`], which is the production cost in every build that
+    /// ships (`dctl_crypto::kdf::gate`).
+    ///
+    /// # Errors
+    /// As [`Vault::init`], plus a KDF failure if `cost` falls outside the frozen
+    /// §2 range.
+    pub async fn init_with_cost(
+        backend: Arc<dyn Backend>,
+        index_path: &Path,
+        password: &str,
+        cost: kdf::Cost,
+    ) -> Result<NewVault> {
         let root_key = keys::generate_key();
         let vault_id = envelope::generate_vault_id();
         let recovery_phrase = kdf::generate_mnemonic()?;
@@ -91,14 +118,8 @@ impl Vault {
         let password_salt = kdf::generate_salt();
         let phrase_salt = kdf::generate_salt();
 
-        let password_kek = kdf::derive_kek(password, None, &password_salt)?;
-        let phrase_kek = kdf::derive_kek_from_mnemonic(
-            &recovery_phrase,
-            &phrase_salt,
-            constants::DEFAULT_ARGON2_M_COST,
-            constants::DEFAULT_ARGON2_T_COST,
-            constants::DEFAULT_ARGON2_P_LANES,
-        )?;
+        let password_kek = kdf::derive_kek(password, None, &password_salt, cost)?;
+        let phrase_kek = kdf::derive_kek_from_mnemonic(&recovery_phrase, &phrase_salt, cost)?;
 
         let slots = vec![
             wrap(
@@ -107,6 +128,7 @@ impl Vault {
                 &vault_id,
                 constants::SLOT_TYPE_PASSWORD,
                 password_salt.to_vec(),
+                cost,
             )?,
             wrap(
                 &phrase_kek,
@@ -114,6 +136,7 @@ impl Vault {
                 &vault_id,
                 constants::SLOT_TYPE_MNEMONIC,
                 phrase_salt.to_vec(),
+                cost,
             )?,
         ];
 
@@ -141,18 +164,20 @@ impl Vault {
     }
 }
 
-/// Wrap the root key into one Argon2id slot at the shipped cost parameters.
+/// Wrap the root key into one Argon2id slot at `cost`.
 ///
-/// Both slots go through here so the recorded `m/t/p` can never differ between
-/// them by accident — a mnemonic slot written at weaker parameters than the
-/// password slot would quietly make the recovery path the cheapest thing to
-/// attack, and nothing in the envelope would look wrong.
+/// Both slots go through here, taking the *same* `cost` value, so the recorded
+/// `m/t/p` can never differ between them by accident — a mnemonic slot written
+/// at weaker parameters than the password slot would quietly make the recovery
+/// path the cheapest thing to attack, and nothing in the envelope would look
+/// wrong.
 fn wrap(
     kek: &[u8; constants::KEY_LEN],
     root_key: &[u8; constants::KEY_LEN],
     vault_id: &[u8; constants::VAULT_ID_LEN],
     slot_type: u8,
     salt: Vec<u8>,
+    cost: kdf::Cost,
 ) -> Result<envelope::Slot> {
     Ok(envelope::wrap_slot(
         kek,
@@ -160,9 +185,9 @@ fn wrap(
         vault_id,
         slot_type,
         constants::KDF_ID_ARGON2ID,
-        constants::DEFAULT_ARGON2_M_COST,
-        constants::DEFAULT_ARGON2_T_COST,
-        constants::DEFAULT_ARGON2_P_LANES,
+        cost.m_cost,
+        cost.t_cost,
+        cost.p_lanes,
         salt,
         Vec::new(),
     )?)
