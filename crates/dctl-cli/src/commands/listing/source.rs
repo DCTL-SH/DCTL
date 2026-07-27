@@ -355,7 +355,7 @@ mod tests {
                 .await
                 .unwrap()
                 .vault;
-            vault.put_file("a.txt", b"hello").await.unwrap();
+            vault.put_file("a.txt", b"hello", dctl_core::Modified::Now).await.unwrap();
         }
 
         let config = dir.path().join("config.toml");
@@ -469,8 +469,8 @@ mod tests {
         {
             let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(&store));
             let vault = Vault::init(backend, &index, "pw").await.unwrap().vault;
-            vault.put_file("photos/a.jpg", b"aaa").await.unwrap();
-            vault.put_file("notes.txt", b"n").await.unwrap();
+            vault.put_file("photos/a.jpg", b"aaa", dctl_core::Modified::Now).await.unwrap();
+            vault.put_file("notes.txt", b"n", dctl_core::Modified::Now).await.unwrap();
         }
 
         let config = dir.path().join("config.toml");

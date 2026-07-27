@@ -14,7 +14,7 @@
 
 use std::sync::Arc;
 
-use dctl_core::{UnlockKey, Vault};
+use dctl_core::{Modified, UnlockKey, Vault};
 use dctl_store::{Backend, LocalFs, ObjectKey};
 use tempfile::TempDir;
 
@@ -102,7 +102,7 @@ async fn the_phrase_alone_opens_a_vault_and_returns_its_bytes() {
             .unwrap();
         created
             .vault
-            .put_file("photos/a.jpg", CONTENTS)
+            .put_file("photos/a.jpg", CONTENTS, Modified::Now)
             .await
             .unwrap();
         created.recovery_phrase.to_string()
@@ -140,7 +140,7 @@ async fn both_slots_unwrap_the_same_root_key() {
         .unwrap();
     created
         .vault
-        .put_file("shared.bin", CONTENTS)
+        .put_file("shared.bin", CONTENTS, Modified::Now)
         .await
         .unwrap();
     let phrase = created.recovery_phrase.to_string();
@@ -224,7 +224,7 @@ async fn changing_the_password_leaves_the_recovery_phrase_working() {
     let created = Vault::init(e.backend.clone(), &e.index_path, PASSWORD)
         .await
         .unwrap();
-    created.vault.put_file("kept.bin", CONTENTS).await.unwrap();
+    created.vault.put_file("kept.bin", CONTENTS, Modified::Now).await.unwrap();
     let phrase = created.recovery_phrase.to_string();
 
     created.vault.change_password(NEW_PASSWORD).await.unwrap();
@@ -328,4 +328,162 @@ async fn every_generated_phrase_is_different() {
         .is_err(),
         "a phrase must open only the vault it was issued for"
     );
+}
+
+/// One slot, decoded straight from the envelope bytes by `FORMAT.md` §2's field
+/// offsets — never by `dctl-crypto`'s parser.
+///
+/// The point is to read the envelope the way a clean-room decoder in 2046 will:
+/// from the published table alone. A test that used the encoder's own parser
+/// would agree with whatever the encoder currently believes, including a shared
+/// misunderstanding of the document.
+struct DecodedSlot {
+    len: u32,
+    slot_type: u8,
+    flags: u8,
+    kdf_id: u8,
+    wrap_algo: u8,
+    m_cost: u32,
+    t_cost: u32,
+    p_lanes: u32,
+    salt: Vec<u8>,
+    aux_len: u16,
+    wrap_len: u16,
+}
+
+/// Decode the envelope's slots by hand from `FORMAT.md` §2.
+fn decode_slots(bytes: &[u8]) -> Vec<DecodedSlot> {
+    let rd_u16 = |o: usize| u16::from_le_bytes([bytes[o], bytes[o + 1]]);
+    let rd_u32 =
+        |o: usize| u32::from_le_bytes([bytes[o], bytes[o + 1], bytes[o + 2], bytes[o + 3]]);
+
+    assert_eq!(&bytes[0..4], b"DKE1", "magic");
+    assert_eq!(bytes[4], 1, "version");
+
+    let mut slots = Vec::new();
+    let mut off = 23; // magic(4)+ver(1)+vault_id(16)+slot_count(2)
+    for _ in 0..rd_u16(SLOT_COUNT_OFFSET) {
+        let salt_len = bytes[off + 52] as usize;
+        let aux_len_at = off + 53 + salt_len;
+        let aux_len = rd_u16(aux_len_at);
+        let wrap_len_at = aux_len_at + 2 + aux_len as usize;
+        slots.push(DecodedSlot {
+            len: rd_u32(off),
+            slot_type: bytes[off + 4],
+            flags: bytes[off + 5],
+            kdf_id: bytes[off + 6],
+            wrap_algo: bytes[off + 7],
+            m_cost: rd_u32(off + 8),
+            t_cost: rd_u32(off + 12),
+            p_lanes: rd_u32(off + 16),
+            salt: bytes[off + 53..off + 53 + salt_len].to_vec(),
+            aux_len,
+            wrap_len: rd_u16(wrap_len_at),
+        });
+        off += rd_u32(off) as usize;
+    }
+    assert_eq!(off, bytes.len(), "trailing bytes after the slot list");
+    slots
+}
+
+#[tokio::test]
+async fn the_envelope_matches_the_table_the_format_document_publishes() {
+    // `docs/FORMAT.md` §2.1 states, field by field, exactly what a v1 writer
+    // emits. A restore twenty years from now is performed against that document
+    // and nothing else, so it is worth as much as the code — and a document that
+    // has silently drifted from the encoder is worse than no document, because
+    // it will be believed.
+    let e = env();
+    drop(
+        Vault::init(e.backend.clone(), &e.index_path, PASSWORD)
+            .await
+            .unwrap(),
+    );
+    let bytes = e
+        .backend
+        .get(&ObjectKey::new(ENVELOPE_KEY))
+        .await
+        .unwrap()
+        .to_vec();
+
+    // The whole envelope: header(23) + two 145-byte slots.
+    assert_eq!(bytes.len(), 313, "§2.1 publishes a 313-byte envelope");
+
+    let slots = decode_slots(&bytes);
+    assert_eq!(slots.len(), 2);
+
+    // Order is written, even though a reader must not depend on it.
+    assert_eq!(slots[0].slot_type, 1, "slots[0] is the password slot");
+    assert_eq!(slots[1].slot_type, 2, "slots[1] is the mnemonic slot");
+
+    for (index, slot) in slots.iter().enumerate() {
+        assert_eq!(slot.len, 145, "slot {index} slot_len");
+        assert_eq!(slot.flags, 0, "slot {index} flags");
+        assert_eq!(slot.kdf_id, 1, "slot {index} kdf_id (Argon2id)");
+        assert_eq!(slot.wrap_algo, 1, "slot {index} wrap_algo (XChaCha20)");
+        assert_eq!(slot.m_cost, 131_072, "slot {index} m_cost");
+        assert_eq!(slot.t_cost, 3, "slot {index} t_cost");
+        assert_eq!(slot.p_lanes, 4, "slot {index} p_lanes");
+        assert_eq!(slot.salt.len(), 16, "slot {index} salt_len");
+        assert_eq!(slot.aux_len, 0, "slot {index} aux_len");
+        assert_eq!(slot.wrap_len, 72, "slot {index} wrap_len");
+        // The frozen structural identity, restated from the document rather
+        // than from the encoder: slot_len == 57 + salt + aux + wrap.
+        assert_eq!(
+            slot.len as usize,
+            57 + slot.salt.len() + slot.aux_len as usize + slot.wrap_len as usize
+        );
+    }
+
+    // Independent salts. A shared one would tie both KEKs to a single random
+    // value and make the pair no stronger than its weaker half — the exact
+    // property the second slot exists to provide.
+    assert_ne!(
+        slots[0].salt, slots[1].salt,
+        "the two slots must not share a salt"
+    );
+}
+
+#[tokio::test]
+async fn a_password_slot_written_today_is_the_shape_an_older_reader_expects() {
+    // The on-disk compatibility claim, stated where it can fail. Adding the
+    // mnemonic slot must not change one byte of what a reader that predates it
+    // needs: such a reader walks the slot list, skips anything whose
+    // `slot_type`/`flags`/`wrap_algo`/`kdf_id` it does not support, and unwraps
+    // the first password slot it can. That reader must still open a vault this
+    // build creates.
+    //
+    // Asserted structurally — the fields that reader branches on — and then
+    // behaviourally, by unlocking with the password alone.
+    let e = env();
+    drop(
+        Vault::init(e.backend.clone(), &e.index_path, PASSWORD)
+            .await
+            .unwrap(),
+    );
+    let bytes = e
+        .backend
+        .get(&ObjectKey::new(ENVELOPE_KEY))
+        .await
+        .unwrap()
+        .to_vec();
+
+    let satisfiable = decode_slots(&bytes)
+        .into_iter()
+        .filter(|slot| {
+            slot.slot_type == 1 && slot.flags == 0 && slot.wrap_algo == 1 && slot.kdf_id == 1
+        })
+        .count();
+    assert_eq!(
+        satisfiable, 1,
+        "exactly one slot an older, password-only reader can satisfy"
+    );
+
+    Vault::unlock(
+        e.backend.clone(),
+        &other_index(&e),
+        UnlockKey::Password(PASSWORD),
+    )
+    .await
+    .expect("the password path must be untouched by the mnemonic slot");
 }

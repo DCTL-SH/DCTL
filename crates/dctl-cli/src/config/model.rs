@@ -19,7 +19,9 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::cli::globals::VerifyMode;
-use crate::constants::{PROVIDER_B2, PROVIDER_LOCAL, PROVIDER_R2, PROVIDER_S3, PROVIDER_VAULT};
+use crate::constants::{
+    PROVIDER_B2, PROVIDER_LOCAL, PROVIDER_R2, PROVIDER_S3, PROVIDER_SFTP, PROVIDER_VAULT,
+};
 
 /// A whole configuration file.
 ///
@@ -126,6 +128,8 @@ pub enum RemoteDef {
     S3(S3Def),
     /// A Cloudflare R2 bucket.
     R2(R2Def),
+    /// An SSH host reached over SFTP, driven by the system `ssh`.
+    Sftp(SftpDef),
     /// A vault wrapper over another configured remote.
     Vault(VaultDef),
 }
@@ -144,6 +148,7 @@ impl RemoteDef {
             Self::B2(_) => PROVIDER_B2,
             Self::S3(_) => PROVIDER_S3,
             Self::R2(_) => PROVIDER_R2,
+            Self::Sftp(_) => PROVIDER_SFTP,
             Self::Vault(_) => PROVIDER_VAULT,
         }
     }
@@ -184,6 +189,7 @@ impl RemoteDef {
             Self::B2(def) => def.require_vault,
             Self::S3(def) => def.require_vault,
             Self::R2(def) => def.require_vault,
+            Self::Sftp(def) => def.require_vault,
             Self::Vault(_) => false,
         }
     }
@@ -208,6 +214,7 @@ impl RemoteDef {
             Self::B2(def) => def.chunk_size,
             Self::S3(def) => def.chunk_size,
             Self::R2(def) => def.chunk_size,
+            Self::Sftp(def) => def.chunk_size,
             Self::Vault(def) => def.chunk_size,
         }
     }
@@ -231,6 +238,7 @@ impl RemoteDef {
             Self::B2(def) => def.verify,
             Self::S3(def) => def.verify,
             Self::R2(def) => def.verify,
+            Self::Sftp(def) => def.verify,
             Self::Vault(def) => def.verify,
         }
     }
@@ -366,6 +374,47 @@ pub struct R2Def {
     pub require_vault: bool,
 }
 
+/// Settings for an `sftp` remote — an SSH host reached over SFTP.
+///
+/// The two required fields are both non-secret, and deliberately so. [`host`] is
+/// a destination `ssh` understands (a `~/.ssh/config` `Host` alias, or
+/// `user@host[:port]`); every other connection parameter — the user, the port,
+/// the identity file, any `ProxyCommand` — is resolved by `ssh` from the user's
+/// own config and is therefore neither DCTL's to store nor a credential. There
+/// is nothing here to arrive from the environment, because the transport's
+/// authentication is `ssh`'s and not DCTL's: this is the one provider that keeps
+/// its whole configuration in the file precisely because none of it is secret.
+///
+/// [`host`]: SftpDef::host
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SftpDef {
+    /// SSH destination, as `ssh` resolves it: a `~/.ssh/config` `Host` alias
+    /// (e.g. `lsx-001`) or `user@host[:port]`.
+    pub host: String,
+
+    /// Remote base directory the objects live under. `~/…` is home-relative and
+    /// a bare relative path is resolved against the SFTP session's start
+    /// directory (the login home); `/…` is absolute.
+    pub base: String,
+
+    /// Transfer chunk size, in bytes.
+    ///
+    /// Carried for parity with the other providers and so a future tuning knob
+    /// round-trips through the file; the backend streams in a fixed-size window
+    /// today and does not yet read it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunk_size: Option<u64>,
+
+    /// Default verification strength for writes to this remote.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify: Option<VerifyMode>,
+
+    /// Whether this directory is a vault's object store.
+    #[serde(default, skip_serializing_if = "is_unset")]
+    pub require_vault: bool,
+}
+
 /// Whether a boolean setting is still at its default and may be left unwritten.
 ///
 /// The same reasoning as every `Option::is_none` above: a default written into
@@ -465,6 +514,13 @@ mod tests {
                 endpoint: None,
                 chunk_size: Some(8 * 1024 * 1024),
                 verify: Some(VerifyMode::Checksum),
+                require_vault: true,
+            }),
+            RemoteDef::Sftp(SftpDef {
+                host: "lsx-001".into(),
+                base: "~/dctl-store".into(),
+                chunk_size: Some(4 * 1024 * 1024),
+                verify: Some(VerifyMode::Strict),
                 require_vault: true,
             }),
             RemoteDef::Vault(VaultDef {

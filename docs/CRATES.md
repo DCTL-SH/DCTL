@@ -358,7 +358,7 @@ from a plain store.
 **Notable internal modules** (`crates/dctl-cli/src/`): `main`, `dispatch`, `cli`, `commands/*`
 (one subtree per command family), `source` (the object-safe `Box<dyn Source>` read abstraction),
 `remote` (`remote::plain` — the plain-store path), `addressing`, `config`, `session`, `ctx`,
-`filter`, `output`, `logging`, `audit`, `platform`, `fidelity`, `exit`, `constants`, `error`.
+`filter`, `output`, `logging`, `audit`, `platform`, `exit`, `constants`, `error`.
 
 **Dependencies:** `dctl-core`, `dctl-store`, `dctl-meta`; plus `clap`/`clap_complete`, `anyhow`,
 `async-trait`, `tokio` (with `signal`), `tracing`/`tracing-subscriber` (`json` sink),

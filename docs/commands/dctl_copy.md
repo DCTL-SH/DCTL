@@ -44,50 +44,54 @@ A size difference always wins over a matching timestamp. A destination whose
 timestamp cannot be read is treated as modified rather than identical — the safe
 direction, because re-transferring costs bandwidth and skipping costs data.
 
-**A vault side is compared by content instead, and the run says so.** This is
-the one place where the comparison that runs is not the one rule 4 describes,
-so it is stated rather than buried.
+**What a modification time means here, and the one place it is not carried.**
+Every transfer records the *source's* modification time at the destination, so a
+file that has not changed compares equal on the next run and is skipped. A vault
+destination stores it in the index record beside the object; a filesystem
+destination has it stamped on the file before it is published. That is what makes
+`copy`, `sync` and `check` incremental, in both directions: `dctl copy ./src
+archive:` and `dctl copy archive: ./restored` both transfer nothing the second
+time they run.
 
-`dctl-core`'s `put_file` takes a logical path and the plaintext and nothing else,
-so the index record it commits stamps the time of the *write* — not the
-modification time of the file it was written from. That number is true and
-describes something else, which made the default comparison unanswerable against
-a vault: `dctl copy ./src archive:` re-uploaded every file on every run, forever,
-and `dctl check ./src archive:` immediately afterwards called the tree it had
-just stored entirely different.
+It was not always so, and the failure is worth recording. `dctl-core`'s
+`put_file` used to take a logical path and the plaintext and nothing else, so the
+index record it committed stamped the time of the *write*. That number is true and
+describes something else, which made the default comparison unanswerable against a
+vault: `dctl copy ./src archive:` re-uploaded every file on every run, forever,
+and `dctl check ./src archive:` immediately afterwards called the tree it had just
+stored entirely different.
 
-The same index record carries the plaintext BLAKE3, so the vault can answer the
-*stronger* question for free. When either side of a transfer is a vault and no
-comparison flag was given, rule 4 becomes a content comparison and a warning on
-stderr names the side that forced it:
+For a while the answer was a substitution — against a vault the default silently
+became a content comparison, announced on stderr, and it worked at the price of
+**reading and hashing the other side in full on every run**. On a nightly backup
+that is close to the cost of the transfer it was avoiding. The write now takes the
+time (`dctl_core::Modified`), so the substitution, the module that decided it and
+the warning that announced it are all gone. If you have a script keying on that
+warning, it will no longer appear.
 
-```
-warning: 'archive:' records when each object was written, not when the source was
-modified, so this run compares contents instead of size and time — every file on
-the other side is read and hashed to do it. Pass --size-only to compare sizes
-alone.
-```
+*The limit this leaves.* Size-and-modification-time cannot see an edit that
+changes neither — a file rewritten in place, byte-for-byte the same length, with
+its timestamp restored afterwards. That is the same trade rclone and rsync make,
+and `--checksum` is the answer: it compares the plaintext BLAKE3 the vault
+recorded at write time against a hash of the local file.
 
-Read the cost seriously: the other side has no recorded hash, so it is read end
-to end. On an incremental backup of a large tree that is close to the cost of the
-transfer being avoided. Three things switch it off, all honoured exactly as
-typed:
+*The one place a timestamp is not carried.* A **plain** remote — including a
+bucket. `Backend::put` stores bytes under a key and has no parameter for a time,
+and for B2, S3 and R2 there could not be one: the provider stamps `Last-Modified`
+itself on acceptance and exposes no way to move it. So a plain destination reports
+when it was written, the default comparison finds every file different on the next
+run, and `--size-only` is the comparison that needs no clock. The same applies in
+reverse: a file downloaded *from* a plain remote is written with the time of the
+download. Both are pinned by tests rather than left to be discovered on a bill.
 
-* `--size-only` — sizes need no clock, so a vault does not disturb it. Nothing
-  is substituted and nothing is announced. It will not notice a same-size edit.
-* `--checksum` — already a content comparison, so nothing is substituted.
-* `--no-traverse` — the destination is never listed, so nothing is compared at
-  all and every source file is `missing-at-destination`.
-
-A vault index row with **no** recorded content hash — what `dctl index rebuild`
-writes, since it recovers from a list-only pass — cannot answer either question.
-That file is transferred, with the plan reason `content-not-recorded` rather than
-`modified`, and the write records the hash the next run compares against. It is
-transferred rather than refused because nobody asked for this comparison; an
-explicit `--checksum` still refuses what it cannot answer.
-
-This compensation exists only until `put_file` takes a modification time. See
-`crates/dctl-cli/src/fidelity.rs`, which is written to be deleted.
+*Vaults written by an earlier build.* Their index rows hold write times. The first
+run of this build against one finds those rows disagreeing with the sources and
+re-transfers the tree once; every run after that skips, because the re-transfer
+writes the source's time. Nothing compares wrongly in the meantime — a write time
+and a source time agree only when the file really was stored the second it was
+last modified, in which case skipping it is correct anyway. `dctl index rebuild`
+writes rows with **no** time at all, which compare as "not comparable" and are
+re-transferred for the same one-off reason.
 
 **The verified-write contract.** DCTL never reports a file as stored until it
 is. What "stored" means depends on where the file is going, so both directions
@@ -244,17 +248,22 @@ password and no re-encryption, use `dctl replicate` instead.
 
 ### Re-running a copy
 
-Into a **vault**, a re-run skips what is already stored: the index recorded a
-plaintext BLAKE3 at write time, so `dctl-cli` compares contents instead of
-timestamps and says so on stderr.
+Into a **vault**, a re-run skips what is already stored, and it does so from
+metadata alone: the index recorded the source's own modification time, so the
+default size-and-time comparison answers the question without reading a byte of
+either side.
+
+Out to a **local path**, the same: the restored file is stamped with the time the
+vault recorded for it before it is published, so a second `dctl copy archive:
+./restored` transfers nothing.
 
 Into a **plain remote — a `local:` remote or a bucket — it does not.** Objects
 carry the time the *store* wrote them (`Backend::put` takes no modification time,
 and B2/S3/R2 assign `Last-Modified` themselves), so the default size-and-time
-comparison finds every file different and copies it again. Unlike a vault, there
-is no recorded plaintext hash to compare instead: a store holds the object and
-nothing about it, and a provider's own checksum is a SHA-1 or an ETag rather than
-the BLAKE3 of the plaintext — which is also why `--checksum` against a bucket is
+comparison finds every file different and copies it again. There is no recorded
+plaintext hash to compare instead either: a store holds the object and nothing
+about it, and a provider's own checksum is a SHA-1 or an ETag rather than the
+BLAKE3 of the plaintext — which is also why `--checksum` against a bucket is
 refused rather than approximated.
 
 So for a plain destination you re-copy on a schedule, use **`--size-only`**,

@@ -122,6 +122,21 @@ impl Source for PlainSource {
         }
     }
 
+    async fn prefetch(&self, _path: &str, _offset: u64, _length: u64) {
+        // Nothing to warm, and that is a property of this view rather than an
+        // omission. A plain read is one `Backend::get_range` straight to the
+        // caller's buffer — there is no cache between the two for a fetch to land
+        // in, so "fetch it early" would mean holding a speculative copy of bytes
+        // nobody has asked for, at a cost that is not this layer's to decide.
+        //
+        // The sealed source has one because it *must*: a vault cannot serve a
+        // 4 KiB read without decrypting the whole megabyte chunk around it, so the
+        // chunks exist as a cache whether anybody prefetches or not, and warming
+        // them costs no memory that a read would not have spent anyway. That
+        // asymmetry is the reason this method is on the trait rather than folded
+        // into one implementation.
+    }
+
     async fn stat(&self, path: &str) -> Result<Option<Entry>> {
         match self.backend.head(&ObjectKey::new(path)).await {
             Ok(meta) => Ok(Some(from_meta(meta))),

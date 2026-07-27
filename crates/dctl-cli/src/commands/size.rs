@@ -485,7 +485,7 @@ mod tests {
             ] {
                 written += bytes.len() as u64;
                 vault
-                    .put_file(path, &bytes)
+                    .put_file(path, &bytes, dctl_core::Modified::Now)
                     .await
                     .expect("a verified write");
             }

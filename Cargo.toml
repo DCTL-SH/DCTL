@@ -67,6 +67,22 @@ libc = "0.2"
 subtle = "2.6"
 ml-kem = "0.2"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
+# `dctl mount` — the FUSE binding behind the read-only filesystem (PLAN.md §15).
+# Listed here rather than only in dctl-cli because the mount adapter is expected
+# to become its own crate (`dctl-mount` in the §16.1 layout) and the version must
+# not fork when it does.
+#
+# `default-features = false` on purpose. On Linux that selects fuser's pure-Rust
+# mount path, so a Linux build links no C library and needs no `libfuse` package
+# — only `fusermount3` at run time. On macOS fuser's build script ignores the
+# feature and always pkg-config-probes `fuse`, which is macFUSE: there is no
+# kext-free FUSE to link against, so macFUSE is the only backend this binding can
+# offer today (FSKit and fuse-t are `PLAN.md` §15's later, kext-free options).
+#
+# fuser logs through the `log` facade. `tracing-subscriber` keeps its default
+# `tracing-log` feature, so those records surface in DCTL's own log pipeline
+# rather than vanishing — which is what makes a mount failure diagnosable at `-v`.
+fuser = { version = "0.18", default-features = false }
 # dev
 proptest = "1"
 tempfile = "3"

@@ -94,6 +94,12 @@ impl Location {
                 vec![def.bucket.clone(), def.account.clone().unwrap_or_default()]
             }
 
+            // The host and the base directory together decide the place: the
+            // same directory on two hosts is two locations, and two bases on one
+            // host are two. Kept verbatim, like a local path — this type stays
+            // pure, so `~/store` and `store` are two spellings it does not unify.
+            RemoteDef::Sftp(def) => vec![def.host.clone(), def.base.clone()],
+
             RemoteDef::Vault(_) => return None,
         };
 

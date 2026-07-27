@@ -18,16 +18,16 @@
 //! * **A filesystem remote** — both halves. A missing file is created empty, an
 //!   existing one is re-stamped without losing a byte, and `--timestamp` is
 //!   honoured exactly, because the operating system owns the timestamps.
-//! * **A sealed vault** — creation works. `Vault::put_file(path, b"")` stores a
-//!   real empty object through the same verified write and durable index commit
-//!   every other object gets, and the time reported afterwards is read back out
-//!   of the index rather than assumed. **Re-stamping does not work and is
-//!   refused**: `dctl-core` exposes no operation that updates a record's
-//!   modification time, and re-storing the object would write *now* instead of
-//!   what was asked for. `--timestamp` is likewise refused before anything is
-//!   created. See [`engine`] for the full account.
-//! * **An object store** — refused. Nothing in this build writes a plain object
-//!   into a bucket; every write to a provider goes through a vault.
+//! * **A sealed vault** — creation works, `--timestamp` and all.
+//!   `Vault::put_file(path, b"", when)` stores a real empty object through the
+//!   same verified write and durable index commit every other object gets,
+//!   carrying `when`, and the time reported afterwards is read back out of the
+//!   index rather than assumed. **Re-stamping does not work and is refused**:
+//!   `dctl-core` exposes no operation that updates a record's modification time,
+//!   and re-storing the object would need contents `touch` does not have. See
+//!   [`engine`] for the full account.
+//! * **An object store** — refused. A provider assigns `Last-Modified` itself
+//!   and exposes no way to move it, which is the one thing `touch` exists to do.
 //!
 //! ## Rules this command enforces before the engine sees anything
 //!
@@ -83,7 +83,8 @@ pub struct TouchArgs {
     ///
     /// UTC, in one of: 2024-05-01T12:00:00Z, '2024-05-01 12:00', 2024-05-01, or
     /// @1714564800 (seconds since the Unix epoch). Honoured on a filesystem
-    /// remote; refused by a vault, which records the time of the write itself.
+    /// remote, and by a vault when the object is being created; a vault cannot
+    /// re-stamp one it already holds.
     #[arg(short = 't', long, value_name = "TIME", value_parser = Timestamp::parse)]
     pub timestamp: Option<Timestamp>,
 
@@ -192,7 +193,6 @@ pub async fn run(ctx: &Ctx, args: &TouchArgs) -> Result<()> {
         engine::Request {
             target: &target,
             stamp,
-            explicit: args.timestamp.is_some(),
             create: !args.no_create,
         },
     )

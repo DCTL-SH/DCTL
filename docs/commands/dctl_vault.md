@@ -63,9 +63,14 @@ Recovery phrase (24 words):
 OK the recovery phrase opened 'archive:'
 Vault password:
 Confirm vault password:
-OK 'archive:' now has a new password; the recovery phrase is unchanged and
-   still opens this vault; keep the paper
+OK 'archive:' now has a new password; the recovery phrase is unchanged and still opens this vault; keep the paper
+remote            archive:
+unlocked          true
+password_changed  true
 ```
+
+The two booleans are the result, on stdout; the `OK` lines are on stderr. They
+are separate because they can differ — see [Exit codes](#exit-codes).
 
 ### The phrase survives a password change
 
@@ -100,12 +105,11 @@ unlock is attempted:
 ```
 $ dctl vault recover archive:
 Recovery phrase (24 words):
-ERROR --recovery-phrase-file is not a valid recovery phrase: invalid mnemonic:
-      mnemonic has an invalid checksum
-  hint: Check the words against the paper: BIP-39 has a checksum, so this
-        refusal means a word is misspelled, missing, or in the wrong place —
-        not that the phrase belongs to another vault. Nothing was read or
-        written.
+error: an interactive prompt is not a valid recovery phrase: kdf: invalid
+mnemonic: the mnemonic has an invalid checksum
+warning: Check the words against the paper: BIP-39 has a checksum, so this
+refusal means a word is misspelled, missing, or in the wrong place — not that
+the phrase belongs to another vault. Nothing was read or written.
 ```
 
 That distinction matters: *"you mistyped a word"* and *"this phrase is for a

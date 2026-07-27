@@ -146,12 +146,13 @@ returns four bytes and transfers one chunk — a megabyte at the default chunk
 size — plus a small bounded header read the first time that object is touched.
 Seeking somewhere else in the same run costs one more request and no header read.
 
-Measured on a sealed 96 MiB object, a ten-byte window costs about **1.6 MiB of
-peak resident memory above the unlock baseline**; reading the same object whole
-costs **+97 MiB**. Against a 512 MiB object the window costs **the same ~1 MiB**
-while the whole-object read costs **over 700 MiB** and takes twenty times as
-long. That is the property that matters: the window's cost is set by the chunk
-size, not by the file. (The baseline is around 140 MiB and is almost entirely
+Measured on a sealed 96 MiB object, a ten-byte window costs **+1.9 MiB of peak
+resident memory above the unlock baseline**; reading the same object whole costs
+**+97.6 MiB** — the figure an audit of the old behaviour reported. Against a
+512 MiB object the window costs **+2.1 MiB**, essentially unchanged, while the
+whole-object read costs **+1025 MiB** and takes eighteen times as long (5.9 s
+against 0.33 s). That is the property that matters: the window's cost is set by
+the chunk size, not by the file. (The ~140 MiB baseline is almost entirely
 Argon2id's working memory during unlock, not the read.)
 
 **What a window authenticates.** Every returned byte carries its chunk's own

@@ -36,8 +36,8 @@ use std::path::Path;
 
 use crate::config::RemoteDef;
 use crate::constants::{
-    CONFIG_KEY_BUCKET, CONFIG_KEY_PATH, PATH_SEPARATOR, PROVIDER_B2, PROVIDER_LOCAL, PROVIDER_R2,
-    PROVIDER_S3, REMOTE_SEPARATOR,
+    CONFIG_KEY_BASE, CONFIG_KEY_BUCKET, CONFIG_KEY_HOST, CONFIG_KEY_PATH, PATH_SEPARATOR,
+    PROVIDER_B2, PROVIDER_LOCAL, PROVIDER_R2, PROVIDER_S3, PROVIDER_SFTP, REMOTE_SEPARATOR,
 };
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -117,8 +117,15 @@ impl BaseLocation {
         })
     }
 
-    /// A provider shorthand: `b2:bucket`, `s3:bucket/prefix`, `r2:bucket`.
+    /// A provider shorthand: `b2:bucket`, `s3:bucket/prefix`, `r2:bucket`, or an
+    /// sftp host `sftp:host/base-dir`.
     fn named(spec: &str, remote: &str, path: &str) -> Result<Self> {
+        // sftp is a place, but not a bucket: its tail is a base directory rather
+        // than a container-plus-prefix, so it has its own parse below.
+        if remote == PROVIDER_SFTP {
+            return Self::sftp(spec, path);
+        }
+
         if !matches!(remote, PROVIDER_B2 | PROVIDER_S3 | PROVIDER_R2) {
             return Err(CliError::new(
                 ExitCode::Usage,
@@ -127,7 +134,8 @@ impl BaseLocation {
             .with_hint(format!(
                 "A base is a *place*, written as \
                  'provider{REMOTE_SEPARATOR}container' — for example \
-                 'b2{REMOTE_SEPARATOR}my-bucket' or \
+                 'b2{REMOTE_SEPARATOR}my-bucket', \
+                 'sftp{REMOTE_SEPARATOR}lsx-001/dctl-store' or \
                  'local{REMOTE_SEPARATOR}/srv/vault'. To wrap a remote that is \
                  already configured, use `dctl config create NAME vault \
                  base={remote}` instead."
@@ -156,6 +164,58 @@ impl BaseLocation {
             )?,
             base_path: (!prefix.is_empty()).then(|| prefix.to_string()),
             container: container.to_string(),
+        })
+    }
+
+    /// An sftp host: `sftp:host/base-dir`.
+    ///
+    /// The first path component is the ssh destination and the whole remainder is
+    /// the base directory the vault's objects go under. Unlike a bucket prefix
+    /// there is no subdirectory to refuse: the tail *is* the store's root, and the
+    /// vault's envelope is written at the root of exactly that directory — so
+    /// [`BaseLocation::base_path`] stays `None` and [`refuse_subdirectory`] has
+    /// nothing to catch.
+    ///
+    /// [`refuse_subdirectory`]: BaseLocation::refuse_subdirectory
+    fn sftp(spec: &str, path: &str) -> Result<Self> {
+        let (host, base) = path.split_once(PATH_SEPARATOR).unwrap_or((path, ""));
+        if host.is_empty() {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                format!("'{spec}' names no ssh host to store the vault on"),
+            )
+            .with_hint(format!(
+                "Write it as 'sftp{REMOTE_SEPARATOR}HOST/BASE-DIR' — for example \
+                 'sftp{REMOTE_SEPARATOR}lsx-001/dctl-store'. HOST is an \
+                 ~/.ssh/config alias or user@host, and all of its connection \
+                 details come from your ssh config."
+            )));
+        }
+        if base.is_empty() {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                format!("'{spec}' names no base directory on '{host}'"),
+            )
+            .with_hint(format!(
+                "Write it as 'sftp{REMOTE_SEPARATOR}{host}/BASE-DIR' — the remote \
+                 directory the ciphertext objects go under, for example \
+                 'sftp{REMOTE_SEPARATOR}{host}/dctl-store'."
+            )));
+        }
+
+        Ok(Self {
+            spec: spec.to_string(),
+            store: settings::build(
+                PROVIDER_SFTP,
+                &[
+                    (CONFIG_KEY_HOST.to_string(), host.to_string()),
+                    (CONFIG_KEY_BASE.to_string(), base.to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            )?,
+            base_path: None,
+            container: host.to_string(),
         })
     }
 

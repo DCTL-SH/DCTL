@@ -332,8 +332,14 @@ strength of a refusal is the same misreport §6 forbids, moved up a level.
   round-trips, this phase is not delivered.
 - **Phase 2 — Streaming mount:** `fuser` read-first VFS, Range reader, prefetch,
   encrypted cache — play a huge encrypted video straight off B2.
-  → **Not delivered.** `dctl mount` parses every argument it owns and then
-  refuses; there is no `dctl-mount` crate and no FUSE/FSKit/WinFSP adapter.
+  → **Not delivered, but no longer empty.** The **Range reader** exists and is
+  used: `dctl_core`'s ranged read fetches only the chunks a window covers,
+  authenticated per chunk, behind a bounded decrypted-chunk cache in the CLI — so
+  `dctl cat --offset` on a large object no longer pays for the whole object. What
+  is missing is the part the phase is named for: there is no `dctl-mount` crate
+  and no FUSE/FSKit/WinFSP adapter, so `dctl mount` parses every argument it owns
+  and then refuses. No file has been played off a mount, which is the test this
+  phase has to pass.
 - **Phase 3 — Google Drive:** OAuth, resumable, 750 GB/day pacer + quota/backoff.
   → **Not started.** `dctl config providers` lists `local`, `b2`, `s3` and `r2`
   only.

@@ -40,9 +40,9 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::constants::{
-    CONFIG_KEY_ACCOUNT, CONFIG_KEY_BASE, CONFIG_KEY_BUCKET, CONFIG_KEY_ENDPOINT, CONFIG_KEY_PATH,
-    CONFIG_KEY_REGION, CONFIG_REMOTE_TYPE_KEY, PATH_SEPARATOR, PROVIDER_B2, PROVIDER_LOCAL,
-    PROVIDER_R2, PROVIDER_S3, PROVIDER_VAULT, REMOTE_PROVIDER_TYPES,
+    CONFIG_KEY_ACCOUNT, CONFIG_KEY_BASE, CONFIG_KEY_BUCKET, CONFIG_KEY_ENDPOINT, CONFIG_KEY_HOST,
+    CONFIG_KEY_PATH, CONFIG_KEY_REGION, CONFIG_REMOTE_TYPE_KEY, PATH_SEPARATOR, PROVIDER_B2,
+    PROVIDER_LOCAL, PROVIDER_R2, PROVIDER_S3, PROVIDER_SFTP, PROVIDER_VAULT, REMOTE_PROVIDER_TYPES,
 };
 use crate::error::{CliError, Result};
 
@@ -278,6 +278,14 @@ fn target_from_entry(name: &str, entry: &RemoteEntry) -> Result<Target> {
             account: entry.setting(CONFIG_KEY_ACCOUNT).map(str::to_string),
         }),
 
+        // Both are required and neither has an environment fall-back: an sftp
+        // remote holds no credential, and a host or base left unset is a broken
+        // remote, not one the environment can complete.
+        PROVIDER_SFTP => Ok(Target::Sftp {
+            host: required(name, entry, CONFIG_KEY_HOST)?.to_string(),
+            base: required(name, entry, CONFIG_KEY_BASE)?.to_string(),
+        }),
+
         // A legal `type` that is deliberately not a provider. Diagnosed on its
         // own rather than falling into "unknown type", which would be untrue and
         // would send the user looking for a typo they did not make: a vault
@@ -320,6 +328,45 @@ fn shorthand(name: &str, path: &str) -> Result<Resolved> {
             name,
             Target::Local {
                 root: PathBuf::from(path),
+            },
+            String::new(),
+        ));
+    }
+
+    // An sftp shorthand is `sftp:host/base-dir`: the first component is the ssh
+    // destination and the *entire* remainder is the base directory, so nothing is
+    // left over as a logical path. Unlike a bucket shorthand, it cannot split a
+    // prefix off the end — there is no way to tell where the base directory stops
+    // and a path inside it begins — so a path within an sftp remote is addressed
+    // through a named remote (`dctl config create NAME sftp host=… base=…`), where
+    // the two are separate settings and unambiguous. This is the form
+    // `dctl init --base sftp:host/dir` and a headless `DCTL_REMOTE` use.
+    if name == PROVIDER_SFTP {
+        let (host, base) = path.split_once(PATH_SEPARATOR).unwrap_or((path, ""));
+        if host.is_empty() {
+            return Err(
+                CliError::fatal(format!("'{name}' needs a host")).with_hint(format!(
+                    "Write it as '{name}:HOST/BASE-DIR', where HOST is an \
+                     ~/.ssh/config alias or user@host — for example \
+                     '{name}:lsx-001/dctl-store'."
+                )),
+            );
+        }
+        if base.is_empty() {
+            return Err(
+                CliError::fatal(format!("'{name}:{host}' needs a base directory")).with_hint(
+                    format!(
+                        "Write it as '{name}:{host}/BASE-DIR' — the remote directory \
+                         the objects go under, for example '{name}:{host}/dctl-store'."
+                    ),
+                ),
+            );
+        }
+        return Ok(Resolved::new(
+            name,
+            Target::Sftp {
+                host: host.to_string(),
+                base: base.to_string(),
             },
             String::new(),
         ));

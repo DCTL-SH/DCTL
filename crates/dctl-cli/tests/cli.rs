@@ -1251,21 +1251,26 @@ fn aged_source_and_vault() -> Sandbox {
 
 #[test]
 fn a_second_copy_into_a_vault_skips_every_file_and_check_agrees() {
-    // Defect D5. `dctl_core::Vault::put_file` takes no modification time and
-    // records `now_unix()` instead, so the index's time describes the *write*
+    // Defect D5. `dctl_core::Vault::put_file` took no modification time and
+    // recorded `now_unix()` instead, so the index's time described the *write*
     // and never the source. Compared by size and time — the default — a vault
     // destination therefore never matched its source: `copy` re-uploaded the
     // whole dataset on every run, and `check` reported a tree it had just
     // written as entirely different.
     //
-    // Three assertions, in the order a user meets them, because each one alone
+    // Four assertions, in the order a user meets them, because each one alone
     // has a way of passing while the product is broken:
     //
-    //  * `check` agreeing proves the comparison was fixed;
-    //  * the second `copy` transferring nothing proves the *same* answer reached
-    //    the planner, rather than the two commands being fixed apart;
     //  * the first `copy` transferring everything proves the fixture is real and
-    //    the skip is not simply "nothing was ever stored".
+    //    the skip below is not simply "nothing was ever stored";
+    //  * `check` agreeing proves the comparison was fixed — and it must say it
+    //    compared *size-and-modtime*, because a run that reached the same
+    //    verdict by silently hashing both sides would be the old compensation
+    //    wearing the new answer's clothes;
+    //  * the second `copy` transferring nothing proves the same answer reached
+    //    the planner, rather than the two commands being fixed apart;
+    //  * one edited file, and only it, moving proves the skip is a comparison
+    //    and not a tool that has stopped transferring.
     let sandbox = aged_source_and_vault();
 
     sandbox
@@ -1289,7 +1294,7 @@ fn a_second_copy_into_a_vault_skips_every_file_and_check_agrees() {
         // A health gate that is silent when healthy cannot be told apart from
         // one that did nothing, so the clean run states what it compared.
         .stderr(predicates::str::contains("3 paths compared"))
-        .stderr(predicates::str::contains("checksum"))
+        .stderr(predicates::str::contains("size-and-modtime"))
         // …and says nothing on stdout, which is where a finding would go.
         .stdout("");
 
@@ -1301,16 +1306,10 @@ fn a_second_copy_into_a_vault_skips_every_file_and_check_agrees() {
         .arg(format!("{VAULT_NAME}:"))
         .assert()
         .success()
-        .stderr(predicates::str::contains("Files: 0 / 0"));
-}
+        .stderr(predicates::str::contains("Files: 0 / 0"))
+        .stderr(predicates::str::contains("Skipped: 3"));
 
-#[test]
-fn a_vault_destination_says_why_it_compared_contents_instead_of_times() {
-    // The user asked for the default size-and-time comparison and got a content
-    // comparison, which costs a full read of the source. Silently substituting
-    // one for the other would be answering a different question than the one
-    // asked, so the run names the side that forced it and what it now costs.
-    let sandbox = aged_source_and_vault();
+    sandbox.write("src/sub/c.txt", b"third, edited");
 
     sandbox
         .dctl()
@@ -1320,17 +1319,169 @@ fn a_vault_destination_says_why_it_compared_contents_instead_of_times() {
         .arg(format!("{VAULT_NAME}:"))
         .assert()
         .success()
-        .stderr(predicates::str::contains(VAULT_NAME))
-        .stderr(predicates::str::contains("compares contents"))
-        .stderr(predicates::str::contains("--size-only"));
+        .stderr(predicates::str::contains("Files: 1 / 1"));
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:sub/c.txt"))
+        .assert()
+        .success()
+        .stdout("third, edited");
+}
+
+#[test]
+fn a_vault_copy_never_reads_the_source_to_compare_it() {
+    // The cost half of the same defect, and the reason the compensation had to
+    // go rather than stay as a belt-and-braces.
+    //
+    // While a vault could not be compared by time, `copy` answered the default
+    // by content instead: correct, and paid for by reading and hashing every
+    // byte of the other side on every run. On the nightly backup this tool is
+    // for, that is the whole dataset read to discover nothing had changed.
+    //
+    // The run is required to say nothing about hashing, because the notice was
+    // the substitution's only outward sign — and a silent return of it is the
+    // failure this test exists to catch.
+    let sandbox = aged_source_and_vault();
+
+    for _ in 0..2 {
+        sandbox
+            .dctl()
+            .env("DCTL_PASSWORD", GOOD_PASSWORD)
+            .arg("copy")
+            .arg(sandbox.path("src"))
+            .arg(format!("{VAULT_NAME}:"))
+            .assert()
+            .success()
+            .stderr(predicates::str::contains("compares contents").not())
+            .stderr(predicates::str::contains("read and hashed").not());
+    }
+}
+
+#[test]
+fn a_vault_records_the_sources_modification_time_and_hands_it_back() {
+    // What the index actually holds, read through the shipped binary rather than
+    // through the core's own API: `lsl` prints the recorded time, and the file it
+    // came from was backdated a day. A vault stamping the write would print
+    // today, and the whole of D5 follows from that one number.
+    //
+    // The round trip is asserted too. Restoring the tree has to reproduce the
+    // times as well as the bytes, or the copy back out is a fresh tree that the
+    // *next* comparison finds entirely modified — the same defect, one direction
+    // over.
+    let sandbox = aged_source_and_vault();
+    let source_modified = std::fs::metadata(sandbox.path("src/a.txt"))
+        .expect("the fixture file")
+        .modified()
+        .expect("this platform reports modification times");
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+
+    let listed = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("lsl")
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let listed = String::from_utf8(listed.get_output().stdout.clone()).expect("utf-8 output");
+    let today = chrono_free_date(std::time::SystemTime::now());
+    assert!(
+        !listed.contains(&today),
+        "the index recorded the time of the write, not the source's: {listed}"
+    );
+    assert!(
+        listed.contains(&chrono_free_date(source_modified)),
+        "the source's own date is missing from the listing: {listed}"
+    );
+
+    // …and back out again, byte-for-byte and second-for-second.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(format!("{VAULT_NAME}:"))
+        .arg(sandbox.path("restored"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 3 / 3"));
+
+    assert_eq!(sandbox.read("restored/a.txt"), b"first");
+    assert_eq!(
+        whole_seconds(
+            std::fs::metadata(sandbox.path("restored/a.txt"))
+                .expect("the restored file")
+                .modified()
+                .expect("a modification time")
+        ),
+        whole_seconds(source_modified),
+        "a restored file must carry the time the vault recorded for it"
+    );
+
+    // Which is the property that makes the download incremental too.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(format!("{VAULT_NAME}:"))
+        .arg(sandbox.path("restored"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 0 / 0"));
+}
+
+/// A `SystemTime` as whole unix seconds — the resolution the index stores.
+fn whole_seconds(time: std::time::SystemTime) -> u64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .expect("a time after 1970")
+        .as_secs()
+}
+
+/// The `YYYY-MM-DD` of a `SystemTime`, without a calendar dependency.
+///
+/// Only ever compared against another value produced the same way, and only to
+/// tell "a day ago" from "today" — which is the whole distinction defect D5 was
+/// invisible without. Civil-date arithmetic from the epoch day, valid for every
+/// date this test can produce.
+fn chrono_free_date(time: std::time::SystemTime) -> String {
+    let days = i64::try_from(whole_seconds(time) / 86_400).expect("a representable day");
+
+    // Howard Hinnant's `civil_from_days`, shifted to a March-based year so the
+    // leap day lands at the end and no month table is needed.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = era * 400 + yoe + i64::from(month <= 2);
+
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 #[test]
 fn an_edited_file_is_still_re_uploaded_after_the_comparison_changed() {
     // The dangerous direction of the D5 fix. Making a vault destination compare
-    // equal is only correct if it still compares *unequal* when the contents
-    // change — and a same-size edit is precisely the case a size comparison
-    // would wave through, so it is the one worth pinning.
+    // *equal* is only correct if it still compares unequal when the file
+    // changes, and this pins the hardest version of that: an edit that changes
+    // no byte of the size, only the contents and the clock.
+    //
+    // What catches it is the timestamp — editing a file moves it — and that is
+    // exactly the claim being made. A same-size edit that also preserved the
+    // modification time is invisible to size-and-modtime, which is the trade
+    // every tool in this family makes and what `--checksum` is for; it is pinned
+    // as a unit test in `commands/transfer/compare.rs`.
     let sandbox = aged_source_and_vault();
 
     sandbox
@@ -1342,9 +1493,9 @@ fn an_edited_file_is_still_re_uploaded_after_the_comparison_changed() {
         .assert()
         .success();
 
-    // Same length, same backdated timestamp, different bytes.
+    // Same length, different bytes — and the edit moves the modification time,
+    // as every edit does.
     sandbox.write("src/a.txt", b"FIRST");
-    sandbox.age("src/a.txt", A_DAY);
 
     sandbox
         .dctl()
@@ -1378,10 +1529,10 @@ fn an_edited_file_is_still_re_uploaded_after_the_comparison_changed() {
 
 #[test]
 fn size_only_is_still_honoured_exactly_against_a_vault() {
-    // The compensation must not swallow a dial the user set deliberately.
-    // `--size-only` is a request for the cheapest comparison there is, and a run
-    // that silently upgraded it to a full read of the source would be spending
-    // the user's money to answer a question they declined to ask.
+    // Nothing may swallow a dial the user set deliberately. `--size-only` is a
+    // request for the cheapest comparison there is, and it is the flag a
+    // substituted comparison used to be most tempted to upgrade — which would
+    // have spent the user's money answering a question they declined to ask.
     let sandbox = aged_source_and_vault();
 
     sandbox
@@ -1980,17 +2131,100 @@ fn the_phrase_is_printed_on_stderr_and_never_on_stdout() {
         "a 256-bit phrase is 24 words: {phrase}"
     );
 
-    // Not one of those words may be on stdout, and the document must say only
-    // *that* a phrase was issued.
+    // The document must say only *that* a phrase was issued.
     let document = json(&output.stdout);
     assert_eq!(document["recovery_phrase_issued"], true);
+
     let stdout = String::from_utf8_lossy(&output.stdout);
-    for word in phrase.split_whitespace() {
-        assert!(
-            !stdout.contains(word),
-            "the word '{word}' reached stdout:\n{stdout}"
-        );
-    }
+    assert!(
+        !stdout.contains(&phrase),
+        "the whole phrase reached stdout:\n{stdout}"
+    );
+
+    // And no *pair* of consecutive phrase words may appear adjacent in stdout.
+    //
+    // Neither a substring scan nor a whole-word scan works here, and both
+    // failures are worth recording because each looks correct until it runs.
+    // `stdout.contains(word)` fires on the JSON field `password_source`, which
+    // contains "sword" — a real BIP-39 word — so a passing run would depend on
+    // which twenty-four words the CSPRNG happened to choose. Matching whole
+    // words instead fails the other way: "index", "source", "run" and "create"
+    // are all in the BIP-39 list *and* in this document legitimately, so that
+    // check is flaky in the opposite direction.
+    //
+    // Adjacency is the property that actually distinguishes them, because the
+    // phrase's *order* is the thing that cannot occur by accident. The count is
+    // reported rather than a bare boolean for the one residual case: `dry` and
+    // `run` are both BIP-39 words and appear adjacent in this document as
+    // `"dry_run"`, so a phrase that happened to place them consecutively would
+    // match once (roughly one run in 180 000). That is what the number is for —
+    // a leak matches ~23 of the 23 pairs, a coincidence matches exactly one, and
+    // the two must never be confused for each other by someone who sees this
+    // fail and reaches for a weaker check.
+    let printed = alphabetic_words(&stdout);
+    let secret = alphabetic_words(&phrase);
+    let leaked = |haystack: &[String]| {
+        secret
+            .windows(2)
+            .filter(|pair| haystack.windows(2).any(|seen| seen == *pair))
+            .count()
+    };
+
+    // The check's own smoke test, and it earns its place: an assertion that
+    // never fires passes every run while proving nothing, which for *this*
+    // property means shipping a build that prints recovery phrases into log
+    // files. Both a bare phrase and the rendered numbered block must be caught.
+    let pairs = secret.len() - 1;
+    assert_eq!(
+        leaked(&alphabetic_words(&format!(
+            "{{\"recovery_phrase\":\"{phrase}\"}}"
+        ))),
+        pairs,
+        "the leak detector does not detect a leaked phrase"
+    );
+    assert_eq!(
+        leaked(&alphabetic_words(&recovery_block_lines(&phrase).join("\n"))),
+        pairs,
+        "the leak detector misses the rendered numbered block"
+    );
+
+    assert_eq!(
+        leaked(&printed),
+        0,
+        "consecutive phrase words reached stdout. A count near {pairs} is a \
+         leak; a count of exactly 1 may be the documented `dry_run` \
+         coincidence — check the phrase before changing this test:\n{stdout}"
+    );
+}
+
+/// The recovery block as `dctl init` renders it, rebuilt for the smoke test
+/// above: numbered words in a grid, which is the *other* shape a leak takes.
+fn recovery_block_lines(phrase: &str) -> Vec<String> {
+    phrase
+        .split_whitespace()
+        .enumerate()
+        .collect::<Vec<_>>()
+        .chunks(4)
+        .map(|row| {
+            row.iter()
+                .map(|(index, word)| format!("{:>2} {word}", index + 1))
+                .collect::<Vec<_>>()
+                .join("   ")
+        })
+        .collect()
+}
+
+/// Every run of ASCII letters in `text`, lowercased, in order.
+///
+/// Numbers and punctuation are separators, so the recovery block's numbered
+/// grid (`1 shiver     2 quantum`) reduces to the word sequence itself — which
+/// is what makes the adjacency check above catch a leak of the rendered block
+/// as readily as a leak of the bare phrase.
+fn alphabetic_words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_ascii_alphabetic())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect()
 }
 
 #[test]
@@ -2204,4 +2438,51 @@ fn the_unlock_failure_names_a_recovery_command_that_exists() {
         .assert()
         .code(22)
         .stderr(predicates::str::contains("recovery phrase"));
+}
+
+// ── the modification time survives every kind of transfer ─────────────────────
+
+#[test]
+fn a_second_local_copy_skips_every_file_and_only_a_touched_one_moves() {
+    // The plainest form of the defect, and the one no compensation ever covered:
+    // `dctl copy ./src ./backup` re-copied the whole tree on every run, because
+    // the destination file was created *now* and the source was modified
+    // whenever it was modified. Nothing about a vault is involved — the
+    // modification time simply was not carried across.
+    //
+    // Both halves are asserted, because the first alone would pass on a tool
+    // that had stopped transferring anything at all.
+    let sandbox = Sandbox::new();
+    for (path, bytes) in AGED_TREE {
+        sandbox.write(path, bytes);
+        sandbox.age(path, A_DAY);
+    }
+
+    for expected in ["Files: 3 / 3", "Files: 0 / 0"] {
+        sandbox
+            .dctl()
+            .arg("--no-ask-password")
+            .arg("copy")
+            .arg(sandbox.path("src"))
+            .arg(sandbox.path("backup"))
+            .assert()
+            .success()
+            .stderr(predicates::str::contains(expected));
+    }
+
+    // One file moves on: only it may be re-copied.
+    sandbox.write("src/b.txt", b"second, edited");
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(sandbox.path("backup"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 1 / 1"));
+
+    assert_eq!(sandbox.read("backup/b.txt"), b"second, edited");
+    assert_eq!(sandbox.read("backup/a.txt"), b"first");
 }

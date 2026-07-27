@@ -143,26 +143,6 @@ impl Comparison {
         }
     }
 
-    /// The comparison to run when one side stamps its own write time.
-    ///
-    /// Only the default moves. `--size-only` and `--checksum` are explicit
-    /// instructions and neither is broken by a write-time timestamp: sizes need
-    /// no clock, and a checksum comparison is already what this returns. Moving
-    /// them would mean the flag a user typed and the comparison that ran were
-    /// different things, which is the misreport the whole module guards against.
-    ///
-    /// The substitution is an *upgrade* — content equality is the stronger claim
-    /// — but it is not free, and it is not what was asked for, so the caller
-    /// announces it. See [`crate::fidelity`] for why a sealed side leaves the
-    /// default unanswerable and for the change to `dctl-core` that retires this.
-    #[must_use]
-    pub const fn content_instead_of_time(self) -> Self {
-        match self {
-            Self::SizeAndModTime => Self::Checksum,
-            other => other,
-        }
-    }
-
     /// Whether this comparison proves the contents are identical.
     ///
     /// Only [`Comparison::Checksum`] does. The report says so, because "0
@@ -354,26 +334,6 @@ mod tests {
         assert_eq!(
             classify(Some(&source), Some(&other), Comparison::Checksum),
             Difference::Differ
-        );
-    }
-
-    #[test]
-    fn a_write_stamped_side_moves_only_the_default_comparison() {
-        // Defect D5's half of `check`. The default becomes unanswerable when one
-        // side's timestamps describe the write, so it is answered by content
-        // instead — but a flag the user typed is left exactly as typed, or the
-        // report would name a comparison that did not run.
-        assert_eq!(
-            Comparison::SizeAndModTime.content_instead_of_time(),
-            Comparison::Checksum
-        );
-        assert_eq!(
-            Comparison::SizeOnly.content_instead_of_time(),
-            Comparison::SizeOnly
-        );
-        assert_eq!(
-            Comparison::Checksum.content_instead_of_time(),
-            Comparison::Checksum
         );
     }
 

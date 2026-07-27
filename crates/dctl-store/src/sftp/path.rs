@@ -267,9 +267,18 @@ mod tests {
         assert_eq!(
             spans,
             vec![
-                ChunkSpan { offset: 0, len: 100 },
-                ChunkSpan { offset: 100, len: 100 },
-                ChunkSpan { offset: 200, len: 50 },
+                ChunkSpan {
+                    offset: 0,
+                    len: 100
+                },
+                ChunkSpan {
+                    offset: 100,
+                    len: 100
+                },
+                ChunkSpan {
+                    offset: 200,
+                    len: 50
+                },
             ]
         );
         // Contiguous, no gaps, sum to total.
@@ -281,7 +290,10 @@ mod tests {
         assert!(chunk_spans(0, 100).is_empty());
         assert_eq!(
             chunk_spans(100, 100),
-            vec![ChunkSpan { offset: 0, len: 100 }]
+            vec![ChunkSpan {
+                offset: 0,
+                len: 100
+            }]
         );
         // Degenerate chunk size is clamped, so the call still terminates.
         assert_eq!(chunk_spans(3, 0).len(), 3);

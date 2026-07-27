@@ -9,17 +9,23 @@ use dctl_store::{ContentHash, ObjectKey};
 
 use crate::error::{CoreError, Result};
 
-use super::{Vault, layout};
+use super::{Modified, Vault, layout};
 
 impl Vault {
-    /// Store `data` under the logical `path`.
+    /// Store `data` under the logical `path`, recorded as last modified at
+    /// `modified`.
     ///
     /// Order matters: the object is sealed, written to the backend with a verified
     /// write, its authoritative name record is written, and only then is the index
     /// record committed — so success is never reported unless the data is durably
     /// and correctly stored.
+    ///
+    /// `modified` describes the **content**, not this call. See [`Modified`] for
+    /// why it is a required argument: the index used to stamp the clock here, and
+    /// a record that describes the write can never be compared against the source
+    /// the write was made from.
     #[tracing::instrument(skip(self, data), fields(backend = self.backend.name(), bytes = data.len()))]
-    pub async fn put_file(&self, path: &str, data: &[u8]) -> Result<()> {
+    pub async fn put_file(&self, path: &str, data: &[u8], modified: Modified) -> Result<()> {
         let path = path::normalize(path)?;
         // Capture any object this path currently maps to, so an overwrite can GC the old
         // ciphertext after the replacement is durable (never orphan a prior version).
@@ -73,7 +79,7 @@ impl Vault {
             path: path.clone(),
             object_key: object_key.clone(),
             size: data.len() as u64,
-            modified_unix: now_unix(),
+            modified_unix: modified.resolve(),
             content_hash: ContentHash::blake3(data).bytes,
         };
         self.index.put(&record)?;
@@ -98,12 +104,4 @@ impl Vault {
             }
         }
     }
-}
-
-/// Current unix time in seconds, if the clock is available.
-pub(super) fn now_unix() -> Option<i64> {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()
-        .map(|d| d.as_secs() as i64)
 }

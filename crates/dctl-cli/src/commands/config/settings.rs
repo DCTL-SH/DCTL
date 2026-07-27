@@ -545,6 +545,48 @@ mod tests {
     }
 
     #[test]
+    fn an_sftp_remote_round_trips_through_the_flat_vocabulary() {
+        // The `dctl config create NAME sftp host=… base=…` path: host and base are
+        // the two required settings, and both must survive flatten → build
+        // unchanged, with require_vault riding along so a store declares itself.
+        let remote = RemoteDef::Sftp(crate::config::SftpDef {
+            host: "lsx-001".into(),
+            base: "~/dctl-store".into(),
+            chunk_size: None,
+            verify: None,
+            require_vault: true,
+        });
+        let settings = flatten(&remote);
+        assert!(settings.contains(&("type".to_string(), "sftp".to_string())));
+        assert!(settings.contains(&("host".to_string(), "lsx-001".to_string())));
+        assert!(settings.contains(&("base".to_string(), "~/dctl-store".to_string())));
+
+        let rebuilt = build(
+            constants::PROVIDER_SFTP,
+            &settings
+                .into_iter()
+                .filter(|(key, _)| key != constants::CONFIG_REMOTE_TYPE_KEY)
+                .collect(),
+        )
+        .unwrap();
+        assert_eq!(rebuilt, remote);
+    }
+
+    #[test]
+    fn an_sftp_remote_rejects_a_setting_it_does_not_define() {
+        // `deny_unknown_fields` has to bite on the command line too: a bucket is
+        // not an sftp setting, and accepting it would silently write a remote the
+        // loader then refuses.
+        let error = build(
+            constants::PROVIDER_SFTP,
+            &assignments(&[("host", "lsx-001"), ("base", "store"), ("bucket", "nope")]),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), ExitCode::Usage);
+        assert!(error.message().contains("bucket"), "{}", error.message());
+    }
+
+    #[test]
     fn a_vault_chain_setting_round_trips_through_the_flat_vocabulary() {
         let remote = RemoteDef::Vault(VaultDef {
             base: "b2prod".into(),

@@ -1,44 +1,52 @@
-//! `dctl mount` — mount a remote as a filesystem.
+//! `dctl mount` — serve a vault as a read-only filesystem.
 //!
-//! **This command cannot mount anything in this build.** It is `PLAN.md` phase 2
-//! (§11), and every run ends in [`CliError::unimplemented`] — an error with a
-//! real exit code, never a success message for work that did not happen
-//! (`PLAN.md` §6). What it *does* do today is everything that can be done
-//! without a filesystem adapter: parse and validate the full flag surface, check
-//! the mountpoint, and name the backend it would attach through. A user who runs
-//! it now learns about their non-empty mountpoint now, rather than on the day
-//! the feature lands.
+//! The **verb**: it parses the command line, validates the mountpoint, unlocks
+//! the vault, refuses the flags this engine cannot honour, and starts the
+//! filesystem. The filesystem itself is [`crate::mount`], and the split is
+//! deliberate — everything here is about the *command*, and nothing here knows
+//! what an inode is.
 //!
-//! ## Why the flags exist before the feature does
+//! ## Read-only is the whole of v1
 //!
-//! A command-line surface is an interface, and interfaces are cheapest to get
-//! right before anyone depends on them. `--help`, the generated shell
-//! completions and the documentation are all built from these definitions the
-//! moment this ships, so the spellings and defaults below are final: phase 2
-//! wires an engine underneath them without renaming a flag or moving a default.
-//! The defaults themselves are argued for in
-//! [`crate::constants`], each with the `PLAN.md` §15 reasoning behind it.
+//! `PLAN.md` §15 makes the mount read-first: a random-write encrypted mount means
+//! re-chunking and journalled writes, and is a scoped phase of its own. So every
+//! write, rename, delete and truncate through the mount is refused with `EROFS`,
+//! `--read-only` is accepted as a statement of what is already true, and a user
+//! who did *not* pass it is told on stderr rather than left to find out from an
+//! error. What this command must never do is accept a write and drop it —
+//! `PLAN.md` §6's rule against reporting work that did not happen, with a
+//! filesystem's authority behind it.
 //!
 //! ## Per-platform backend (`PLAN.md` §15)
 //!
-//! | OS | Backend | Notes |
+//! | OS | Backend | State |
 //! |----|---------|-------|
-//! | Linux | **FUSE3** via `fuser` | writeback cache, large `max_read`/`max_write`, multithreaded, big readahead |
-//! | macOS | **FSKit** (macOS 15+) → **fuse-t** → **macFUSE** | FSKit is Apple-sanctioned and needs no kernel extension, which is what makes it the 20-year-safe default (`PLAN.md` §13.1); fuse-t avoids a kext by tunnelling over NFS loopback; macFUSE is a kext — fastest, opt-in, and the one a macOS release can break |
-//! | Windows | **WinFSP** | the mature FUSE-like layer; ProjFS is an option later for read-first streaming virtualisation |
+//! | Linux | **FUSE3** via `fuser` | Works. Pure-Rust mount path, so no `libfuse` at build time; `fusermount3` at run time. |
+//! | macOS | **macFUSE** via `fuser` | Works. FSKit and fuse-t are §15's later kext-free options — neither has a Rust binding, so macFUSE is what this build can offer, and it says so rather than claiming the others. |
+//! | Windows | **WinFSP** | Not built. WinFSP is not a FUSE binding and cannot be reached through `fuser`; the command refuses by name. |
 //!
-//! The order lives in [`backend`], and the checks in [`mountpoint`].
+//! The preference order lives in [`backend`], the checks in [`mountpoint`], and
+//! the flag decisions in [`plan`].
+//!
+//! ## One password, for as long as the mount is up
+//!
+//! The vault is unlocked once, here, and stays unlocked until the mount ends.
+//! That is what makes a mount usable and it is a real security property — see
+//! the security note in [`crate::mount`], which spells out what it means for a
+//! machine left unattended with a mount attached.
 //!
 //! ## Output
 //!
 //! `mount` produces no structured result, so it has nothing to render in
-//! `--format json`: it either runs a filesystem in the foreground or fails.
-//! The resolved plan is written to **stderr** at `-v`, where it belongs — stdout
-//! is reserved for data, and a mount's data is the filesystem itself.
+//! `--format json`: it either runs a filesystem in the foreground or fails. The
+//! resolved plan goes to **stderr**, where it belongs — stdout is reserved for
+//! data, and a mount's data is the filesystem itself.
 
 pub mod backend;
 pub mod mountpoint;
 pub mod options;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+pub mod plan;
 pub mod source;
 
 use std::path::PathBuf;
@@ -47,12 +55,11 @@ use std::time::Duration;
 use clap::Args;
 
 use crate::constants::{
-    MOUNT_ADAPTER_FEATURE, MOUNT_DEFAULT_ATTR_TIMEOUT, MOUNT_DEFAULT_BUFFER_SIZE,
-    MOUNT_DEFAULT_DIR_CACHE_TIME, MOUNT_DEFAULT_VFS_READ_AHEAD, MOUNT_ENGINE_HINT,
-    MOUNT_SIZE_DISABLED,
+    MOUNT_DEFAULT_ATTR_TIMEOUT, MOUNT_DEFAULT_BUFFER_SIZE, MOUNT_DEFAULT_DIR_CACHE_TIME,
+    MOUNT_DEFAULT_VFS_READ_AHEAD,
 };
 use crate::ctx::Ctx;
-use crate::error::{CliError, Result};
+use crate::error::Result;
 use crate::logging::fields;
 use crate::output::size;
 
@@ -162,57 +169,130 @@ pub struct MountArgs {
     pub no_modtime: bool,
 }
 
-/// Mount a remote as a filesystem.
+/// Serve a vault as a read-only filesystem, until it is unmounted or the process
+/// is asked to stop.
 ///
-/// Validates everything that can be validated, reports what it would do, and
-/// then fails: see the module docs for why this is an error rather than a
-/// no-op.
+/// The order is the order it has to be: parse the source, check the mountpoint —
+/// both of which fail cheaply and without a password — and only then reach the
+/// engine, which resolves the flags and unlocks the vault. A user with a typo in
+/// their mountpoint should not have to type their passphrase to find out.
 ///
 /// # Errors
-/// [`crate::exit::ExitCode::Usage`] for an unparseable remote or an unusable
-/// mountpoint, [`crate::exit::ExitCode::DirNotFound`] for a mountpoint that does
-/// not exist, and [`crate::exit::ExitCode::FatalError`] from
-/// [`CliError::unimplemented`] once everything else has passed.
+/// [`crate::exit::ExitCode::Usage`] for an unparseable remote, an unusable
+/// mountpoint or a flag this build cannot honour;
+/// [`crate::exit::ExitCode::DirNotFound`] for a mountpoint that does not exist;
+/// [`crate::exit::ExitCode::VaultLocked`] when the vault will not unlock;
+/// [`crate::exit::ExitCode::FatalError`] when the platform's FUSE layer refuses
+/// the mount, and for the whole command on a platform that has none; and
+/// [`crate::exit::ExitCode::Cancelled`] when a signal ends it — see
+/// [`crate::mount::session`] for why an interrupted mount is not a success.
 pub async fn run(ctx: &Ctx, args: &MountArgs) -> Result<()> {
     let source = Source::parse(&args.remote)?;
-
-    // The mountpoint is checked even though nothing can be mounted: it is the
-    // problem the user has to fix before phase 2 is any use to them, and finding
-    // out today costs one command.
     mountpoint::validate(&args.mountpoint)?;
 
-    advise(ctx, args);
-    report(ctx, &source, args);
+    // [`backend::attached`] is the authority on whether this build can attach a
+    // filesystem at all, so it is asked once, here, rather than being inferred
+    // from a `cfg` at each of the places that would care. On a platform with no
+    // FUSE layer the run still reaches the two checks above first, because a bad
+    // mountpoint should be reported as a bad mountpoint even where the command
+    // was never going to succeed.
+    if backend::attached().is_none() {
+        advise(ctx, args);
+        report(ctx, &source, args);
+        tracing::debug!(
+            { fields::REMOTE } = source.remote.as_str(),
+            { fields::PATH } = source.path.as_str(),
+            mountpoint = %args.mountpoint.display(),
+            "mount validated; this platform has no FUSE layer"
+        );
+        return Err(no_filesystem_layer());
+    }
 
-    tracing::debug!(
+    serve(ctx, args, &source).await
+}
+
+/// The refusal for a platform with no FUSE layer.
+///
+/// Windows attaches a userspace filesystem through **WinFSP**, which is not a
+/// FUSE binding and cannot be reached from the crate that serves Linux and
+/// macOS. Everything above the adapter — the flag surface, the mountpoint checks,
+/// the filesystem itself — is finished and runs on the other two, so the refusal
+/// names the one missing piece and the section that schedules it rather than
+/// leaving a reader to wonder which part of their command was wrong.
+fn no_filesystem_layer() -> crate::error::CliError {
+    crate::error::CliError::unimplemented(format!(
+        "{} {VERB}: {}",
+        dctl_meta::BINARY_NAME,
+        crate::constants::MOUNT_ADAPTER_FEATURE
+    ))
+    .with_hint(crate::constants::MOUNT_ENGINE_HINT)
+}
+
+/// Unlock the vault and run the filesystem.
+///
+/// Split from [`run`] so that everything a mount needs regardless of platform —
+/// the source, the mountpoint, the refusal — is written once, and only the part
+/// that genuinely needs a kernel interface is compiled per platform.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+async fn serve(ctx: &Ctx, args: &MountArgs, source: &Source) -> Result<()> {
+    use std::sync::Arc;
+
+    let config = plan::resolve(ctx, args, source)?;
+
+    report(ctx, source, args);
+
+    // The password is asked for here and the vault stays unlocked for the life of
+    // the mount. That is not an implementation detail — see the security note in
+    // `crate::mount`, which says what it means for the machine this runs on.
+    let spec = crate::remote::RemoteSpec::Named {
+        remote: source.remote.clone(),
+        path: String::new(),
+    };
+    let opened: Arc<dyn crate::source::Source> = Arc::from(crate::source::open(ctx, &spec).await?);
+
+    let mounted = crate::mount::mount(
+        opened,
+        config,
+        &args.mountpoint,
+        tokio::runtime::Handle::current(),
+    )?;
+
+    tracing::info!(
+        { fields::OP } = VERB,
         { fields::REMOTE } = source.remote.as_str(),
         { fields::PATH } = source.path.as_str(),
         mountpoint = %args.mountpoint.display(),
-        backend = backend::first_choice().map_or("none", backend::MountBackend::slug),
-        read_only = args.read_only,
-        vfs_cache_mode = args.vfs_cache_mode.slug(),
-        "mount validated; no filesystem adapter in this build"
+        backend = backend::attached().map_or("none", backend::MountBackend::slug),
+        read_only = true,
+        "mounted"
     );
+    plan::announce(ctx, args, &args.mountpoint);
 
-    // The message names the missing *capability* and the crate that would own
-    // it, with the command in front so a reader can map it onto what they typed.
-    // Naming only the command would be the one thing this refusal must not do:
-    // everything `dctl mount` itself is responsible for has, by this line,
-    // already run and passed.
-    Err(CliError::unimplemented(format!(
-        "{} {VERB}: {MOUNT_ADAPTER_FEATURE}",
-        dctl_meta::BINARY_NAME
-    ))
-    .with_hint(MOUNT_ENGINE_HINT))
+    mounted.run().await
+}
+
+/// The same, on a platform with no FUSE layer.
+///
+/// Never reached — [`run`] has already asked [`backend::attached`], which is the
+/// authority — and written anyway rather than left to a `cfg` at the call site,
+/// so that the platform question is answered in exactly one place. A second
+/// answer is how the two come to disagree.
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+async fn serve(_ctx: &Ctx, _args: &MountArgs, _source: &Source) -> Result<()> {
+    Err(no_filesystem_layer())
 }
 
 /// Warn about combinations that parse but cannot do what they look like they do.
 ///
-/// Warnings rather than errors, and on stderr: every one of these is legal on
-/// some platform or in some future mode, and refusing would break a script that
-/// is correct elsewhere. Saying nothing, though, leaves a user tuning a dial
-/// that is not connected.
+/// Only reached on a platform with no filesystem adapter, where a flag that
+/// cannot be honoured is moot: the command is going to refuse anyway, and turning
+/// each of these into its own refusal would report the *flag* as the problem when
+/// the platform is. Where a mount really can be attached, the equivalent
+/// decisions are refusals rather than warnings — see [`plan`], and the reasoning
+/// there for why a warning is the wrong shape once something is at stake.
 fn advise(ctx: &Ctx, args: &MountArgs) {
+    use crate::constants::MOUNT_SIZE_DISABLED;
+
     if args.vfs_read_ahead > MOUNT_SIZE_DISABLED && args.vfs_cache_mode == VfsCacheMode::Off {
         ctx.out.warn(
             "--vfs-read-ahead does nothing with --vfs-cache-mode off: read-ahead \
@@ -221,46 +301,35 @@ fn advise(ctx: &Ctx, args: &MountArgs) {
         );
     }
 
-    if cfg!(target_os = "windows") {
-        if args.allow_other || args.allow_root {
-            ctx.out.warn(
-                "--allow-other and --allow-root are POSIX permission concepts and \
-                 have no effect on Windows, where access follows the drive's ACL.",
-            );
-        }
-        if args.daemon {
-            ctx.out.warn(
-                "--daemon has no effect on Windows: a filesystem stays up as a \
-                 service there, not as a detached process.",
-            );
-        }
+    if args.allow_other || args.allow_root {
+        ctx.out.warn(
+            "--allow-other and --allow-root are POSIX permission concepts and have \
+             no effect on Windows, where access follows the drive's ACL.",
+        );
+    }
+    if args.daemon {
+        ctx.out.warn(
+            "--daemon has no effect on Windows: a filesystem stays up as a service \
+             there, not as a detached process.",
+        );
     }
 }
 
-/// Describe the mount that would have been attached, on stderr at `-v`.
+/// Describe the mount on stderr at `-v`.
 fn report(ctx: &Ctx, source: &Source, args: &MountArgs) {
-    ctx.out.info(format!(
-        "would mount {source} at {}",
-        args.mountpoint.display()
-    ));
+    ctx.out
+        .info(format!("mounting {source} at {}", args.mountpoint.display()));
 
-    match backend::first_choice() {
-        Some(first) => {
-            let fallbacks: Vec<&str> = backend::preferred()
-                .iter()
-                .skip(1)
-                .map(|candidate| candidate.describe())
-                .collect();
-            if fallbacks.is_empty() {
-                ctx.out.info(format!("backend: {}", first.describe()));
-            } else {
-                ctx.out.info(format!(
-                    "backend: {} (falling back to {})",
-                    first.describe(),
-                    fallbacks.join(", ")
-                ));
-            }
-        }
+    // The backend actually being used, never the one `PLAN.md` §15 prefers — see
+    // [`backend::attached`] for why naming the preference here would tell a macOS
+    // user the opposite of what they need to know.
+    match backend::attached() {
+        Some(attached) => match backend::shortfall() {
+            Some(reason) => ctx
+                .out
+                .info(format!("backend: {} — {reason}", attached.describe())),
+            None => ctx.out.info(format!("backend: {}", attached.describe())),
+        },
         None => ctx
             .out
             .info("backend: none — this platform has no supported filesystem layer"),
@@ -268,14 +337,10 @@ fn report(ctx: &Ctx, source: &Source, args: &MountArgs) {
 
     let units = ctx.out.units();
     ctx.out.info(format!(
-        "options: read-only={}, dir-cache={}, attr-timeout={}, vfs-cache={}, \
-         buffer={}, read-ahead={}, modtime={}",
-        args.read_only,
+        "options: read-only=true, dir-cache={}, attr-timeout={}, buffer={}, modtime={}",
         size::duration(args.dir_cache_time.as_secs()),
         size::duration(args.attr_timeout.as_secs()),
-        args.vfs_cache_mode.slug(),
         size::bytes(args.buffer_size, units),
-        size::bytes(args.vfs_read_ahead, units),
         !args.no_modtime,
     ));
 }
@@ -284,6 +349,7 @@ fn report(ctx: &Ctx, source: &Source, args: &MountArgs) {
 mod tests {
     use super::*;
     use crate::cli::GlobalArgs;
+    use crate::constants::MOUNT_SIZE_DISABLED;
     use crate::exit::ExitCode;
     use clap::Parser;
 
@@ -303,12 +369,6 @@ mod tests {
 
     fn parse(argv: &[&str]) -> MountArgs {
         Harness::parse_from(std::iter::once("dctl").chain(argv.iter().copied())).args
-    }
-
-    /// A context with the progress display and warnings silenced, so a test run
-    /// from a terminal does not paint over the harness's output.
-    fn ctx() -> Ctx {
-        Ctx::new(Globals::parse_from(["dctl", "--quiet"]).globals)
     }
 
     fn mountpoint() -> tempfile::TempDir {
@@ -418,83 +478,89 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn a_valid_invocation_still_fails_because_nothing_can_mount_yet() {
-        // PLAN.md §6: never report work that did not happen. There is no mode —
-        // not even --dry-run — in which this build may exit 0.
-        let dir = mountpoint();
-        let path = dir.path().to_string_lossy().to_string();
-        let error = run(&ctx(), &parse(&["vault:", &path])).await.unwrap_err();
-
-        assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(
-            error.message().contains("mount"),
-            "message must name the command: {}",
-            error.message()
-        );
-        // …and the three things that turn a dead end into a roadmap entry. The
-        // command name alone is what this test used to check, and it would have
-        // passed on a message that told a reader nothing they could act on.
-        assert!(
-            error.message().contains(MOUNT_ADAPTER_FEATURE),
-            "the missing capability must be named: {}",
-            error.message()
-        );
-        assert!(
-            error.message().contains("dctl-mount"),
-            "and the layer that owes it: {}",
-            error.message()
-        );
-        assert!(
-            error.hint().is_some_and(|hint| hint.contains("phase 2")),
-            "the refusal must say when it lands"
-        );
+    /// A context with `--no-ask-password`, so a test that reaches the unlock
+    /// fails on the missing remote instead of blocking on an invisible prompt.
+    fn headless() -> Ctx {
+        Ctx::new(Globals::parse_from(["dctl", "--quiet", "--no-ask-password"]).globals)
     }
 
     #[tokio::test]
-    async fn the_mountpoint_is_checked_before_the_engine_is_blamed() {
-        // The whole reason the checks run in a build that cannot mount: a bad
-        // mountpoint must be reported as a bad mountpoint, not as a missing
-        // feature the user would then wait for.
+    async fn the_mountpoint_is_checked_before_the_vault_is_unlocked() {
+        // The order the command promises: a user with a typo in their mountpoint
+        // must not have to type a passphrase to find out. A non-empty mountpoint
+        // is a *usage* error, reported as such rather than as a failure to reach
+        // the remote.
         let dir = mountpoint();
         std::fs::write(dir.path().join("occupied.txt"), b"x").unwrap();
         let path = dir.path().to_string_lossy().to_string();
 
-        let error = run(&ctx(), &parse(&["vault:", &path])).await.unwrap_err();
+        let error = run(&headless(), &parse(&["vault:", &path]))
+            .await
+            .unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
-        assert_ne!(error.code(), ExitCode::FatalError);
+        assert!(
+            error.message().contains("not empty"),
+            "the mountpoint must be blamed for being non-empty: {}",
+            error.message()
+        );
     }
 
     #[tokio::test]
     async fn a_missing_mountpoint_is_its_own_exit_code() {
+        // Distinct from a usage error so a wrapper can create it and retry
+        // rather than parsing a message.
         let dir = mountpoint();
         let missing = dir.path().join("not-there");
         let path = missing.to_string_lossy().to_string();
-        let error = run(&ctx(), &parse(&["vault:", &path])).await.unwrap_err();
+        let error = run(&headless(), &parse(&["vault:", &path]))
+            .await
+            .unwrap_err();
         assert_eq!(error.code(), ExitCode::DirNotFound);
     }
 
     #[tokio::test]
     async fn the_remote_is_parsed_before_the_mountpoint_is_touched() {
         // A local source is a usage error whatever the mountpoint looks like.
-        let error = run(&ctx(), &parse(&["/srv/data", "/mnt/nowhere-at-all"]))
+        let error = run(&headless(), &parse(&["/srv/data", "/mnt/nowhere-at-all"]))
             .await
             .unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
     }
 
     #[tokio::test]
-    async fn a_pointless_read_ahead_warns_but_does_not_fail_the_parse() {
-        // The advice must never become a refusal: the same flags are correct in
-        // a cache mode this run did not ask for.
+    async fn a_flag_this_engine_cannot_honour_is_refused_before_anything_is_unlocked() {
+        // The rule `plan` exists for, checked through the command rather than
+        // around it: a refusal has to happen before the password prompt, or the
+        // user pays for a mount that was never going to start.
         let dir = mountpoint();
         let path = dir.path().to_string_lossy().to_string();
-        let args = parse(&["vault:", &path, "--vfs-read-ahead", "128M"]);
-        let error = run(&ctx(), &args).await.unwrap_err();
-        assert_eq!(
-            error.code(),
-            ExitCode::FatalError,
-            "warning became a refusal"
+        for flags in [
+            vec!["--daemon"],
+            vec!["--vfs-cache-mode", "full"],
+            vec!["--vfs-read-ahead", "128M"],
+        ] {
+            let mut argv = vec!["vault:", path.as_str()];
+            argv.extend(flags.iter().copied());
+            let error = run(&headless(), &parse(&argv)).await.unwrap_err();
+            assert_eq!(error.code(), ExitCode::Usage, "{flags:?}");
+            assert!(error.hint().is_some(), "{flags:?} refused without advice");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_unconfigured_remote_fails_at_the_unlock_and_not_at_the_mount() {
+        // Everything this command owns has passed by then, so the failure has to
+        // name the remote rather than the filesystem.
+        let dir = mountpoint();
+        let path = dir.path().to_string_lossy().to_string();
+        let error = run(&headless(), &parse(&["nosuchremote:", &path]))
+            .await
+            .unwrap_err();
+        assert_ne!(error.code(), ExitCode::Success);
+        assert!(
+            error.message().contains("nosuchremote"),
+            "the refusal must name the remote: {}",
+            error.message()
         );
     }
 }

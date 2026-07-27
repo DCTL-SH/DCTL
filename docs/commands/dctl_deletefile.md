@@ -23,10 +23,22 @@ to remove one file. Two syntactic forms are refused outright with exit code 1:
   names a directory;
 * a bare remote, `vault:`, which names the vault root.
 
-The semantic half of that check — *is this path a directory in the vault?* —
-needs a listing the engine does not expose yet, so today only the syntactic half
-runs. Once the engine lands, a path that resolves to a directory will fail the
-same way, never recurse.
+The semantic half of that check — *is this path a directory in the vault?* — runs
+too, now that listing does. A path with no trailing separator that nonetheless
+resolves to a directory is refused rather than recursed into, and the two halves
+say which one caught it:
+
+```console
+$ dctl deletefile archive:site-a --force
+error: 'archive:site-a' is a directory, not an object
+$ dctl deletefile archive:site-a/ --force
+error: 'archive:site-a/' names a directory, not an object
+```
+
+Both are exit **1**. An earlier revision of this page said only the syntactic
+half ran and that the semantic one was owed — which would have left a reader
+believing `deletefile` could be pointed at a directory and quietly do something
+unintended.
 
 **Target resolution** is the family's strict parse. A remote name must be at
 least two characters, so a one-character prefix is always a Windows drive

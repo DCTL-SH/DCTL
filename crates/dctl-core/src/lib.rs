@@ -28,7 +28,7 @@ mod vault;
 pub use dctl_crypto::kem;
 pub use dctl_index::Record;
 pub use error::{CoreError, Result};
-pub use vault::{NewVault, UnlockKey, Vault};
+pub use vault::{Modified, NewVault, UnlockKey, Vault};
 
 /// Check a typed recovery phrase against BIP-39 without attempting an unlock.
 ///

@@ -35,9 +35,15 @@ mod ctx;
 mod dispatch;
 mod error;
 mod exit;
-mod fidelity;
 mod filter;
 mod logging;
+// The read-only FUSE filesystem, on the two platforms that have a FUSE layer.
+// Target-gated in one place rather than inside every file it contains: on
+// Windows there is no kernel interface to compile against, and `commands::mount`
+// answers that with a refusal naming WinFSP (`PLAN.md` §15) rather than with a
+// module full of `#[cfg]`s that could not work if they compiled.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+mod mount;
 mod output;
 mod platform;
 mod remote;

@@ -625,7 +625,6 @@ dependencies = [
  "dctl-store",
  "fuser",
  "indicatif",
- "libc",
  "predicates",
  "rpassword",
  "serde",

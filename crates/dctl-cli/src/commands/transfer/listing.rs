@@ -85,11 +85,11 @@ pub struct ListOptions {
     /// policy, because it is the *listing* that pays for it: a vault answers
     /// from its index for free, and a local tree is read end to end.
     ///
-    /// Set by `--checksum`, and also by the transfer whose destination stamps
-    /// its own write time and therefore has to be compared by content instead
-    /// ([`crate::fidelity`]). The two reach the same place because they need the
-    /// same thing; they are decided apart because only one of them is something
-    /// the user asked for.
+    /// Set by `--checksum` and by nothing else. A transfer used to raise it on
+    /// its own whenever a side was a vault — a vault could not be compared by
+    /// modification time, so content was substituted — which made an ordinary
+    /// `copy` read its whole source tree. The vault records the source's time
+    /// now, so the substitution and the flag it set are both gone.
     pub hash_contents: bool,
 }
 
@@ -107,17 +107,6 @@ impl ListOptions {
             include_empty_dirs,
             hash_contents: globals.checksum,
         })
-    }
-
-    /// Also produce a content hash for every entry.
-    ///
-    /// Additive rather than assigning, so a caller compensating for a
-    /// write-stamped destination cannot accidentally *cancel* a `--checksum` the
-    /// user typed. The flag is a floor, never a switch.
-    #[must_use]
-    pub const fn hashing_contents(mut self, also: bool) -> Self {
-        self.hash_contents |= also;
-        self
     }
 
     /// Whether a file at this logical path and size is in scope.

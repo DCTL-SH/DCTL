@@ -131,6 +131,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use dctl_core::Modified;
 use dctl_store::ContentHash;
 use zeroize::Zeroizing;
 
@@ -152,6 +153,7 @@ use crate::session::{self, Session};
 
 use super::pipeline::{Reaper, StageDriver};
 use super::plan::PlanEntry;
+use super::staged::Staged;
 
 /// Which way bytes move, and what stands at each end.
 ///
@@ -245,14 +247,18 @@ pub struct Engine {
     vault_prefix: String,
     /// Which side this engine's reaper deletes from.
     reap_target: ReapTarget,
-    /// Plaintext in flight, keyed by the entry's destination path.
+    /// Files in flight, keyed by the entry's destination path.
     ///
-    /// The stage trait takes `&self`, and a file's bytes have to survive from
+    /// The stage trait takes `&self`, and a file's contents have to survive from
     /// `read` to `upload`, so they live here rather than in a local. Entries are
     /// removed as soon as they are consumed: holding a file's plaintext one
     /// stage longer than necessary is exactly the kind of lifetime a crypto tool
     /// should not have.
-    staged: Mutex<HashMap<String, Zeroizing<Vec<u8>>>>,
+    ///
+    /// A [`Staged`] rather than the bytes alone, because the source's
+    /// modification time has to make the same journey — see that module for what
+    /// went wrong while it did not.
+    staged: Mutex<HashMap<String, Staged>>,
     /// BLAKE3 of each entry's plaintext, keyed by destination path, waiting to
     /// be put in that file's audit record.
     ///
@@ -513,8 +519,8 @@ impl Engine {
         Ok(())
     }
 
-    /// Take an entry's staged plaintext.
-    fn take_staged(&self, key: &str) -> Result<Zeroizing<Vec<u8>>> {
+    /// Take an entry's staged file.
+    fn take_staged(&self, key: &str) -> Result<Staged> {
         self.staged
             .lock()
             .map_err(|_| CliError::new(ExitCode::FatalError, "internal: staging lock poisoned"))?
@@ -527,11 +533,11 @@ impl Engine {
             })
     }
 
-    fn put_staged(&self, key: &str, bytes: Zeroizing<Vec<u8>>) -> Result<()> {
+    fn put_staged(&self, key: &str, staged: Staged) -> Result<()> {
         self.staged
             .lock()
             .map_err(|_| CliError::new(ExitCode::FatalError, "internal: staging lock poisoned"))?
-            .insert(key.to_string(), bytes);
+            .insert(key.to_string(), staged);
         Ok(())
     }
 
@@ -599,7 +605,7 @@ impl Engine {
 }
 
 impl StageDriver for Engine {
-    /// Step 1 — obtain the contents.
+    /// Step 1 — obtain the contents, **and the time they were last changed**.
     ///
     /// For either upload that means reading the source file. For a *sealed*
     /// download it means fetching and authenticating the object, which
@@ -608,25 +614,37 @@ impl StageDriver for Engine {
     /// object was stored as it stands — so it is fetched as it stands, and the
     /// difference in what can be promised is why the two are separate arms
     /// rather than one call behind a shared name.
+    ///
+    /// Every arm also answers *when the content last changed*, because that fact
+    /// belongs to the content and the destination has to record it — see
+    /// [`super::staged`]. Three of the five can: a local file is asked through
+    /// the same handle its bytes were read from, and a vault object carries the
+    /// time in its index row. A plain object store cannot, and says so rather
+    /// than substituting the clock: what it reports is when the provider accepted
+    /// the object, which is a true fact about a different event.
     async fn read(&self, entry: &PlanEntry) -> Result<()> {
         self.check_size(entry)?;
 
-        let bytes = match self.direction {
+        let staged = match self.direction {
             Direction::Upload | Direction::PlainUpload | Direction::LocalOnly => {
                 let path = self.source_path(&entry.source);
-                Zeroizing::new(tokio::fs::read(&path).await.map_err(|error| {
-                    CliError::from(error).with_hint(format!("reading source {}", path.display()))
-                })?)
+                read_local(&path).await?
             }
             Direction::Download => {
-                self.vault()?
-                    .get_file(&self.sealed_path(&entry.source))
-                    .await?
+                let path = self.sealed_path(&entry.source);
+                let vault = self.vault()?;
+                let bytes = vault.get_file(&path).await?;
+                Staged::new(bytes, recorded_modification(vault, &path)?)
             }
-            Direction::PlainDownload => self.plain()?.get(&entry.source).await?,
+            // Nothing better than "unknown" is available here, and inventing one
+            // would be worse than the re-download it would avoid: see the arm's
+            // note above and `docs/commands/dctl_copy.md`.
+            Direction::PlainDownload => {
+                Staged::new(self.plain()?.get(&entry.source).await?, Modified::Unknown)
+            }
         };
 
-        self.put_staged(&entry.dest, bytes)
+        self.put_staged(&entry.dest, staged)
     }
 
     /// Step 2 — sealing.
@@ -651,30 +669,35 @@ impl StageDriver for Engine {
     /// returns too, and the guarantee this stage makes does not depend on which
     /// kind of destination was named.
     async fn upload(&self, entry: &PlanEntry) -> Result<u64> {
-        let bytes = self.take_staged(&entry.dest)?;
-        let written = bytes.len() as u64;
+        let staged = self.take_staged(&entry.dest)?;
+        let written = staged.len();
+        let bytes = &staged.bytes;
 
         // Hashed here, where the plaintext is already resident, rather than by
         // re-reading the file afterwards: a second read would double the I/O and
         // could hash something other than what was stored if the source changed
         // underneath the run. This is the digest the audit record carries.
-        self.note_hash(&entry.dest, ContentHash::blake3(&bytes).hex());
+        self.note_hash(&entry.dest, ContentHash::blake3(bytes).hex());
 
         match self.direction {
             Direction::Upload => {
                 self.vault()?
-                    .put_file(&self.sealed_path(&entry.dest), &bytes)
+                    .put_file(&self.sealed_path(&entry.dest), bytes, staged.modified)
                     .await?;
             }
+            // No timestamp goes with it, because there is nowhere to put one:
+            // `Backend::put` stores bytes under a key, and a bucket assigns its
+            // own `Last-Modified` on acceptance. Stated here rather than left as
+            // an omission a reader has to infer.
             Direction::PlainUpload => {
-                self.plain()?.put(&entry.dest, &bytes).await?;
+                self.plain()?.put(&entry.dest, bytes).await?;
             }
             Direction::Download | Direction::PlainDownload | Direction::LocalOnly => {
                 let path = self.dest_path(&entry.dest);
                 if let Some(parent) = path.parent() {
                     tokio::fs::create_dir_all(parent).await?;
                 }
-                write_durably(&path, &bytes).await?;
+                write_durably(&path, bytes, staged.modified).await?;
             }
         }
 
@@ -934,6 +957,55 @@ fn refuse_remote_to_remote(command: &str, sealed: bool) -> CliError {
     CliError::unimplemented(format!("{}: {feature}", command_name(command))).with_hint(hint)
 }
 
+/// Read a local source file, and the modification time of the bytes just read.
+///
+/// One open handle answers both questions. A `tokio::fs::read` followed by a
+/// separate `stat` would be shorter and would occasionally lie: between the two
+/// calls the file can be rewritten, and the destination would then be given
+/// contents from before the edit stamped with the time of the edit — a
+/// combination the next run reads as "already up to date" and never corrects.
+///
+/// A filesystem that will not report a modification time yields
+/// [`Modified::Unknown`] and the transfer proceeds: the destination records no
+/// time, every later run finds the two sides "not comparable" and re-transfers,
+/// which costs bandwidth. That is the direction to fail in.
+async fn read_local(path: &std::path::Path) -> Result<Staged> {
+    use tokio::io::AsyncReadExt as _;
+
+    let at = |error: std::io::Error| {
+        CliError::from(error).with_hint(format!("reading source {}", path.display()))
+    };
+
+    let mut file = tokio::fs::File::open(path).await.map_err(at)?;
+    let modified = file
+        .metadata()
+        .await
+        .map_or(Modified::Unknown, |meta| Modified::of(&meta));
+
+    let mut bytes = Zeroizing::new(Vec::new());
+    file.read_to_end(&mut bytes).await.map_err(at)?;
+
+    Ok(Staged::new(bytes, modified))
+}
+
+/// The modification time a vault recorded for one of its objects.
+///
+/// A keyed index lookup ([`dctl_core::Vault::record`]), not a listing: this is
+/// asked once per file of a download, and a prefix scan per file would turn a
+/// restore of a large tree into a quadratic one.
+///
+/// An object the local index does not know about is [`Modified::Unknown`] rather
+/// than an error. `get_file` resolves through the authoritative name records and
+/// therefore succeeds on a device whose index has not been rebuilt, and refusing
+/// to write a file that was fetched perfectly well — because its *timestamp* was
+/// unavailable — would trade real data for metadata.
+fn recorded_modification(vault: &dctl_core::Vault, path: &str) -> Result<Modified> {
+    Ok(vault
+        .record(path)?
+        .and_then(|record| record.modified_unix)
+        .map_or(Modified::Unknown, Modified::At))
+}
+
 /// Write a file and make both the data *and its name* durable before returning.
 ///
 /// Staging then renaming, rather than truncating in place, and syncing the
@@ -944,6 +1016,11 @@ fn refuse_remote_to_remote(command: &str, sealed: bool) -> CliError {
 ///   its old contents or its new ones.
 /// * `sync_all` puts the bytes on stable storage before any name points at them,
 ///   so a crash cannot produce a complete-looking file full of zeroes.
+/// * **The source's modification time is stamped on the staging file**, before
+///   the rename rather than after it. A destination is never briefly visible
+///   carrying the wrong time, and a run interrupted between the two cannot leave
+///   a published file whose timestamp says it was written now — which the next
+///   run would compare against the source and re-transfer.
 /// * `rename` publishes atomically.
 /// * **Syncing the parent directory** is what makes the rename itself durable.
 ///   POSIX does not guarantee a rename survives a power cut until the containing
@@ -952,18 +1029,12 @@ fn refuse_remote_to_remote(command: &str, sealed: bool) -> CliError {
 ///   the file is gone from both sides.
 ///
 /// This mirrors `crate::commands::rcat::local`, which already does it correctly.
-async fn write_durably(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
-    use tokio::io::AsyncWriteExt as _;
-
+async fn write_durably(path: &std::path::Path, bytes: &[u8], modified: Modified) -> Result<()> {
     let staging = staging_path(path);
 
-    {
-        let mut file = tokio::fs::File::create(&staging).await?;
-        if let Err(error) = file.write_all(bytes).await {
-            let _ = tokio::fs::remove_file(&staging).await;
-            return Err(error.into());
-        }
-        file.sync_all().await?;
+    if let Err(error) = fill(&staging, bytes, modified).await {
+        let _ = tokio::fs::remove_file(&staging).await;
+        return Err(error);
     }
 
     if let Err(error) = tokio::fs::rename(&staging, path).await {
@@ -973,6 +1044,66 @@ async fn write_durably(path: &std::path::Path, bytes: &[u8]) -> Result<()> {
 
     sync_parent_directory(path).await
 }
+
+/// Fill the staging file with `bytes`, stamp it with `modified`, and put both on
+/// stable storage — leaving it ready to publish with a rename.
+///
+/// The stamp and the `fsync` happen together on the blocking pool because Tokio
+/// wraps neither timestamp call: `tokio::fs::File` offers `set_len` and
+/// `set_permissions` and no `set_times`, so a std handle has to be reached for.
+/// Doing both there costs one hop instead of two, and — more importantly — keeps
+/// the ordering in one place: the time is set *before* the sync, so the metadata
+/// the sync flushes is the metadata the file is published with.
+async fn fill(staging: &std::path::Path, bytes: &[u8], modified: Modified) -> Result<()> {
+    use tokio::io::AsyncWriteExt as _;
+
+    let mut file = tokio::fs::File::create(staging).await?;
+    file.write_all(bytes).await?;
+
+    // Resolved before the handle is handed over: `Modified::Now` must mean the
+    // moment of the write, and a time this platform cannot represent leaves the
+    // file with the one it was written at rather than failing a transfer whose
+    // bytes are perfectly correct.
+    let when = modified.resolve().and_then(system_time);
+    let file = file.into_std().await;
+
+    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+        // Only the modification time, never the access time. The two answer
+        // different questions — "when did this content last change" against
+        // "when did somebody last look at it" — and a file this run has just
+        // written genuinely *was* accessed now. `touch(1)` moves both because it
+        // is asked to; a transfer is not.
+        if let Some(when) = when {
+            file.set_times(std::fs::FileTimes::new().set_modified(when))?;
+        }
+        file.sync_all()
+    })
+    .await
+    .map_err(|error| {
+        CliError::new(
+            ExitCode::FatalError,
+            format!("the durable-write task failed: {error}"),
+        )
+    })??;
+
+    Ok(())
+}
+
+/// A whole-second unix timestamp as a [`SystemTime`], including before 1970.
+///
+/// [`None`] for a value this platform's clock cannot represent, which keeps
+/// "unrepresentable" distinguishable from "the epoch" — stamping a file with
+/// 1970 because its real time did not fit would be an invented answer.
+fn system_time(seconds: i64) -> Option<std::time::SystemTime> {
+    let magnitude = std::time::Duration::from_secs(seconds.unsigned_abs());
+    if seconds >= 0 {
+        std::time::SystemTime::UNIX_EPOCH.checked_add(magnitude)
+    } else {
+        std::time::SystemTime::UNIX_EPOCH.checked_sub(magnitude)
+    }
+}
+
+
 
 /// A staging path beside the destination, on the same filesystem so the rename
 /// is atomic. The pid and a counter keep concurrent writers apart.
@@ -1094,9 +1225,22 @@ mod tests {
         // Plaintext must not outlive the stage that needs it.
         let engine = engine(Direction::Upload, PathBuf::from("/tmp"));
         engine
-            .put_staged("a.txt", Zeroizing::new(b"hello".to_vec()))
+            .put_staged(
+                "a.txt",
+                Staged::new(
+                    Zeroizing::new(b"hello".to_vec()),
+                    Modified::At(1_700_000_000),
+                ),
+            )
             .unwrap();
-        assert_eq!(engine.take_staged("a.txt").unwrap().as_slice(), b"hello");
+
+        let taken = engine.take_staged("a.txt").unwrap();
+        assert_eq!(taken.bytes.as_slice(), b"hello");
+        // The timestamp travels with the bytes or the destination invents one:
+        // taking the contents and leaving the time behind is the shape of the
+        // defect this pairing exists to prevent.
+        assert_eq!(taken.modified, Modified::At(1_700_000_000));
+
         assert!(engine.take_staged("a.txt").is_err(), "taken twice");
     }
 
@@ -1389,7 +1533,9 @@ mod tests {
         // in the directory except the destination itself.
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out.bin");
-        write_durably(&dest, b"durable payload").await.unwrap();
+        write_durably(&dest, b"durable payload", Modified::Unknown)
+            .await
+            .unwrap();
 
         assert_eq!(std::fs::read(&dest).unwrap(), b"durable payload");
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
@@ -1410,8 +1556,49 @@ mod tests {
         let dest = dir.path().join("out.bin");
         std::fs::write(&dest, b"old contents that are longer").unwrap();
 
-        write_durably(&dest, b"new").await.unwrap();
+        write_durably(&dest, b"new", Modified::Unknown).await.unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");
+    }
+
+    #[tokio::test]
+    async fn a_durable_write_publishes_the_source_time_rather_than_the_clock() {
+        // Half the incremental-backup fix, at the layer that performs it. A
+        // downloaded or locally-copied file that kept the moment it was written
+        // compares unequal to the source it was made from, on the next run and
+        // every run after — so the destination has to come out of this call
+        // already carrying the source's time.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        write_durably(&dest, b"aged", Modified::At(1_500_000_000))
+            .await
+            .unwrap();
+
+        let modified = std::fs::metadata(&dest)
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(modified, 1_500_000_000);
+    }
+
+    #[tokio::test]
+    async fn a_source_with_no_time_leaves_the_destination_stamped_by_the_clock() {
+        // The honest fallback. Nothing is invented — no epoch, no zero — so the
+        // file simply carries the time it was written, and the comparison that
+        // reads two incomparable timestamps transfers it again rather than
+        // guessing.
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("out.bin");
+        let before = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
+
+        write_durably(&dest, b"unknown", Modified::Unknown)
+            .await
+            .unwrap();
+
+        let modified = std::fs::metadata(&dest).unwrap().modified().unwrap();
+        assert!(modified >= before, "the file was stamped with something old");
     }
 
     #[test]

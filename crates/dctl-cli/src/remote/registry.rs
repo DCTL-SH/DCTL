@@ -36,12 +36,12 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dctl_store::b2::{B2Backend, B2Credentials};
-use dctl_store::{Backend, LocalFs, R2Backend, S3Backend, S3Config};
+use dctl_store::{Backend, LocalFs, R2Backend, S3Backend, S3Config, SftpBackend, SftpConfig};
 
 use crate::constants::{
     ENV_B2_APP_KEY, ENV_B2_KEY_ID, ENV_R2_ACCESS_KEY, ENV_R2_ACCOUNT_ID, ENV_R2_SECRET_KEY,
     ENV_S3_ACCESS_KEY, ENV_S3_ENDPOINT, ENV_S3_REGION, ENV_S3_SECRET_KEY, PROVIDER_B2,
-    PROVIDER_LOCAL, PROVIDER_R2, PROVIDER_S3,
+    PROVIDER_LOCAL, PROVIDER_R2, PROVIDER_S3, PROVIDER_SFTP,
 };
 use crate::error::{CliError, Result};
 use crate::logging::fields;
@@ -92,6 +92,20 @@ pub enum Target {
         /// back to the environment when unset.
         account: Option<String>,
     },
+
+    /// An SSH host reached over SFTP, driven by the system `ssh`.
+    ///
+    /// Neither field falls back to the environment: unlike the cloud providers,
+    /// an sftp remote holds no credential to look up. The user, port, identity
+    /// and any `ProxyCommand` come from `~/.ssh/config`, resolved by `ssh` from
+    /// [`host`](Target::Sftp::host) alone, so the config file carries the whole
+    /// of what DCTL needs and there is nothing secret to keep out of it.
+    Sftp {
+        /// SSH destination: a `~/.ssh/config` `Host` alias or `user@host[:port]`.
+        host: String,
+        /// Remote base directory objects live under.
+        base: String,
+    },
 }
 
 impl Target {
@@ -105,6 +119,7 @@ impl Target {
             Self::B2 { .. } => PROVIDER_B2,
             Self::S3 { .. } => PROVIDER_S3,
             Self::R2 { .. } => PROVIDER_R2,
+            Self::Sftp { .. } => PROVIDER_SFTP,
         }
     }
 }
@@ -161,7 +176,43 @@ pub fn build(resolved: &Resolved) -> Result<Arc<dyn Backend>> {
                 secret_key,
             )?))
         }
+
+        // No credential is read: `ssh` authenticates the transport from the
+        // user's own config, which is the whole reason a cloudflared-proxied host
+        // works. This is also the one arm that opens a connection to build, so it
+        // is the one that bridges to the async `connect` — see [`connect_sftp`].
+        Target::Sftp { host, base } => connect_sftp(host, base),
     }
+}
+
+/// Open an [`SftpBackend`], bridging its async [`SftpBackend::connect`] to the
+/// synchronous [`build`] path.
+///
+/// The other providers construct without any I/O — they defer every request to
+/// first use — so their constructors are synchronous and fit [`build`] directly.
+/// SFTP cannot: it opens a multiplexed `ssh` session up front (that is what makes
+/// every later operation reuse one connection), so `connect` is `async`. [`build`]
+/// stays synchronous because it is reached from synchronous command paths too
+/// (`session::prepare`, `source::plain::open`), and turning it `async` would
+/// cascade through all of them and their tests for the sake of one provider.
+///
+/// The whole CLI runs inside the multi-threaded runtime built in `main`, so
+/// [`tokio::task::block_in_place`] lets this worker thread block on the connect
+/// without starving the scheduler, and [`tokio::runtime::Handle::block_on`] drives
+/// it on that same long-lived runtime — which the returned session must stay on
+/// for the backend's lifetime. [`Handle::try_current`](tokio::runtime::Handle::try_current)
+/// is used rather than `current` so the "not on a runtime" case is a typed error
+/// rather than a panic, keeping this lib code panic-free.
+fn connect_sftp(host: &str, base: &str) -> Result<Arc<dyn Backend>> {
+    let handle = tokio::runtime::Handle::try_current().map_err(|_| {
+        CliError::fatal("the sftp backend must be built inside the async runtime").with_hint(
+            "This is an internal error. Please report the command that produced it.",
+        )
+    })?;
+    let config = SftpConfig::new(host, base);
+    let backend =
+        tokio::task::block_in_place(|| handle.block_on(SftpBackend::connect(config)))?;
+    Ok(Arc::new(backend))
 }
 
 /// Build a backend for a spec typed on the command line, without a config file.
@@ -290,6 +341,14 @@ mod tests {
             }
             .provider_type(),
             PROVIDER_R2
+        );
+        assert_eq!(
+            Target::Sftp {
+                host: "lsx-001".into(),
+                base: "store".into(),
+            }
+            .provider_type(),
+            PROVIDER_SFTP
         );
     }
 

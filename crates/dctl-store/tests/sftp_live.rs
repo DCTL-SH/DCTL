@@ -19,14 +19,18 @@
 //! the default run). Run the command above against `lsx-001` to verify.
 
 use bytes::Bytes;
-use dctl_store::{Backend, ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, SftpBackend, SftpConfig};
+use dctl_store::{
+    Backend, ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, SftpBackend, SftpConfig,
+};
 
 /// A multi-chunk source (> the backend's 4 MiB streaming chunk) so `put_from_path`
 /// and `get_to_path` exercise the bounded, multi-iteration streaming path.
 const STREAM_SOURCE_LEN: u64 = 5 * 1024 * 1024 + 123;
 
 fn host_from_env() -> Option<String> {
-    std::env::var("DCTL_SFTP_HOST").ok().filter(|s| !s.is_empty())
+    std::env::var("DCTL_SFTP_HOST")
+        .ok()
+        .filter(|s| !s.is_empty())
 }
 
 fn base_from_env() -> String {
@@ -96,7 +100,10 @@ async fn sftp_full_round_trip() {
     assert!(outcome.verified.matches(&small_hash));
 
     assert!(sftp.exists(&small_key).await.unwrap());
-    assert_eq!(sftp.head(&small_key).await.unwrap().size, small.len() as u64);
+    assert_eq!(
+        sftp.head(&small_key).await.unwrap().size,
+        small.len() as u64
+    );
 
     // get: byte-exact.
     assert_eq!(sftp.get(&small_key).await.unwrap(), small);
@@ -109,7 +116,10 @@ async fn sftp_full_round_trip() {
     assert_eq!(&mid[..], &small[1000..1256]);
     // A tail range clamps its length at EOF rather than erroring.
     let tail = sftp
-        .get_range(&small_key, ByteRange::new(small.len() as u64 - 10, Some(999)))
+        .get_range(
+            &small_key,
+            ByteRange::new(small.len() as u64 - 10, Some(999)),
+        )
         .await
         .unwrap();
     assert_eq!(&tail[..], &small[small.len() - 10..]);
@@ -124,7 +134,11 @@ async fn sftp_full_round_trip() {
     // Verified-write refuses a hash mismatch and commits nothing.
     let bad_key = ObjectKey::new("nested/dir/bad.bin");
     let err = sftp
-        .put(&bad_key, Bytes::from_static(b"actual"), &blake3(b"different"))
+        .put(
+            &bad_key,
+            Bytes::from_static(b"actual"),
+            &blake3(b"different"),
+        )
         .await
         .unwrap_err();
     assert!(matches!(
@@ -155,15 +169,15 @@ async fn sftp_full_round_trip() {
     // streamed hash so the test never buffers the whole object either).
     let dest = tmp.path().join("download.bin");
     sftp.get_to_path(&stream_key, &dest).await.unwrap();
-    assert_eq!(
-        std::fs::metadata(&dest).unwrap().len(),
-        STREAM_SOURCE_LEN
-    );
+    assert_eq!(std::fs::metadata(&dest).unwrap().len(), STREAM_SOURCE_LEN);
     assert!(hash_file(&dest, HashAlgo::Blake3).matches(&src_hash));
 
     // A middle range of the multi-chunk object, byte-exact.
     let win = sftp
-        .get_range(&stream_key, ByteRange::new(4 * 1024 * 1024, Some(64 * 1024)))
+        .get_range(
+            &stream_key,
+            ByteRange::new(4 * 1024 * 1024, Some(64 * 1024)),
+        )
         .await
         .unwrap();
     let src_bytes = std::fs::read(&src).unwrap();
@@ -198,7 +212,12 @@ async fn sftp_full_round_trip() {
     // Prefix filtering scopes the walk.
     let nested = sftp.list_page("nested/", None).await.unwrap();
     assert_eq!(nested.items.len(), 2);
-    assert!(nested.items.iter().all(|m| m.key.as_str().starts_with("nested/")));
+    assert!(
+        nested
+            .items
+            .iter()
+            .all(|m| m.key.as_str().starts_with("nested/"))
+    );
 
     // ---- delete is idempotent and really removes the object --------------------
     sftp.delete(&small_key).await.unwrap();

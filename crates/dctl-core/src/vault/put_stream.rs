@@ -22,7 +22,7 @@ use dctl_index::Record;
 use dctl_store::{ContentHash, HashAlgo, Hasher, ObjectKey};
 use zeroize::Zeroizing;
 
-use super::{Vault, layout};
+use super::{Modified, Vault, layout};
 use crate::error::{CoreError, Result};
 
 /// Working-buffer size for the vault's constant-memory hashing passes over the temp
@@ -52,8 +52,19 @@ impl Vault {
     /// [`get_file`](Vault::get_file) path as a buffered put. The strict order — object
     /// written and verified, then the authoritative §5 name record, then the durable
     /// index commit — means success is never reported unless the data is correctly stored.
+    ///
+    /// `modified` is a required argument for the reason [`Modified`] gives, and it is
+    /// **not** read from `source` here even though this path opens the file: `source` is
+    /// frequently a spool of something that has no modification time of its own (a pipe
+    /// captured by `dctl rcat`), and taking the temporary file's time would record the
+    /// moment of the spool while looking exactly like a real answer.
     #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
-    pub async fn put_file_from_path(&self, logical_path: &str, source: &Path) -> Result<()> {
+    pub async fn put_file_from_path(
+        &self,
+        logical_path: &str,
+        source: &Path,
+        modified: Modified,
+    ) -> Result<()> {
         let path = path::normalize(logical_path)?;
         // Capture any object this path currently maps to, for post-commit overwrite GC.
         let previous = self.lookup_object_key(&path).await?;
@@ -113,7 +124,7 @@ impl Vault {
             path: path.clone(),
             object_key: object_key.clone(),
             size: sealed.plaintext_len,
-            modified_unix: super::put::now_unix(),
+            modified_unix: modified.resolve(),
             content_hash: sealed.plaintext_hash,
         };
         self.index.put(&record)?;

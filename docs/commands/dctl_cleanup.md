@@ -183,7 +183,7 @@ An unknown class is rejected by the parser, with the valid ones listed:
 ```console
 $ dctl cleanup b2prod: --class everything
 error: invalid value 'everything' for '--class <CLASS>'
-  [possible values: multipart, staging, versions]
+  [possible values: multipart, staging, orphans, versions]
 ```
 
 ## Options
@@ -191,7 +191,8 @@ error: invalid value 'everything' for '--class <CLASS>'
 ```
   -h, --help           help for cleanup
       --class <CLASS>  Class of debris to reclaim. Repeatable; every class by
-                       default [possible values: multipart, staging, versions]
+                       default [possible values: multipart, staging, orphans,
+                       versions]
       --min-age <AGE>  Leave anything younger than this alone — it may still be
                        in flight [default: 24h]
 ```

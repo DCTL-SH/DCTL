@@ -67,6 +67,14 @@ anstyle = "1"
 toml = "0.8"
 unicode-normalization = "0.1"
 
+# `dctl mount`, on the two platforms that have a FUSE layer. Target-gated rather
+# than optional, because a Cargo feature would let a Windows build be configured
+# into a state where `crate::mount` is compiled without a kernel interface behind
+# it; the target gate makes "this platform has no mount" a fact of the build, and
+# `commands::mount` answers it with a refusal naming WinFSP (`PLAN.md` §15).
+[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+fuser = { workspace = true }
+
 [dev-dependencies]
 assert_cmd = { workspace = true }
 predicates = { workspace = true }

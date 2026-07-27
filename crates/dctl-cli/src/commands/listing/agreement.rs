@@ -283,7 +283,7 @@ mod tests {
                 .vault;
             for (path, size) in TREE {
                 vault
-                    .put_file(path, &vec![b'x'; *size])
+                    .put_file(path, &vec![b'x'; *size], dctl_core::Modified::Now)
                     .await
                     .expect("a verified write");
             }

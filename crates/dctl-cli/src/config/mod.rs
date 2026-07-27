@@ -88,7 +88,7 @@ pub use validate::{validate, validate_remote_name, vault_chain, vault_only_locat
 #[cfg(test)]
 pub use load::{absent_path, parse};
 #[cfg(test)]
-pub use model::{B2Def, LocalDef, R2Def, S3Def, VaultDef};
+pub use model::{B2Def, LocalDef, R2Def, S3Def, SftpDef, VaultDef};
 #[cfg(test)]
 pub use save::render;
 

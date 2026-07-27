@@ -26,7 +26,7 @@
 //! command whose next act is to upload, paying an egress charge to find out
 //! whether it may would be an odd way to protect the data.
 
-use dctl_core::Vault;
+use dctl_core::{Modified, Vault};
 
 use crate::commands::directory::Target;
 use crate::commands::pipeline::ObjectSpec;
@@ -76,9 +76,17 @@ pub async fn store(
     // The seal, the verified write and the durable index commit are one
     // operation in `dctl-core`: when this returns `Ok`, the object is stored and
     // recorded, and when it returns an error nothing was committed.
+    //
+    // `Modified::Now` is the honest answer and the spool is the reason it has to
+    // be said out loud. What is being stored arrived on a pipe, and a pipe has no
+    // modification time; the temporary file it was captured in has one, and it is
+    // the moment of the capture — a number that would look exactly like a real
+    // source timestamp to every later comparison. Saying "now" records the same
+    // instant while claiming only what is true: this content came into being
+    // here.
     session
         .vault
-        .put_file_from_path(&target.path, spooled.path())
+        .put_file_from_path(&target.path, spooled.path(), Modified::Now)
         .await?;
 
     ctx.stats.file_done();
@@ -166,7 +174,7 @@ mod tests {
         .vault;
 
         for (path, bytes) in files {
-            vault.put_file(path, bytes).await.expect("a verified write");
+            vault.put_file(path, bytes, dctl_core::Modified::Now).await.expect("a verified write");
         }
         (dir, vault)
     }
@@ -245,7 +253,7 @@ mod tests {
         let payload: Vec<u8> = (0..=255_u8).cycle().take(200_000).collect();
         let spooled = spool::capture(&ctx(&[]), &mut payload.as_slice()).expect("the spool");
         vault
-            .put_file_from_path("dump.bin", spooled.path())
+            .put_file_from_path("dump.bin", spooled.path(), Modified::Now)
             .await
             .expect("the sealed write");
 

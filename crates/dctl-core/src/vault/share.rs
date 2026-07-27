@@ -28,8 +28,7 @@ use dctl_crypto::{kem, path};
 use dctl_index::Record;
 use dctl_store::{ByteRange, ContentHash, ObjectKey, StoreError};
 
-use super::put::now_unix;
-use super::{Vault, layout};
+use super::{Modified, Vault, layout};
 use crate::error::{CoreError, Result};
 
 /// `DRR1` public-registry container (§12.3): `magic(4) ‖ version(1) ‖ reserved(1) ‖
@@ -53,12 +52,18 @@ impl Vault {
     /// Same durability ordering as [`put_file`](Vault::put_file): seal → verified object
     /// write → authoritative §5 name record → durable index commit → overwrite-GC of any
     /// superseded object. Success is never reported unless the data is durably stored.
+    ///
+    /// `modified` is required here for the same reason it is required on
+    /// [`put_file`](Vault::put_file) — see [`Modified`]. A share is still a stored copy of
+    /// something that has an age, and a write path exempted from saying so would be the one
+    /// that quietly reintroduced a record describing the write instead of the content.
     #[tracing::instrument(skip(self, data, recipients), fields(backend = self.backend.name(), bytes = data.len(), recipients = recipients.len()))]
     pub async fn put_file_shared(
         &self,
         logical_path: &str,
         data: &[u8],
         recipients: &[kem::Drk1Public],
+        modified: Modified,
     ) -> Result<()> {
         let path = path::normalize(logical_path)?;
         // Capture any object this path currently maps to, so an overwrite can GC the old
@@ -127,7 +132,7 @@ impl Vault {
             path: path.clone(),
             object_key: object_key.clone(),
             size: data.len() as u64,
-            modified_unix: now_unix(),
+            modified_unix: modified.resolve(),
             content_hash: ContentHash::blake3(data).bytes,
         };
         self.index.put(&record)?;

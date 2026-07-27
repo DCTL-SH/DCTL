@@ -12,6 +12,7 @@ mod imported;
 mod init;
 mod layout;
 mod list;
+mod modified;
 mod put;
 mod put_stream;
 mod rekey;
@@ -29,6 +30,7 @@ use dctl_store::Backend;
 use crate::error::{CoreError, Result};
 
 pub use init::NewVault;
+pub use modified::Modified;
 pub use unlock::UnlockKey;
 
 /// An unlocked vault over a storage backend.

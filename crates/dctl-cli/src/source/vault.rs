@@ -48,15 +48,15 @@
 //! its covering chunks** and nothing else.
 //!
 //! Measured, not assumed. A ten-byte window of a **96 MiB** sealed object costs
-//! about **1.6 MiB of peak resident memory above the unlock baseline**; the
-//! whole-object read it replaced costs **+97 MiB**, which is the figure the audit
-//! reported. Against a **512 MiB** object the window costs the same ~1 MiB and
-//! the whole-object read costs over **700 MiB**. The windowed figure is set by
-//! the chunk size and does not move when the object grows, which is the whole
-//! difference between a cost that scales with the file and one that scales with
-//! the read. The `cat` pre-flight warning that used to announce the old cost is
-//! gone with the cost; see `commands::cat::source`, which is where it was
-//! printed.
+//! **+1.9 MiB of peak resident memory above the unlock baseline**; the
+//! whole-object read it replaced costs **+97.6 MiB** — the figure the audit
+//! reported. Against a **512 MiB** object the window costs **+2.1 MiB**, which is
+//! the same number, while the whole-object read costs **+1025 MiB**. The windowed
+//! figure is set by the chunk size and does not move when the object grows, and
+//! that is the whole difference between a cost that scales with the file and one
+//! that scales with the read. The `cat` pre-flight warning that used to announce
+//! the old cost is gone with the cost; see `commands::cat::source`, which is
+//! where it was printed.
 //!
 //! Repeated windows cost even less than that. A kernel reads a file 4 KiB at a
 //! time and a chunk is 1 MiB, so the chunks are cached, bounded, between reads —
@@ -211,6 +211,17 @@ impl Source for VaultSource {
         self.chunks
             .read_range(&self.session.vault, path, offset, length)
             .await
+    }
+
+    async fn prefetch(&self, path: &str, offset: u64, length: u64) {
+        // Straight through to the cache the next read will consult. Nothing is
+        // assembled and nothing is returned: what a sealed source can usefully
+        // warm is exactly the decrypted, authenticated chunks — see
+        // [`ChunkCache::warm`](super::chunk_cache::ChunkCache::warm) for why that
+        // is not the same call as a `read_range` whose result is dropped.
+        self.chunks
+            .warm(&self.session.vault, path, offset, length)
+            .await;
     }
 
     async fn stat(&self, path: &str) -> Result<Option<Entry>> {
@@ -512,7 +523,7 @@ mod tests {
             .expect("a fresh vault initialises")
             .vault;
         for (path, bytes) in files {
-            vault.put_file(path, bytes).await.expect("a verified write");
+            vault.put_file(path, bytes, dctl_core::Modified::Now).await.expect("a verified write");
         }
 
         let session = Session {

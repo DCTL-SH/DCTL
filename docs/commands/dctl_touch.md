@@ -27,7 +27,7 @@ different halves of it:
 |---|---|---|---|
 | The object is missing | created empty | created empty | refused |
 | The object exists | re-stamped, contents untouched | **refused** | refused |
-| `--timestamp` | honoured exactly | **refused before anything is created** | refused |
+| `--timestamp` | honoured exactly | honoured on create; **refused** on an object that exists | refused |
 | `--no-create` on a missing object | `skipped` | `skipped` | refused |
 
 **A local remote does both halves**, because the operating system owns the
@@ -36,10 +36,12 @@ without losing a byte, and both the modification and access times are written �
 `touch(1)` sets both, and a tool that moved only one would leave a tree no
 `find -newer` agrees with.
 
-**A vault creates, and cannot re-stamp.** An empty object is a real, storable
-thing: `dctl touch archive:sentinel` seals a zero-byte object, writes it with the
-same verified write every other object gets, and commits an index record. It then
-appears in `dctl ls archive:` at `0 B`, like any other file.
+**A vault creates — with the time you asked for — and cannot re-stamp.** An
+empty object is a real, storable thing: `dctl touch archive:sentinel` seals a
+zero-byte object, writes it with the same verified write every other object gets,
+and commits an index record. It then appears in `dctl ls archive:` at `0 B`, like
+any other file. `dctl touch -t 2024-05-01 archive:sentinel` creates it carrying
+that time, and `dctl lsl archive:` prints the time it was asked for.
 
 Changing the time of an object the vault *already* holds has nowhere to go, and
 the command refuses rather than doing something else:
@@ -62,17 +64,18 @@ does against a vault works; there is no branch missing here to go and find.
 The gap is a `dctl-core` boundary rather than a missing branch here: the time
 lives in the encrypted index, `Vault` exposes no operation that updates a
 record's `modified_unix`, and the index handle is private to the core. Two
-alternatives were rejected — re-storing the object would set the time to *now*,
-which is a different write than the one requested, and opening the index directly
-from the CLI would mean a second writer to a database the vault holds open and a
-second implementation of a format `dctl-core` owns.
+alternatives were rejected — re-storing the object would need contents `touch`
+does not have and must not destroy, and opening the index directly from the CLI
+would mean a second writer to a database the vault holds open and a second
+implementation of a format `dctl-core` owns.
 
-**`--timestamp` against a vault is refused before anything is created**, for the
-same reason: `put_file` stamps the moment of the write and takes no time from the
-caller, so creating the object and reporting the requested time would be a lie,
-and creating it with a different time would be an operation nobody asked for.
-Drop the flag to create the object with the time of the write, or address a local
-remote.
+**`--timestamp` on the create path used to be refused too, and no longer is.**
+The refusal was honest while it stood: the write took no time from the caller, so
+there was no argument for the flag to become, and creating the object while
+reporting the requested time would have been a lie. That argument now exists —
+added so `dctl copy` could record a source's modification time instead of the
+moment of the upload — so the flag is honoured. Only re-stamping something the
+vault already holds is still refused, and for its own reason.
 
 **An object store is refused outright, and this one is nobody's build gap.**
 The refusal used to read "nothing in this build writes a plain object into a
@@ -228,23 +231,21 @@ $ echo $?
 7
 ```
 
-`--timestamp` against a vault is a **second** missing capability rather than the
-same one twice: re-stamping needs a call that updates an existing record, and
-this needs the *write* to accept a time at all. `Vault::put_file` stamps the
-moment of the write and takes no timestamp from the caller, so there is no
-argument for the flag to become. It is refused before anything is created, and
-the object does not appear afterwards:
+Creating one with a chosen time, on the other hand, works:
 
 ```console
 $ dctl touch archive:dated -t 2024-05-01T12:00:00Z
-error: a dctl_core::Vault write that accepts a modification time — which is what storing a chosen one in a vault would need — is not implemented in this build
-warning: Nothing was created or modified. A vault records the time of the write itself and dctl-core takes no timestamp, so the time you asked for could not be stored. Drop --timestamp to create the object with the time of the write, or address a plain local remote, whose filesystem timestamps are settable.
-$ echo $?
-7
-$ dctl ls archive: | grep dated
-$ echo $?
-1
+OK created: archive:dated
+$ dctl lsl archive:
+        0 2024-05-01T12:00:00Z dated
 ```
+
+That used to be a second refusal, and the reasoning it carried was sound at the
+time: `Vault::put_file` stamped the moment of the write and took no timestamp
+from the caller, so there was no argument for `--timestamp` to become. The write
+takes one now — `dctl copy` needed it to record a source's modification time
+instead of the moment of the upload — and a refusal kept past the reason for it is
+how a tool ends up with rules nobody can explain.
 
 A bucket has no settable modification time — the one thing `touch` exists to
 set. The refusal says so, and offers the two things that *are* possible instead
@@ -373,7 +374,7 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 1 | `usage` | An unparseable command line; a `--timestamp` DCTL does not accept, carrying a zone offset, or naming a date that does not exist; an empty target; a local, UNC or drive-letter path; a remote name shorter than two characters or containing a separator; a `..` component; the remote root (`REMOTE:`); `--no-create` together with `--immutable`; an existing object under `--immutable`; a target that names a directory on a filesystem. |
 | 2 | `uncategorised` | The report could not be written to stdout. A closed pipe is *not* an error. |
 | 4 | `file_not_found` | A local target whose parent directory does not exist — `touch(1)` does not create directories either. |
-| 7 | `fatal_error` | An unknown remote; a re-stamp a vault cannot perform; `--timestamp` against a vault; an object store, which has no settable modification time at all; a destination the addressing rule claims for a vault's object store. In every one of these, **nothing was written**. |
+| 7 | `fatal_error` | An unknown remote; a re-stamp a vault cannot perform; an object store, which has no settable modification time at all; a destination the addressing rule claims for a vault's object store. In every one of these, **nothing was written**. |
 | 20 | `checksum_mismatch` | A vault's empty object was not stored as sent. Nothing was committed. |
 | 22 | `vault_locked` | The vault would not unlock. |
 | 23 | `index_error` | The index commit failed. |

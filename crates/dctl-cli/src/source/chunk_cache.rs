@@ -17,6 +17,16 @@
 //! copied out. The bounds are [`VAULT_CHUNK_CACHE_BYTES`] and
 //! [`VAULT_CHUNK_CACHE_MAX_CHUNKS`], both argued for where they are defined.
 //!
+//! ## Chunks can also arrive before they are asked for
+//!
+//! Caching turns a re-read into nothing; it does not turn the *first* read of a chunk into
+//! nothing, and on a network filesystem that first read is a provider round trip a video
+//! player waits out. [`ChunkCache::warm`] is the other half: a caller that knows where a
+//! reader is going — a mount serving a sequential read — can have the next chunks fetched
+//! and authenticated while the current one is being consumed, which is `PLAN.md` §15's
+//! "serve chunk *k* while fetching *k+1…k+P*". It lands in the same bounded cache, so
+//! read-ahead cannot grow memory beyond what a read already could.
+//!
 //! ## Two things are cached, and they are cached for different reasons
 //!
 //! * **Readers**, by logical path. A [`RangeReader`] holds the resolved object key, the
@@ -193,6 +203,96 @@ impl ChunkCache {
         }
 
         assemble(&covering, chunk_size, offset, want, path)
+    }
+
+    /// Fetch, authenticate and retain the chunks covering `[offset, offset + length)`
+    /// **without assembling a window**.
+    ///
+    /// The read-ahead a mount performs between reads: a player streaming a film asks for
+    /// chunk *k*, and by the time it asks for *k+1* the provider round trip for it has
+    /// already happened. `PLAN.md` §15 names this as the thing that makes a streaming mount
+    /// feel local, because on a network filesystem the cost is latency rather than
+    /// decryption — ChaCha20-Poly1305 pushes multiple gigabytes a second and a provider
+    /// does not.
+    ///
+    /// Distinct from `read_range` in the one way that matters here: it never allocates the
+    /// window. Warming sixteen megabytes through `read_range` would build a sixteen-megabyte
+    /// plaintext buffer and immediately drop it, which is a copy of everything the mount is
+    /// about to serve — so this stops at the cache, where the chunks are what a later read
+    /// wants anyway.
+    ///
+    /// **Advisory, and therefore silent.** A failure here is not a failure of anything the
+    /// caller asked for: nothing has been promised to a reader, and the read that follows
+    /// will meet the same error and report it properly, with a path and an errno. Returning
+    /// a `Result` nobody could act on would only invite a caller to surface a warning about
+    /// a request the user never made. What it does instead is leave a debug record, which is
+    /// where a "why is this mount slow" investigation looks.
+    pub async fn warm(&self, vault: &Vault, path: &str, offset: u64, length: u64) {
+        if length == 0 {
+            return;
+        }
+        let Ok(reader) = self.reader(vault, path).await else {
+            // The object could not be opened at all. The read that follows will say so.
+            return;
+        };
+        let chunk_size = u64::from(reader.chunk_size());
+        let plaintext_len = reader.plaintext_len();
+        if offset >= plaintext_len {
+            return;
+        }
+
+        let want = length.min(plaintext_len - offset);
+        if want == 0 {
+            return;
+        }
+        let first = offset / chunk_size;
+        let last = (offset + want - 1) / chunk_size;
+
+        // Only the chunks that are missing, and only the run of them: a chunk already held
+        // is exactly what read-ahead was trying to achieve, and re-fetching it would make
+        // a warm cache cost more than a cold one.
+        let file_id = *reader.file_id();
+        let (lo, hi) = {
+            let state = self.state();
+            let lo = (first..=last).find(|index| !state.chunks.contains_key(&(file_id, *index)));
+            let hi = (first..=last)
+                .rev()
+                .find(|index| !state.chunks.contains_key(&(file_id, *index)));
+            match (lo, hi) {
+                (Some(lo), Some(hi)) => (lo, hi),
+                // Everything the window covers is already decrypted. Nothing to do, and
+                // nothing to report: this is read-ahead working.
+                _ => return,
+            }
+        };
+
+        match reader.read_chunks(lo, hi - lo + 1).await {
+            Ok(chunks) => {
+                let fetched = chunks.len();
+                for chunk in chunks {
+                    self.state()
+                        .store_chunk((file_id, chunk.index), Arc::new(chunk.plaintext));
+                }
+                tracing::debug!(
+                    { crate::logging::fields::PATH } = path,
+                    offset,
+                    chunks = fetched,
+                    "read-ahead warmed the chunk cache"
+                );
+            }
+            Err(error) => {
+                // Deliberately not propagated — see the note above. The read that needs
+                // these bytes will fetch them again and fail visibly.
+                // `CoreError` carries no `message()` accessor; its `Display` is
+                // the message, and is what every other diagnostic in this crate
+                // renders.
+                tracing::debug!(
+                    { crate::logging::fields::PATH } = path,
+                    offset,
+                    "read-ahead did not complete: {error}"
+                );
+            }
+        }
     }
 
     /// The object's plaintext length and its recorded whole-plaintext BLAKE3, from the

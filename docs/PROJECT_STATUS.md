@@ -179,7 +179,7 @@ work is an **ad-hoc `dctl-cli`-local implementation** (a `Place` enum + `PlainRe
 | M6 capability-aware server copy/move + track-renames | ⬜ | |
 | M7 streaming — retire the 1 GiB limit | ⬜ | |
 | M8 `dctl-vfs` + `dctl-mount` (FUSE) | ⬜ | |
-| M9 ranged Vault crypto (efficient huge-file mount) | ✅ | `dctl_core::range` — a window fetches only its covering chunks, per-chunk authenticated; bounded decrypted-chunk cache in the CLI. Measured: a 10-byte window costs ~1.6 MiB peak RSS above baseline against +97 MiB for the whole-object read it replaced (96 MiB object), and stays flat at 512 MiB where whole-object exceeds 700 MiB |
+| M9 ranged Vault crypto (efficient huge-file mount) | ✅ | `dctl_core::range` — a window fetches only its covering chunks, per-chunk authenticated; bounded decrypted-chunk cache in the CLI. Measured: a 10-byte window costs +1.9 MiB peak RSS above baseline against +97.6 MiB for the whole-object read it replaced (96 MiB object), and stays flat at +2.1 MiB on a 512 MiB object where the whole-object read costs +1025 MiB |
 | M10 `dctl serve` | ⬜ | |
 
 ---

@@ -163,6 +163,10 @@ fn mark_as_store(store: RemoteDef) -> RemoteDef {
             def.require_vault = true;
             RemoteDef::R2(def)
         }
+        RemoteDef::Sftp(mut def) => {
+            def.require_vault = true;
+            RemoteDef::Sftp(def)
+        }
         // Unreachable through `VaultPair::new`, whose callers build a store from
         // a location. Returned unchanged rather than panicking: a vault remote
         // has no location to declare, so there is nothing to mark, and

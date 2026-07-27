@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use dctl_core::error::ErrorKind;
-use dctl_core::{CoreError, UnlockKey, Vault};
+use dctl_core::{CoreError, Modified, UnlockKey, Vault};
 use dctl_store::{
     Backend, ByteRange, ContentHash, LocalFs, ObjectKey, ObjectMeta, Page, PutOutcome, StoreError,
 };
@@ -55,7 +55,7 @@ async fn init_unlock_put_get_roundtrip() {
             .await
             .unwrap();
         vault
-            .put_file("photos/a.jpg", b"hello verified world")
+            .put_file("photos/a.jpg", b"hello verified world", Modified::Now)
             .await
             .unwrap();
     }
@@ -87,8 +87,8 @@ async fn put_overwrites_same_path() {
     let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
-    vault.put_file("k", b"first").await.unwrap();
-    vault.put_file("k", b"second").await.unwrap();
+    vault.put_file("k", b"first", Modified::Now).await.unwrap();
+    vault.put_file("k", b"second", Modified::Now).await.unwrap();
     assert_eq!(vault.get_file("k").await.unwrap().as_slice(), b"second");
     assert_eq!(vault.list("").unwrap().len(), 1);
 }
@@ -99,9 +99,9 @@ async fn list_filters_by_prefix() {
     let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
-    vault.put_file("a/1", b"x").await.unwrap();
-    vault.put_file("a/2", b"y").await.unwrap();
-    vault.put_file("b/1", b"z").await.unwrap();
+    vault.put_file("a/1", b"x", Modified::Now).await.unwrap();
+    vault.put_file("a/2", b"y", Modified::Now).await.unwrap();
+    vault.put_file("b/1", b"z", Modified::Now).await.unwrap();
 
     let listed = vault.list("a/").unwrap();
     let paths: Vec<_> = listed.iter().map(|r| r.path.clone()).collect();
@@ -114,7 +114,7 @@ async fn delete_removes_object_and_record() {
     let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
-    vault.put_file("gone", b"data").await.unwrap();
+    vault.put_file("gone", b"data", Modified::Now).await.unwrap();
 
     assert!(vault.delete_file("gone").await.unwrap());
     assert!(!vault.delete_file("gone").await.unwrap());
@@ -137,9 +137,9 @@ async fn restore_on_a_fresh_device_from_backend_only() {
     // Device A: create the vault and store some files, then go away.
     {
         let a = init_vault(backend.clone(), &a_path, "pw").await.unwrap();
-        a.put_file("photos/2026/a.jpg", b"alpha").await.unwrap();
-        a.put_file("photos/2026/b.jpg", b"bravo").await.unwrap();
-        a.put_file("docs/notes.txt", b"charlie").await.unwrap();
+        a.put_file("photos/2026/a.jpg", b"alpha", Modified::Now).await.unwrap();
+        a.put_file("photos/2026/b.jpg", b"bravo", Modified::Now).await.unwrap();
+        a.put_file("docs/notes.txt", b"charlie", Modified::Now).await.unwrap();
     }
 
     // Device B: SAME backend, a brand-new EMPTY index. Unlock with only the password.
@@ -211,7 +211,7 @@ async fn put_file_from_path_streams_multichunk_roundtrip() {
             .await
             .unwrap();
         vault
-            .put_file_from_path("videos/clip.bin", &src_path)
+            .put_file_from_path("videos/clip.bin", &src_path, Modified::Now)
             .await
             .unwrap();
 
@@ -255,7 +255,7 @@ async fn get_file_to_path_streams_multichunk_roundtrip() {
         .await
         .unwrap();
     vault
-        .put_file_from_path("videos/clip.bin", &src_path)
+        .put_file_from_path("videos/clip.bin", &src_path, Modified::Now)
         .await
         .unwrap();
 
@@ -286,7 +286,7 @@ async fn get_file_to_path_tamper_errors_and_leaves_no_dest() {
         .await
         .unwrap();
     vault
-        .put_file("photos/a.jpg", b"the quick brown fox jumps over")
+        .put_file("photos/a.jpg", b"the quick brown fox jumps over", Modified::Now)
         .await
         .unwrap();
 
@@ -332,7 +332,7 @@ async fn get_file_to_path_cross_device_via_name_record() {
         let a = init_vault(backend.clone(), &idx_a.path().join("a.redb"), "pw")
             .await
             .unwrap();
-        a.put_file_from_path("media/movie.bin", &src_path)
+        a.put_file_from_path("media/movie.bin", &src_path, Modified::Now)
             .await
             .unwrap();
     }
@@ -372,9 +372,9 @@ async fn stream_and_buffered_puts_interoperate() {
     let src_path = src.path().join("s.bin");
     std::fs::write(&src_path, &payload).unwrap();
 
-    vault.put_file("via/buffered", &payload).await.unwrap();
+    vault.put_file("via/buffered", &payload, Modified::Now).await.unwrap();
     vault
-        .put_file_from_path("via/streamed", &src_path)
+        .put_file_from_path("via/streamed", &src_path, Modified::Now)
         .await
         .unwrap();
 
@@ -397,12 +397,12 @@ async fn overwrite_gcs_the_previous_object() {
     let obj_dir = e._store.path().join("o");
     let count = |dir: &std::path::Path| std::fs::read_dir(dir).map(|d| d.count()).unwrap_or(0);
 
-    vault.put_file("k", b"first").await.unwrap();
+    vault.put_file("k", b"first", Modified::Now).await.unwrap();
     assert_eq!(count(&obj_dir), 1, "one object after first put");
 
     // Overwriting the same path must GC the previous ciphertext, not orphan it on the
     // untrusted backend (a private tool must not leave prior versions recoverable).
-    vault.put_file("k", b"second and longer").await.unwrap();
+    vault.put_file("k", b"second and longer", Modified::Now).await.unwrap();
     assert_eq!(
         count(&obj_dir),
         1,
@@ -424,7 +424,7 @@ async fn cross_device_delete_removes_object_and_name_record() {
         let a = init_vault(backend.clone(), &idx_a.path().join("a.redb"), "pw")
             .await
             .unwrap();
-        a.put_file("secret.txt", b"classified").await.unwrap();
+        a.put_file("secret.txt", b"classified", Modified::Now).await.unwrap();
     }
 
     // Device B: fresh empty index. Delete resolves via the name record (no rebuild),
@@ -497,7 +497,7 @@ async fn shared_put_roundtrips_and_head_is_kem1() {
 
     let data = b"hello asymmetric recipients";
     owner
-        .put_file_shared("shared/a", data, &[recipient.identity().clone()])
+        .put_file_shared("shared/a", data, &[recipient.identity().clone()], Modified::Now)
         .await
         .unwrap();
 
@@ -535,16 +535,16 @@ async fn recipient_in_set_decrypts_but_non_recipient_errors() {
 
     let data = b"top secret shared payload";
     // Share to B only; C is deliberately excluded (O is auto-included per §12.8).
-    o.put_file_shared("p", data, &[b.identity().clone()])
+    o.put_file_shared("p", data, &[b.identity().clone()], Modified::Now)
         .await
         .unwrap();
     let shared = only_object_bytes(o_env._store.path());
 
     // Mint a resolvable "p" on B and C (placeholder put), then repoint it at the shared
     // object by overwriting the stored object bytes in place (the object KEY is unchanged).
-    b.put_file("p", b"placeholder").await.unwrap();
+    b.put_file("p", b"placeholder", Modified::Now).await.unwrap();
     std::fs::write(only_object_path(b_env._store.path()), &shared).unwrap();
-    c.put_file("p", b"placeholder").await.unwrap();
+    c.put_file("p", b"placeholder", Modified::Now).await.unwrap();
     std::fs::write(only_object_path(c_env._store.path()), &shared).unwrap();
 
     // B is a recipient → decrypts to the original plaintext.
@@ -573,7 +573,7 @@ async fn owner_auto_included_even_when_not_passed() {
     // The recipient set does NOT contain the owner's identity...
     let data = b"write-only backup with no symmetric fallback";
     owner
-        .put_file_shared("backup/x", data, &[recipient.identity().clone()])
+        .put_file_shared("backup/x", data, &[recipient.identity().clone()], Modified::Now)
         .await
         .unwrap();
 
@@ -599,7 +599,7 @@ async fn shared_object_reads_via_get_file_to_path_and_verifies() {
 
     let data = pseudo_random(1024 * 1024 + 9_001);
     owner
-        .put_file_shared("media/clip.bin", &data, &[recipient.identity().clone()])
+        .put_file_shared("media/clip.bin", &data, &[recipient.identity().clone()], Modified::Now)
         .await
         .unwrap();
 
@@ -656,7 +656,7 @@ async fn tampered_object_is_detected_on_read() {
         .await
         .unwrap();
     vault
-        .put_file("photos/a.jpg", b"the quick brown fox jumps")
+        .put_file("photos/a.jpg", b"the quick brown fox jumps", Modified::Now)
         .await
         .unwrap();
 
@@ -712,7 +712,7 @@ async fn sidecar_add_grants_read_then_remove_revokes() {
 
     // O uploads an object shared to OWNER-ONLY (B is not an inline recipient).
     let data = b"payload shared later via the grant sidecar, never re-uploaded".repeat(4);
-    o.put_file_shared("clip", &data, &[]).await.unwrap();
+    o.put_file_shared("clip", &data, &[], Modified::Now).await.unwrap();
     // The owner always reads its own object (inline).
     assert_eq!(
         o.get_file("clip").await.unwrap().as_slice(),
@@ -720,7 +720,7 @@ async fn sidecar_add_grants_read_then_remove_revokes() {
     );
 
     // Mint a resolvable "clip" on B, then repoint it at O's shared object bytes.
-    b.put_file("clip", b"placeholder").await.unwrap();
+    b.put_file("clip", b"placeholder", Modified::Now).await.unwrap();
     let shared = only_object_bytes(o_store);
     std::fs::write(only_object_path(b_store), &shared).unwrap();
 
@@ -955,7 +955,7 @@ async fn share_add_recipients_transient_get_error_aborts_without_wiping_sidecar(
     // Owner-only object, then grant B (fault disarmed). This first add also proves the
     // genuine-absence path: the not-yet-existing sidecar GET returns NotFound and the add
     // starts fresh at grant_gen 1.
-    o.put_file_shared("clip", b"payload never re-uploaded", &[])
+    o.put_file_shared("clip", b"payload never re-uploaded", &[], Modified::Now)
         .await
         .unwrap();
     o.share_add_recipients("clip", &[b.identity().clone()])
@@ -1016,13 +1016,13 @@ async fn get_file_sidecar_only_recipient_transient_get_error_is_retryable_not_de
 
     // O grants B purely via the sidecar (B is NOT an inline recipient).
     let data = b"sidecar-only recipient payload, never re-uploaded".repeat(8);
-    o.put_file_shared("clip", &data, &[]).await.unwrap();
+    o.put_file_shared("clip", &data, &[], Modified::Now).await.unwrap();
     o.share_add_recipients("clip", &[b.identity().clone()])
         .await
         .unwrap();
 
     // Repoint B's "clip" at O's shared object bytes and ship the sidecar to B's store.
-    b.put_file("clip", b"placeholder").await.unwrap();
+    b.put_file("clip", b"placeholder", Modified::Now).await.unwrap();
     let shared = only_object_bytes(o_env._store.path());
     std::fs::write(only_object_path(b_store.path()), &shared).unwrap();
     copy_sidecar(o_env._store.path(), b_store.path());
@@ -1069,10 +1069,10 @@ async fn genuine_absent_sidecar_stays_permanent_not_a_recipient_and_share_add_st
 
     // Owner-only object; no sidecar exists yet anywhere.
     let data = b"owner only, no sidecar yet";
-    o.put_file_shared("clip", data, &[]).await.unwrap();
+    o.put_file_shared("clip", data, &[], Modified::Now).await.unwrap();
 
     // Repoint B's "clip" at O's object but ship NO sidecar → B is genuinely not a recipient.
-    b.put_file("clip", b"placeholder").await.unwrap();
+    b.put_file("clip", b"placeholder", Modified::Now).await.unwrap();
     std::fs::write(
         only_object_path(b_env._store.path()),
         only_object_bytes(o_env._store.path()),
@@ -1125,9 +1125,9 @@ async fn share_add_on_missing_or_non_recipient_errors() {
     ));
 
     // A non-recipient vault cannot add recipients to an object it cannot read.
-    owner.put_file_shared("doc", b"secret", &[]).await.unwrap();
+    owner.put_file_shared("doc", b"secret", &[], Modified::Now).await.unwrap();
     let shared = only_object_bytes(e._store.path());
-    stranger.put_file("doc", b"placeholder").await.unwrap();
+    stranger.put_file("doc", b"placeholder", Modified::Now).await.unwrap();
     std::fs::write(only_object_path(r_env._store.path()), &shared).unwrap();
     assert!(
         stranger
@@ -1138,7 +1138,7 @@ async fn share_add_on_missing_or_non_recipient_errors() {
     );
 
     // A plain kem_id=0 object has no recipients to add — rejected.
-    owner.put_file("plain", b"symmetric").await.unwrap();
+    owner.put_file("plain", b"symmetric", Modified::Now).await.unwrap();
     assert!(
         owner
             .share_add_recipients("plain", &[stranger.identity().clone()])
@@ -1210,7 +1210,7 @@ async fn imported_identity_discovers_reads_and_revokes_shared_object() {
         let returned = o.import_keypair_material(&ext).await.unwrap();
         assert_eq!(returned, ext_key_id);
 
-        o.put_file_shared("docs/report.txt", &data, &[])
+        o.put_file_shared("docs/report.txt", &data, &[], Modified::Now)
             .await
             .unwrap();
         o.share_add_recipients("docs/report.txt", std::slice::from_ref(&ext.public))
@@ -1333,7 +1333,7 @@ async fn share_add_self_heals_missing_discovery_record_on_retry() {
 
     // Owner-only object: no inline recipients → no sidecar and no DGD1 exist yet.
     let data = b"payload shared to B via the grant sidecar, never re-uploaded";
-    o.put_file_shared("clip", data, &[]).await.unwrap();
+    o.put_file_shared("clip", data, &[], Modified::Now).await.unwrap();
     drop(o); // release the index; re-unlock loads `ext` into the in-memory identity set
 
     // Re-unlock so the vault holds `ext` (root + imported) and can discover as B.
@@ -1393,4 +1393,167 @@ async fn share_add_self_heals_missing_discovery_record_on_retry() {
         found.file_id, file_id,
         "discovery points at the same object"
     );
+}
+
+// ── the index records when the source changed, not when the vault was written ──
+
+/// A day, in seconds. Far enough outside any comparison's tolerance that a
+/// record stamped with the write time cannot be mistaken for one stamped with
+/// the source's.
+const A_DAY: i64 = 86_400;
+
+/// A source file whose modification time is `A_DAY` in the past.
+///
+/// Backdating is the whole fixture. A file written and stored inside the same
+/// second produces a write time and a source time that agree by accident, so a
+/// vault that records the wrong one still looks correct — which is precisely how
+/// this went unnoticed.
+fn aged_source(dir: &std::path::Path, name: &str, bytes: &[u8]) -> (std::path::PathBuf, i64) {
+    let path = dir.join(name);
+    std::fs::write(&path, bytes).unwrap();
+    let when = std::time::SystemTime::now() - std::time::Duration::from_secs(A_DAY as u64);
+    std::fs::OpenOptions::new()
+        .write(true)
+        .open(&path)
+        .unwrap()
+        .set_modified(when)
+        .unwrap();
+    let seconds = when
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    (path, seconds)
+}
+
+/// The record the index holds for exactly `path`.
+fn record(vault: &Vault, path: &str) -> dctl_index::Record {
+    vault
+        .list(path)
+        .unwrap()
+        .into_iter()
+        .find(|record| record.path == path)
+        .expect("the vault holds the path it was just given")
+}
+
+#[tokio::test]
+async fn a_streamed_put_records_the_sources_modification_time() {
+    // The defect, at the layer that caused it. `put_file_from_path` stamped
+    // `now_unix()`, which is a true statement about the *write* and says nothing
+    // about the file it was made from — so a vault destination could never match
+    // its source by time, and every incremental `copy` re-sent the whole dataset.
+    let e = env();
+    let src = TempDir::new().unwrap();
+    let (source, modified) = aged_source(src.path(), "clip.bin", b"streamed payload");
+
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+    let metadata = std::fs::metadata(&source).unwrap();
+    vault
+        .put_file_from_path("videos/clip.bin", &source, Modified::of(&metadata))
+        .await
+        .unwrap();
+
+    assert_eq!(
+        record(&vault, "videos/clip.bin").modified_unix,
+        Some(modified),
+        "the index must carry the source's time, not the moment of the write"
+    );
+}
+
+#[tokio::test]
+async fn a_buffered_put_records_the_time_it_was_handed() {
+    // The buffered path had the identical defect and needs its own proof: the two
+    // write paths build their `Record` independently, so a fix applied to one and
+    // forgotten in the other would leave `dctl copy` (buffered) broken while
+    // `dctl backup` (streamed) worked, which is the hardest kind of half-fix to
+    // notice.
+    let e = env();
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+
+    vault
+        .put_file("notes.txt", b"content", Modified::At(1_500_000_000))
+        .await
+        .unwrap();
+    assert_eq!(
+        record(&vault, "notes.txt").modified_unix,
+        Some(1_500_000_000)
+    );
+
+    // …and an overwrite re-states it rather than inheriting the first write's,
+    // which is what makes a re-copied file compare equal on the run after it.
+    vault
+        .put_file("notes.txt", b"edited!", Modified::At(1_600_000_000))
+        .await
+        .unwrap();
+    assert_eq!(
+        record(&vault, "notes.txt").modified_unix,
+        Some(1_600_000_000)
+    );
+}
+
+#[tokio::test]
+async fn a_stream_with_no_source_time_records_the_clock_and_never_the_spools() {
+    // `dctl rcat` spools standard input to a temporary file and stores *that*.
+    // The temp file's own modification time is the moment of the spool and looks
+    // exactly like a real answer, so the streaming path must take the caller's
+    // word — `Modified::Now` — rather than reading the file it was handed.
+    //
+    // Proven by handing it a source backdated a day: a record carrying that day
+    // would mean the file's time had been read after all.
+    let e = env();
+    let src = TempDir::new().unwrap();
+    let (spool, aged) = aged_source(src.path(), "spool.tmp", b"piped bytes");
+
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+    vault
+        .put_file_from_path("dump.bin", &spool, Modified::Now)
+        .await
+        .unwrap();
+
+    let recorded = record(&vault, "dump.bin")
+        .modified_unix
+        .expect("the clock is available");
+    assert!(
+        recorded > aged,
+        "the spool's own time ({aged}) must not become the record's ({recorded})"
+    );
+}
+
+#[tokio::test]
+async fn a_source_with_no_readable_time_is_recorded_as_absent() {
+    // The third claim, and the one with teeth. An unknown time must reach the
+    // index as *nothing*: a comparison reads absence as "these were never
+    // comparable" and transfers the file, while a fabricated `now` would read as
+    // a real answer and could match a source it had never been compared with.
+    let e = env();
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+
+    vault
+        .put_file("mystery.bin", b"x", Modified::Unknown)
+        .await
+        .unwrap();
+    assert_eq!(record(&vault, "mystery.bin").modified_unix, None);
+}
+
+#[tokio::test]
+async fn a_shared_object_records_its_source_time_like_any_other() {
+    // The §12 write path builds its own `Record`, so it gets its own assertion.
+    // A share is still a stored copy of something with an age.
+    let e = env();
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .unwrap();
+
+    vault
+        .put_file_shared("shared/report.txt", b"payload", &[], Modified::At(1_234))
+        .await
+        .unwrap();
+    assert_eq!(record(&vault, "shared/report.txt").modified_unix, Some(1_234));
 }

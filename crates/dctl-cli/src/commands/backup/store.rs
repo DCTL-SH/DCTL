@@ -38,6 +38,8 @@
 
 use std::path::Path;
 
+use dctl_core::Modified;
+
 use crate::commands::transfer::pipeline;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
@@ -111,14 +113,37 @@ impl Store {
         crate::platform::path::join(&self.prefix, logical)
     }
 
-    /// Store one file, streaming.
+    /// Store one file, streaming, recorded as last modified when the source was.
+    ///
+    /// The time is read here rather than carried from the scan, and rather than
+    /// being left for the core to read out of the file it is about to seal.
+    ///
+    /// *Not from the scan*, because a scan of ten million files can finish hours
+    /// before this file's turn comes, and a record is worth having only if it
+    /// describes the bytes that were actually stored.
+    ///
+    /// *Not by the core*, because the core cannot tell a real source from a
+    /// spool: `dctl rcat` hands the same call a temporary file whose own
+    /// modification time is the moment of the spool. The caller is the only one
+    /// that knows which it has.
+    ///
+    /// A source that changes between this `stat` and the seal records the
+    /// *older* time, so the next run sees a newer source and stores it again.
+    /// That is the direction to be wrong in — the alternative is a record that
+    /// claims to be current and stops the file ever being backed up again.
     ///
     /// # Errors
     /// Whatever the core reported. The caller decides whether that ends the run.
+    /// A metadata failure is *not* one of them: the file is stored with no
+    /// recorded time, which every later comparison reads as "not comparable" and
+    /// re-stores, rather than abandoning a backup over a timestamp.
     async fn store_one(&self, logical: &str, native: &Path) -> Result<()> {
+        let modified = tokio::fs::metadata(native)
+            .await
+            .map_or(Modified::Unknown, |meta| Modified::of(&meta));
         self.session
             .vault
-            .put_file_from_path(logical, native)
+            .put_file_from_path(logical, native, modified)
             .await?;
         Ok(())
     }

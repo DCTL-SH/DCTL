@@ -1182,6 +1182,17 @@ pub const PROVIDER_S3: &str = "s3";
 /// need different settings from the user.
 pub const PROVIDER_R2: &str = "r2";
 
+/// Provider type for an SSH host reached over SFTP.
+///
+/// The one provider whose connection parameters are not DCTL's to hold: the
+/// backend drives the system `ssh`, so the user, port, identity file and any
+/// `ProxyCommand` all come from `~/.ssh/config` and never from the config file.
+/// A remote therefore carries only [`CONFIG_KEY_HOST`] (an ssh destination — a
+/// `Host` alias or `user@host`) and [`CONFIG_KEY_BASE`] (the remote directory
+/// its objects live under). This is what lets a cloudflared-proxied host work
+/// with no credential anywhere in DCTL.
+pub const PROVIDER_SFTP: &str = "sftp";
+
 /// Remote provider types this build understands, each paired with the one-line
 /// description `dctl config providers` prints.
 ///
@@ -1196,6 +1207,7 @@ pub const REMOTE_PROVIDER_TYPES: &[(&str, &str)] = &[
     (PROVIDER_B2, "Backblaze B2 bucket"),
     (PROVIDER_S3, "Amazon S3, or any S3-compatible endpoint"),
     (PROVIDER_R2, "Cloudflare R2 bucket"),
+    (PROVIDER_SFTP, "SSH/SFTP server (uses your ~/.ssh/config)"),
 ];
 
 /// POSIX permission bits that mean "readable by someone other than the owner".
@@ -1484,6 +1496,16 @@ pub const CONFIG_KEY_ACCOUNT: &str = "account";
 /// resolved beneath, exactly as the bucket is for a cloud remote.
 pub const CONFIG_KEY_PATH: &str = "path";
 
+/// Setting naming the SSH destination an `sftp` remote connects to.
+///
+/// A destination `ssh` itself understands — a `Host` alias from `~/.ssh/config`
+/// (e.g. `lsx-001`) or a full `user@host[:port]`. It is not a credential: user,
+/// port, identity file and any `ProxyCommand` are resolved by `ssh` from the
+/// user's own config, which is what lets a cloudflared-proxied host connect with
+/// nothing secret stored in DCTL. The remote directory objects live under is the
+/// shared [`CONFIG_KEY_BASE`].
+pub const CONFIG_KEY_HOST: &str = "host";
+
 /// Environment settings carrying provider credentials, never read from the
 /// config file (`PLAN.md` §14 — rclone's reversibly-obscured secrets are the
 /// specific mistake being avoided).
@@ -1582,28 +1604,6 @@ pub const COMPARISON_SIZE_ONLY: &str = "size-only";
 /// See [`COMPARISON_SIZE_AND_MODTIME`]. The only one that proves the contents
 /// match rather than that the metadata agrees.
 pub const COMPARISON_CHECKSUM: &str = "checksum";
-
-/// Told to anyone whose size-and-time comparison was answered by content
-/// instead, because a side of it stores the time of the *write*.
-///
-/// Printed as a warning rather than logged at `-v`, and that is the whole point
-/// of the constant existing. The substitution is not a detail: it changes what
-/// the run proves — upwards, since content equality is the stronger claim — and
-/// it changes what the run costs, because the side that records no hash has to
-/// be read end to end to produce one. A user who asked for the cheap comparison
-/// and silently got the expensive one would have no way to find out why their
-/// nightly job started reading the whole source tree.
-///
-/// The remedy is named in the same breath, and both halves of it are real:
-/// `--size-only` genuinely is honoured exactly as asked here (sizes need no
-/// timestamps), and `--checksum` asks for what is happening anyway, which stops
-/// the notice by making it true of the request rather than of the destination.
-///
-/// See [`crate::fidelity`] for why a sealed side cannot answer the question that
-/// was asked, and for the one change to `dctl-core` that would retire this.
-pub const WRITE_TIME_COMPARISON_NOTICE: &str = "records when each object was written, not when the source was modified, so this \
-     run compares contents instead of size and time — every file on the other side is \
-     read and hashed to do it. Pass --size-only to compare sizes alone.";
 
 /// One-character marks written by `check --combined`.
 ///
@@ -1890,18 +1890,6 @@ pub const PLAN_REASON_EMPTY_SOURCE_DIR: &str = "empty-source-dir";
 /// See [`PLAN_REASON_MISSING`]. The destination was never listed
 /// (`--no-traverse`), so every source file is assumed absent.
 pub const PLAN_REASON_UNTRAVERSED: &str = "destination-not-listed";
-/// See [`PLAN_REASON_MISSING`]. The comparison fell back to content because a
-/// side stores the time of the write ([`crate::fidelity`]), and that side has no
-/// content hash recorded for this path.
-///
-/// A distinct slug rather than reuse of [`PLAN_REASON_MODIFIED`], because the
-/// two answer different questions. `modified` means "the timestamps were
-/// compared and disagreed"; this one means "nothing was compared, and the file
-/// is being sent because sending it is the safe direction". An operator asking
-/// why a rebuilt index re-uploads everything on its first run deserves the
-/// second answer, not the first.
-pub const PLAN_REASON_CONTENT_UNRECORDED: &str = "content-not-recorded";
-
 /// See [`PLAN_REASON_MISSING`]. One side has no recorded size for this path, so
 /// the sizes were never comparable and the file is being sent.
 ///
@@ -3081,6 +3069,12 @@ pub const DIRECTORY_TIMESTAMP_SOURCE_EXPLICIT: &str = "explicit";
 /// listing, deletion, index rebuild, the recipient operations — updates a
 /// record's time. The gap is one function that does not exist in another crate,
 /// and the message says so by naming it.
+///
+/// This is now the **only** vault refusal `touch` has. `--timestamp` used to earn
+/// a second one, because the write took no time from the caller; it takes one
+/// today ([`dctl_core::Modified`]), so a chosen time is stored on the create path
+/// like any other. Re-stamping is a different gap and survives: it needs a call
+/// that edits an existing record, and no amount of write plumbing produces one.
 pub const TOUCH_RESTAMP_FEATURE: &str = "a dctl_core::Vault call that updates the modification time of a stored \
      record — which is what re-stamping an object a vault already holds would \
      need —";
@@ -3099,34 +3093,6 @@ pub const TOUCH_RESTAMP_HINT: &str = "The object was not modified. A vault keeps
      will not pretend to. Re-write the object (`dctl copy` or `dctl rcat`) if a \
      current time is what you need, or run `touch` against a plain local remote, \
      where the filesystem's own timestamps are settable.";
-
-/// Feature name reported when `--timestamp` is aimed at a sealed vault.
-///
-/// Names the missing `dctl-core` capability for the same reason
-/// [`TOUCH_RESTAMP_FEATURE`] does, and it is a *different* missing capability
-/// rather than the same one twice. Re-stamping needs a call that updates an
-/// existing record; this needs the **write** to accept a time at all.
-/// `Vault::put_file` and `Vault::put_file_from_path` both stamp the record with
-/// the moment of the write (`now_unix()`) and take no timestamp from the caller,
-/// so there is no argument for `--timestamp` to become. A reader who is told
-/// "dctl touch cannot do this" would go looking for the flag plumbing; the
-/// plumbing is complete, and the signature it would call does not take the
-/// value.
-pub const TOUCH_EXPLICIT_TIME_FEATURE: &str = "a dctl_core::Vault write that accepts a modification time — which is what \
-     storing a chosen one in a vault would need —";
-
-/// Remediation hint attached to [`TOUCH_EXPLICIT_TIME_FEATURE`].
-///
-/// Refused *before* anything is written, and that ordering is the point. The
-/// only write available here is `Vault::put_file`, which stamps the record with
-/// the moment of the write; creating the object and then reporting the requested
-/// time would be a lie, and creating it and reporting a different time would be
-/// an operation the user did not ask for. So nothing is created at all.
-pub const TOUCH_EXPLICIT_TIME_HINT: &str = "Nothing was created or modified. A vault records the time of the write \
-     itself and dctl-core takes no timestamp, so the time you asked for could \
-     not be stored. Drop --timestamp to create the object with the time of the \
-     write, or address a plain local remote, whose filesystem timestamps are \
-     settable.";
 
 /// Feature name reported when `touch` is aimed at a plain object store.
 ///
@@ -3394,30 +3360,184 @@ pub const MOUNT_DEFAULT_VFS_READ_AHEAD: &str = "0";
 /// bare `0` at the use site reads as a bug rather than as a setting.
 pub const MOUNT_SIZE_DISABLED: u64 = 0;
 
-/// Missing capability reported by `mount`.
+/// Missing capability reported by `mount` on a platform with no FUSE layer.
 ///
 /// Names the adapter rather than the command, and the difference is the whole
 /// value of the message. "dctl mount is not implemented" invites a reader to
 /// wonder whether their arguments, their remote or their platform is the
 /// problem; every one of those has already been checked and passed by the time
-/// this error is built. What is absent is one thing: the crate that turns a
-/// remote into a filesystem the kernel will talk to — `dctl-mount` in the
-/// workspace layout of `PLAN.md` §16.1, which does not exist yet.
-pub const MOUNT_ADAPTER_FEATURE: &str = "a filesystem adapter (missing crate dctl-mount: no FUSE/FSKit/WinFSP \
-     layer to attach a remote through)";
+/// this error is built. What is absent is one thing, and it is platform-shaped:
+/// Windows attaches a userspace filesystem through **WinFSP**, which is not a
+/// FUSE binding and cannot be reached from the `fuser` crate that serves Linux
+/// and macOS. So the refusal names WinFSP by name — that is what a Windows user
+/// would have to install, and what a future `dctl-mount` crate (`PLAN.md` §16.1)
+/// would have to bind — rather than leaving them to infer it.
+pub const MOUNT_ADAPTER_FEATURE: &str = "a filesystem adapter for this platform (the read-only mount is built on \
+     FUSE, which Windows does not have; attaching a filesystem there needs \
+     WinFSP, and the WinFSP binding that dctl-mount would own does not exist)";
 
 /// Remediation hint attached to [`MOUNT_ADAPTER_FEATURE`].
 ///
-/// States what *is* finished, so the failure reads as a scheduled absence rather
-/// than as a broken command: everything except the filesystem adapter itself has
-/// already run by the time the user sees this. The phase is named because there
-/// genuinely is one — unlike most of the refusals in this file, `mount` is on the
-/// roadmap by name.
-pub const MOUNT_ENGINE_HINT: &str = "The mountpoint checks, the flag surface and the per-platform backend choice \
-     are final and have already run — only the filesystem adapter is missing. It \
-     is PLAN.md phase 2 (§11, §15): FUSE3 on Linux, FSKit/fuse-t/macFUSE on \
-     macOS, WinFSP on Windows. Until then, `dctl copy` and `dctl cat --offset` \
-     read the same data without a mount.";
+/// States what *is* finished, so the failure reads as a platform gap rather than
+/// as a broken command: the whole flag surface, the mountpoint checks and the
+/// filesystem itself exist and run — on Linux and macOS. The section is named
+/// because `PLAN.md` §15 is what schedules the Windows backend, and a reader who
+/// wants to know when it lands should be able to find the answer.
+pub const MOUNT_ENGINE_HINT: &str = "The mountpoint checks, the flag surface and the read-only filesystem are \
+     finished and run today on Linux (FUSE3) and macOS (macFUSE) — only the \
+     Windows backend is missing. WinFSP is the layer PLAN.md §15 names for it, \
+     and ProjFS the later option for read-first streaming. Until then, `dctl \
+     copy` and `dctl cat --offset` read the same data without a mount.";
+
+// ─── The read-only FUSE filesystem (`PLAN.md` §15) ──────────────────────────
+//
+// Tunables for the mount engine itself, as opposed to the flags above. Every one
+// of them bounds something a filesystem callback touches, and a callback that
+// panics wedges the mount — on macOS badly enough to hang Finder and every
+// process that walks the path — so each is stated here rather than left as a
+// literal that somebody later "adjusts".
+
+/// Apparent `st_size` reported for a directory in the mount.
+///
+/// One block, which is what an ordinary ext4 or APFS directory reports. The
+/// alternative — the recursive byte total of everything beneath it, which the
+/// mount computes anyway for `statfs` — was rejected: `st_size` on a directory is
+/// conventionally the size of the *directory entry table*, and a tool that summed
+/// it across a tree would count every file once per ancestor. `dctl lsd` is the
+/// command that answers "how big is this subtree", and it says so in a column
+/// nobody can mistake for a POSIX field.
+pub const MOUNT_DIRECTORY_APPARENT_SIZE: u64 = 4096;
+
+/// `st_blksize`, and the `f_bsize`/`f_frsize` a `statfs` reports.
+///
+/// 4 KiB: the page size every reader in this class assumes, and the unit `df`
+/// divides by. It is deliberately *not* the vault's AEAD chunk size — that is a
+/// property of the stored format and would make `df` arithmetic depend on how a
+/// vault happened to be sealed.
+pub const MOUNT_BLOCK_SIZE: u32 = 4096;
+
+/// Bytes per block in the `st_blocks` field, fixed by POSIX at 512.
+///
+/// Named because `stat(2)` fixes it independently of `st_blksize`, and the two
+/// being different numbers is exactly the kind of thing a bare literal hides. A
+/// wrong value here makes `du` report a multiple of the truth.
+pub const MOUNT_STAT_BLOCK_SIZE: u64 = 512;
+
+/// Longest single path component the mount advertises through `statfs`.
+///
+/// 255 bytes, matching ext4, APFS and every filesystem a caller is likely to be
+/// comparing against. The vault itself imposes no such limit — `docs/FORMAT.md`
+/// §5 stores a whole logical path — so this is what the mount *presents*, and
+/// presenting the universal number is what keeps a `pathconf`-driven tool from
+/// refusing to walk the tree.
+pub const MOUNT_MAX_NAME_LEN: u32 = 255;
+
+/// `st_nlink` for a file in the mount.
+///
+/// One. A vault stores one name per object and the mount creates no hard links,
+/// so any other number would be a claim about links that do not exist — and
+/// `find -links` and every archiver's hard-link detector read this field.
+pub const MOUNT_FILE_LINK_COUNT: u32 = 1;
+
+/// `st_nlink` for a directory in the mount.
+///
+/// Two — the directory's own entry plus its `.` — which is the floor POSIX
+/// defines. The exact answer would be `2 + subdirectory count`, and computing it
+/// would turn every `getattr` on a directory into a listing of that directory.
+/// Two is what a filesystem that cannot cheaply count subdirectories reports, and
+/// what `find` treats as "this directory's link count carries no information",
+/// which makes it fall back to walking — the behaviour that is correct here.
+pub const MOUNT_DIRECTORY_LINK_COUNT: u32 = 2;
+
+/// Permission bits on every file in the mount: `r--r--r--`.
+///
+/// Read for everyone, write for nobody, execute for nobody. The mount is
+/// read-only in v1 (`PLAN.md` §15 makes the write path a later scoped phase), and
+/// permissions that *said* a file were writable would invite an editor to open it
+/// for writing, buffer the user's work, and discover EROFS at save time. Execute
+/// is off because a vault records no mode bits: claiming a file is executable is
+/// a claim about content this layer has not inspected.
+pub const MOUNT_FILE_MODE: u16 = 0o444;
+
+/// Permission bits on every directory in the mount: `r-xr-xr-x`.
+///
+/// The execute bit on a directory is *search* permission, without which nothing
+/// can traverse into it — so unlike the file mode above it has to be set for the
+/// mount to be usable at all. Write stays off for the same reason it does on
+/// files.
+pub const MOUNT_DIRECTORY_MODE: u16 = 0o555;
+
+/// How many inode records the mount keeps for paths the kernel has released.
+///
+/// The FUSE protocol lets a filesystem recycle an inode once the kernel has sent
+/// as many `forget`s as it received `lookup`s, and the mount honours that: a
+/// record the kernel still references is **never** evicted, whatever this number
+/// says. What the cap bounds is the residue — paths seen by a `readdir` or
+/// released by the kernel, kept on the chance they are looked up again.
+///
+/// 65536 records is a few megabytes of paths and covers browsing a large tree,
+/// while stopping a `find` over a ten-million-object vault from retaining every
+/// path it walked past for the life of the mount. Reached only after the kernel
+/// has finished with them, so eviction can never produce a stale inode number.
+pub const MOUNT_INODE_CACHE_MAX: usize = 65_536;
+
+/// How many directory listings the mount holds decrypted at once.
+///
+/// A listing is the unit `--dir-cache-time` ages out; this is the second bound on
+/// the same cache, and it exists because a time limit alone does not stop a walk
+/// of a wide tree from holding every directory it touched inside one TTL window.
+///
+/// 256 directories is deep enough for a file manager's history and for the chain
+/// a `find` has open, and small enough that the memory is bounded by the widest
+/// few directories rather than by the tree. An evicted listing costs one
+/// re-listing of that directory, never a re-read of any object.
+pub const MOUNT_DIR_CACHE_MAX: usize = 256;
+
+/// How many directory entries the mount prepares for one `readdir` call.
+///
+/// The kernel supplies a bounded reply buffer — a few kilobytes to a hundred and
+/// twenty-eight — and stops accepting entries when it is full. Preparing a whole
+/// directory to fill it would mean formatting a million entries to send the first
+/// hundred, on a call the kernel makes repeatedly.
+///
+/// 512 entries fills the largest buffer a FUSE reply uses even for very short
+/// names, so a batch is never the reason a reply comes back half empty. Running
+/// out of batch early is free: the kernel asks again from the next offset, and
+/// the listing behind it is already decrypted and cached.
+pub const MOUNT_READDIR_BATCH: usize = 512;
+
+/// Longest a mount waits for its filesystem thread to finish after unmounting.
+///
+/// Unmounting makes the kernel's end of `/dev/fuse` return `ENODEV`, which ends
+/// the session loop — normally within microseconds. The wait is bounded anyway
+/// because the thread can be inside a provider request that has not answered, and
+/// a `dctl mount` that would not exit on Ctrl-C is a worse failure than one that
+/// exits while a doomed request is still in flight. Two seconds is long enough
+/// for the ordinary case by four orders of magnitude.
+pub const MOUNT_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// How often the shutdown wait re-checks whether the filesystem thread has ended.
+///
+/// Ten milliseconds: below human perception, and cheap enough that the poll costs
+/// nothing against [`MOUNT_SHUTDOWN_GRACE`]. A condition variable would remove
+/// the poll entirely and add a second synchronisation object to a path that runs
+/// exactly once per mount.
+pub const MOUNT_SHUTDOWN_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Name the mount reports as its source, in `/etc/mtab` and in `df`.
+///
+/// The binary's name rather than the remote's: a remote name is the user's word
+/// for a vault and can be anything, including something they would not want on a
+/// shared machine's mount table, and `PLAN.md` §2's metadata-privacy design does
+/// not stop at object keys.
+pub const MOUNT_FS_NAME: &str = "dctl";
+
+/// Filesystem subtype reported in the mount table, after [`MOUNT_FS_NAME`].
+///
+/// `df -T` and `mount` print this, so it is what an operator sees when they ask
+/// what is attached at a path. Spelled to say both things that matter about it:
+/// it is a vault, and it is read-only.
+pub const MOUNT_FS_SUBTYPE: &str = "dctl-vault-ro";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Removal family — `delete`, `deletefile`, `purge`, `rmdir`, `rmdirs`, `cleanup`
@@ -4021,19 +4141,37 @@ pub const BACKEND_CAPABILITIES: &[(&str, &str, &[&str])] = &[
         CAPABILITY_RANGE_READS,
         "Serve an arbitrary byte range without transferring the whole object. \
          What makes 'dctl cat' seekable and a mount usable on a 50 GB file.",
-        &[PROVIDER_LOCAL, PROVIDER_B2, PROVIDER_S3, PROVIDER_R2],
+        &[
+            PROVIDER_LOCAL,
+            PROVIDER_B2,
+            PROVIDER_S3,
+            PROVIDER_R2,
+            PROVIDER_SFTP,
+        ],
     ),
     (
         CAPABILITY_VERIFIED_WRITES,
         "Refuse to report a write as stored until the stored bytes match the \
          expected content hash (PLAN.md §6 step 5).",
-        &[PROVIDER_LOCAL, PROVIDER_B2, PROVIDER_S3, PROVIDER_R2],
+        &[
+            PROVIDER_LOCAL,
+            PROVIDER_B2,
+            PROVIDER_S3,
+            PROVIDER_R2,
+            PROVIDER_SFTP,
+        ],
     ),
     (
         CAPABILITY_PAGED_LISTING,
         "Enumerate objects one bounded page at a time, so memory stays flat on a \
          ten-million-object remote (PLAN.md §16.2).",
-        &[PROVIDER_LOCAL, PROVIDER_B2, PROVIDER_S3, PROVIDER_R2],
+        &[
+            PROVIDER_LOCAL,
+            PROVIDER_B2,
+            PROVIDER_S3,
+            PROVIDER_R2,
+            PROVIDER_SFTP,
+        ],
     ),
     (
         CAPABILITY_MULTIPART_UPLOAD,
@@ -4483,7 +4621,13 @@ mod tests {
         // nobody could discover; a table row with no constant would advertise a
         // provider the registry cannot build.
         let advertised: Vec<&str> = REMOTE_PROVIDER_TYPES.iter().map(|(n, _)| *n).collect();
-        let known = [PROVIDER_LOCAL, PROVIDER_B2, PROVIDER_S3, PROVIDER_R2];
+        let known = [
+            PROVIDER_LOCAL,
+            PROVIDER_B2,
+            PROVIDER_S3,
+            PROVIDER_R2,
+            PROVIDER_SFTP,
+        ];
         for name in known {
             assert!(advertised.contains(&name), "'{name}' is not advertised");
         }
@@ -4500,6 +4644,7 @@ mod tests {
             CONFIG_KEY_REGION,
             CONFIG_KEY_ACCOUNT,
             CONFIG_KEY_PATH,
+            CONFIG_KEY_HOST,
             CONFIG_REMOTE_TYPE_KEY,
         ];
         for (index, key) in keys.iter().enumerate() {
@@ -4713,6 +4858,7 @@ mod tests {
             CONFIG_KEY_REGION,
             CONFIG_KEY_ACCOUNT,
             CONFIG_KEY_PATH,
+            CONFIG_KEY_HOST,
             CONFIG_KEY_BASE,
             CONFIG_KEY_BASE_PATH,
             CONFIG_KEY_CHUNK_SIZE,
@@ -4966,7 +5112,6 @@ mod tests {
             PLAN_REASON_EXTRA,
             PLAN_REASON_EMPTY_SOURCE_DIR,
             PLAN_REASON_UNTRAVERSED,
-            PLAN_REASON_CONTENT_UNRECORDED,
             PLAN_REASON_SIZE_UNRECORDED,
         ];
         for (index, reason) in reasons.iter().enumerate() {
@@ -5165,20 +5310,6 @@ mod tests {
                 "a transfer writes plain objects today: {text}"
             );
         }
-    }
-
-    #[test]
-    fn the_write_time_notice_says_what_changed_what_it_costs_and_what_to_type() {
-        // A substitution the user did not ask for has to answer all three
-        // questions, or it reads as noise and gets ignored — and the one it is
-        // most tempting to leave out is the cost, which is the only reason
-        // somebody would want to opt out of it.
-        assert!(WRITE_TIME_COMPARISON_NOTICE.contains("compares contents"));
-        assert!(WRITE_TIME_COMPARISON_NOTICE.contains("read and hashed"));
-        assert!(WRITE_TIME_COMPARISON_NOTICE.contains("--size-only"));
-        // It is appended to a side's name, so it must not open with a capital or
-        // repeat the subject: "'archive:' records when each object was written".
-        assert!(WRITE_TIME_COMPARISON_NOTICE.starts_with("records"));
     }
 
     #[test]

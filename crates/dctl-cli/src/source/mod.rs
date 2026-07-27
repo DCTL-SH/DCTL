@@ -206,6 +206,32 @@ pub trait Source: Send + Sync {
         length: Option<u64>,
     ) -> Result<Zeroizing<Vec<u8>>>;
 
+    /// Warm whatever this source caches for `[offset, offset + length)`, ahead of
+    /// a read that has not happened yet.
+    ///
+    /// A hint, and shaped like one: no return value, no error channel, no promise
+    /// that anything was fetched. That is not laziness about the signature — it is
+    /// the only honest shape. Nothing has been asked for on a user's behalf, so
+    /// there is no operation to report as having failed, and the read that follows
+    /// meets the same failure and reports it with a path and a reason. A `Result`
+    /// here would invite a caller to surface a warning about a request the user
+    /// never made.
+    ///
+    /// **The reason this is on the trait rather than inside one implementation.**
+    /// `PLAN.md` §15 makes latency, not decryption, the thing a streaming mount
+    /// has to hide: a player asking for chunk *k* should find *k+1* already
+    /// fetched. Only the source knows what "the next chunk" is — for a vault it is
+    /// a covering-chunk range in the decrypted-chunk cache, and for a plain store
+    /// there is no cache to warm at all — so the caller states *where the reader
+    /// is going* and each implementation decides what that is worth.
+    ///
+    /// Deliberately not given a default implementation. A default no-op would let
+    /// a source added later silently lose read-ahead, and a mount that quietly
+    /// stopped hiding latency is a performance regression with nothing to point
+    /// at; an explicit empty body says "there is nothing to warm here" and can be
+    /// read as the decision it is.
+    async fn prefetch(&self, path: &str, offset: u64, length: u64);
+
     /// Describe one object without reading it, or [`None`] if it is not there.
     ///
     /// `None` is the answer for "no such object", never an error, because every

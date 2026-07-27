@@ -39,11 +39,8 @@
 //! rejects. See [`refuse_a_plain_write_into_a_vault`].
 
 use crate::cli::GlobalArgs;
-use crate::constants::WRITE_TIME_COMPARISON_NOTICE;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
-use crate::fidelity;
-
 use crate::remote::RemoteSpec;
 
 use super::compare::ComparePolicy;
@@ -103,12 +100,13 @@ pub struct Request<'a> {
 impl Request<'_> {
     /// The comparison policy implied by the globals and the command's flags.
     ///
-    /// `content_for_time` is not among them — it is not a flag — so it arrives
-    /// as an argument from [`adopt_a_content_comparison`], which is the only
-    /// thing entitled to decide it.
-    fn compare_policy(&self, content_for_time: bool) -> ComparePolicy {
+    /// Every input to it is something the user typed. A transfer used to add one
+    /// of its own — a content comparison substituted whenever a side was a vault,
+    /// because a vault could not answer by time — and that is gone: the vault
+    /// answers by time like anything else now, so what runs is what was asked
+    /// for.
+    fn compare_policy(&self) -> ComparePolicy {
         ComparePolicy::resolve(self.globals, self.compare)
-            .comparing_content_for_time(content_for_time)
     }
 
     /// The plan policy implied by the whole request.
@@ -117,8 +115,8 @@ impl Request<'_> {
     /// so the one field that separates a `copy` from a `sync` is chosen by a
     /// word — `copying` or `syncing` — instead of by a bare `true` that a
     /// careless edit could flip.
-    fn plan_policy(&self, content_for_time: bool) -> Policy {
-        let compare = self.compare_policy(content_for_time);
+    fn plan_policy(&self) -> Policy {
+        let compare = self.compare_policy();
         let base = if self.delete_extras {
             Policy::syncing(compare)
         } else {
@@ -182,12 +180,7 @@ async fn diff_directory_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Pre
     let dest = RemoteSpec::parse(request.dest_spec)?;
     reject_self_transfer(&source, &dest)?;
 
-    // The flags are resolved *before* the comparison is chosen, so a pattern
-    // that will not compile stops the run without first announcing a comparison
-    // that is never going to be made.
-    let flags = ListOptions::resolve(request.globals, request.create_empty_src_dirs)?;
-    let content_for_time = adopt_a_content_comparison(ctx, request, &source, &dest);
-    let options = flags.hashing_contents(content_for_time);
+    let options = ListOptions::resolve(request.globals, request.create_empty_src_dirs)?;
     let source_listing = listing::source(ctx, &source, &options).await?;
     warn_about_omissions(ctx, &source_listing);
 
@@ -207,7 +200,7 @@ async fn diff_directory_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Pre
     let plan = Plan::compute(
         &source_listing.entries,
         &dest_listing.entries,
-        &request.plan_policy(content_for_time),
+        &request.plan_policy(),
     )?;
 
     Ok(Prepared {
@@ -244,12 +237,7 @@ async fn diff_exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepare
     let dest = RemoteSpec::parse(request.dest_spec)?;
     reject_self_transfer(&source, &dest)?;
 
-    // The flags are resolved *before* the comparison is chosen, so a pattern
-    // that will not compile stops the run without first announcing a comparison
-    // that is never going to be made.
-    let flags = ListOptions::resolve(request.globals, request.create_empty_src_dirs)?;
-    let content_for_time = adopt_a_content_comparison(ctx, request, &source, &dest);
-    let options = flags.hashing_contents(content_for_time);
+    let options = ListOptions::resolve(request.globals, request.create_empty_src_dirs)?;
     let source_listing = listing::source(ctx, &source, &options).await?;
     warn_about_omissions(ctx, &source_listing);
 
@@ -261,7 +249,7 @@ async fn diff_exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepare
         let plan = Plan::compute(
             &source_listing.entries,
             &dest_listing.entries,
-            &request.plan_policy(content_for_time),
+            &request.plan_policy(),
         )?;
         return Ok(Prepared {
             source,
@@ -294,7 +282,7 @@ async fn diff_exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepare
         source_entry,
         existing.as_ref(),
         &name,
-        &request.plan_policy(content_for_time),
+        &request.plan_policy(),
     )?;
 
     Ok(Prepared {
@@ -307,52 +295,6 @@ async fn diff_exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepare
         plan,
         dest_file_count: usize::from(existing.is_some()),
     })
-}
-
-/// Decide whether this transfer's default comparison must be answered by
-/// content, and say so if it must.
-///
-/// One function for both halves on purpose. The substitution and the
-/// announcement are the same decision: a run that quietly read the whole source
-/// tree to hash it, when the user had asked for the one-metadata-round-trip
-/// comparison, would be answering a question nobody asked and charging for it.
-/// Splitting them would make it possible to add a third call site that does the
-/// first without the second.
-///
-/// Three cases decline before anything is classified, and each declines for its
-/// own reason:
-///
-/// * **`--checksum`** already compares content, so there is nothing to
-///   substitute and nothing to announce.
-/// * **`--size-only`** is an explicit request for the cheapest comparison there
-///   is, and it is not broken by a write-time timestamp: sizes need no clock.
-///   Upgrading it would spend a full read of the source on a question the user
-///   deliberately declined to ask.
-/// * **`--no-traverse`** never looks at the destination, so every source file is
-///   already `missing-at-destination` and nothing is compared at all. Hashing
-///   the source there would be pure cost for an answer no rule consults.
-///
-/// See [`crate::fidelity`] for what makes the remaining case necessary, and for
-/// the one change to `dctl-core` that retires it.
-fn adopt_a_content_comparison(
-    ctx: &Ctx,
-    request: &Request<'_>,
-    source: &RemoteSpec,
-    dest: &RemoteSpec,
-) -> bool {
-    if request.globals.checksum || request.globals.size_only || request.traversal.no_traverse {
-        return false;
-    }
-
-    let Some(side) = fidelity::comparing_by_time_is_meaningless(ctx, source, dest) else {
-        return false;
-    };
-
-    // A warning, not a `-v` note. It changes what the run costs, and the only
-    // person who can act on that is the one reading stderr on an ordinary run.
-    ctx.out
-        .warn(format!("'{side}' {WRITE_TIME_COMPARISON_NOTICE}"));
-    true
 }
 
 /// The directory a listing's paths are relative to.

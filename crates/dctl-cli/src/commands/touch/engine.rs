@@ -14,22 +14,34 @@
 //! a metadata operation, and losing data to a timestamp command would be
 //! unforgivable.
 //!
-//! ## A sealed vault: creation works, re-stamping does not, and both are honest
+//! ## A sealed vault: creation works — with the time asked for — and re-stamping
+//! does not
 //!
-//! An empty object is a real, storable thing — `Vault::put_file(path, b"")`
+//! An empty object is a real, storable thing — `Vault::put_file(path, b"", when)`
 //! seals it, writes it with the same verified write every other object gets, and
-//! commits an index record. So `touch archive:sentinel` genuinely creates
-//! something, and the time it reports is read back out of the index afterwards
-//! rather than assumed from the clock.
+//! commits an index record carrying `when`. So `touch archive:sentinel` genuinely
+//! creates something, and `touch -t 2024-05-01 archive:sentinel` genuinely
+//! creates it with that time; what is reported afterwards is read back out of the
+//! index rather than assumed from the clock.
 //!
-//! Changing the time of an object the vault already holds has nowhere to go.
-//! The modification time lives in `dctl_index::Record::modified_unix` inside the
-//! encrypted index; `dctl_core::Vault` exposes no operation that updates one,
-//! and the index handle is private to the core — there is no call this command
-//! could make. The alternatives are worse than refusing:
+//! `--timestamp` on the create path used to be refused, and the refusal was
+//! honest at the time: the write took no timestamp, so there was no argument for
+//! the flag to become, and creating the object while reporting the requested time
+//! would have been a lie. That argument now exists ([`dctl_core::Modified`]) —
+//! added so that `dctl copy` could record a source's modification time instead of
+//! the moment of the upload — and a refusal kept past the reason for it is how a
+//! tool ends up with rules nobody can explain. So the flag is honoured.
 //!
-//! * re-storing the object would set the time to *now*, which is a different
-//!   write than the one requested and would silently discard `--timestamp`;
+//! Changing the time of an object the vault **already holds** still has nowhere
+//! to go, and that refusal stands. The modification time lives in
+//! `dctl_index::Record::modified_unix` inside the encrypted index;
+//! `dctl_core::Vault` exposes no operation that updates one, and the index handle
+//! is private to the core — there is no call this command could make. The
+//! alternatives are worse than refusing:
+//!
+//! * re-storing the object would need its contents, which `touch` does not have
+//!   and must not destroy — a `touch` that emptied a file would be the worst bug
+//!   in the tool;
 //! * opening the index directly from the CLI would mean a second writer to a
 //!   database the vault holds open, and a second implementation of a format
 //!   `dctl-core` owns.
@@ -38,20 +50,8 @@
 //! rather than this command** ([`TOUCH_RESTAMP_FEATURE`]). That wording is
 //! deliberate and load-bearing: a message reading "dctl touch is not
 //! implemented" would send a reader here to find a branch that is absent, and
-//! nothing is absent here. `dctl_core::Vault`'s public surface is unlocking,
-//! whole-object writes, whole-object reads, verification, listing, deletion,
-//! index rebuild and the recipient/share operations; not one of them takes or
-//! updates a modification time, and `Vault::index` — the only thing that could —
-//! is a private field. The gap is a function in another crate, and the message
-//! points there.
-//!
-//! The same reasoning refuses `--timestamp` against a vault *before anything is
-//! created* ([`TOUCH_EXPLICIT_TIME_FEATURE`]), and it is a **second** missing
-//! capability rather than the same one: `put_file` stamps `now_unix()` and takes
-//! no time from the caller, so even the create path has no argument for
-//! `--timestamp` to become. Creating the object and reporting the requested time
-//! would be a lie, and creating it with a different time would be an operation
-//! nobody asked for.
+//! nothing is absent here. The gap is a function in another crate, and the
+//! message points there.
 //!
 //! ## An object store: refused, and this one is nobody's build gap
 //!
@@ -76,12 +76,11 @@
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use dctl_core::Vault;
+use dctl_core::{Modified, Vault};
 
 use crate::commands::directory::{self, Outcome, Target};
 use crate::constants::{
-    TOUCH_EXPLICIT_TIME_FEATURE, TOUCH_EXPLICIT_TIME_HINT, TOUCH_OBJECT_STORE_FEATURE,
-    TOUCH_OBJECT_STORE_HINT, TOUCH_RESTAMP_FEATURE, TOUCH_RESTAMP_HINT,
+    TOUCH_OBJECT_STORE_FEATURE, TOUCH_OBJECT_STORE_HINT, TOUCH_RESTAMP_FEATURE, TOUCH_RESTAMP_HINT,
 };
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
@@ -93,20 +92,22 @@ use super::timestamp::Timestamp;
 
 /// One resolved `touch` request.
 ///
-/// A struct rather than four positional arguments because three of them are
-/// booleans and a transposed pair would silently invert `--no-create`.
+/// A struct rather than three positional arguments: two of them are a boolean
+/// and a timestamp, and a call site that transposed anything would silently
+/// invert `--no-create`.
 #[derive(Clone, Copy, Debug)]
 pub struct Request<'a> {
     /// The object being addressed.
     pub target: &'a Target,
     /// The time to write.
-    pub stamp: Timestamp,
-    /// Whether that time came from `--timestamp` rather than from the clock.
     ///
-    /// Kept apart from the value itself: "now" and "this exact second, which
-    /// happens to be now" are the same number and different requests, and only
-    /// the second one has to be refused by a vault.
-    pub explicit: bool,
+    /// Already resolved by the caller — the clock when `--timestamp` was absent,
+    /// the parsed value when it was present — because the plan prints this exact
+    /// second and the object has to be stamped with the number that was printed.
+    /// Whether the flag supplied it is deliberately *not* carried here: every
+    /// place honours the time it is given, so a second reading of that fact would
+    /// be a distinction with nothing behind it.
+    pub stamp: Timestamp,
     /// Whether a missing object may be created (`!--no-create`).
     pub create: bool,
 }
@@ -144,16 +145,9 @@ fn object_store(provider: &str) -> CliError {
     .with_hint(TOUCH_OBJECT_STORE_HINT)
 }
 
-/// The sealed path: create when missing, refuse to re-stamp.
+/// The sealed path: create when missing — with the time asked for — and refuse
+/// to re-stamp.
 async fn sealed(ctx: &Ctx, request: Request<'_>) -> Result<Outcome> {
-    // First, and before the vault is opened: a chosen time cannot be stored
-    // here whatever the object's state, so refusing costs no password prompt and
-    // — more importantly — no partially-performed operation.
-    if request.explicit {
-        return Err(CliError::unimplemented(TOUCH_EXPLICIT_TIME_FEATURE)
-            .with_hint(TOUCH_EXPLICIT_TIME_HINT));
-    }
-
     let session = session::open(ctx, &request.target.spec()).await?;
     let path = request.target.path.as_str();
 
@@ -186,7 +180,16 @@ async fn sealed(ctx: &Ctx, request: Request<'_>) -> Result<Outcome> {
     // An empty object goes through the same verified write and the same durable
     // index commit as any other, so success here means the same thing it means
     // for a 40 GB file (`PLAN.md` §6).
-    session.vault.put_file(path, b"").await?;
+    //
+    // The record carries `request.stamp` whether or not `--timestamp` supplied
+    // it, which is what keeps the plan and the object in agreement: the plan
+    // printed that exact second, and resolving the clock a second time here could
+    // store a different one. `Modified::At` rather than `Modified::Now` for
+    // precisely that reason.
+    session
+        .vault
+        .put_file(path, b"", Modified::At(request.stamp.unix_seconds()))
+        .await?;
     Ok(Outcome::Created)
 }
 
@@ -330,7 +333,6 @@ mod tests {
         Request {
             target,
             stamp: Timestamp::parse(stamp).expect("a valid time"),
-            explicit: true,
             create,
         }
     }
@@ -473,25 +475,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_explicit_time_is_refused_by_a_vault_before_anything_is_opened() {
-        // `--no-ask-password` pins the ordering: reaching the unlock would fail
-        // with VaultLocked, so a FatalError proves the refusal came first — and
-        // therefore that nothing was created.
+    async fn a_chosen_time_no_longer_stops_a_vault_before_it_is_even_opened() {
+        // The refusal this replaces was honest while `Vault::put_file` took no
+        // timestamp: there was no argument for `--timestamp` to become, so it was
+        // rejected before the vault was opened. That argument now exists, so the
+        // flag has to reach the write.
+        //
+        // Asserted through the *ordering*, which is the part that changed and the
+        // part a unit test can see without a vault: under `--no-ask-password` an
+        // unlock cannot succeed, so `VaultLocked` proves the run got as far as
+        // trying to open the vault. `FatalError` — what the old pre-check
+        // produced — would mean the request was thrown out before that, which is
+        // exactly the behaviour being removed. The object really being created
+        // with the chosen second is pinned end to end in `tests/cli.rs`.
         let target = target("archive:sentinel");
         let error = sealed(
             &ctx(&["--no-ask-password"]),
             request(&target, "2024-05-01T12:00:00Z", true),
         )
         .await
-        .expect_err("a chosen time cannot be stored in a vault");
+        .expect_err("no password is available, so the vault cannot open");
 
-        assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(error.message().contains(TOUCH_EXPLICIT_TIME_FEATURE));
-        assert!(
-            error
-                .hint()
-                .is_some_and(|hint| hint.contains("--timestamp"))
-        );
+        assert_eq!(error.code(), ExitCode::VaultLocked);
     }
 
     #[tokio::test]
