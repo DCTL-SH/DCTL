@@ -119,7 +119,7 @@ Two deviations from the letter of §13.6, both deliberate and both stricter:
 | **1 — manifest** | That the comparison at the end is against what went *in*. A manifest taken afterwards would be verifying a backup by reading the backup. |
 | **2 — phrase** | That the second key exists, is 24 BIP-39 words, and is **transcribable**: the test parses the numbered grid a human reads, so a block that stopped being readable fails here rather than on recovery day. |
 | **3 — destroy** | That the disaster actually happened. The store is counted before and after; if the count moved, the disaster was not local and the drill is testing something else. |
-| **4 — rebuild** | `PLAN.md` §13.5: *a lost index never means lost data*. The rebuild is a list-only pass over the encrypted `n/*` name records, and it must recover exactly as many rows as there were files. |
+| **4 — rebuild** | `PLAN.md` §13.5: *a lost index never means lost data*. The rebuild reads the encrypted `n/*` name records and then each object's own header, and it must recover exactly as many rows as there were files — with their sizes, times and hashes. |
 | **5 — restore** | That the recovery phrase alone — no password anywhere in the environment — reaches every command a recovery needs, not just a `vault recover` verb that reports success. |
 | **6 — diff** | The only claim that matters: every path, every size, every BLAKE3. |
 
@@ -238,35 +238,47 @@ out loud when it cannot run the case.
 
 ---
 
-## What a rebuilt index does not know
+## What a rebuilt index knows
 
-`dctl index rebuild` is a **list-only pass**. It lists and decrypts every `n/*`
-name record and writes the path→object mapping; it fetches no object bodies,
-because doing so would turn a cheap reconciliation into a full read of the whole
-dataset. A vault of any size therefore rebuilds for the price of a listing.
+`dctl index rebuild` reads two bounded things per file: the encrypted `n/*` name
+record, which gives the path and the object key, and the object's own **header**,
+which gives the size, the modification time and the content hash it was sealed
+with. No object body is fetched, so a vault of any size rebuilds for the price of
+a listing plus a few kilobytes per object.
 
-The rows it writes carry **no size, no content hash and no modification time**.
-Immediately after step 4, `dctl lsl` renders all three as `-`, which is correct:
-the index genuinely does not know them yet.
+The rebuilt rows are therefore the rows that were written. `dctl lsl` after step 4
+is indistinguishable from `dctl lsl` before the disaster, `dctl size` reports a
+total rather than a lower bound, and `dctl check --checksum` against the source
+tree matches.
 
-**This has one consequence on restore day that is easy to miss.** A restore from
-a rebuilt index stamps every file with the **time of the restore**, because that
-is the only fact available. The bytes and the names are exact; the timestamps are
-not the ones that were backed up. A tree restored this way looks, to anything
-that sorts or syncs by date, entirely rewritten — including DCTL's own
-`dctl check`, which will report every path as differing.
+**It used not to.** The rebuild was a list-only pass over the name records alone,
+and its rows carried no size, no content hash and no modification time. `PLAN.md`
+§13.5 always promised an index *"rebuildable by scanning object headers"*, and the
+headers always carried `mtime_unix`, `size` and `content_blake3`
+(`dctl-crypto/src/object/meta.rs`) — they were simply not being read. Two
+consequences followed, and both were reachable only on recovery day:
 
-A restore that has *not* lost its index keeps the original modification times;
-this is specific to the recovery path.
+* A restore from such an index stamped every file with the **time of the
+  restore**, because that was the only fact available. The bytes and the names
+  were exact; the timestamps were not the ones that were backed up, so a
+  recovered tree looked entirely rewritten to anything that sorts or syncs by
+  date — `dctl check` included.
+* `dctl check` could not compare at all, `dctl size` under-reported, and the next
+  `dctl sync` re-uploaded the whole dataset. Nothing filled the fields in
+  afterwards: `cat`, `hashsum` and a whole `scrub` all read the object and answer
+  from it without writing back.
 
-It is also a gap between the plan and the build worth stating plainly. `PLAN.md`
-§13.5 promises an index *"rebuildable by scanning object headers"*, and each
-object's header does carry `mtime_unix` and `size`
-(`dctl-crypto/src/object/meta.rs`). The implemented rebuild scans **name records
-only**. Recovering the times and sizes is therefore possible at the cost of one
-ranged header GET per object — far less than a full read, far more than a
-listing. It is not implemented, and the drill pins the current behaviour so that
-a change to it cannot go unnoticed.
+Fixing the read half exposed the write half. The `mtime_unix` field was declared,
+sealed into every object and **never written to** — the time lived only in the
+local index — so it is now recorded at seal time. Objects written by earlier
+builds carry the field's `0` sentinel, and a rebuild reports those as having *no*
+recorded time rather than as dated `1970-01-01T00:00:00Z`; a fabricated timestamp
+makes every such file look older than every other file and inverts an `--update`
+comparison.
+
+An object the rebuild cannot read back at all still gets its path mapped — that
+is the recovery story — and is counted as **unmeasured**. The command reports the
+count and exits **6** when it is not zero.
 
 ---
 

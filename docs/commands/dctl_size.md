@@ -52,9 +52,11 @@ rounded number and every use for a stable one.
 
 ### When the total cannot be computed
 
-A vault's sizes live in its index. `dctl index rebuild` is a **list-only pass**
-by design — it recovers object names without reading their bodies — so straight
-after a disaster-recovery rebuild no row in the vault has a recorded size.
+A vault's sizes live in its index, and a row can lack one.
+`dctl index rebuild` reads each object's own header for the size, so a rebuilt
+index normally carries them all; a row that is still unmeasured belongs to an
+object whose header could not be read back at all, which the rebuild counts and
+exits **6** over.
 
 `bytes` is then **`null`**, not `0`:
 
@@ -84,10 +86,11 @@ A genuinely empty file is **measured**: it has a recorded size of zero, and it
 does not make the total unknown. The two states are different facts and the shape
 keeps them apart.
 
-Nothing in this build fills those sizes in on a read — `cat`, `hashsum` and a
-whole `scrub` all leave the row exactly as unmeasured as they found it, despite
-what `rebuild_index`'s own documentation says. Only writing the file again
-records a size, so the remedy is to re-run the copy that produced the vault.
+A read does not fill those sizes in — `cat`, `hashsum` and a whole `scrub` all
+leave the row exactly as unmeasured as they found it. The remedy is
+[`dctl index rebuild`](dctl_index.md), which reads the header each size lives in.
+A row still unmeasured after that belongs to an object whose header could not be
+read back at all, and the rebuild names how many.
 
 An empty scope reports zeroes rather than nothing — `Total objects: 0` /
 `Total size: 0 B (0 bytes)`. "Zero objects" is an answer; silence is not. That

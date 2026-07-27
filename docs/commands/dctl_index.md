@@ -33,51 +33,61 @@ It is also the remedy several of DCTL's own error messages name. An index-layer
 failure, an object that is recorded but absent at the provider (`missing` in a
 `scrub` report), and a `cat` of a file written on another machine all point here.
 
-### What it costs, and what it does not know
+### What it costs, and what it recovers
 
-A rebuild is a **list-only pass**: every `n/*` record is listed and decrypted, but
-no object body is fetched. A vault of any size therefore rebuilds for the price
-of a listing rather than of a restore.
+Two bounded reads per file. The `n/*` name record gives the path and the object
+key; the object's own **header** gives the size, the modification time and the
+content hash it was sealed with. No object body is ever fetched, so a vault of
+any size rebuilds for the price of a listing plus a few kilobytes per object —
+never a restore.
 
-The consequence is that the rows it writes carry **no size, no content hash and
-no modification time**. Those live in the object bodies, and fetching them would
-turn a cheap reconciliation into a full read of the dataset. The command says so
-on stderr before it starts, because the effect is visible immediately afterwards:
+The rebuilt rows are therefore the rows that were written. A listing taken
+straight afterwards is indistinguishable from one taken before the index was
+lost, `dctl check --checksum` against the source tree matches, and `dctl size`
+reports a total rather than a lower bound.
+
+**It used not to.** A rebuild was a list-only pass and its rows carried no size,
+no content hash and no modification time. Nothing filled them in afterwards
+either — `cat`, `hashsum` and a whole `scrub` all read the object and answer from
+it without writing back — so the only cure was storing every file again. The
+result was an index that looked rebuilt and behaved degraded: `dctl check` cannot
+compare a row with no size and no hash, `dctl size` reports a lower bound in the
+shape of a total, and `dctl sync` treats every file as changed and re-uploads the
+whole dataset. `PLAN.md` §13.5 always described an index *"rebuildable by scanning
+object headers"*; the headers were simply not being scanned.
+
+### When an object cannot be described
+
+The path is indexed anyway — the mapping is what makes the file readable at all —
+and the row is counted as **unmeasured**. The report carries the count, and a run
+with any unmeasured row warns and exits **6** (`partial_failure`):
 
 ```
-dctl ls archive:
-         - a.txt
-         - sub/b.bin
+dctl index rebuild archive:
+Files  Unmeasured  Index
+-----  ----------  ------------------------------------
+ 1204           2  /home/mx/.dctl/index/vault.redb
+warning: 2 object(s) are mapped but could not be described: ...
 ```
 
-Those files are not empty, and the listing says so: an unmeasured row renders as
-`-`, the same placeholder `lsl` already uses for a modification time the index
-never recorded. It used to render as `0 B`, which is a *number* — and a number
-gets believed, summed and acted on. `dctl size` reported `"bytes": 0` for a
-forty-terabyte vault, `dctl scrub` filed the same zero into its coverage record,
-and `dctl delete --dry-run` offered to free nothing. See
+There are exactly two causes and they call for different actions: the object a
+name record points at is not at the provider (a durability incident — run
+`dctl scrub` to find out which), or its metadata uses a schema this build does
+not parse (a version problem). Both paths remain listable and readable; only
+their measurements are missing.
+
+An unmeasured row renders as `-`, the same placeholder `lsl` already uses for a
+modification time the index never recorded. It used to render as `0 B`, which is
+a *number* — and a number gets believed, summed and acted on. See
 [`dctl size`](dctl_size.md#when-the-total-cannot-be-computed) for the JSON shape
 that carries the absence.
-
-Nothing that *matters* is wrong — `dctl cat`, `dctl scrub` and `dctl copy` all
-read the object itself and get the right bytes. `dctl cat` in particular measures
-the object rather than trusting an unmeasured zero, so it can never write a short
-stream and exit 0. What a listing shows is the index's own state, and the index
-genuinely does not know the sizes yet.
-
-**A read does not settle them.** `rebuild_index`'s own documentation says the
-sizes "populate on first read of each file"; in this build they do not — `cat`,
-`hashsum` and a whole `scrub` all leave the row exactly as unmeasured as they
-found it. Only writing the file again records a size, so the remedy is to re-run
-the copy that produced the vault.
 
 ### Idempotent, and safe to repeat
 
 Existing rows are overwritten with the authoritative mapping from the backend. A
 name record that cannot be decrypted — one belonging to a different vault sharing
 the same bucket — is skipped with a warning rather than aborting the run. Nothing
-in the backend is written or deleted, so a rebuild cannot lose data; the worst it
-can do is replace a well-populated local cache with a sparser one.
+in the backend is written or deleted, so a rebuild cannot lose data.
 
 ### Whole vaults only
 
@@ -109,7 +119,10 @@ last listing is the signal that objects have gone missing at the provider. Zero
 is information too — it says the scan ran and found no name records, which is a
 very different statement from a command that printed nothing.
 
-`--json` emits one document with `remote`, `index` and `files`.
+`--json` emits one document with `remote`, `index`, `files`, `measured` and
+`unmeasured`. `unmeasured` is always present, including as `0`: an absent field
+would be read as "none", which is the same claim made by a report that never
+counted it.
 `--format json-lines` emits the same single document, rather than nothing: a
 consumer must not have to special-case this command by discovering it is silent.
 
@@ -120,10 +133,9 @@ needed; nothing local survives from before.
 
 ```
 dctl index rebuild archive:
-warning: a rebuild is a list-only pass, so the rows it writes carry no size, no content hash and no modification time: files restored from a rebuilt index are byte-exact and carry the time of the restore
-Files  Index
------  ------------------------------------
- 1204  /home/mx/.dctl/index/vault.redb
+Files  Unmeasured  Index
+-----  ----------  ------------------------------------
+ 1204           0  /home/mx/.dctl/index/vault.redb
 ```
 
 Reconcile after a `scrub` reported `missing` objects — the index and the provider

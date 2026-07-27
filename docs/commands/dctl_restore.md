@@ -102,17 +102,19 @@ right names with every timestamp set to the moment of the restore would not have
 reproduced the tree — it would have produced one that every tool sorting or
 syncing by date reads as entirely rewritten, this one included: the next `dctl
 check` against the vault would report every path as differing. Objects whose index
-row carries no time (what `dctl index rebuild` writes, since it recovers from a
-list-only pass) land with the time of the restore, because that is the only fact
-available.
+row carries no time land with the time of the restore, because that is the only
+fact available. A rebuilt index is no longer such a row by default —
+`dctl index rebuild` reads each object's header, which carries the time it was
+sealed with — but an object written by a build that never recorded one, or one
+whose header cannot be read back, still has no time to restore.
 
 On top of that, the length of what landed is compared against the length the
 index recorded. The core proves an object is consistent with *itself*; this
 catches an **index that disagrees with the store**, which is what a partial
 rebuild or a database restored from an older backup looks like. Rows whose size
-was never measured — `dctl index rebuild` writes those deliberately, as a
-list-only pass — are exempt and the run says so rather than silently reporting a
-total of zero.
+was never measured — an object whose header `dctl index rebuild` could not read
+back — are exempt and the run says so rather than silently reporting a total of
+zero.
 
 **One bad object does not abandon the restore.** A per-file failure is counted,
 reported by name, and skipped; the run continues and the exit code reflects it

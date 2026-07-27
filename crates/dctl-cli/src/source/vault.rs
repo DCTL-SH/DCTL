@@ -348,19 +348,21 @@ pub fn from_record(record: Record) -> Entry {
 
 /// Whether this record's size was never measured.
 ///
+/// A rebuilt index used to be entirely made of these rows.
 /// [`Vault::rebuild_index`](dctl_core::Vault::rebuild_index) recovers a machine
-/// from the backend alone by listing and decrypting the §5 name records. That is
-/// a **list-only pass** by design — it must not cost a full read of the dataset
-/// — so the rows it writes carry `size: 0` and an *empty* content hash.
+/// from the backend alone, and it was a **list-only pass**: it decrypted the §5
+/// name records and wrote `size: 0` with an *empty* content hash, and nothing
+/// ever filled them in. `Vault::get_file` resolves the object key, decrypts and
+/// returns, writing nothing back, so `cat`, `hashsum` and a whole `scrub` all
+/// left the row as unmeasured as they found it — checked by running each of them
+/// against a rebuilt index. On a restored machine the state was permanent until
+/// the next backup ran.
 ///
-/// The core's own comment says those sizes "populate on first read of each
-/// file". They do not, in this build: `Vault::get_file` resolves the object key,
-/// decrypts and returns, and writes nothing back to the index, so `cat`,
-/// `hashsum` and a whole `scrub` all leave the row as unmeasured as they found
-/// it — checked by running each of them against a rebuilt index. Only writing
-/// the file again records a size. That is why the absence has to survive all the
-/// way to the renderers instead of being treated as a state that will clear
-/// itself: on a restored machine it is permanent until the next backup runs.
+/// The rebuild now describes each object from its own header, so this is no
+/// longer the ordinary state of a recovered index. It is still reachable — an
+/// object the rebuild could not read back leaves exactly this row, and the
+/// rebuild reports how many — which is why the absence still has to survive all
+/// the way to the renderers rather than being treated as impossible.
 ///
 /// The two conditions together are what make the case identifiable. A file
 /// written through the ordinary path always has a 32-byte BLAKE3 recorded, and
@@ -404,7 +406,11 @@ mod tests {
     /// it. Nothing is mocked: the objects are sealed, stored and indexed exactly
     /// as `dctl copy` would have stored them.
     struct Fixture {
-        _store: TempDir,
+        /// The directory the objects live in. Reached into by the tests that
+        /// corrupt or remove an object — including the only way left to produce
+        /// an unmeasured index row, which is an object that is not there to
+        /// describe.
+        store: TempDir,
         _index: TempDir,
         source: VaultSource,
         /// The meter under the vault — how many bytes of object storage this
@@ -535,7 +541,7 @@ mod tests {
             index: index_path,
         };
         Fixture {
-            _store: store,
+            store,
             _index: index,
             source: VaultSource::new(session),
             meter,
@@ -744,30 +750,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rebuilt_row_is_measured_rather_than_reported_as_empty() {
-        // The failure this guards, seen for real: `dctl index rebuild` writes
-        // rows with no size, and a `stat` that believed the zero made
+    async fn a_rebuild_records_what_the_object_declares_rather_than_nothing() {
+        // The failure this guards, seen for real: `dctl index rebuild` wrote rows
+        // with no size, and a `stat` that believed the zero made
         // `dctl cat archive:a.txt` print nothing and exit 0 for a file that was
-        // plainly there.
+        // plainly there. `stat` was taught to measure round it — but `check`,
+        // `size` and `sync` read the row, and the row said nothing.
         let fixture = vault_with(&[("a.txt", b"hello world")]).await;
-        fixture
+        let rebuilt = fixture
             .source
             .session
             .vault
             .rebuild_index()
             .await
             .expect("the index rebuilds from the backend");
+        assert_eq!(
+            (rebuilt.files, rebuilt.measured, rebuilt.unmeasured),
+            (1, 1, 0)
+        );
 
-        // The listing shows what the index holds, which is genuinely nothing.
+        // The listing reads the index directly, so it is where a degraded row
+        // shows. Both facts are the object's own, sealed under its DEK.
         let mut cursor = fixture.source.enumerate("").await.unwrap();
         let listed = cursor.next().await.unwrap().expect("the row is there");
         assert_eq!(
-            listed.size, None,
-            "a rebuild records no size, and the listing says so rather than \
-             answering zero"
+            listed.size,
+            Some(11),
+            "the rebuilt row carries the size the object declares"
+        );
+        assert_eq!(
+            listed.content_hash.as_deref(),
+            Some(blake3::hash(b"hello world").as_bytes().as_slice()),
+            "and the content hash, without which `dctl check` cannot compare"
         );
 
-        // `stat` refuses to pass that on as a fact.
+        // And `stat` agrees, from the row rather than from a second read.
         let found = fixture
             .source
             .stat("a.txt")
@@ -775,9 +792,35 @@ mod tests {
             .unwrap()
             .expect("the object is there");
         assert_eq!(found.size, Some(11));
+    }
+
+    #[tokio::test]
+    async fn an_object_the_rebuild_cannot_read_leaves_a_row_that_claims_nothing() {
+        // The one case that still produces an unmeasured row, and the reason the
+        // absence has to survive to the renderers: the name record maps the path,
+        // the object it points at is gone, and the row must not answer zero for a
+        // file whose size nobody knows.
+        let fixture = vault_with(&[("a.txt", b"hello world")]).await;
+        std::fs::remove_dir_all(fixture.store.path().join("o"))
+            .expect("the object tree is removable");
+
+        let rebuilt = fixture
+            .source
+            .session
+            .vault
+            .rebuild_index()
+            .await
+            .expect("a rebuild over a missing object still maps the path");
         assert_eq!(
-            found.content_hash.as_deref(),
-            Some(blake3::hash(b"hello world").as_bytes().as_slice())
+            (rebuilt.files, rebuilt.measured, rebuilt.unmeasured),
+            (1, 0, 1)
+        );
+
+        let mut cursor = fixture.source.enumerate("").await.unwrap();
+        let listed = cursor.next().await.unwrap().expect("the row is there");
+        assert_eq!(
+            listed.size, None,
+            "an unmeasured row reports no size rather than answering zero"
         );
     }
 
@@ -807,7 +850,7 @@ mod tests {
             .await
             .expect("an intact object authenticates");
 
-        let objects = fixture._store.path().join("o");
+        let objects = fixture.store.path().join("o");
         for entry in std::fs::read_dir(&objects).expect("the object directory exists") {
             let path = entry.expect("a directory entry").path();
             let length = std::fs::metadata(&path).expect("readable").len();
@@ -919,7 +962,7 @@ mod tests {
 
         // Delete every stored object. A read that still answers correctly can only
         // have come from memory.
-        let objects = fixture._store.path().join("o");
+        let objects = fixture.store.path().join("o");
         for entry in std::fs::read_dir(&objects).expect("the object directory exists") {
             std::fs::remove_file(entry.expect("a directory entry").path()).expect("removed");
         }
@@ -946,7 +989,7 @@ mod tests {
         let size = 8 * 1024 * 1024;
         let plaintext: Vec<u8> = (0..size).map(|i| (i % 251) as u8).collect();
         let fixture = vault_with(&[("big.bin", &plaintext)]).await;
-        let object = std::fs::read_dir(fixture._store.path().join("o"))
+        let object = std::fs::read_dir(fixture.store.path().join("o"))
             .expect("the object directory exists")
             .filter_map(std::result::Result::ok)
             .map(|entry| entry.metadata().map_or(0, |meta| meta.len()))
@@ -1091,7 +1134,7 @@ mod tests {
         let plaintext: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
         let fixture = vault_with(&[("big.bin", &plaintext)]).await;
 
-        let objects = fixture._store.path().join("o");
+        let objects = fixture.store.path().join("o");
         for entry in std::fs::read_dir(&objects).expect("the object directory exists") {
             let path = entry.expect("a directory entry").path();
             let mut bytes = std::fs::read(&path).expect("readable");

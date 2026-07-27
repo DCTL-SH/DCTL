@@ -472,8 +472,11 @@ recovers the whole vault with only the password.
 3. Decrypt each record with the name-layer keys → `(path, file_id)`. A record
    that does not decrypt (e.g. it belongs to another vault under a shared
    bucket) is **skipped with a warning**, never aborting the rebuild.
-4. Upsert an index row for `path → o/<file_id>`. Sizes are left unset (a rebuild
-   stays a cheap, list-only pass) and populate on first read.
+4. Read each object's own header — one **bounded ranged** read, never its body —
+   for the size, the modification time and the `content_blake3` it was sealed
+   with. An object that cannot be read back leaves the path mapped, the row
+   unmeasured, and the count reported (the run then exits 6).
+5. Upsert a full index row for `path → o/<file_id>`.
 
 After rebuild every path is listable and readable, and content integrity is
 re-checked on read against each object's own `content_blake3`. This flow is the

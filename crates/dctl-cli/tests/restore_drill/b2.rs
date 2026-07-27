@@ -5,15 +5,32 @@
 //!   cargo test -p dctl-cli --test restore_drill -- --ignored --nocapture
 //! ```
 //!
-//! **This is the run that matters, and it is the one that has not happened.** A
-//! local drill decides everything DCTL controls; a provider decides everything
-//! it does not. Listing every `n/*` record in step 4 is one `read_dir` locally
-//! and a paginated API walk on B2, where a rebuild that stops at the first page
-//! recovers a plausible-looking subset and reports a number nobody can tell is
-//! wrong. Step 5 pulls twelve chunks over the network instead of out of the page
-//! cache, so a ranged request that is off by a byte, or a retry that restarts a
-//! stream without rewinding the hasher, only shows up here. Neither failure is
-//! reachable against a directory.
+//! **This is the run that matters, and it has now happened.** A local drill
+//! decides everything DCTL controls; a provider decides everything it does not.
+//! Listing every `n/*` record in step 4 is one `read_dir` locally and a paginated
+//! API walk on B2, where a rebuild that stops at the first page recovers a
+//! plausible-looking subset and reports a number nobody can tell is wrong. Step 5
+//! pulls twelve chunks over the network instead of out of the page cache, so a
+//! ranged request that is off by a byte, or a retry that restarts a stream
+//! without rewinding the hasher, only shows up here. Neither failure is reachable
+//! against a directory.
+//!
+//! ## What the first live run found
+//!
+//! It failed, which is what a drill is for. Five of the ten files came back
+//!
+//! ```text
+//! b2 api error 503: {"code":"service_unavailable","message":"no tomes available"}
+//! ```
+//!
+//! — B2's ordinary way of saying an upload pod is busy and the client should ask
+//! for another URL — and the run reported `Files: 5 / 10`, `Errors: 5`, exit 6,
+//! having stored half a backup. Nothing in `dctl-store` retried anything, while
+//! every backend error carried the hint *"Retries were exhausted."*
+//! `crates/dctl-store/src/b2/retry.rs` is the answer to that, and this drill is
+//! what proves it: the same ten files, the same bucket, now `10 identical`.
+//!
+//! Local runs cannot reach that failure. No directory has ever been out of tomes.
 //!
 //! ## Why it is `#[ignore]` and why it panics instead of skipping
 //!

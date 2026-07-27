@@ -155,8 +155,8 @@ not report the one case where it still misreports (an absent local path, above).
 
 The remaining gaps are named where they bite rather than here: exit **3** is not
 produced for a missing local directory (*Ordering, memory and what is actually
-shown*), and a row straight out of `dctl index rebuild` carries no size until the
-object is next read (*Synopsis*).
+shown*), and a row whose object `dctl index rebuild` could not read the header
+of carries no size (*Synopsis*).
 
 ```
 dctl ls [REMOTE:PATH] [flags]

@@ -15,50 +15,57 @@
 //! here. A hint that named a command which did not exist would be the same defect
 //! class as a refusal naming a remote that cannot be addressed.
 //!
-//! ## What a rebuild costs, and what it loses
+//! ## What a rebuild costs, and what it recovers
 //!
-//! It is a **list-only pass**: every `n/*` record is listed and decrypted, but no
-//! object body is fetched, so a vault of any size rebuilds for the price of a
-//! listing rather than of a restore.
+//! Two bounded reads per file: the `n/*` name record, which gives the path and
+//! the object key, and then the object's **own header**, which gives the size,
+//! the modification time and the content hash the writer sealed. No object body
+//! is ever fetched, so a vault of any size rebuilds for the price of a listing
+//! plus a few kilobytes per object rather than of a restore.
 //!
-//! The consequence is that the rows it writes carry **no size, no content hash
-//! and no modification time** — those live in the object bodies, and fetching
-//! them would turn a cheap reconciliation into a full read of the dataset. A
-//! listing taken straight after a rebuild therefore renders all three as `-`,
-//! which is surprising enough that the command says so before it starts rather
-//! than leaving it to be discovered.
+//! It was a listing-only pass, and the rows it wrote carried **no size, no
+//! content hash and no modification time**. That is what `PLAN.md` §13.5 means by
+//! an index *"rebuildable by scanning object headers"* — and the headers were not
+//! being scanned. The result was an index that looked rebuilt and behaved
+//! degraded: `dctl check` cannot compare a row with no size and no hash, `dctl
+//! size` reports a lower bound in the shape of a total, and `dctl sync` treats
+//! every file as changed and re-uploads the whole dataset. Nothing filled the
+//! fields in afterwards either; `cat`, `hashsum` and a whole `scrub` all measure
+//! the object and answer from it without writing back, so the only cure was
+//! storing every file again.
 //!
-//! The time is the one with a consequence beyond the listing: a **restore** from
-//! a rebuilt index stamps every file with the time of the restore, because that
-//! is the only fact available. The bytes and the names are exact; the timestamps
-//! are not the ones that were backed up, and a tree recovered this way reads as
-//! entirely rewritten to anything that sorts or syncs by date — including
-//! `dctl check` against the vault it came from. See `docs/RESTORE_DRILL.md`,
-//! which measures it.
+//! The modification time is the one whose absence reached furthest: a **restore**
+//! from an unmeasured index stamps every file with the time of the restore,
+//! because that is the only fact available, and a tree recovered that way reads
+//! as entirely rewritten to anything that sorts or syncs by date. See
+//! `docs/RESTORE_DRILL.md`, which measures it.
 //!
-//! `PLAN.md` §13.5 describes an index *"rebuildable by scanning object headers"*,
-//! and an object header does carry `mtime_unix` and `size`
-//! (`dctl_crypto::object::meta`). This rebuild scans **name records only**, so
-//! recovering the times and sizes is possible at the cost of one ranged header
-//! GET per object — far less than a full read, far more than a listing. It is
-//! not implemented.
+//! ## When a header cannot be read
+//!
+//! The path is indexed anyway — the mapping is what makes the file readable at
+//! all — and the row is counted as **unmeasured**. The command reports the count,
+//! warns when it is not zero, and exits [`ExitCode::PartialFailure`]. There are
+//! only two causes, an object that is not at the provider and a metadata schema
+//! this build cannot parse, and an operator has to know which before they trust
+//! the index. Reporting a complete rebuild over either would be `PLAN.md` §6's
+//! misreport with the recovery story's authority behind it.
 //!
 //! ## Idempotent, and safe to repeat
 //!
 //! Existing rows are overwritten with the authoritative mapping from the
 //! backend, and a name record that cannot be decrypted — one belonging to a
 //! different vault sharing the bucket — is skipped rather than aborting the run.
-//! Nothing in the backend is written or deleted, so a rebuild cannot lose data;
-//! the worst it can do is replace a well-populated local cache with a sparser one
-//! that refills as files are read.
+//! Nothing in the backend is written or deleted, so a rebuild cannot lose data.
 
 use clap::Args;
 
 use crate::audit::record::Entry as AuditEntry;
 use crate::audit::sink;
 use crate::commands::integrity::{Target, command_name};
+use crate::constants;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
+use crate::exit::ExitCode;
 use crate::session;
 
 use super::report::Report;
@@ -114,20 +121,13 @@ pub async fn run(ctx: &Ctx, args: &RebuildArgs) -> Result<()> {
     }
 
     ctx.out.info(format!("{command}: {target}"));
-    // Said before the scan, not after: someone watching a listing go to zeroes
-    // afterwards should already know why.
-    // The modification time belongs in this sentence as much as the size does,
-    // and it costs more: a restore from a rebuilt index stamps every file with
-    // the time of the restore, because that is the only fact available. A tree
-    // recovered that way reads as entirely rewritten to anything that sorts or
-    // syncs by date — `dctl check` included. An operator learning that from the
-    // restored tree rather than from here has been told too late to choose
-    // differently. Measured by the restore drill; see docs/RESTORE_DRILL.md.
-    ctx.out.warn(
-        "a rebuild is a list-only pass, so the rows it writes carry no size, no content hash \
-         and no modification time: files restored from a rebuilt index are byte-exact and \
-         carry the time of the restore",
-    );
+    // Said before the scan rather than after: the second read per object is what
+    // makes the rows comparable and it is also what makes a large vault's rebuild
+    // take twice as many requests, and an operator watching one deserves to know
+    // that before they start wondering whether it has hung. This used to be a
+    // `warn` saying the opposite — that the rows would carry nothing — which was
+    // the honest description of a rebuild that produced a degraded index.
+    ctx.out.info(constants::INDEX_REBUILD_NOTICE);
 
     let session = session::open(ctx, &target.spec()).await?;
     let rebuilt = session.vault.rebuild_index().await.map_err(CliError::from);
@@ -148,13 +148,15 @@ pub async fn run(ctx: &Ctx, args: &RebuildArgs) -> Result<()> {
     // when the rebuild failed, because a failed rebuild counted nothing.
     ctx.audit.record(
         &AuditEntry::new(VERB, sink::outcome(&rebuilt))
-            .objects(rebuilt.as_ref().copied().unwrap_or_default() as u64)
+            .objects(rebuilt.as_ref().map(|r| r.files).unwrap_or_default())
             .remote(&remote),
     )?;
-    let files = rebuilt?;
+    let rebuilt = rebuilt?;
 
     tracing::info!(
-        files,
+        files = rebuilt.files,
+        measured = rebuilt.measured,
+        unmeasured = rebuilt.unmeasured,
         index = %session.index.display(),
         "rebuilt the index from the backend"
     );
@@ -162,16 +164,36 @@ pub async fn run(ctx: &Ctx, args: &RebuildArgs) -> Result<()> {
     Report::new(
         target.to_string(),
         session.index.display().to_string(),
-        files,
+        rebuilt,
     )
-    .emit(&ctx.out)
+    .emit(&ctx.out)?;
+
+    // Reported after the table, and as a *failure*, not a note. A row nothing
+    // could describe is either an object missing at the provider or a schema this
+    // build cannot read; both make the index incomparable for that path, and a
+    // rebuild that exits 0 over either is a recovery reporting itself complete
+    // when it is not (`PLAN.md` §6).
+    if rebuilt.unmeasured > 0 {
+        ctx.out.warn(format!(
+            "{} {}",
+            rebuilt.unmeasured,
+            constants::INDEX_REBUILD_UNMEASURED_WARNING
+        ));
+        return Err(CliError::new(
+            ExitCode::PartialFailure,
+            format!(
+                "{command}: {} of {} path(s) are indexed but not described",
+                rebuilt.unmeasured, rebuilt.files
+            ),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::cli::{Cli, Command};
-    use crate::exit::ExitCode;
     use clap::Parser;
 
     fn parse(args: &[&str]) -> (Ctx, RebuildArgs) {

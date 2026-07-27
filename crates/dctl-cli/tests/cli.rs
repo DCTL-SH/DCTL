@@ -1872,22 +1872,112 @@ fn a_scrub_that_verified_nothing_does_not_pass_for_a_clean_one() {
 }
 
 #[test]
-fn a_rebuilt_index_reports_sizes_as_unknown_rather_than_as_zero() {
-    // Defect D3. `index rebuild` is a list-only pass, so its rows carry no
-    // size — and every reader downstream rendered that absence as the number
-    // 0. A capacity monitor reading `--json size` after a disaster-recovery
-    // rebuild was told a 40 TB vault held nothing.
+fn a_rebuilt_index_carries_the_sizes_and_hashes_its_objects_declare() {
+    // Defect D3's other half. The rendering was fixed — an absent size stopped
+    // printing as `0` — but the absence itself was the ordinary state of every
+    // rebuilt row, so a recovered machine could not `check`, could not total its
+    // own bytes, and re-uploaded the whole vault on the next `sync`. A rebuild
+    // now describes each object from its own header, and this is that claim end
+    // to end, through the shipped binary.
     let sandbox = a_sealed_vault_with_content();
 
-    sandbox
+    // What the vault held before the rebuild, to compare against.
+    let before = json(
+        &sandbox
+            .dctl()
+            .env("DCTL_PASSWORD", GOOD_PASSWORD)
+            .args(["--json", "size"])
+            .arg(format!("{VAULT_NAME}:"))
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    let rebuild = sandbox
         .dctl()
         .env("DCTL_PASSWORD", GOOD_PASSWORD)
-        .args(["index", "rebuild"])
+        .args(["--json", "index", "rebuild"])
         .arg(format!("{VAULT_NAME}:"))
         .assert()
         .success();
+    let rebuilt = json(&rebuild.get_output().stdout);
+    assert_eq!(rebuilt["files"], 3);
+    assert_eq!(rebuilt["measured"], 3);
+    assert_eq!(
+        rebuilt["unmeasured"], 0,
+        "every object is describable from its own header: {rebuilt}"
+    );
 
-    // `ls` must not print a byte count it does not have.
+    // `ls` prints real byte counts, including a real zero for the empty file.
+    let listing = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("ls")
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let listed = String::from_utf8_lossy(&listing.get_output().stdout).into_owned();
+    assert_eq!(listed.lines().count(), 3);
+    assert!(
+        listed
+            .lines()
+            .all(|line| line.split_whitespace().next() != Some(UNKNOWN_SIZE)),
+        "no row may be unmeasured after a rebuild:\n{listed}"
+    );
+
+    // `size` reports the same total it did before the index was rebuilt, which
+    // is the property a capacity monitor depends on.
+    let sized = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--json", "size"])
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let totals = json(&sized.get_output().stdout);
+    assert_eq!(totals["count"], 3);
+    assert_eq!(totals["unmeasured"], 0);
+    assert_eq!(
+        totals["bytes"], before["bytes"],
+        "a rebuild must not change what the vault is said to hold: {totals} vs {before}"
+    );
+
+    // And `check` against the source tree matches, which it cannot do at all
+    // over rows with no size and no hash.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["check", "--checksum"])
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+}
+
+#[test]
+fn a_rebuild_over_missing_objects_says_so_and_does_not_exit_zero() {
+    // The other side: the objects are gone at the provider and only the name
+    // records remain. The paths are still mapped — that is the recovery story —
+    // but nothing about them can be measured, and a rebuild that reported three
+    // files and exited 0 would be a recovery calling itself complete.
+    let sandbox = a_sealed_vault_with_content();
+    std::fs::remove_dir_all(sandbox.path("vault").join("o")).expect("the object tree is removable");
+
+    let rebuild = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--json", "index", "rebuild"])
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        // PartialFailure (6): the mapping is complete, the description is not.
+        .code(6);
+    let rebuilt = json(&rebuild.get_output().stdout);
+    assert_eq!(rebuilt["files"], 3);
+    assert_eq!(rebuilt["measured"], 0);
+    assert_eq!(rebuilt["unmeasured"], 3);
+
+    // And the unmeasured rows still refuse to render as measured zeroes.
     let listing = sandbox
         .dctl()
         .env("DCTL_PASSWORD", GOOD_PASSWORD)
@@ -1900,45 +1990,11 @@ fn a_rebuilt_index_reports_sizes_as_unknown_rather_than_as_zero() {
         !listed.contains("0 B"),
         "an unmeasured row must not render as a measured zero:\n{listed}"
     );
-    assert_eq!(listed.lines().count(), 3);
     assert!(
         listed
             .lines()
             .all(|line| line.split_whitespace().next() == Some(UNKNOWN_SIZE)),
         "every unmeasured row's size column must read as unknown:\n{listed}"
-    );
-
-    // `size` must not report a total it could not compute.
-    let sized = sandbox
-        .dctl()
-        .env("DCTL_PASSWORD", GOOD_PASSWORD)
-        .args(["--json", "size"])
-        .arg(format!("{VAULT_NAME}:"))
-        .assert()
-        .success();
-    let totals = json(&sized.get_output().stdout);
-    assert_eq!(totals["count"], 3);
-    assert!(
-        totals["bytes"].is_null(),
-        "a total over unmeasured rows is not a number: {totals}"
-    );
-    assert_eq!(totals["unmeasured"], 3);
-    assert_eq!(totals["measured_bytes"], 0);
-
-    // And the same absence has to reach the audit trail a scrub writes.
-    let scrubbed = sandbox
-        .dctl()
-        .env("DCTL_PASSWORD", GOOD_PASSWORD)
-        .args(["--json", "scrub"])
-        .arg(format!("{VAULT_NAME}:"))
-        .assert()
-        .success();
-    let report = json(&scrubbed.get_output().stdout);
-    assert_eq!(report["coverage"]["scanned"], 3);
-    assert_eq!(report["coverage"]["unmeasured"], 3);
-    assert!(
-        report["coverage"]["bytes"].is_null(),
-        "a scrub that cannot total its bytes must not publish a zero: {report}"
     );
 }
 

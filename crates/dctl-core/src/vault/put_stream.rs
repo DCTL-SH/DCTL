@@ -69,6 +69,11 @@ impl Vault {
         // Capture any object this path currently maps to, for post-commit overwrite GC.
         let previous = self.lookup_object_key(&path).await?;
 
+        // Resolved once, here, so the object's own metadata and the index record
+        // state the same time. `Modified::Now` reads the clock on resolution, and
+        // resolving it twice would seal one instant and index another.
+        let modified_unix = modified.resolve();
+
         // Seal the source straight to a temp object off the async runtime (heavy CPU +
         // blocking file I/O). Everything here is O(chunk_size)/O(buffer) memory.
         // A transient owned copy for the blocking sealer: `LockedSecret` is not `Clone`,
@@ -79,7 +84,7 @@ impl Vault {
         let source = source.to_path_buf();
         let meta_path = path.clone();
         let sealed = tokio::task::spawn_blocking(move || -> Result<Sealed> {
-            seal_source_to_temp(&root_key, &source, chunk_size, &meta_path)
+            seal_source_to_temp(&root_key, &source, chunk_size, &meta_path, modified_unix)
         })
         .await
         .map_err(|e| {
@@ -124,7 +129,7 @@ impl Vault {
             path: path.clone(),
             object_key: object_key.clone(),
             size: sealed.plaintext_len,
-            modified_unix: modified.resolve(),
+            modified_unix,
             content_hash: sealed.plaintext_hash,
         };
         self.index.put(&record)?;
@@ -148,6 +153,7 @@ fn seal_source_to_temp(
     source: &Path,
     chunk_size: u32,
     nfc_path: &str,
+    modified_unix: Option<i64>,
 ) -> Result<Sealed> {
     let mut src = std::fs::File::open(source).map_err(io_err)?;
     let plaintext_len = src.metadata().map_err(io_err)?.len();
@@ -160,7 +166,7 @@ fn seal_source_to_temp(
             root_key,
             &mut src,
             plaintext_len,
-            &Metadata::new(nfc_path),
+            &Metadata::new(nfc_path).with_mtime(modified_unix),
             chunk_size,
             &mut writer,
         )?;

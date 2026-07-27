@@ -164,8 +164,15 @@ async fn restore_on_a_fresh_device_from_backend_only() {
     );
 
     // (2) Rebuild the whole index from the backend; then everything lists and reads.
-    let n = b.rebuild_index().await.unwrap();
-    assert_eq!(n, 3, "all three name records rebuilt");
+    let rebuilt = b.rebuild_index().await.unwrap();
+    assert_eq!(rebuilt.files, 3, "all three name records rebuilt");
+    // And every one of them describable from its own object header: a rebuild
+    // that mapped three paths and measured none of them used to pass this test.
+    assert_eq!(
+        rebuilt.measured, 3,
+        "every row described from its object header"
+    );
+    assert_eq!(rebuilt.unmeasured, 0);
     let mut paths: Vec<_> = b.list("").unwrap().into_iter().map(|r| r.path).collect();
     paths.sort();
     assert_eq!(
@@ -190,6 +197,102 @@ async fn restore_on_a_fresh_device_from_backend_only() {
         b.get_file("nope").await.unwrap_err(),
         CoreError::NotFound(_)
     ));
+}
+
+#[tokio::test]
+async fn a_rebuilt_row_carries_the_size_time_and_hash_the_object_was_sealed_with() {
+    // The whole of what a rebuild recovers, compared field by field against the
+    // row the original write produced. A rebuild used to write `size: 0`, no
+    // time and an empty hash, which is an index `check` cannot compare, `size`
+    // under-reports from and `sync` re-uploads the entire dataset against — and
+    // nothing ever filled the fields in, so a recovered machine stayed that way.
+    const WHEN: i64 = 1_551_675_967;
+
+    let store = TempDir::new().unwrap();
+    let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(store.path()));
+    let idx_a = TempDir::new().unwrap();
+    let idx_b = TempDir::new().unwrap();
+    let a_path = idx_a.path().join("a.redb");
+    let b_path = idx_b.path().join("b.redb");
+
+    let original = {
+        let a = init_vault(backend.clone(), &a_path, "pw").await.unwrap();
+        a.put_file("photos/a.jpg", b"alpha", Modified::At(WHEN))
+            .await
+            .unwrap();
+        // Stored through the streaming path too, because it seals its metadata
+        // in a different function and a fix applied to one of the two would
+        // leave every large file undated.
+        let source = idx_a.path().join("big.bin");
+        std::fs::write(&source, b"bravo bravo").unwrap();
+        a.put_file_from_path("docs/big.bin", &source, Modified::At(WHEN - 1))
+            .await
+            .unwrap();
+        a.list("").unwrap()
+    };
+
+    let b = Vault::unlock(backend.clone(), &b_path, UnlockKey::Password("pw"))
+        .await
+        .unwrap();
+    let rebuilt = b.rebuild_index().await.unwrap();
+    assert_eq!(
+        (rebuilt.files, rebuilt.measured, rebuilt.unmeasured),
+        (2, 2, 0)
+    );
+
+    let recovered = b.list("").unwrap();
+    assert_eq!(
+        recovered, original,
+        "a rebuilt row is the row that was written"
+    );
+    // Stated separately so a failure names the field rather than dumping two
+    // structs: these three are exactly what was missing.
+    for row in &recovered {
+        assert_ne!(row.size, 0, "{} lost its size", row.path);
+        assert!(!row.content_hash.is_empty(), "{} lost its hash", row.path);
+    }
+    assert_eq!(recovered[0].modified_unix, Some(WHEN - 1));
+    assert_eq!(recovered[1].modified_unix, Some(WHEN));
+}
+
+#[tokio::test]
+async fn a_file_stored_with_no_known_time_rebuilds_undated_rather_than_dated_1970() {
+    // `Modified::Unknown` means nobody knows when the content changed, and the
+    // object records that as the `0` sentinel. Reading the sentinel back as a
+    // time would put `1970-01-01T00:00:00Z` on the file — a fabricated fact, and
+    // the exact substitution `Modified::Unknown` exists to refuse, because the
+    // epoch makes every such file look older than every other file.
+    let store = TempDir::new().unwrap();
+    let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(store.path()));
+    let idx_a = TempDir::new().unwrap();
+    let idx_b = TempDir::new().unwrap();
+
+    {
+        let a = init_vault(backend.clone(), &idx_a.path().join("a.redb"), "pw")
+            .await
+            .unwrap();
+        a.put_file("undated.bin", b"x", Modified::Unknown)
+            .await
+            .unwrap();
+    }
+
+    let b = Vault::unlock(
+        backend.clone(),
+        &idx_b.path().join("b.redb"),
+        UnlockKey::Password("pw"),
+    )
+    .await
+    .unwrap();
+    // Still fully measured: the size and the hash are known, only the time is not.
+    let rebuilt = b.rebuild_index().await.unwrap();
+    assert_eq!(rebuilt.measured, 1);
+
+    let row = b.list("").unwrap().pop().expect("the row is there");
+    assert_eq!(row.size, 1);
+    assert_eq!(
+        row.modified_unix, None,
+        "an unrecorded time must come back absent, never as the epoch"
+    );
 }
 
 /// Deterministic pseudo-random bytes (xorshift64) — no `rand` dep, reproducible.

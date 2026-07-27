@@ -436,17 +436,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_sealed_listing_carries_an_unmeasured_row_as_unmeasured() {
-        // This listing used to build its entries with its own copy of the
-        // record-to-entry conversion, and that copy kept handing on the zero a
-        // rebuilt index row carries after the shared one stopped. The visible
-        // result was `dctl delete --dry-run archive:` naming three real files
-        // and reporting `0 B` freed — a figure somebody reads before deciding
-        // the deletion is harmless.
+    async fn a_rebuilt_sealed_listing_carries_the_sizes_its_objects_declare() {
+        // A rebuild describes each object from its own header, so the sizes come
+        // back. This used to assert the opposite — that every row after a rebuild
+        // was unmeasured — which was a faithful description of an index that
+        // `dctl check` could not compare and `dctl size` under-reported from.
         let (_store, _index, medium) =
             vault_with(&[("a.txt", b"hello world"), ("empty.txt", b"")]).await;
 
-        // Measured, as written.
         let before = medium.list("").await.expect("the listing succeeds");
         assert_eq!(before[0].size, Some(11));
         assert_eq!(
@@ -458,18 +455,58 @@ mod tests {
         let Medium::Vault { session, .. } = &medium else {
             panic!("the fixture is a sealed medium");
         };
-        session
+        let rebuilt = session
             .vault
             .rebuild_index()
             .await
             .expect("the index rebuilds from the backend");
+        assert_eq!(rebuilt.unmeasured, 0);
+
+        let after = medium.list("").await.expect("the listing still succeeds");
+        assert_eq!(
+            after.iter().map(|entry| entry.size).collect::<Vec<_>>(),
+            vec![Some(11), Some(0)],
+            "a rebuild recovers the sizes the objects were sealed with"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sealed_listing_carries_an_unmeasured_row_as_unmeasured() {
+        // This listing used to build its entries with its own copy of the
+        // record-to-entry conversion, and that copy kept handing on the zero an
+        // unmeasured index row carries after the shared one stopped. The visible
+        // result was `dctl delete --dry-run archive:` naming three real files
+        // and reporting `0 B` freed — a figure somebody reads before deciding
+        // the deletion is harmless.
+        //
+        // The row is produced the only way one still can be: the objects are
+        // removed from the store, so the rebuild can map every path from its name
+        // record and describe none of them. That is also the real scenario — a
+        // provider that has lost the bodies — rather than a contrived fixture.
+        let (store, _index, medium) =
+            vault_with(&[("a.txt", b"hello world"), ("empty.txt", b"")]).await;
+        std::fs::remove_dir_all(store.path().join("o")).expect("the object tree is removable");
+
+        let Medium::Vault { session, .. } = &medium else {
+            panic!("the fixture is a sealed medium");
+        };
+        let rebuilt = session
+            .vault
+            .rebuild_index()
+            .await
+            .expect("a rebuild over missing objects still maps every path");
+        assert_eq!(rebuilt.files, 2);
+        assert_eq!(
+            rebuilt.unmeasured, 2,
+            "an object that is not there cannot be described, and the count says so"
+        );
 
         let after = medium.list("").await.expect("the listing still succeeds");
         assert_eq!(after.len(), 2);
         for entry in &after {
             assert_eq!(
                 entry.size, None,
-                "a rebuilt row has no size, and '{}' must not claim one",
+                "an unmeasured row has no size, and '{}' must not claim one",
                 entry.path
             );
         }

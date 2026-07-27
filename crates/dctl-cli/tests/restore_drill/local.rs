@@ -30,7 +30,7 @@ fn the_whole_dataset_survives_a_destroyed_index_and_comes_back_on_the_phrase_alo
     eprintln!("{}", report.summary());
 
     no_plaintext_reached_the_store(&report);
-    the_rebuild_recovered_paths_but_neither_sizes_nor_times(&report);
+    the_rebuild_recovered_paths_sizes_and_times(&report);
 }
 
 /// The bytes that came back are the bytes that went in — and they were never
@@ -71,25 +71,23 @@ fn no_plaintext_reached_the_store(report: &drill::Report) {
 
 /// What a rebuild recovers, stated as a test rather than only in prose.
 ///
-/// `dctl index rebuild` is a **list-only pass**: it reads the encrypted name
-/// records and writes the path→object mapping, and it deliberately does not
-/// fetch object bodies, because doing so would turn a cheap reconciliation into
-/// a full read of the dataset. The consequence is visible immediately — the rows
-/// it writes carry no size and no modification time, and `lsl` renders both as
-/// `-`.
+/// This function used to assert the opposite, and its own comment said what to do
+/// when the day came: *"if this ever fails because a rebuild started recovering
+/// sizes and times, the fix is to update `docs/RESTORE_DRILL.md` and delete this
+/// function — not to weaken it."* It did, and this is the replacement.
 ///
-/// This is pinned because it is the part of a recovery that surprises people,
-/// and because it has a consequence the drill's manifest cannot see: a restore
-/// from a rebuilt index stamps every file with the time of the restore, since
-/// that is the only fact available. The bytes and the names are exact; the
-/// timestamps are not the ones that were backed up. An auditor is entitled to be
-/// told that in advance rather than to discover it from a tree where every file
-/// looks freshly written.
+/// `dctl index rebuild` was a **list-only pass**: it read the encrypted name
+/// records, wrote the path→object mapping, and stopped. The rows carried no size
+/// and no modification time, `lsl` rendered both as `-`, and the consequence
+/// reached past the listing — a restore from such an index stamped every file
+/// with the time of the restore, because that was the only fact available, so a
+/// recovered tree read as entirely rewritten to anything that sorts by date.
 ///
-/// If this ever fails because a rebuild started recovering sizes and times, the
-/// fix is to update `docs/RESTORE_DRILL.md` and delete this function — not to
-/// weaken it.
-fn the_rebuild_recovered_paths_but_neither_sizes_nor_times(report: &drill::Report) {
+/// Both facts live in the object's own header, which is a bounded read, so the
+/// rebuild takes them. What is asserted here is the whole-vault consequence: the
+/// rebuilt index totals the same bytes the manifest went in with, and no row is
+/// left claiming a size or a time it does not have.
+fn the_rebuild_recovered_paths_sizes_and_times(report: &drill::Report) {
     let listing = report
         .sandbox
         .run_with_phrase(
@@ -111,12 +109,40 @@ fn the_rebuild_recovered_paths_but_neither_sizes_nor_times(report: &drill::Repor
 
     for row in &rows {
         let mut columns = row.split_whitespace();
-        assert_eq!(
-            (columns.next(), columns.next()),
-            (Some("-"), Some("-")),
-            "a rebuilt row reports a size or a time it cannot know: {row}"
+        let size = columns.next();
+        assert_ne!(
+            size,
+            Some("-"),
+            "a rebuilt row reports no size for a file the object declares one for: {row}"
+        );
+        // The unit follows the figure, so the timestamp is the third column.
+        assert_ne!(
+            columns.nth(1),
+            Some("-"),
+            "a rebuilt row reports no modification time: {row}"
         );
     }
+
+    // The number an operator actually acts on. A total assembled from rows that
+    // each carry a size is the vault's real size; the same command over the old
+    // rebuild reported a null and a count of unmeasured rows.
+    let sized = report
+        .sandbox
+        .run_with_phrase(
+            &report.backend,
+            &report.phrase,
+            &["--json", "size", &format!("{VAULT_REMOTE}:")],
+        )
+        .expect_success("sizing the rebuilt index");
+    let totals: serde_json::Value =
+        serde_json::from_str(&sized.stdout).expect("the size report is JSON");
+    assert_eq!(totals["unmeasured"], 0, "{}", sized.transcript());
+    assert_eq!(
+        totals["bytes"].as_u64(),
+        Some(report.manifest.total_bytes()),
+        "the rebuilt index totals a different number of bytes than went in\n{}",
+        sized.transcript()
+    );
 }
 
 /// Whether `haystack` contains `needle`.

@@ -38,7 +38,7 @@ pub use dctl_index::Record;
 /// creation, because the answer is baked into the envelope from then on.
 pub use dctl_crypto::kdf::Cost as KdfCost;
 pub use error::{CoreError, Result};
-pub use vault::{Modified, NewVault, UnlockKey, Vault};
+pub use vault::{Modified, NewVault, Rebuilt, UnlockKey, Vault};
 
 /// Check a typed recovery phrase against BIP-39 without attempting an unlock.
 ///

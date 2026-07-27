@@ -170,21 +170,22 @@ pub const SIZE_REPORT_LOWER_BOUND: &str = "at least";
 /// is a permanent property of a vault that a reader learns once, while this is a
 /// state that makes the headline figure wrong and that the operator can act on.
 ///
-/// The remedy named here is the one that was **observed to work**, which is not
-/// the one `dctl_core`'s own documentation promises.
-/// [`Vault::rebuild_index`](dctl_core::Vault::rebuild_index) says the sizes
-/// "populate on first read of each file"; they do not, in this build —
-/// `Vault::get_file` resolves and decrypts without writing anything back to the
-/// index, so `cat`, `hashsum` and `scrub` all leave the row exactly as unmeasured
-/// as they found it. Re-running the write does record it. Naming the read as a
-/// fix would send an operator to spend a full egress bill on a run that changes
-/// nothing, which is precisely the kind of confident wrong answer `PLAN.md` §6
-/// is about.
+/// The remedy named here is the one that was **observed to work**, and it has
+/// changed. It used to be "re-run the copy that produced the vault", because a
+/// rebuild wrote nothing but the mapping and no read ever filled the sizes in:
+/// `Vault::get_file` resolves and decrypts without writing back, so `cat`,
+/// `hashsum` and `scrub` all left the row exactly as unmeasured as they found it.
+/// [`Vault::rebuild_index`](dctl_core::Vault::rebuild_index) now describes each
+/// object from its own header, so a rebuild settles the sizes at the cost of one
+/// bounded read per object — far less than re-uploading the dataset, which is
+/// what the old advice amounted to. A row that is *still* unmeasured after a
+/// rebuild is an object the backend could not describe, and `dctl scrub` is what
+/// says which one.
 pub const SIZE_UNMEASURED_NOTE: &str = "some objects carry no recorded size, so this figure is a lower bound rather \
-     than a total. A rebuilt index lists object names without reading their \
-     bodies, and nothing in this build fills those sizes in on a read — only \
-     writing the file again does. Re-run the copy that produced the vault to \
-     settle them, or read the total as the bound it is.";
+     than a total. Run `dctl index rebuild` on the remote: it reads each object's \
+     own header and records the size, the modification time and the content hash. \
+     A row still unmeasured after that is an object whose header could not be read \
+     back at all — `dctl scrub` names it.";
 
 /// Name of the basis reported for a sealed vault's byte total.
 ///
@@ -1810,8 +1811,39 @@ pub const SCRUB_REPAIR_UNAVAILABLE_HINT: &str = "Per-object Reed-Solomon parity 
 /// Follows [`INTEGRITY_COLUMN_STATUS`]'s prefixing convention: the index verbs
 /// own their own columns, so a change here cannot disturb a listing's layout.
 pub const INDEX_COLUMN_FILES: &str = "Files";
+/// See [`INDEX_COLUMN_FILES`]. Rows that are mapped but not described, because
+/// their object could not be read back. Rendered even at zero, so that a reader
+/// who sees no such column knows they are looking at an older build rather than
+/// at a clean rebuild.
+pub const INDEX_COLUMN_UNMEASURED: &str = "Unmeasured";
 /// See [`INDEX_COLUMN_FILES`]. The index database the rebuild wrote to.
 pub const INDEX_COLUMN_INDEX: &str = "Index";
+
+/// Said before a rebuild starts, so nobody has to infer the cost from the clock.
+///
+/// A rebuild reads every name record **and** every object's own header. The
+/// second half is what makes the rows comparable, and it is also what makes the
+/// run roughly twice as many requests as the listing-only pass it replaces. An
+/// operator watching a large vault rebuild deserves to know that before they
+/// start wondering whether it has hung.
+pub const INDEX_REBUILD_NOTICE: &str = "a rebuild reads every name record and then each object's own header, which is a \
+     bounded read per object and never a read of its contents: the rows it writes \
+     carry the size, the modification time and the content hash the object was \
+     sealed with";
+
+/// Warning when a rebuild mapped a path whose object it could not describe.
+///
+/// There are exactly two causes and the message names both, because they call
+/// for different actions: an object missing at the provider is a durability
+/// incident, and an unparseable metadata schema is a version problem. The file is
+/// still listable and still readable in both cases, which is worth saying — the
+/// warning must not read as data loss when it is not.
+pub const INDEX_REBUILD_UNMEASURED_WARNING: &str = "object(s) are mapped but could not be described: their header could not be read \
+     back. Either the object a name record points at is not at the provider, or \
+     its metadata uses a schema this build does not parse. Those paths are still \
+     listed and still readable, but they carry no size, time or content hash, so \
+     `dctl check` cannot compare them and `dctl size` will under-report. Run \
+     `dctl scrub` against the remote to find out which of the two it is.";
 
 /// Column headers for the integrity family's text reports.
 ///
@@ -5186,19 +5218,37 @@ mod tests {
 
     #[test]
     fn the_unmeasured_note_names_the_remedy_that_actually_works() {
-        // `dctl_core`'s own documentation says these sizes "populate on first
-        // read of each file"; they do not in this build — `cat`, `hashsum` and a
-        // whole `scrub` all leave the row unmeasured, and only writing the file
-        // again records a size. Naming a read as the fix would send an operator
-        // to spend a full egress bill on a run that changes nothing.
-        assert!(SIZE_UNMEASURED_NOTE.contains("writing the file again"));
+        // The remedy has changed and the note has to change with it. It used to
+        // say "re-run the copy that produced the vault", because a rebuild wrote
+        // nothing but the mapping and no read ever filled the sizes in — which
+        // amounted to telling an operator to re-upload their dataset. A rebuild
+        // now reads each object's own header, so it is the cheap fix and the note
+        // must name it. Telling somebody to re-upload when a bounded read would
+        // do is the same class of confident wrong answer as the reverse.
+        assert!(SIZE_UNMEASURED_NOTE.contains("index rebuild"));
         assert!(
-            !SIZE_UNMEASURED_NOTE.contains("scrub"),
-            "a read does not settle them, so the note must not suggest one"
+            !SIZE_UNMEASURED_NOTE.contains("writing the file again"),
+            "re-uploading the dataset is no longer the remedy, and must not be advised"
         );
         // And the qualifier it explains has to be the one printed on the line.
         assert!(!SIZE_REPORT_LOWER_BOUND.is_empty());
         assert!(SIZE_REPORT_LABEL_UNMEASURED.ends_with(':'));
+    }
+
+    #[test]
+    fn the_rebuild_messages_state_the_cost_and_the_shortfall() {
+        // The notice has to say a header is read per object — that is what makes
+        // the run twice the requests, and an operator watching a large vault
+        // deserves the reason before they wonder whether it has hung.
+        assert!(INDEX_REBUILD_NOTICE.contains("header"));
+        // And the warning has to name both causes, because they call for
+        // completely different actions: a missing object is a durability
+        // incident, an unparseable schema is a version problem.
+        assert!(INDEX_REBUILD_UNMEASURED_WARNING.contains("not at the provider"));
+        assert!(INDEX_REBUILD_UNMEASURED_WARNING.contains("schema"));
+        // It must also say the files are still readable. A warning that reads as
+        // data loss when the bytes are fine is its own kind of misreport.
+        assert!(INDEX_REBUILD_UNMEASURED_WARNING.contains("still readable"));
     }
 
     #[test]

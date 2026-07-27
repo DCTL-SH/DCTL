@@ -471,13 +471,14 @@ impl MountState {
     /// The size to report for a child, establishing it if nobody has measured it.
     ///
     /// A directory has a constant apparent size and never reaches the source. A
-    /// file whose index row carries no size — the state
-    /// [`Vault::rebuild_index`](dctl_core::Vault::rebuild_index) leaves every row
-    /// in, because a rebuild is a list-only pass — is measured from the object's
-    /// own authenticated header, which is a bounded read and not a transfer of
-    /// the file. Reporting the absent size as zero instead would make every
-    /// reader see an empty file and exit successfully, which is `PLAN.md` §6's
-    /// misreport with a filesystem's authority behind it.
+    /// file whose index row carries no size — once the state
+    /// [`Vault::rebuild_index`](dctl_core::Vault::rebuild_index) left every row
+    /// in, and now only what it leaves for an object it could not read back — is
+    /// measured from the object's own authenticated header, which is a bounded
+    /// read and not a transfer of the file. Reporting the absent size as zero
+    /// instead would make every reader see an empty file and exit successfully,
+    /// which is `PLAN.md` §6's misreport with a filesystem's authority behind
+    /// it.
     async fn size_of(&self, kind: Kind, path: &str, recorded: Option<u64>) -> Result<u64> {
         match (kind, recorded) {
             (Kind::Directory, _) => Ok(0),

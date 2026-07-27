@@ -31,6 +31,7 @@ use crate::error::{CoreError, Result};
 
 pub use init::NewVault;
 pub use modified::Modified;
+pub use restore::Rebuilt;
 pub use unlock::UnlockKey;
 
 /// An unlocked vault over a storage backend.

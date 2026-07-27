@@ -10,6 +10,18 @@ use crate::error::{CryptoError, Result};
 #[derive(Clone, Debug)]
 pub struct Metadata {
     pub flags: u8,
+    /// The content's last-modified time in whole unix seconds, or `0` for
+    /// "not recorded".
+    ///
+    /// The sentinel is the field's original value and predates anything writing
+    /// to it, so every object sealed before that carries a zero here. Reading one
+    /// back as `1970-01-01T00:00:00Z` would put a fabricated timestamp on every
+    /// such object — the exact substitution `dctl_core::Modified::Unknown`
+    /// documents as worse than no answer, because the epoch makes every file look
+    /// older than every other file and inverts an `--update` comparison. So `0`
+    /// means absent, at the cost of mis-describing a file genuinely modified at
+    /// the epoch as undated. That file is re-transferred once; the alternative
+    /// mis-dates every object DCTL has ever written.
     pub mtime_unix: i64,
     pub birthtime_unix: i64,
     pub size: u64,
@@ -36,6 +48,40 @@ impl Metadata {
             path_hint: path_hint.into(),
             content_type: None,
             ext: Vec::new(),
+        }
+    }
+
+    /// Record the content's last-modified time, in whole unix seconds.
+    ///
+    /// `None` leaves the [`mtime_unix`](Self::mtime_unix) sentinel in place — see
+    /// that field for why zero means "not recorded" rather than "the epoch".
+    ///
+    /// This exists because the field was declared, sealed into every object and
+    /// never written to. The time lived only in the local index, so an index
+    /// rebuilt from the backend could recover a file's name, its bytes and its
+    /// hash but not the one fact that says when it was last changed — and a tree
+    /// restored from it read as entirely rewritten to anything that sorts or
+    /// syncs by date. Populating a field the §4 schema already reserves is not a
+    /// format change: the layout is unaltered and an older reader parses it
+    /// exactly as before.
+    #[must_use]
+    pub const fn with_mtime(mut self, unix: Option<i64>) -> Self {
+        if let Some(seconds) = unix {
+            self.mtime_unix = seconds;
+        }
+        self
+    }
+
+    /// Whether a modification time was recorded, and which.
+    ///
+    /// The reader's half of [`with_mtime`](Self::with_mtime): the sentinel comes
+    /// back as [`None`] rather than as a date in 1970.
+    #[must_use]
+    pub const fn recorded_mtime(&self) -> Option<i64> {
+        if self.mtime_unix == 0 {
+            None
+        } else {
+            Some(self.mtime_unix)
         }
     }
 
@@ -176,4 +222,46 @@ fn read_u64(b: &[u8]) -> Result<u64> {
         .try_into()
         .map_err(|_| CryptoError::Format("bad u64 field".into()))?;
     Ok(u64::from_le_bytes(arr))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_recorded_time_survives_the_round_trip_through_the_wire_bytes() {
+        // The field is positional and fixed-width, so an offset slip shows up
+        // here rather than as a vault full of files dated 1970.
+        let meta = Metadata::new("photos/a.jpg").with_mtime(Some(1_551_675_967));
+        let parsed = parse_metadata(&build_metadata(&meta).expect("builds")).expect("parses");
+        assert_eq!(parsed.recorded_mtime(), Some(1_551_675_967));
+    }
+
+    #[test]
+    fn an_object_that_recorded_no_time_reads_back_as_absent_not_as_the_epoch() {
+        // The whole reason `recorded_mtime` exists. Every object sealed before
+        // anything wrote this field carries `0`, and an index rebuilt from those
+        // objects would otherwise stamp the entire vault `1970-01-01T00:00:00Z` —
+        // a fabricated fact, which makes every file look older than every other
+        // file and inverts an `--update` comparison.
+        let never_set = Metadata::new("legacy.bin");
+        assert_eq!(never_set.mtime_unix, 0, "the sentinel is the default");
+        assert_eq!(never_set.recorded_mtime(), None);
+
+        // And `None` must leave the sentinel rather than write something over it.
+        assert_eq!(Metadata::new("f").with_mtime(None).recorded_mtime(), None);
+
+        let parsed = parse_metadata(&build_metadata(&never_set).expect("builds")).expect("parses");
+        assert_eq!(parsed.recorded_mtime(), None);
+    }
+
+    #[test]
+    fn a_time_before_the_epoch_is_recorded_rather_than_mistaken_for_absence() {
+        // A restored archive legitimately holds pre-1970 timestamps. Only the
+        // exact zero is the sentinel; a negative second is a real answer and must
+        // survive the signed round trip.
+        let meta = Metadata::new("archive/old.txt").with_mtime(Some(-86_400));
+        let parsed = parse_metadata(&build_metadata(&meta).expect("builds")).expect("parses");
+        assert_eq!(parsed.recorded_mtime(), Some(-86_400));
+    }
 }

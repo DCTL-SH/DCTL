@@ -333,7 +333,7 @@ sequenceDiagram
     participant New as New machine (empty)
     participant BE as Backend (ciphertext only)
     New->>New: dctl config import  (register the remotes)
-    New->>BE: dctl index rebuild vault:  (list-only, password only)
+    New->>BE: dctl index rebuild vault:  (headers only, password only)
     BE-->>New: decrypt n/* name records → path→object map
     New->>BE: dctl restore vault: /out  (stream + verify each object)
     BE-->>New: byte-exact plaintext
@@ -358,38 +358,39 @@ mkdir -p "$HOME/recovered"
 dctl config import local:/srv/vault --name vault
 ```
 
-**2. Rebuild the index — password only, no data downloaded.** This is a
-**list-only** pass: it lists and decrypts every `n/*` record and writes the
-authoritative mapping. It never fetches an object body, so it costs a listing,
-not a restore.
+**2. Rebuild the index — password only, no file bodies downloaded.** It lists and
+decrypts every `n/*` record for the authoritative mapping, then reads each
+object's **header** for the size, the modification time and the content hash it
+was sealed with. Both reads are bounded, so this costs a listing plus a few
+kilobytes per object — not a restore.
 
 ```console
 $ dctl index rebuild vault:
-warning: a rebuild is a list-only pass, so the rows it writes carry no size, no content hash and no modification time: files restored from a rebuilt index are byte-exact and carry the time of the restore
-Files  Index
------  ------------------------------------
-    3  /home/you/recovered/index.redb
+Files  Unmeasured  Index
+-----  ----------  ------------------------------------
+    3           0  /home/you/recovered/index.redb
 ```
 
 The **file count is the point** — compare it against what you expected the vault
 to hold. Zero means the scan ran and found nothing; fewer than last time is the
-signal that objects went missing at the provider.
+signal that objects went missing at the provider. `Unmeasured` counts the paths
+whose object could not be read back at all; when it is not zero the run warns and
+exits **6**.
 
-**3. List — the map is back.** Freshly rebuilt rows carry no size yet (a rebuild
-does not read bodies), so `ls` prints `-` rather than a misleading `0 B`:
+**3. List — the map is back, with its sizes and times.**
 
 ```console
 $ dctl ls vault:
-         - 2024/a.jpg
-         - README.md
-         - notes/café.txt
+   1.2 MiB 2024/a.jpg
+      28 B README.md
+      19 B notes/café.txt
 ```
 
-That `-` is honest: the index genuinely does not know the sizes. Everything that
-reads the object itself (`cat`, `restore`, `scrub`, `verify`) gets the right
-bytes regardless. **The sizes populate only when the file is next written** — a
-read does **not** settle them in this build (WIP), so to re-measure, re-run the
-copy that produced the vault.
+This listing is indistinguishable from one taken before the machine was lost,
+which is the whole point: `dctl check --checksum` against the original tree
+matches, and the next `dctl sync` transfers only what changed. An object the
+rebuild could not read back would print `-` instead — honest rather than a
+misleading `0 B` — and would be counted in `Unmeasured` above.
 
 **4. Restore, streamed and verified.** Every object is streamed into a temporary
 sibling of its destination and renamed into place **only after the whole object
@@ -549,12 +550,16 @@ configured remote in certain unfinished code paths — if an unlock fails with e
 
 ### `ls`/`size` show `-` or `null` after a disaster-recovery rebuild
 
-Expected. `dctl index rebuild` is a **list-only** pass and writes rows with no
-size or content hash; unmeasured rows render as `-` (text) / `null` (JSON), never
-a fake `0 B`. The bytes are fine — `cat`, `restore`, `verify`, `scrub` all read
-the object directly. Sizes populate only when a file is **written again** (a read
-does not settle them yet), so re-run the copy that produced the vault if you need
-the index to carry sizes.
+Not expected any more, and worth investigating. A rebuild reads each object's own
+header and records the size, the time and the content hash, so a row that is
+still unmeasured is one whose object could not be read back at all — the rebuild
+counts those under `Unmeasured` and exits **6** rather than reporting a clean
+run. Run `dctl scrub` on the remote to find out whether the object is missing at
+the provider or sealed with a metadata schema this build cannot parse.
+
+The rendering itself is correct either way: an unmeasured row prints `-` (text) /
+`null` (JSON), never a fake `0 B`, and the bytes are still fine — `cat`,
+`restore`, `verify` and `scrub` all read the object directly.
 
 ### `cat`/`scrub` says a file is `missing`, or an object was written elsewhere
 

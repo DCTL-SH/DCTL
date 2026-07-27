@@ -31,12 +31,20 @@ impl Vault {
         // ciphertext after the replacement is durable (never orphan a prior version).
         let previous = self.lookup_object_key(&path).await?;
 
+        // Resolved once, here, so the object's own metadata and the index record
+        // state the same time. `Modified::Now` reads the clock on resolution, and
+        // resolving it twice would seal one instant and index another.
+        let modified_unix = modified.resolve();
+
         // Seal into a self-describing DSF1 object (embeds its own root-wrapped DEK
         // + encrypted metadata). The backend key is the object's random file_id.
+        // The modification time goes *into the object*, not only into the index:
+        // the index is a cache, and a fact that lives only in a cache is a fact a
+        // rebuilt machine has lost.
         let obj = object::seal(
             self.root()?,
             data,
-            &Metadata::new(path.as_str()),
+            &Metadata::new(path.as_str()).with_mtime(modified_unix),
             self.chunk_size,
         )?;
         if obj.len() < 68 {
@@ -79,7 +87,7 @@ impl Vault {
             path: path.clone(),
             object_key: object_key.clone(),
             size: data.len() as u64,
-            modified_unix: modified.resolve(),
+            modified_unix,
             content_hash: ContentHash::blake3(data).bytes,
         };
         self.index.put(&record)?;

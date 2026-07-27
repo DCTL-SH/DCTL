@@ -142,8 +142,9 @@ disagree with the data.
 ### Sizes that were never measured
 
 `coverage.bytes` and each finding's size come from the index, which is where a
-vault's plaintext sizes live. Straight after `dctl index rebuild` those sizes are
-not known at all — the rebuild is a list-only pass by design.
+vault's plaintext sizes live. A row can still lack one: `dctl index rebuild`
+reads each object's header for the size, and an object it could not read back
+leaves the path mapped and unmeasured (the rebuild counts those and exits **6**).
 
 They are reported as **unknown**, not as zero. `coverage.bytes` becomes `null`,
 `coverage.unmeasured` counts the rows responsible, `coverage.measured_bytes`
@@ -153,9 +154,9 @@ forty-terabyte vault used to file itself as having read `"bytes": 0`, which is a
 false line in the one artefact whose entire value is being true.
 
 The objects are still read back in full and still graded, because the grade does
-not depend on knowing a length. Nothing in this build fills those sizes in on a
-read — `cat`, `hashsum` and `scrub` all leave the row as unmeasured as they found
-it. Only writing the file again records a size.
+not depend on knowing a length. A read does not fill the size in — `cat`,
+`hashsum` and `scrub` all leave the row as unmeasured as they found it — so the
+remedy is `dctl index rebuild`, which reads the header the size lives in.
 
 ### Damage is a finding, not an exit
 

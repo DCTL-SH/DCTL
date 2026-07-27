@@ -54,9 +54,9 @@ six above and adding a seventh is a compatibility change, guarded by a test.
   that produced it.
 * **`Size`** is the exact plaintext size in bytes — an integer, never a rounded
   human string. This is where arithmetic belongs; the text listings round on
-  purpose. It is **`null`** when the index recorded no size, which is the state
-  of every row straight after `dctl index rebuild` (a list-only pass that never
-  opens an object body). Null rather than `0`, for the same reason `ModTime` is
+  purpose. It is **`null`** when the index recorded no size — an object
+  `dctl index rebuild` could not read the header of, which that command counts
+  and exits **6** over. Null rather than `0`, for the same reason `ModTime` is
   null rather than the epoch: a consumer summing this field must be able to tell
   "this object is empty" from "nobody has weighed this object". A genuinely empty
   file reports `0`.
