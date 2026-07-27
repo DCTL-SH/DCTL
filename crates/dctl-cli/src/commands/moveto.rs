@@ -126,7 +126,14 @@ pub async fn run(ctx: &Ctx, args: &MovetoArgs) -> Result<()> {
         &reaper,
         &prepared.plan,
     )
-    .await
+    .await?;
+    report::outcome(
+        ctx,
+        TRANSFER_COMMAND_MOVETO,
+        &prepared.plan,
+        &prepared.source,
+        &prepared.dest,
+    )
 }
 
 #[cfg(test)]

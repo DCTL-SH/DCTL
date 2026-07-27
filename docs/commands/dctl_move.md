@@ -299,7 +299,7 @@ the full list. The ones that change what this command does:
 | `--verify <MODE>` | `checksum` (default) adds nothing to the verified write; `sample` and `strict` are identical today and re-read every uploaded object in full; all three do nothing on a filesystem destination. A failure at this stage is what keeps the source in place. See [copy](dctl_copy.md) for the detail. |
 | `--verify-samples <N>` | Parsed and **not consulted**: partial sampling does not exist yet. |
 | `--immutable` | **Honoured at plan time** for the destination: any `update` fails the run with exit **7** before anything moves, naming the paths. It does **not** protect the source — deleting it is what `move` means. Refused with `--no-traverse` (exit **1**). |
-| `--format`, `--json` | Render the plan as a table, one JSON document, or one JSON Lines record per action. |
+| `--format`, `--json` | Render as a table, one JSON document, or one JSON Lines record per action. Both JSON forms carry a `result` object on a **real** run — the executor's own counters, including `errors` — so what was attempted can be told from what was achieved. |
 | `--min-size`, `--max-size`, `--max-depth` | Honoured by the walk. A file excluded by a filter is not moved and not deleted. |
 | `--include`, `--exclude`, `--filter-from`, `--files-from` | **Honoured.** A file excluded by a rule is not moved and not deleted. A rule file that cannot be read or parsed is a usage error (exit **1**) naming the file and the line, never a run with the rules dropped. |
 | `--transfers`, `--bwlimit`, `--retries` | Parsed and **not consulted**. Files move one at a time, unshaped and unretried. |

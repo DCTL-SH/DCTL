@@ -137,13 +137,29 @@ mod tests {
     fn a_mistyped_word_is_rejected_rather_than_deriving_a_useless_key() {
         // Without the checksum this would derive *some* key and the caller would
         // be told their vault did not open, rather than that they had mistyped a
-        // word. `zoo` is a real BIP-39 word, so this is a checksum failure — the
-        // harder of the two to catch.
-        let phrase = generate_mnemonic().unwrap();
-        let mut words: Vec<&str> = phrase.split_whitespace().collect();
-        words[0] = "zoo";
-        let mangled = words.join(" ");
+        // word. Every word below is a real BIP-39 word, so this is a checksum
+        // failure — the harder of the two to catch.
+        //
+        // The phrase is a **fixed vector**, not a generated one, and that is the
+        // point rather than convenience. Generating a phrase and mangling one
+        // word made this test fail roughly once in every few hundred runs: a
+        // 24-word phrase carries an 8-bit checksum, so a mangled phrase passes it
+        // by chance about 1 in 256 times, and the substitute word can also
+        // happen to be the word it replaced. Both are the test failing for a
+        // reason that is not the defect it guards, in the one crate where a
+        // spurious red is most likely to be waved through.
+        //
+        // Derived from the canonical all-`abandon` BIP-39 vector, whose final
+        // word carries the checksum.
+        let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon abandon abandon abandon \
+                      abandon abandon abandon abandon abandon abandon abandon art";
+        validate_mnemonic(phrase).expect("the fixture itself must be a valid phrase");
 
+        // One word changed, to a different real word: the word list still
+        // accepts every token and only the checksum can reject it.
+        let mangled = phrase.replacen("abandon", "ability", 1);
+        assert_ne!(mangled, phrase, "the fixture must really differ");
         assert!(validate_mnemonic(&mangled).is_err());
         assert!(kek(&mangled).is_err());
     }

@@ -378,7 +378,7 @@ the full list. The ones that matter here:
 | `--verify-samples <N>` | Parsed and **not consulted**: partial sampling does not exist yet. |
 | `--min-size`, `--max-size`, `--max-depth` | Honoured, and applied to **both** listings. An excluded file is neither transferred nor deleted, so these narrow the deletion set rather than widening it. |
 | `--include`, `--exclude`, `--filter-from`, `--files-from` | **Honoured**, and applied to **both** listings, so an excluded file is neither transferred nor deleted. A rule file that cannot be read or parsed is a usage error (exit **1**) naming the file and the line — it is never dropped, because a dropped rule here deletes the files it was protecting. |
-| `--format`, `--json` | Render the plan as a table, one JSON document, or one JSON Lines record per action. |
+| `--format`, `--json` | Render as a table, one JSON document, or one JSON Lines record per action. Both JSON forms carry a `result` object on a **real** run — the executor's own counters, including `errors` — so what was attempted can be told from what was achieved. |
 | `--transfers`, `--bwlimit`, `--retries` | Parsed and **not consulted**. Files move one at a time, unshaped and unretried. |
 | `--immutable` | **Honoured at plan time**, and strictest here: any `update` *or* `delete` in the plan fails the run with exit **7** before anything moves, naming the paths. Only additions are allowed. |
 | `-q`, `--quiet` | Suppresses the summary and the shape line. The mass-deletion warning is a warning, not commentary; errors are always printed. |

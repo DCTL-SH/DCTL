@@ -104,7 +104,19 @@ pub async fn run(ctx: &Ctx, args: &CopyArgs) -> Result<()> {
     execute::account_for_skips(ctx, &prepared.plan);
     let engine =
         Engine::connect(ctx, TRANSFER_COMMAND_COPY, &prepared.source, &prepared.dest).await?;
-    execute::transfers(ctx, TRANSFER_COMMAND_COPY, &engine, &prepared.plan).await
+    execute::transfers(ctx, TRANSFER_COMMAND_COPY, &engine, &prepared.plan).await?;
+
+    // The result document, on a real run. `--json` had no output at all here:
+    // the plan was rendered only under `--dry-run`, and the stderr statistics
+    // block is suppressed in the JSON formats, so a CI job piping this to a file
+    // got zero bytes on every run — including the ones where files failed.
+    report::outcome(
+        ctx,
+        TRANSFER_COMMAND_COPY,
+        &prepared.plan,
+        &prepared.source,
+        &prepared.dest,
+    )
 }
 
 #[cfg(test)]

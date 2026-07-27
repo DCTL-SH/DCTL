@@ -104,7 +104,14 @@ pub async fn run(ctx: &Ctx, args: &CopytoArgs) -> Result<()> {
         &prepared.dest,
     )
     .await?;
-    execute::transfers(ctx, TRANSFER_COMMAND_COPYTO, &engine, &prepared.plan).await
+    execute::transfers(ctx, TRANSFER_COMMAND_COPYTO, &engine, &prepared.plan).await?;
+    report::outcome(
+        ctx,
+        TRANSFER_COMMAND_COPYTO,
+        &prepared.plan,
+        &prepared.source,
+        &prepared.dest,
+    )
 }
 
 #[cfg(test)]

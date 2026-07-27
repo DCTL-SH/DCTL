@@ -285,7 +285,7 @@ the full list. The ones that change what this command does:
 | `--verify-samples <N>` | Parsed and **not consulted**: partial sampling does not exist yet. |
 | `--password`, `--password-command`, `--password-file`, `--no-ask-password` | How the vault password is acquired, once, before the transfer. Only a vault destination needs one; nothing available exits **22**. |
 | `--index <PATH>` | The index database the vault commit is written to. |
-| `--format`, `--json` | Render the plan as a table, one JSON document, or one JSON Lines record per action. |
+| `--format`, `--json` | Render as a table, one JSON document, or one JSON Lines record per action. Both JSON forms carry a `result` object on a **real** run — the executor's own counters, including `errors` — so what was attempted can be told from what was achieved. |
 | `--min-size`, `--max-size` | Honoured. If they exclude the single named file, that is a usage error rather than a silent no-op. |
 | `--max-depth` | Honoured for a directory source. |
 | `--include`, `--exclude`, `--filter-from`, `--files-from` | **Honoured.** A rule file that cannot be read or parsed is a usage error (exit **1**) naming the file and the line, never a run with the rules dropped. |

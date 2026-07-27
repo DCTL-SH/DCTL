@@ -11,6 +11,21 @@
 //! bury the three deletions the reader is actually there to check. The skipped
 //! count is reported in the summary instead, so nothing is hidden — only
 //! summarised.
+//!
+//! ## A real run emits a document too
+//!
+//! The paragraph above used to be true only of `--dry-run`. [`render`] was
+//! called inside `if ctx.is_dry_run()` and nowhere else, so a real transfer
+//! rendered nothing in any format — and because the end-of-run statistics block
+//! is suppressed in the JSON formats, `dctl --json copy src dst` produced
+//! **zero bytes on both streams** while `dctl --dry-run --json copy src dst`
+//! produced a full document. With a per-file failure the JSON channel was still
+//! empty while the process exited 6.
+//!
+//! [`outcome`] closes that. It emits the same plan plus a `result` object built
+//! from the executor's own counters, so a consumer can tell what was attempted
+//! from what was achieved. Text is unchanged: it already has per-file lines and
+//! a statistics block on the two streams they belong on.
 
 use serde::Serialize;
 
@@ -45,8 +60,42 @@ struct Document<'a> {
     dry_run: bool,
     /// Aggregate counts.
     summary: Summary,
-    /// One record per action.
+    /// One record per action **the run set out to perform**.
+    ///
+    /// On a dry run that is the whole document. On a real run it is still the
+    /// plan — an entry here is not a claim that that entry succeeded — and
+    /// [`Document::result`] is what says how the run ended.
     actions: Vec<ActionRecord<'a>>,
+    /// What the run actually achieved. Absent on a dry run, which achieved
+    /// nothing by design.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    result: Option<RunResult>,
+}
+
+/// The measured outcome of a real run.
+///
+/// Every field is a **counter the executor incremented**, never a figure derived
+/// from the plan: `files` counts files whose durable commit returned, and
+/// `errors` counts the ones that failed. A consumer that wants to know whether a
+/// run was clean reads `errors` and `checksum_mismatches`, not the length of
+/// `actions`.
+#[derive(Debug, Serialize)]
+struct RunResult {
+    /// Files whose durable commit returned. Never the plan's count.
+    files: u64,
+    /// Bytes the upload stage measured going past.
+    bytes: u64,
+    /// Files removed at the destination (`sync`) or the source (`move`).
+    deleted: u64,
+    /// Files proven identical and therefore not transferred.
+    skipped: u64,
+    /// Per-file failures. **Non-zero means the run did not do everything the
+    /// `actions` list describes.**
+    errors: u64,
+    /// Failures where the destination stored something other than what was
+    /// sent. Counted apart from `errors` because exit code 20 exists so a script
+    /// can tell that apart from a timeout.
+    checksum_mismatches: u64,
 }
 
 /// One action, as a machine reads it.
@@ -88,10 +137,76 @@ pub fn render(
     source: &RemoteSpec,
     dest: &RemoteSpec,
 ) -> Result<()> {
+    render_with(ctx, command, plan, source, dest, None)
+}
+
+/// Print what a **real** run did, on stdout, in the active format.
+///
+/// ## The hole this closes
+///
+/// `render` was called only inside `if ctx.is_dry_run()`. A real run therefore
+/// rendered no document in any format — and under `--json` the stderr statistics
+/// block is suppressed too, so the whole output was nothing at all:
+///
+/// ```text
+/// $ dctl --json copy src dst | wc -c
+/// 0
+/// $ dctl --dry-run --json copy src dst | wc -c
+/// 427
+/// ```
+///
+/// With a real per-file failure the JSON channel was *still* empty while the
+/// process exited 6. A CI job running `dctl --json sync /srv/data backup: >
+/// run.json` and then reading `run.json` to record what moved got an empty file
+/// on every run, including the ones where files failed.
+///
+/// Text is deliberately unchanged: its per-file lines and its end-of-run
+/// statistics block are already on the two streams they belong on, and printing
+/// the plan table again after the work would be noise. The JSON formats have no
+/// such block, which is exactly why they had nothing.
+///
+/// # Errors
+/// As [`render`].
+pub fn outcome(
+    ctx: &Ctx,
+    command: &str,
+    plan: &Plan,
+    source: &RemoteSpec,
+    dest: &RemoteSpec,
+) -> Result<()> {
+    if ctx.out.format() == Format::Text {
+        return Ok(());
+    }
+    let stats = ctx.stats.snapshot();
+    render_with(
+        ctx,
+        command,
+        plan,
+        source,
+        dest,
+        Some(RunResult {
+            files: stats.files_done,
+            bytes: stats.bytes_transferred,
+            deleted: stats.files_deleted,
+            skipped: stats.files_skipped,
+            errors: stats.errors,
+            checksum_mismatches: stats.checksum_mismatches,
+        }),
+    )
+}
+
+fn render_with(
+    ctx: &Ctx,
+    command: &str,
+    plan: &Plan,
+    source: &RemoteSpec,
+    dest: &RemoteSpec,
+    result: Option<RunResult>,
+) -> Result<()> {
     match ctx.out.format() {
         Format::Text => render_text(ctx, plan),
-        Format::Json => render_json(ctx, command, plan, source, dest),
-        Format::JsonLines => render_json_lines(ctx, plan),
+        Format::Json => render_json(ctx, command, plan, source, dest, result),
+        Format::JsonLines => render_json_lines(ctx, plan, result),
     }
 }
 
@@ -125,6 +240,7 @@ fn render_json(
     plan: &Plan,
     source: &RemoteSpec,
     dest: &RemoteSpec,
+    result: Option<RunResult>,
 ) -> Result<()> {
     let document = Document {
         command,
@@ -133,6 +249,7 @@ fn render_json(
         dry_run: ctx.is_dry_run(),
         summary: plan.summary(),
         actions: plan.actions().map(ActionRecord::of).collect(),
+        result,
     };
     ctx.out.json(&document)?;
     Ok(())
@@ -143,9 +260,15 @@ fn render_json(
 /// No wrapping document: the newline is the record separator, so a consumer can
 /// read, parse and drop one action at a time and stay flat in memory on a plan
 /// far larger than RAM.
-fn render_json_lines(ctx: &Ctx, plan: &Plan) -> Result<()> {
+fn render_json_lines(ctx: &Ctx, plan: &Plan, result: Option<RunResult>) -> Result<()> {
     for entry in plan.actions() {
         ctx.out.json(&ActionRecord::of(entry))?;
+    }
+    // Last, and only on a real run: a consumer streaming this format reads
+    // records until the stream ends, so the summary has to be the final one or
+    // it would arrive before the records it summarises.
+    if let Some(result) = result {
+        ctx.out.json(&result)?;
     }
     Ok(())
 }
@@ -254,12 +377,50 @@ mod tests {
             dry_run: true,
             summary: plan.summary(),
             actions: plan.actions().map(ActionRecord::of).collect(),
+            result: None,
         };
         let json = serde_json::to_string(&document).unwrap();
         assert!(json.contains("/srv/src"), "{json}");
         assert!(json.contains("vault:dst"), "{json}");
         assert!(json.contains("\"delete\""), "{json}");
         assert!(json.contains("\"dry_run\":true"), "{json}");
+        // A rehearsal achieved nothing, so it claims nothing: the key is absent
+        // rather than present with zeros, which a consumer could read as "the
+        // run moved no files" instead of "no run happened".
+        assert!(!json.contains("result"), "{json}");
+    }
+
+    #[test]
+    fn a_real_run_carries_measured_counters_beside_the_plan() {
+        // The hole this closes: `--json` on a real transfer emitted **zero
+        // bytes**, because the plan was rendered only under `--dry-run` and the
+        // stderr statistics block is suppressed in the JSON formats. A CI job
+        // reading the file it redirected got nothing, on every run, including
+        // the ones where files failed.
+        let plan = sample_plan();
+        let (source, dest) = endpoints();
+        let document = Document {
+            command: "sync",
+            source: source.to_string(),
+            destination: dest.to_string(),
+            dry_run: false,
+            summary: plan.summary(),
+            actions: plan.actions().map(ActionRecord::of).collect(),
+            result: Some(RunResult {
+                files: 2,
+                bytes: 4096,
+                deleted: 1,
+                skipped: 7,
+                errors: 1,
+                checksum_mismatches: 0,
+            }),
+        };
+        let json = serde_json::to_string(&document).unwrap();
+        assert!(json.contains("\"dry_run\":false"), "{json}");
+        assert!(json.contains("\"files\":2"), "{json}");
+        assert!(json.contains("\"bytes\":4096"), "{json}");
+        // The field that stops `actions` being read as a list of successes.
+        assert!(json.contains("\"errors\":1"), "{json}");
     }
 
     #[test]

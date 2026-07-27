@@ -712,7 +712,7 @@ the full list. The ones that change what this command does:
 | `-n`, `--dry-run` | Print the plan and change nothing. Complete and trustworthy today. |
 | `--password`, `--password-command`, `--password-file`, `--no-ask-password` | How the vault password is acquired, once, before the first file. Only a vault destination needs one. Nothing available exits **22**. |
 | `--index <PATH>` | The index database the vault commit is written to. Defaults to the platform data directory. |
-| `--format`, `--json` | Render the plan as a table, one JSON document, or one JSON Lines record per action. |
+| `--format`, `--json` | Render as a table, one JSON document, or one JSON Lines record per action. Both JSON forms carry a `result` object on a **real** run — the executor's own counters, including `errors` — so what was attempted can be told from what was achieved. |
 | `--min-size`, `--max-size`, `--max-depth` | Honoured by the walk, and applied to both listings. An unsatisfiable size range is a usage error rather than a silent transfer of nothing. |
 | `--include`, `--exclude`, `--filter-from`, `--files-from` | **Honoured**, and applied to the walk before anything is transferred. A rule file that cannot be read or parsed is a usage error (exit **1**) naming the file and the line, never a run with the rules dropped. |
 | `-P`, `--progress`, `--stats` | Per-file bars showing the real pipeline stage — a row at `verify` has been written but is not yet counted as stored. |

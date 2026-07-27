@@ -124,7 +124,14 @@ pub async fn run(ctx: &Ctx, args: &SyncArgs) -> Result<()> {
     )
     .await?;
 
-    execute::run(ctx, &engine, &reaper, &prepared.plan, mode).await
+    execute::run(ctx, &engine, &reaper, &prepared.plan, mode).await?;
+    report::outcome(
+        ctx,
+        plan::COMMAND,
+        &prepared.plan,
+        &prepared.source,
+        &prepared.dest,
+    )
 }
 
 #[cfg(test)]

@@ -132,7 +132,14 @@ pub async fn run(ctx: &Ctx, args: &MoveArgs) -> Result<()> {
     )
     .await?;
 
-    execute::moves(ctx, TRANSFER_COMMAND_MOVE, &engine, &reaper, &prepared.plan).await
+    execute::moves(ctx, TRANSFER_COMMAND_MOVE, &engine, &reaper, &prepared.plan).await?;
+    report::outcome(
+        ctx,
+        TRANSFER_COMMAND_MOVE,
+        &prepared.plan,
+        &prepared.source,
+        &prepared.dest,
+    )
 }
 
 #[cfg(test)]

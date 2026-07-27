@@ -2832,3 +2832,78 @@ fn no_command_reports_zero_for_a_volume_that_is_not_mounted() {
         );
     }
 }
+
+#[test]
+fn json_on_a_real_transfer_is_a_document_and_not_zero_bytes() {
+    // `dctl --json copy src dst | wc -c` printed **0**, on every real run. The
+    // plan was rendered only under `--dry-run`, and the stderr statistics block
+    // is suppressed in the JSON formats, so there was no output at all — while
+    // `--dry-run --json` on the same command produced 427 bytes.
+    //
+    // A CI job running `dctl --json sync /srv/data backup: > run.json` and then
+    // reading `run.json` to record what moved got an empty file every time,
+    // including the runs where files failed.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", b"aaaa");
+    sandbox.write("src/b.txt", b"bb");
+
+    let assert = sandbox
+        .dctl()
+        .args(["--json", "copy", "src", "dst"])
+        .assert()
+        .success();
+    let document = json(&assert.get_output().stdout);
+
+    assert_eq!(document["command"], "copy");
+    assert_eq!(document["dry_run"], false);
+    // The counters are the executor's, not the plan's: `files` is files whose
+    // durable commit returned.
+    assert_eq!(document["result"]["files"], 2);
+    assert_eq!(document["result"]["bytes"], 6);
+    assert_eq!(document["result"]["errors"], 0);
+    assert_eq!(
+        document["actions"].as_array().map(Vec::len),
+        Some(2),
+        "the plan is still there: {document}"
+    );
+
+    // And the bytes really moved, which is the only assertion that cannot be
+    // faked by a counter.
+    assert_eq!(sandbox.read("dst/a.txt"), b"aaaa");
+
+    // A dry run still claims nothing: the key is absent rather than zeroed.
+    let rehearsal = sandbox
+        .dctl()
+        .args(["--json", "--dry-run", "copy", "src", "dst2"])
+        .assert()
+        .success();
+    let planned = json(&rehearsal.get_output().stdout);
+    assert_eq!(planned["dry_run"], true);
+    assert!(planned["result"].is_null(), "{planned}");
+    assert!(!sandbox.exists("dst2"));
+}
+
+#[test]
+fn json_on_a_transfer_with_a_failure_still_reports_what_happened() {
+    // The worse half of the same defect: with a real per-file failure the JSON
+    // channel was *still* empty while the process exited 6, so the one run a
+    // consumer most needs a record of produced no record at all.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/ok.txt", b"fine");
+    sandbox.write("src/blocked.txt", b"nope");
+    // A directory where the destination file has to go, so that one entry fails
+    // and the other succeeds.
+    sandbox.dir("dst/blocked.txt");
+
+    let assert = sandbox
+        .dctl()
+        .args(["--json", "copy", "src", "dst"])
+        // 6 = partial_failure (docs/EXIT_CODES.md).
+        .assert()
+        .code(6);
+    let document = json(&assert.get_output().stdout);
+
+    assert_eq!(document["result"]["errors"], 1);
+    assert_eq!(document["result"]["files"], 1);
+    assert_eq!(sandbox.read("dst/ok.txt"), b"fine");
+}
