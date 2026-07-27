@@ -35,7 +35,7 @@ use super::SyncArgs;
 /// # Errors
 /// Usage errors from the specs, from the argument shapes `sync` refuses, and
 /// from the empty-source guard; enumeration failures from either side.
-pub fn compute(ctx: &Ctx, args: &SyncArgs) -> Result<transfer::Prepared> {
+pub async fn compute(ctx: &Ctx, args: &SyncArgs) -> Result<transfer::Prepared> {
     let request = prepare::Request {
         globals: &ctx.globals,
         source_spec: &args.source,
@@ -50,7 +50,7 @@ pub fn compute(ctx: &Ctx, args: &SyncArgs) -> Result<transfer::Prepared> {
         delete_extras: true,
     };
 
-    let prepared = prepare::directory_transfer(ctx, &request)?;
+    let prepared = prepare::directory_transfer(ctx, &request).await?;
     guard_empty_source(ctx, &prepared)?;
     Ok(prepared)
 }
@@ -124,11 +124,11 @@ mod tests {
         (dir, source, dest)
     }
 
-    #[test]
-    fn a_sync_plan_names_every_deletion() {
+    #[tokio::test]
+    async fn a_sync_plan_names_every_deletion() {
         let (_dir, source, dest) = fixture();
         let ctx = ctx(&["--size-only"]);
-        let prepared = compute(&ctx, &args(&source, &dest)).unwrap();
+        let prepared = compute(&ctx, &args(&source, &dest)).await.unwrap();
 
         let mut deleted: Vec<&str> = prepared
             .plan
@@ -140,14 +140,14 @@ mod tests {
         assert_eq!(prepared.plan.count(Op::Skip), 1, "keep.txt is identical");
     }
 
-    #[test]
-    fn the_plan_is_computable_without_executing_anything() {
+    #[tokio::test]
+    async fn the_plan_is_computable_without_executing_anything() {
         // The property the whole design rests on: `--dry-run` shows the truth
         // because there is no second traversal that decides while it acts.
         let (dir, source, dest) = fixture();
         let ctx = ctx(&["--size-only"]);
-        let first = compute(&ctx, &args(&source, &dest)).unwrap();
-        let second = compute(&ctx, &args(&source, &dest)).unwrap();
+        let first = compute(&ctx, &args(&source, &dest)).await.unwrap();
+        let second = compute(&ctx, &args(&source, &dest)).await.unwrap();
 
         assert_eq!(first.plan.entries, second.plan.entries, "not deterministic");
         // Nothing moved.
@@ -155,8 +155,8 @@ mod tests {
         assert!(dir.path().join("dst/old/deep.txt").exists());
     }
 
-    #[test]
-    fn an_empty_source_is_refused_rather_than_emptying_the_destination() {
+    #[tokio::test]
+    async fn an_empty_source_is_refused_rather_than_emptying_the_destination() {
         // The unmounted-volume case. This guard is the difference between a
         // typo and a restore.
         let dir = tempfile::tempdir().unwrap();
@@ -166,13 +166,13 @@ mod tests {
         let dest = dir.path().join("dst").to_string_lossy().into_owned();
 
         let ctx = ctx(&[]);
-        let error = compute(&ctx, &args(&source, &dest)).unwrap_err();
+        let error = compute(&ctx, &args(&source, &dest)).await.unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
         assert!(error.hint().is_some_and(|hint| hint.contains("--force")));
     }
 
-    #[test]
-    fn force_allows_a_deliberate_emptying() {
+    #[tokio::test]
+    async fn force_allows_a_deliberate_emptying() {
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("empty")).unwrap();
         write(&dir.path().join("dst/precious.txt"), 100);
@@ -180,12 +180,12 @@ mod tests {
         let dest = dir.path().join("dst").to_string_lossy().into_owned();
 
         let ctx = ctx(&["--force"]);
-        let prepared = compute(&ctx, &args(&source, &dest)).unwrap();
+        let prepared = compute(&ctx, &args(&source, &dest)).await.unwrap();
         assert_eq!(prepared.plan.deletions().count(), 1);
     }
 
-    #[test]
-    fn an_empty_source_and_an_empty_destination_is_simply_a_no_op() {
+    #[tokio::test]
+    async fn an_empty_source_and_an_empty_destination_is_simply_a_no_op() {
         // Nothing to delete means nothing to guard against.
         let dir = tempfile::tempdir().unwrap();
         fs::create_dir_all(dir.path().join("a")).unwrap();
@@ -194,12 +194,12 @@ mod tests {
         let dest = dir.path().join("b").to_string_lossy().into_owned();
 
         let ctx = ctx(&[]);
-        let prepared = compute(&ctx, &args(&source, &dest)).unwrap();
+        let prepared = compute(&ctx, &args(&source, &dest)).await.unwrap();
         assert!(prepared.plan.is_noop());
     }
 
-    #[test]
-    fn syncing_a_tree_that_only_gained_files_deletes_nothing() {
+    #[tokio::test]
+    async fn syncing_a_tree_that_only_gained_files_deletes_nothing() {
         let dir = tempfile::tempdir().unwrap();
         write(&dir.path().join("src/a.txt"), 1);
         write(&dir.path().join("src/b.txt"), 2);
@@ -208,7 +208,7 @@ mod tests {
         let dest = dir.path().join("dst").to_string_lossy().into_owned();
 
         let ctx = ctx(&["--size-only"]);
-        let prepared = compute(&ctx, &args(&source, &dest)).unwrap();
+        let prepared = compute(&ctx, &args(&source, &dest)).await.unwrap();
         assert!(!prepared.plan.destroys_anything());
         assert_eq!(prepared.plan.count(Op::Copy), 1);
     }

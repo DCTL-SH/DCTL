@@ -17,13 +17,15 @@
 //! still exist tomorrow morning, and re-creating a directory that a cleanup
 //! removed overnight is a race nobody needs.
 //!
-//! ## What runs today
+//! ## What it can and cannot sweep
 //!
-//! Argument parsing, target resolution, the destructive gate and the
-//! `--dry-run` plan. The sweep needs recursive directory enumeration, which the
-//! vault does not expose — and [`Ctx`] carries no vault handle to ask — so the
-//! command fails with a real exit code rather than reporting removals that
-//! never happened. See [`super::removal::engine`].
+//! A directory with no objects in it is not stored anywhere, so the only empty
+//! directories that *exist* to be removed are the ones somebody declared with
+//! `dctl mkdir` — the sweep removes their markers. A directory that existed only
+//! because a file sat in it has already ceased to exist by the time the file is
+//! gone, and is not counted as a removal, because none happened. Inventing one
+//! so the numbers looked like a filesystem's is exactly the misreport `PLAN.md`
+//! §6 forbids. See [`super::removal::dirs`].
 
 use clap::Args;
 
@@ -34,13 +36,10 @@ use crate::ctx::Ctx;
 use crate::error::Result;
 use serde::Serialize;
 
-use super::removal::{PlanOptions, Removal, Row, Target, execute, yes_no};
+use super::removal::{Operation, PlanOptions, Removal, Row, Target, execute, yes_no};
 
 /// Stable command name. Must match `Command::name()` in `cli/mod.rs`.
 const COMMAND: &str = "rmdirs";
-
-/// The engine capability this command is waiting on.
-const CAPABILITY: &str = "walking a vault's directories to find the empty ones";
 
 /// `dctl rmdirs REMOTE:PATH`
 #[derive(Args, Debug)]
@@ -70,8 +69,10 @@ impl PlanOptions for RmdirsOptions {
 ///
 /// # Errors
 /// [`crate::exit::ExitCode::Usage`] for a malformed target;
-/// [`crate::exit::ExitCode::Cancelled`] if the user declines; otherwise the
-/// unimplemented refusal described above.
+/// [`crate::exit::ExitCode::Cancelled`] if the user declines; whatever opening
+/// the remote reported. A directory that could not be removed is reported and
+/// counted rather than returned, so the sweep finishes and the process exits
+/// [`crate::exit::ExitCode::PartialFailure`].
 pub async fn run(ctx: &Ctx, args: &RmdirsArgs) -> Result<()> {
     let target = Target::parse(&args.path)?;
 
@@ -88,10 +89,12 @@ pub async fn run(ctx: &Ctx, args: &RmdirsArgs) -> Result<()> {
         options: RmdirsOptions {
             leave_root: args.leave_root,
         },
-        capability: CAPABILITY,
+        operation: Operation::Rmdirs {
+            leave_root: args.leave_root,
+        },
     };
 
-    execute(ctx, &removal)
+    execute(ctx, &removal).await
 }
 
 #[cfg(test)]
@@ -131,11 +134,13 @@ mod tests {
     #[tokio::test]
     async fn the_whole_vault_may_be_swept() {
         // Unlike `rmdir`, the root is a legal region: nothing that holds an
-        // object is touched, so there is no blast radius to guard.
-        let error = run_with(&["vault:", "--dry-run", "--quiet"])
+        // object is touched, so there is no blast radius to guard. The run
+        // reaches the store and fails there rather than on a usage rule.
+        let error = run_with(&["vault:", "--dry-run", "--quiet", "--no-ask-password"])
             .await
             .unwrap_err();
         assert_eq!(error.code(), ExitCode::FatalError);
+        assert!(error.message().contains("vault"), "{}", error.message());
     }
 
     #[tokio::test]
@@ -145,28 +150,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dry_run_never_reports_a_sweep() {
-        let error = run_with(&["vault:photos", "--dry-run", "--quiet"])
+    async fn a_dry_run_reaches_the_engine_rather_than_being_cancelled() {
+        let error = run_with(&["vault:photos", "--dry-run", "--quiet", "--no-ask-password"])
             .await
             .unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
-    }
-
-    #[tokio::test]
-    async fn a_real_run_never_reports_a_sweep_either() {
-        let error = run_with(&["vault:photos", "--force", "--quiet"])
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
-    }
-
-    #[tokio::test]
-    async fn every_output_format_is_supported() {
-        for format in [vec!["--json"], vec!["--format", "json-lines"], vec![]] {
-            let mut args = vec!["vault:photos", "--dry-run", "--quiet"];
-            args.extend(format.iter().copied());
-            assert!(run_with(&args).await.is_err(), "{format:?}");
-        }
+        assert_ne!(error.code(), ExitCode::Cancelled);
     }
 
     #[test]

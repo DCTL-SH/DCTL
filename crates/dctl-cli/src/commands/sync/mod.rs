@@ -83,7 +83,7 @@ pub async fn run(ctx: &Ctx, args: &SyncArgs) -> Result<()> {
     // fails as a usage error rather than after a full enumeration of both sides.
     let mode = args.delete.mode()?;
 
-    let prepared = plan::compute(ctx, args)?;
+    let prepared = plan::compute(ctx, args).await?;
     report::announce(ctx, &prepared.plan, prepared.dest_file_count);
 
     if ctx.is_dry_run() {
@@ -220,7 +220,9 @@ mod tests {
         let (dir, source, dest) = fixture();
         let ctx = ctx(&["--dry-run", "--size-only"]);
 
-        let prepared = plan::compute(&ctx, &args(&source, &dest, &[])).unwrap();
+        let prepared = plan::compute(&ctx, &args(&source, &dest, &[]))
+            .await
+            .unwrap();
         assert_eq!(prepared.plan.count(Op::Delete), 1);
 
         run(&ctx, &args(&source, &dest, &[])).await.unwrap();
@@ -341,14 +343,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_pattern_filter_is_refused_rather_than_ignored() {
-        // The data-loss case: an ignored --exclude makes sync delete exactly the
-        // files the rule was protecting.
+    async fn an_excluded_destination_file_is_protected_rather_than_deleted() {
+        // The data-loss case this whole family worries about, now that the
+        // filters are honoured rather than refused: an `--exclude` hides a file
+        // from *both* listings, so `sync` must not then see the destination copy
+        // as an extra and delete it. A rule that only reached the source would
+        // do exactly that, silently, on a real run.
         let (dir, source, dest) = fixture();
-        let ctx = ctx(&["--exclude", "stale.*", "--dry-run"]);
-        let error = run(&ctx, &args(&source, &dest, &[])).await.unwrap_err();
+        let ctx = ctx(&["--exclude", "stale.*", "--force"]);
+        run(&ctx, &args(&source, &dest, &[])).await.unwrap();
 
-        assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(dir.path().join("dst/stale.txt").exists());
+        assert!(
+            dir.path().join("dst/stale.txt").exists(),
+            "the excluded file must survive the sync"
+        );
+        assert_eq!(ctx.stats.snapshot().files_deleted, 0);
+    }
+
+    #[tokio::test]
+    async fn a_sync_without_the_exclusion_still_removes_the_extra() {
+        // The control for the test above: without the rule the same file *is*
+        // an extra, and `sync` deletes it. Asserting only the protection would
+        // pass just as well against a filter that removed every deletion.
+        let (dir, source, dest) = fixture();
+        let ctx = ctx(&["--force"]);
+        run(&ctx, &args(&source, &dest, &[])).await.unwrap();
+
+        assert!(!dir.path().join("dst/stale.txt").exists());
+        assert_eq!(ctx.stats.snapshot().files_deleted, 1);
     }
 }

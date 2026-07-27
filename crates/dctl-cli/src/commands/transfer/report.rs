@@ -58,8 +58,8 @@ struct ActionRecord<'a> {
     source: &'a str,
     /// Path at the destination.
     dest: &'a str,
-    /// Bytes moved, or freed by a delete.
-    size: u64,
+    /// Bytes moved, or freed by a delete; `null` when the side reported no size.
+    size: Option<u64>,
     /// Stable slug explaining the decision.
     reason: &'a str,
 }
@@ -107,7 +107,7 @@ fn render_text(ctx: &Ctx, plan: &Plan) -> Result<()> {
     for entry in plan.actions() {
         table.push(vec![
             entry.action.slug().to_string(),
-            size::bytes(entry.size, ctx.out.units()),
+            size::bytes_or_unknown(entry.size, ctx.out.units()),
             entry.display_path(),
         ]);
     }
@@ -164,7 +164,7 @@ pub fn announce(ctx: &Ctx, plan: &Plan, dest_file_count: usize) {
         summary.update,
         summary.delete,
         summary.skip,
-        size::bytes(summary.bytes, ctx.out.units()),
+        size::bytes_or_unknown(summary.bytes, ctx.out.units()),
     ));
 
     if is_mass_deletion(summary.delete, dest_file_count) {

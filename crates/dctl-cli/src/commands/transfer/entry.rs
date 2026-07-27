@@ -34,8 +34,17 @@ pub enum Kind {
 pub struct Entry {
     /// Logical path relative to the transfer root.
     pub path: String,
-    /// Size in bytes. Always zero for [`Kind::EmptyDir`].
-    pub size: u64,
+    /// Size in bytes, when the side reported one. Always `Some(0)` for
+    /// [`Kind::EmptyDir`].
+    ///
+    /// Absent only for a remote object whose index row was never measured — a
+    /// vault rebuilt from object headers (see
+    /// [`crate::source::Entry::size`]). Kept as an [`Option`] for exactly the
+    /// reason `modified` is: "unknown" and "zero" must not compare equal, or a
+    /// size comparison against a rebuilt vault would report every real file as
+    /// matching a zero-byte local one and skip it. [`super::compare`] treats the
+    /// absence as "not comparable" and transfers.
+    pub size: Option<u64>,
     /// Modification time, when the side can report one.
     ///
     /// Optional rather than defaulted, because "unknown" and "the epoch" must
@@ -59,7 +68,24 @@ impl Entry {
     pub fn file(path: impl Into<String>, size: u64) -> Self {
         Self {
             path: path.into(),
-            size,
+            size: Some(size),
+            modified: None,
+            hash: None,
+            kind: Kind::File,
+        }
+    }
+
+    /// A file entry whose size the side could not report.
+    ///
+    /// Named rather than spelled `file(path, 0)`, because those are the two
+    /// facts this whole type distinction exists to keep apart. Reached only from
+    /// [`super::listing`], for an object enumerated out of an unmeasured vault
+    /// index row.
+    #[must_use]
+    pub fn unmeasured_file(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            size: None,
             modified: None,
             hash: None,
             kind: Kind::File,
@@ -71,7 +97,8 @@ impl Entry {
     pub fn empty_dir(path: impl Into<String>) -> Self {
         Self {
             path: path.into(),
-            size: 0,
+            // A known zero: a directory really does carry no bytes.
+            size: Some(0),
             modified: None,
             hash: None,
             kind: Kind::EmptyDir,
@@ -139,7 +166,7 @@ mod tests {
     fn a_file_entry_carries_its_size_and_nothing_else() {
         let entry = Entry::file("a/b.txt", 42);
         assert!(entry.is_file());
-        assert_eq!(entry.size, 42);
+        assert_eq!(entry.size, Some(42));
         assert!(entry.modified.is_none());
         assert!(entry.hash.is_none());
     }
@@ -148,7 +175,7 @@ mod tests {
     fn an_empty_directory_has_no_size() {
         let entry = Entry::empty_dir("a/empty");
         assert!(!entry.is_file());
-        assert_eq!(entry.size, 0);
+        assert_eq!(entry.size, Some(0));
         assert_eq!(entry.kind, Kind::EmptyDir);
     }
 

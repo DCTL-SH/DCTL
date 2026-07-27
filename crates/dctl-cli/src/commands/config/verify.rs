@@ -11,12 +11,13 @@
 //! 3. **What does each remote do to the bytes?** `plain` or `sealed`, per
 //!    remote, stated outright.
 //!
-//! That third answer is only possible because of invariant I4: a remote's
-//! encryption behaviour is a function of the **name**, fixed when the remote was
-//! defined, and never of what its destination happens to contain. A tool that
-//! decided by inspection could not tell you what a command *will* do, only what
-//! it would have done a moment ago. This one can put it in a report, before the
-//! run, and be right.
+//! That third answer is only possible because of invariant I4: what a remote
+//! encrypts is determined solely by the **name**, fixed when the remote was
+//! defined. Contents can withhold permission from a command; they cannot change
+//! what it does, so `plain` and `sealed` are properties of the file being read
+//! here and not of any place it points at. A tool that decided by inspection
+//! could not tell you what a command *will* do, only what it would have done a
+//! moment ago. This one can put it in a report, before the run, and be right.
 //!
 //! ## Why it opens files the loader refuses
 //!
@@ -380,8 +381,9 @@ mod tests {
 
     #[test]
     fn each_remote_is_reported_as_plain_or_sealed() {
-        // The answer only possible because encryption follows the name typed and
-        // never the destination's contents (invariant I4).
+        // The answer only possible because what a remote encrypts follows the
+        // name typed; contents can refuse a command but never change what it
+        // does (invariant I4), so this column is never contingent.
         let report = inspect(&sound());
         let modes: BTreeMap<&str, &str> = report
             .remotes

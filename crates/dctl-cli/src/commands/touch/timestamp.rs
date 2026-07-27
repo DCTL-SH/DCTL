@@ -75,6 +75,18 @@ impl Timestamp {
         self.seconds
     }
 
+    /// The instant a stored record carries.
+    ///
+    /// The inverse of [`Timestamp::unix_seconds`], and the reason both exist:
+    /// when `touch` reports the time an object *already* has, that number comes
+    /// out of `dctl_index::Record::modified_unix` and has to be rendered by the
+    /// same code that renders the time a run would have written. Two renderings
+    /// of one instant is how a report comes to disagree with itself.
+    #[must_use]
+    pub const fn from_unix(seconds: i64) -> Self {
+        Self { seconds }
+    }
+
     /// Parse one of the accepted spellings (see [`TIMESTAMP_EXAMPLES`]).
     ///
     /// Used as a clap `value_parser`, so a malformed `--timestamp` is a usage

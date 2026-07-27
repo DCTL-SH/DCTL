@@ -100,7 +100,7 @@ use report::Report;
 use target::Side;
 
 /// The verb this module implements, used wherever the command names itself.
-const VERB: &str = "replicate";
+pub(super) const VERB: &str = "replicate";
 
 /// Arguments to `dctl replicate`.
 ///

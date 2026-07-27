@@ -15,6 +15,33 @@
 //!    so the grade cannot be mistaken for a claim about the part that was
 //!    skipped, or for a stronger claim than the remote can support.
 //!
+//! ## The coverage is the report, and it is always printed
+//!
+//! Step 3 is not optional and is not behind `-v`. Everything this command said
+//! about a healthy run used to go through [`Out::info`](crate::output::Out::info),
+//! which is silent below `-v`, and the findings table renders empty when there
+//! are no findings — so the default output of a successful scrub was *nothing at
+//! all*, on both streams. `dctl scrub archive:` over a real dataset and
+//! `dctl scrub archive:typo` over nothing produced byte-identical output and the
+//! same exit code.
+//!
+//! So a text-mode run always writes one line to stderr naming the grade, the
+//! objects read, the bytes, the assurance and the target
+//! ([`Report::announce`](report::Report::announce)). JSON mode does not: the
+//! document already carries every one of those numbers, and a second prose
+//! rendering is a second thing that can disagree with the data.
+//!
+//! ## Reading nothing is a distinct outcome, and it is not zero
+//!
+//! A run that scanned no object grades
+//! [`HEALTH_UNVERIFIED`](crate::constants::HEALTH_UNVERIFIED) and exits
+//! [`ExitCode::NoFilesTransferred`](crate::exit::ExitCode::NoFilesTransferred)
+//! (9). Health is a claim about objects that were read; over none of them there
+//! is no claim, and `healthy` is the most reassuring of the four words to pick
+//! for it. The exit code moves because that is the only part a cron wrapper
+//! reads — see [`Report::outcome`](report::Report::outcome) for why 9 rather
+//! than a new number, and for the four causes the message distinguishes.
+//!
 //! ## `--repair` is refused, not ignored
 //!
 //! Repair means rebuilding a damaged object from redundancy — the par2-style
@@ -128,6 +155,12 @@ pub struct ScrubArgs {
 /// — [`ExitCode::IntegrityFailure`](crate::exit::ExitCode::IntegrityFailure) for
 /// objects that did not authenticate, and the availability codes for objects
 /// that were missing or unreachable.
+///
+/// Also
+/// [`ExitCode::NoFilesTransferred`](crate::exit::ExitCode::NoFilesTransferred)
+/// when the run read no object at all. Nothing failed there; nothing was proved
+/// either, and a scheduled scrub that exits 0 while verifying nothing is the
+/// exact failure `PLAN.md` §13.4 exists to prevent.
 pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
     let command = command_name(VERB);
     let target = Target::parse(&args.target)?;
@@ -224,6 +257,14 @@ pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
     .await?;
 
     report.emit(&ctx.out)?;
+    // Text mode only: the JSON document already carries `health` and the whole
+    // `coverage` object, and a second, prose rendering of the same numbers on
+    // stderr would be one more thing that can disagree with the data. In text
+    // mode there is no such document, and the coverage would otherwise be
+    // invisible — which was the defect.
+    if !ctx.out.is_json() {
+        report.announce(&ctx.out);
+    }
     report.outcome().map_or(Ok(()), Err)
 }
 

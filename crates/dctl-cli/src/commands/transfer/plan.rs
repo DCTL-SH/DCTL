@@ -113,8 +113,16 @@ pub struct PlanEntry {
     /// `moveto`, where `DEST` names the object rather than its container — which
     /// is exactly why both are carried rather than one path and a rule.
     pub dest: String,
-    /// Bytes this entry would move (or free, for a delete).
-    pub size: u64,
+    /// Bytes this entry would move (or free, for a delete) — [`None`] when the
+    /// side it came from recorded no size.
+    ///
+    /// Only reachable when the *source* is a vault whose index was rebuilt from
+    /// object headers: those rows carry no size until the file is written again
+    /// (see [`crate::source::Entry::size`]). The plan then genuinely does not
+    /// know how much it is about to move, and saying `0 B` — in the table, in
+    /// the `--json` plan, and in the run's byte estimate — would describe a real
+    /// download of real files as moving nothing.
+    pub size: Option<u64>,
     /// Stable slug explaining the decision.
     pub reason: &'static str,
 }
@@ -337,10 +345,17 @@ impl Plan {
         self.with_op(op).count()
     }
 
-    /// Bytes the transfers would move.
+    /// Bytes the transfers would move, or [`None`] when any of them has no
+    /// recorded size.
+    ///
+    /// Absorbing rather than partial, like every other total in this binary that
+    /// can be missing a term: a sum that quietly dropped the unmeasured entries
+    /// would be short by an unknown amount and would look complete.
     #[must_use]
-    pub fn bytes_to_transfer(&self) -> u64 {
-        self.transfers().map(|entry| entry.size).sum()
+    pub fn bytes_to_transfer(&self) -> Option<u64> {
+        self.transfers().try_fold(0_u64, |total, entry| {
+            entry.size.map(|size| total.saturating_add(size))
+        })
     }
 
     /// Whether anything would be removed. Drives the destructive confirmation.
@@ -370,7 +385,7 @@ impl Plan {
 }
 
 /// Aggregate counts for a plan.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 pub struct Summary {
     /// Files not present at the destination.
     pub copy: usize,
@@ -382,8 +397,9 @@ pub struct Summary {
     pub skip: usize,
     /// Empty source directories to recreate.
     pub mkdir: usize,
-    /// Bytes the transfers would move.
-    pub bytes: u64,
+    /// Bytes the transfers would move, or `null` when any of them has no
+    /// recorded size. See [`Plan::bytes_to_transfer`].
+    pub bytes: Option<u64>,
 }
 
 /// Turn an empty source directory into its plan entry.
@@ -393,7 +409,8 @@ fn empty_dir_entry(item: &Entry, exists_at_dest: bool, policy: &Policy) -> PlanE
         action: if create { Op::CreateDir } else { Op::Skip },
         source: item.path.clone(),
         dest: item.path.clone(),
-        size: 0,
+        // A directory moves no bytes, and that is a measurement.
+        size: Some(0),
         reason: if create {
             PLAN_REASON_EMPTY_SOURCE_DIR
         } else if exists_at_dest {
@@ -450,7 +467,7 @@ mod tests {
             ]
         );
         assert!(!plan.destroys_anything(), "copy must never delete");
-        assert_eq!(plan.bytes_to_transfer(), 30);
+        assert_eq!(plan.bytes_to_transfer(), Some(30));
     }
 
     #[test]
@@ -518,7 +535,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(ops(&with), [(Op::CreateDir, "empty")]);
-        assert_eq!(with.bytes_to_transfer(), 0, "a directory moves no bytes");
+        assert_eq!(
+            with.bytes_to_transfer(),
+            Some(0),
+            "a directory moves no bytes"
+        );
     }
 
     #[test]
@@ -592,7 +613,7 @@ mod tests {
                 delete: 1,
                 skip: 1,
                 mkdir: 0,
-                bytes: 10,
+                bytes: Some(10),
             }
         );
     }

@@ -114,7 +114,6 @@ pub fn walk(root: &Path, selection: &Selection, follow_links: bool) -> Scan {
                         native: root.to_path_buf(),
                         size: metadata.len(),
                     },
-                    1,
                 ),
                 Some(Err(issue)) => scan.problems.push(not_representable(root, issue)),
                 // A path with no final component (`..`, or a bare root) names no
@@ -128,11 +127,17 @@ pub fn walk(root: &Path, selection: &Selection, follow_links: bool) -> Scan {
         Ok(_) => {}
     }
 
-    // (directory, depth of its children)
-    let mut stack: Vec<(PathBuf, i32)> = vec![(root.to_path_buf(), 1)];
+    // (directory, its logical path relative to the scan root)
+    //
+    // The logical path rather than a recursion counter, because that is what
+    // the filter engine asks about: `--max-depth`, a `--files-from` manifest and
+    // a `- build/` rule are all questions about *where a directory sits*, and a
+    // walk that derived depth separately would answer one of them differently
+    // from the listing the operator read beforehand.
+    let mut stack: Vec<(PathBuf, String)> = vec![(root.to_path_buf(), String::new())];
     let mut visited: HashSet<PathBuf> = HashSet::new();
 
-    while let Some((directory, depth)) = stack.pop() {
+    while let Some((directory, _prefix)) = stack.pop() {
         if follow_links && !remember(&mut visited, &directory) {
             // Already walked through this directory by another route: a symlink
             // loop, or two links to the same tree. Either way, walking it twice
@@ -193,8 +198,8 @@ pub fn walk(root: &Path, selection: &Selection, follow_links: bool) -> Scan {
             };
 
             if resolved.is_dir() {
-                if selection.admits_depth(depth) {
-                    stack.push((entry, depth + 1));
+                if selection.may_descend(&relative) {
+                    stack.push((entry, relative));
                 } else {
                     scan.filtered += 1;
                 }
@@ -209,7 +214,6 @@ pub fn walk(root: &Path, selection: &Selection, follow_links: bool) -> Scan {
                     native: entry,
                     size: resolved.len(),
                 },
-                depth,
             );
         }
     }
@@ -221,11 +225,14 @@ pub fn walk(root: &Path, selection: &Selection, follow_links: bool) -> Scan {
 }
 
 /// Apply the filters to one candidate file.
-fn consider(scan: &mut Scan, selection: &Selection, file: ScannedFile, depth: i32) {
-    if selection.admits_depth(depth)
-        && selection.admits_size(file.size)
-        && selection.admits_path(&file.logical)
-    {
+///
+/// One question, not three. The depth limit, the size bounds, the pattern rules
+/// and the `--files-from` list are a single decision made by
+/// [`crate::filter::FilterSet`]; asking them separately here is how a walk
+/// applies one and forgets another, and the forgotten one is always the
+/// `--exclude` somebody wrote to keep an archive out of a backup.
+fn consider(scan: &mut Scan, selection: &Selection, file: ScannedFile) {
+    if selection.admits_file(&file.logical, file.size) {
         scan.files.push(file);
     } else {
         scan.filtered += 1;

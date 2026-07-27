@@ -9,8 +9,6 @@ accepted the upload, and nothing a client sends can change it afterwards. DCTL
 therefore keeps the file's real modification time in its own encrypted index
 (`modified_unix`), which is also what makes a `copy` or `check` comparison
 meaningful across two providers that disagree about their own clocks.
-`dctl touch` writes that field — and, when the object does not exist yet, an
-empty object for the field to hang on.
 
 **This is not a niche convenience.** [`sync`](dctl_sync.md) and
 [`copy`](dctl_copy.md) decide what to transfer from size and modification time,
@@ -19,8 +17,77 @@ re-upload 40 GB of it". It is also how you make a freshly restored tree stop
 looking newer than its source, and how a scripted pipeline stamps a sentinel
 object that a later step waits on.
 
-**Timestamps are UTC and whole seconds.** Both rules are enforced by the argument
-parser, before the command body runs:
+### What runs, per backend
+
+`touch` is two operations wearing one name — *create an empty object* and *set a
+modification time* — and the three kinds of place DCTL can address support
+different halves of it:
+
+| | A local remote | A vault remote | An object store |
+|---|---|---|---|
+| The object is missing | created empty | created empty | refused |
+| The object exists | re-stamped, contents untouched | **refused** | refused |
+| `--timestamp` | honoured exactly | **refused before anything is created** | refused |
+| `--no-create` on a missing object | `skipped` | `skipped` | refused |
+
+**A local remote does both halves**, because the operating system owns the
+timestamps: a missing file is created empty, an existing one is re-stamped
+without losing a byte, and both the modification and access times are written —
+`touch(1)` sets both, and a tool that moved only one would leave a tree no
+`find -newer` agrees with.
+
+**A vault creates, and cannot re-stamp.** An empty object is a real, storable
+thing: `dctl touch archive:sentinel` seals a zero-byte object, writes it with the
+same verified write every other object gets, and commits an index record. It then
+appears in `dctl ls archive:` at `0 B`, like any other file.
+
+Changing the time of an object the vault *already* holds has nowhere to go, and
+the command refuses rather than doing something else:
+
+```
+error: a dctl_core::Vault call that updates the modification time of a stored
+record — which is what re-stamping an object a vault already holds would need —
+is not implemented in this build
+warning: The object was not modified. A vault keeps modification times in its
+encrypted index and dctl-core exposes no call that updates one, so DCTL will not
+pretend to. Re-write the object (`dctl copy` or `dctl rcat`) if a current time is
+what you need, or run `touch` against a plain local remote, where the
+filesystem's own timestamps are settable. 'archive:sentinel' keeps the
+modification time it was written with (2026-07-26T23:34:45Z).
+```
+
+The message names the **missing call**, not the command. Everything `dctl touch`
+does against a vault works; there is no branch missing here to go and find.
+
+The gap is a `dctl-core` boundary rather than a missing branch here: the time
+lives in the encrypted index, `Vault` exposes no operation that updates a
+record's `modified_unix`, and the index handle is private to the core. Two
+alternatives were rejected — re-storing the object would set the time to *now*,
+which is a different write than the one requested, and opening the index directly
+from the CLI would mean a second writer to a database the vault holds open and a
+second implementation of a format `dctl-core` owns.
+
+**`--timestamp` against a vault is refused before anything is created**, for the
+same reason: `put_file` stamps the moment of the write and takes no time from the
+caller, so creating the object and reporting the requested time would be a lie,
+and creating it with a different time would be an operation nobody asked for.
+Drop the flag to create the object with the time of the write, or address a local
+remote.
+
+**An object store is refused outright, and this one is nobody's build gap.**
+The refusal used to read "nothing in this build writes a plain object into a
+bucket". That is no longer true — `dctl copy ./file b2:bucket/key` writes one —
+and it was never the reason `touch` could not work there. A bucket has no
+`utimes()`: B2, S3 and R2 each assign `Last-Modified` when they accept the
+object and expose no operation that moves it. The missing capability is the
+**provider's**, one layer below `dctl-store`, and **no phase of `PLAN.md`
+delivers it**, so the message names no release to wait for. Creating an empty
+object there *is* possible — that is a write, not a stamp — and `dctl copy` of
+an empty file performs it.
+
+### Timestamps are UTC and whole seconds
+
+Both rules are enforced by the argument parser, before the command body runs:
 
 * A time with no zone is read as UTC, and **an explicit zone offset is refused
   rather than converted**. A laptop that crossed a timezone between two backups
@@ -42,65 +109,42 @@ real calendar with the Gregorian leap rule, so `2024-02-29` is accepted,
 second `60` — RFC 3339's leap second — is refused rather than silently clamped.
 Years run from `0001` to `9999`; times before 1970 are negative, not an error, so
 `@-1` and `1969-12-31T23:59:59Z` are the same instant. Whatever the input
-spelling, the plan prints one canonical form, `YYYY-MM-DDTHH:MM:SSZ`, alongside
-the raw epoch integer the index will store — so a script never has to re-parse
+spelling, the report prints one canonical form, `YYYY-MM-DDTHH:MM:SSZ`, alongside
+the raw epoch integer the index would store — so a script never has to re-parse
 the string DCTL just printed.
 
+### Flags that could not act
+
 **`--no-create` mirrors `touch -c`**: re-stamp what exists, stay silent about what
-does not. Combining it with the global `--immutable` is a **usage error**, not a
-no-op: `--no-create` forbids creating and `--immutable` forbids modifying, so the
-run could not possibly act, and a command guaranteed to do nothing is a mistake
-worth naming. Either flag on its own is fine.
+does not. A missing object is reported as `skipped`, which is a success with a
+distinct word rather than a silent zero. Combining it with the global
+`--immutable` is a **usage error**, not a no-op: `--no-create` forbids creating
+and `--immutable` forbids modifying, so the run could not possibly act, and a
+command guaranteed to do nothing is a mistake worth naming. Either flag on its
+own is fine.
 
 **Target resolution is the directory family's strict parse**, shared with
 [`mkdir`](dctl_mkdir.md): the target is `REMOTE:PATH`; a remote name is at least
 two characters, so `C:\Users\me\notes.txt` is a Windows drive path and
 `\\server\share\x` is a UNC path, and both are local and refused; a string with
-no colon is local too; `..` components are refused; the remote root (`vault:`) is
-not a target, because stamping a time on the root means nothing. The path is
+no colon is local too; `..` components are refused; the remote root (`archive:`)
+is not a target, because stamping a time on the root means nothing. The path is
 canonicalised — `.` and empty components dropped, backslashes folded to `/`, NFC
-applied — so `vault:./notes//todo.md` and `vault:notes/todo.md` are one object,
-and macOS's decomposed spelling of an accented name matches Linux's composed one.
+applied — so `archive:./notes//todo.md` and `archive:notes/todo.md` are one
+object, and macOS's decomposed spelling of an accented name matches Linux's
+composed one.
 
-**Relationship to the verified-write contract.** When the object has to be
-created, the empty object is written through the `PLAN.md` §6 pipeline like any
-other: staged under a temporary key, the provider's stored checksum compared
-against the locally computed one, and **a mismatch hard-aborts** — the staged
-object is deleted, nothing is committed, and the exit code is 20
-(`checksum_mismatch`). The modification time itself becomes real only when the
-index entry is committed in a single ACID transaction; until that commit, nothing
-has changed. `touch` never truncates or replaces an object that already has
-content — for an existing object it sets a field, and for a missing one it
-creates an empty object. To *write* content, use [`rcat`](dctl_rcat.md) or
-[`copy`](dctl_copy.md).
+**An object inside a vault's object store is refused**, by the same addressing
+rule that stops `copy` and `rcat` writing plaintext there.
 
-### What runs today
-
-**Neither half of the write is implemented in this build.** Argument parsing,
-timestamp conversion, target resolution, the `--no-create` / `--immutable`
-refusal, the plan and every output format are complete and tested. Creating the
-empty object needs a `dctl-core` vault handle reachable from the command context,
-which the CLI does not carry yet; setting the time additionally needs an index
-operation for "update the modification time of an existing record", which does
-not exist yet either.
-
-Rather than print a success message for a write that never happened — the one
-thing `PLAN.md` §6 forbids — a real run emits its plan and then exits **7**
-(`fatal_error`):
-
-```
-error: dctl touch is not implemented in this build
-warning: Parsing, validation and planning are complete: re-run with --dry-run to
-see exactly what would be created. Writing the object needs a dctl-core vault
-handle (PLAN.md §6) reachable from the command context, which the CLI does not
-carry yet.
-```
-
-A `--dry-run` exits **0**, because a dry run promises a report and delivers
-exactly that. A failure today therefore says nothing about whether the object
-exists or what time it carries — nothing was read. The engine arrives with the
-`PLAN.md` §11 **Phase 1 (B2 MVP)** milestone, which is where the vault handle,
-the encrypted index and the §6 write pipeline land.
+**Relationship to the verified-write contract.** When an object has to be
+created in a vault, the empty object goes through the `PLAN.md` §6 pipeline like
+any other: sealed, written with the provider's stored checksum compared against
+the locally computed one, and committed to the index in a single durable
+operation. A mismatch hard-aborts with exit 20 (`checksum_mismatch`) and nothing
+is committed. `touch` never truncates or replaces an object that already has
+content — on a filesystem it sets a field and leaves every byte in place, and to
+*write* content you use [`rcat`](dctl_rcat.md) or [`copy`](dctl_copy.md).
 
 ```
 dctl touch REMOTE:PATH [flags]
@@ -108,59 +152,139 @@ dctl touch REMOTE:PATH [flags]
 
 ## Examples
 
-Stamp an object with the current time. The plan goes to stdout, the `[dry-run]`
-notice to stderr; `Timestamp source` says where the time came from, so a report
-read later is not ambiguous about whether a time was chosen or defaulted:
+Create an empty object in a vault. It is a real object: it appears in `ls`, it
+can be read back, and it carries the time of the write:
 
 ```console
-$ dctl touch vault:notes/todo.md --dry-run
+$ dctl touch archive:sentinel
 Command            touch
-Target             vault:notes/todo.md
-Mode               dry-run
-Object             notes/todo.md
-Timestamp          2026-07-26T09:15:04Z
+Target             archive:sentinel
+Mode               execute
+Object             sentinel
+Backend            vault
+Timestamp          2026-07-26T22:23:40Z
 Timestamp source   now
 Create if missing  yes
-warning: [dry-run] would set the modification time of: vault:notes/todo.md
+Outcome            created
+OK created empty object: archive:sentinel
+$ dctl ls archive:
+      12 B a.txt
+       0 B sentinel
 ```
 
-Set an explicit time, so a restored file stops looking newer than the source it
-came from and `sync` stops wanting to re-upload it. Note the canonical rendering:
-the input was written in the loose form, the plan prints RFC 3339:
+Create and stamp a file on a local remote. `Timestamp source` says where the time
+came from, so a report read later is not ambiguous about whether a time was
+chosen or defaulted:
 
 ```console
-$ dctl touch b2prod:bucket/media/reel.mov -t '2024-05-01 12:00' --dry-run
+$ dctl touch scratch:notes.txt -t '2024-05-01 12:00'
 Command            touch
-Target             b2prod:bucket/media/reel.mov
-Mode               dry-run
-Object             bucket/media/reel.mov
+Target             scratch:notes.txt
+Mode               execute
+Object             notes.txt
+Backend            local
 Timestamp          2024-05-01T12:00:00Z
 Timestamp source   explicit
 Create if missing  yes
-warning: [dry-run] would set the modification time of: b2prod:bucket/media/reel.mov
+Outcome            created
+OK created empty object: scratch:notes.txt
+$ ls -l /mnt/scratch/notes.txt
+-rw-r--r--  1 mx  wheel  0 May  1  2024 /mnt/scratch/notes.txt
 ```
 
-The same plan as JSON. The timestamp appears twice on purpose — once canonically
-for a human, once as the integer the index stores — and no field claims the write
-happened:
+Re-stamping an existing file changes the time and nothing else:
 
 ```console
-$ dctl touch vault:photos/2024/index.json -t @1714564800 -c --dry-run --json
+$ dctl touch scratch:notes.txt -t @0
+...
+Outcome            stamped
+OK set the modification time of: scratch:notes.txt
+$ cat /mnt/scratch/notes.txt
+content
+```
+
+`--no-create` against something that is not there does nothing, and says so:
+
+```console
+$ dctl touch archive:absent -c
+...
+Create if missing  no
+Outcome            skipped
+OK not there and --no-create was given, so nothing was done for: archive:absent
+$ echo $?
+0
+```
+
+An object the vault already holds cannot be re-stamped. **The refusal names the
+missing `dctl-core` call rather than this command**, because that is where the
+gap actually is — nothing is missing in `dctl touch`, and a message blaming it
+would send you looking here for a branch that is not absent:
+
+```console
+$ dctl touch archive:sentinel
+error: a dctl_core::Vault call that updates the modification time of a stored record — which is what re-stamping an object a vault already holds would need — is not implemented in this build
+warning: The object was not modified. A vault keeps modification times in its encrypted index and dctl-core exposes no call that updates one, so DCTL will not pretend to. Re-write the object (`dctl copy` or `dctl rcat`) if a current time is what you need, or run `touch` against a plain local remote, where the filesystem's own timestamps are settable. 'archive:sentinel' keeps the modification time it was written with (2026-07-26T23:34:45Z).
+$ echo $?
+7
+```
+
+`--timestamp` against a vault is a **second** missing capability rather than the
+same one twice: re-stamping needs a call that updates an existing record, and
+this needs the *write* to accept a time at all. `Vault::put_file` stamps the
+moment of the write and takes no timestamp from the caller, so there is no
+argument for the flag to become. It is refused before anything is created, and
+the object does not appear afterwards:
+
+```console
+$ dctl touch archive:dated -t 2024-05-01T12:00:00Z
+error: a dctl_core::Vault write that accepts a modification time — which is what storing a chosen one in a vault would need — is not implemented in this build
+warning: Nothing was created or modified. A vault records the time of the write itself and dctl-core takes no timestamp, so the time you asked for could not be stored. Drop --timestamp to create the object with the time of the write, or address a plain local remote, whose filesystem timestamps are settable.
+$ echo $?
+7
+$ dctl ls archive: | grep dated
+$ echo $?
+1
+```
+
+A bucket has no settable modification time — the one thing `touch` exists to
+set. The refusal says so, and offers the two things that *are* possible instead
+of a phase that is never coming:
+
+```console
+$ dctl touch b2:mybucket/x
+error: setting the modification time of an object in an object store — the
+provider assigns it on write and exposes no way to change it — (b2, dctl touch)
+is not implemented in this build
+warning: Nothing was written. A bucket's 'last modified' is the time the provider
+stored the object, not a value DCTL can set — no phase of PLAN.md changes that,
+because it is the provider's own model. To create an empty object there, copy an
+empty file with `dctl copy`; to stamp a time, address a local remote, whose
+filesystem timestamps are settable.
+$ echo $?
+7
+```
+
+The plan as JSON. The timestamp appears twice on purpose — once canonically for a
+human, once as the integer the index stores — and `status` reports what happened:
+
+```console
+$ dctl touch archive:photos/2024/index.json -c --json
 {
   "command": "touch",
   "target": {
-    "remote": "vault",
+    "remote": "archive",
     "path": "photos/2024/index.json"
   },
-  "dry_run": true,
+  "dry_run": false,
   "options": {
     "object": "photos/2024/index.json",
-    "timestamp": "2024-05-01T12:00:00Z",
-    "timestamp_unix": 1714564800,
-    "timestamp_source": "explicit",
+    "backend": "vault",
+    "timestamp": "2026-07-26T22:28:38Z",
+    "timestamp_unix": 1785104918,
+    "timestamp_source": "now",
     "create_if_missing": false
   },
-  "status": "planned"
+  "status": "skipped"
 }
 ```
 
@@ -168,7 +292,7 @@ A zone offset is refused rather than converted, because converting would make th
 same command mean different things on two machines:
 
 ```console
-$ dctl touch vault:notes/todo.md -t 2024-05-01T12:00:00+02:00
+$ dctl touch archive:notes/todo.md -t 2024-05-01T12:00:00+02:00
 error: invalid value '2024-05-01T12:00:00+02:00' for '--timestamp <TIME>': '2024-05-01T12:00:00+02:00' carries a zone offset. DCTL timestamps are UTC: convert the time first, or append Z if it already is.
 
 For more information, try '--help'.
@@ -179,7 +303,7 @@ $ echo $?
 A date that does not exist is an error, never the following day:
 
 ```console
-$ dctl touch vault:notes/todo.md -t 2023-02-29
+$ dctl touch archive:notes/todo.md -t 2023-02-29
 error: invalid value '2023-02-29' for '--timestamp <TIME>': '2023-02-29' is not a date DCTL can represent (years 1 to 9999, and the day must exist in its month)
 ```
 
@@ -187,8 +311,9 @@ error: invalid value '2023-02-29' for '--timestamp <TIME>': '2023-02-29' is not 
 command does, so it is refused before anything else happens:
 
 ```console
-$ dctl touch vault:notes/todo.md --no-create --immutable --dry-run
-error: --no-create and --immutable together allow neither creating nor modifying anything
+$ dctl touch archive:notes/todo.md --no-create --immutable
+error: --no-create and --immutable together allow neither creating nor modifying
+anything
 warning: Drop --immutable to re-stamp an object that exists, or drop --no-create
 to create one that does not.
 $ echo $?
@@ -227,15 +352,16 @@ ones that matter here:
 
 | Flag | Effect here |
 |------|-------------|
-| `-n`, `--dry-run` | Print the plan, change nothing, exit 0. The only way this command succeeds today. |
+| `-n`, `--dry-run` | Print the plan, change nothing, exit 0. A vault is not unlocked and no password is asked for. |
 | `--immutable` | Refuses to modify anything that already exists. **Conflicts with `--no-create`** — together they permit nothing, and the combination is a usage error. |
-| `--format`, `--json` | Render the plan as an aligned table (`text`, the default), one pretty JSON document (`json`), or one JSON record per line (`json-lines`). |
-| `--quiet` | Suppress the `[dry-run]` notice and warnings. The plan still goes to stdout; errors are still printed. |
-| `-v`, `--verbose` | `-vv` logs the resolved remote, path, epoch timestamp and whether a missing object would be created. |
+| `--format`, `--json` | Render the report as an aligned table (`text`, the default), one pretty JSON document (`json`), or one JSON record per line (`json-lines`). |
+| `--quiet` | Suppress the outcome line and the `[dry-run]` notice. The report still goes to stdout; errors are still printed. |
+| `-v`, `--verbose` | `-vv` logs the resolved remote, path, backend kind, epoch timestamp and whether a missing object would be created. |
 
 The filter flags are accepted and have no effect: this command addresses one
-named object, not a set. `--verify`, `--checksum` and `--size-only` do nothing
-until the write exists.
+named object, not a set. `--verify`, `--checksum` and `--size-only` do nothing —
+a vault's empty object is already written through the verified-write pipeline,
+and there is nothing to compare.
 
 ## Exit codes
 
@@ -243,17 +369,15 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 
 | Code | Name | When |
 |------|------|------|
-| 0 | `success` | `--dry-run` only: the plan was printed and nothing was written. |
-| 1 | `usage` | An unparseable command line; a `--timestamp` DCTL does not accept, carrying a zone offset, or naming a date that does not exist; an empty target; a local, UNC or drive-letter path; a remote name shorter than two characters or containing a separator; a `..` component; the remote root (`REMOTE:`); `--no-create` together with `--immutable`. |
-| 2 | `uncategorised` | The plan could not be written to stdout. A closed pipe is *not* an error. |
-| 7 | `fatal_error` | Creating the object and setting the time are both unavailable. **Every real run ends here today**, after the plan has been printed. Nothing was written and nothing was read. |
+| 0 | `success` | The object was created, re-stamped, or deliberately skipped. The `Outcome` row and the JSON `status` say which. |
+| 1 | `usage` | An unparseable command line; a `--timestamp` DCTL does not accept, carrying a zone offset, or naming a date that does not exist; an empty target; a local, UNC or drive-letter path; a remote name shorter than two characters or containing a separator; a `..` component; the remote root (`REMOTE:`); `--no-create` together with `--immutable`; an existing object under `--immutable`; a target that names a directory on a filesystem. |
+| 2 | `uncategorised` | The report could not be written to stdout. A closed pipe is *not* an error. |
+| 4 | `file_not_found` | A local target whose parent directory does not exist — `touch(1)` does not create directories either. |
+| 7 | `fatal_error` | An unknown remote; a re-stamp a vault cannot perform; `--timestamp` against a vault; an object store, which has no settable modification time at all; a destination the addressing rule claims for a vault's object store. In every one of these, **nothing was written**. |
+| 20 | `checksum_mismatch` | A vault's empty object was not stored as sent. Nothing was committed. |
+| 22 | `vault_locked` | The vault would not unlock. |
+| 23 | `index_error` | The index commit failed. |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. No partial work is reported as stored. |
-
-When the engine lands, the §6 contract makes 20 (`checksum_mismatch`) reachable
-for an empty object the provider stored incorrectly, 22 (`vault_locked`) for a
-vault that will not unlock, and 23 (`index_error`) for a failed index commit.
-`--no-create` against an object that is not there follows `touch -c`: there is
-nothing to do, and nothing to report.
 
 ## See also
 

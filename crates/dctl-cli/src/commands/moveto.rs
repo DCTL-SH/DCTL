@@ -74,7 +74,7 @@ pub async fn run(ctx: &Ctx, args: &MovetoArgs) -> Result<()> {
         delete_extras: false,
     };
 
-    let prepared = prepare::exact_transfer(ctx, &request)?;
+    let prepared = prepare::exact_transfer(ctx, &request).await?;
     report::announce(ctx, &prepared.plan, prepared.dest_file_count);
 
     if ctx.is_dry_run() {
@@ -119,7 +119,14 @@ pub async fn run(ctx: &Ctx, args: &MovetoArgs) -> Result<()> {
     )
     .await?;
 
-    execute::moves(ctx, &engine, &reaper, &prepared.plan).await
+    execute::moves(
+        ctx,
+        TRANSFER_COMMAND_MOVETO,
+        &engine,
+        &reaper,
+        &prepared.plan,
+    )
+    .await
 }
 
 #[cfg(test)]

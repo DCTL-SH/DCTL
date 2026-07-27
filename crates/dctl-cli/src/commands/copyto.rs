@@ -76,7 +76,7 @@ pub async fn run(ctx: &Ctx, args: &CopytoArgs) -> Result<()> {
         delete_extras: false,
     };
 
-    let prepared = prepare::exact_transfer(ctx, &request)?;
+    let prepared = prepare::exact_transfer(ctx, &request).await?;
     report::announce(ctx, &prepared.plan, prepared.dest_file_count);
 
     if ctx.is_dry_run() {
@@ -104,7 +104,7 @@ pub async fn run(ctx: &Ctx, args: &CopytoArgs) -> Result<()> {
         &prepared.dest,
     )
     .await?;
-    execute::transfers(ctx, &engine, &prepared.plan).await
+    execute::transfers(ctx, TRANSFER_COMMAND_COPYTO, &engine, &prepared.plan).await
 }
 
 #[cfg(test)]
@@ -188,7 +188,7 @@ mod tests {
             create_empty_src_dirs: false,
             delete_extras: false,
         };
-        let prepared = prepare::exact_transfer(&ctx, &request).unwrap();
+        let prepared = prepare::exact_transfer(&ctx, &request).await.unwrap();
 
         assert_eq!(prepared.plan.entries.len(), 1);
         assert_eq!(prepared.plan.entries[0].source, "report.pdf");
@@ -215,7 +215,7 @@ mod tests {
             create_empty_src_dirs: false,
             delete_extras: false,
         };
-        let prepared = prepare::exact_transfer(&ctx, &request).unwrap();
+        let prepared = prepare::exact_transfer(&ctx, &request).await.unwrap();
 
         let mut dests: Vec<&str> = prepared
             .plan

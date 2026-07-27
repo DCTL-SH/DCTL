@@ -169,7 +169,7 @@ mod tests {
                     action: *action,
                     source: (*path).to_string(),
                     dest: (*path).to_string(),
-                    size: 1,
+                    size: Some(1),
                     reason: "test",
                 })
                 .collect(),

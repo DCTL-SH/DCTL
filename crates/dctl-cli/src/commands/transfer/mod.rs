@@ -17,6 +17,7 @@
 //! | [`endpoint`] | splitting `DEST` into a container and an object name |
 //! | [`entry`]    | what a transferable thing is |
 //! | [`listing`]  | how one side is enumerated, and which filters apply |
+//! | [`checksum`] | producing the digest `--checksum` compares |
 //! | [`compare`]  | whether a file needs transferring at all |
 //! | [`plan`]     | the add/update/delete diff, computed without executing |
 //! | [`immutable`] | the `--immutable` gate, applied to a plan before it runs |
@@ -42,6 +43,7 @@
 //! that decides what to do while doing it — which is what lets a reviewer trust
 //! a `sync --dry-run` before letting it delete anything.
 
+pub mod checksum;
 pub mod compare;
 pub mod endpoint;
 pub mod engine;
@@ -125,10 +127,25 @@ pub(crate) mod testing {
     /// a fixture that would not survive validation fails here rather than
     /// silently exercising a different rule.
     pub fn ctx_with_config(config: &Config) -> (tempfile::TempDir, Ctx) {
+        ctx_with_config_and(config, &[])
+    }
+
+    /// The same, with further global flags.
+    ///
+    /// `--no-ask-password` is the flag this exists for. Whether a command asks
+    /// for a password is exactly what several of the engine's tests are
+    /// asserting, and a test that left the prompt reachable could pass by being
+    /// answered on a developer's terminal while failing in CI — or, worse, pass
+    /// in both places for a run that should never have asked at all.
+    pub fn ctx_with_config_and(config: &Config, flags: &[&str]) -> (tempfile::TempDir, Ctx) {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let path = dir.path().join("config.toml");
         config::save(config, &path).expect("the fixture must be a valid configuration");
-        let ctx = ctx(&[CONFIG_FLAG, &path.to_string_lossy()]);
+
+        let spelled = path.to_string_lossy().into_owned();
+        let mut argv: Vec<&str> = vec![CONFIG_FLAG, &spelled];
+        argv.extend_from_slice(flags);
+        let ctx = ctx(&argv);
         (dir, ctx)
     }
 }

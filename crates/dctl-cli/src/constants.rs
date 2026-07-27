@@ -121,16 +121,11 @@ pub const LISTING_HASH_ALGORITHM: &str = "blake3";
 pub const LISTING_TARGET_HINT: &str = "Name the remote in the command ('dctl ls vault:photos'), or set a default \
      with --remote / DCTL_REMOTE.";
 
-/// Feature name reported when rules are requested from a file.
-///
-/// Refused rather than ignored for the same reason as every other filter: a
-/// listing whose `--filter-from` was dropped shows objects the user believes
-/// are excluded, and that answer then gets used to decide what to delete.
-pub const RULE_FILE_FEATURE: &str = "reading filter rules from a file";
-
-/// Remediation hint attached to [`RULE_FILE_FEATURE`].
-pub const RULE_FILE_HINT: &str = "Pass the rules directly with --include/--exclude, which are honoured in \
-     full by the listing commands.";
+// `RULE_FILE_FEATURE` and `RULE_FILE_HINT` were here, naming the refusal the
+// listing family used to return for `--filter-from` and `--files-from`. Both
+// flags are now honoured by every listing verb through `crate::filter`, the same
+// engine the transfer family consults, so there is no refusal left to word — and
+// a constant kept "in case" would be an invitation to refuse the feature again.
 
 /// Lower-case hexadecimal digits, indexed by nibble value.
 ///
@@ -153,6 +148,43 @@ pub const SIZE_REPORT_LABEL_OBJECTS: &str = "Total objects:";
 /// would put the qualifier after the punctuation, where it reads as an
 /// afterthought rather than as part of what is being claimed.
 pub const SIZE_REPORT_LABEL_BYTES: &str = "Total size";
+
+/// Label on the row counting objects whose size was never recorded.
+///
+/// Printed only when there are any, because a `0` on every ordinary run would
+/// train a reader to skip the line — and this line exists precisely to be read
+/// on the one run where it is not zero.
+pub const SIZE_REPORT_LABEL_UNMEASURED: &str = "Unmeasured objects:";
+
+/// Qualifier put in front of a byte total that is missing some of its objects.
+///
+/// The figure beside it is a real sum of real files, so suppressing it entirely
+/// would throw away the only quantity available. Saying `at least` is what stops
+/// it being read as the total — a number that is short by an unknown amount and
+/// looks complete is worse than no number at all.
+pub const SIZE_REPORT_LOWER_BOUND: &str = "at least";
+
+/// Warning attached to a total that could not include every object.
+///
+/// A warning and not a note, unlike [`SIZE_PLAINTEXT_NOTE`]: the plaintext basis
+/// is a permanent property of a vault that a reader learns once, while this is a
+/// state that makes the headline figure wrong and that the operator can act on.
+///
+/// The remedy named here is the one that was **observed to work**, which is not
+/// the one `dctl_core`'s own documentation promises.
+/// [`Vault::rebuild_index`](dctl_core::Vault::rebuild_index) says the sizes
+/// "populate on first read of each file"; they do not, in this build —
+/// `Vault::get_file` resolves and decrypts without writing anything back to the
+/// index, so `cat`, `hashsum` and `scrub` all leave the row exactly as unmeasured
+/// as they found it. Re-running the write does record it. Naming the read as a
+/// fix would send an operator to spend a full egress bill on a run that changes
+/// nothing, which is precisely the kind of confident wrong answer `PLAN.md` §6
+/// is about.
+pub const SIZE_UNMEASURED_NOTE: &str = "some objects carry no recorded size, so this figure is a lower bound rather \
+     than a total. A rebuilt index lists object names without reading their \
+     bodies, and nothing in this build fills those sizes in on a read — only \
+     writing the file again does. Re-run the copy that produced the vault to \
+     settle them, or read the total as the bound it is.";
 
 /// Name of the basis reported for a sealed vault's byte total.
 ///
@@ -749,6 +781,20 @@ pub const CONFIRM_PROMPT_PREFIX: &str = "confirm:";
 // Second-factor keyfile (`--key-file`)
 // ─────────────────────────────────────────────────────────────────────────────
 
+/// The missing capability every `--key-file` refusal names.
+///
+/// Built into the message by [`crate::session::factor::refuse_if_present`]
+/// rather than left to its callers, and that is a correctness fix rather than
+/// tidiness. The call site in `main.rs` — the chokepoint every command passes
+/// through, and therefore the one a user actually meets — composed its operation
+/// from the command name alone, so `dctl init --key-file kf` reported **"dctl
+/// init is not implemented in this build"**: a false statement about a command
+/// that is fully implemented, produced for someone whose only mistake was asking
+/// for two factors. The flag and the gap now travel with the constant, so a call
+/// site cannot spell either of them out and cannot omit them.
+pub const KEY_FILE_FEATURE: &str = "the --key-file second factor (missing in dctl-core: Vault::init and \
+     ::unlock take a password and no factor parameter)";
+
 /// Why `--key-file` is refused by every command that can be handed one.
 ///
 /// `PLAN.md` §8 specifies the second factor as `KDF_input = password ‖ H(factor)`,
@@ -765,11 +811,22 @@ pub const CONFIRM_PROMPT_PREFIX: &str = "confirm:";
 /// whether a factor is applied would leave the operator unable to determine what
 /// actually protects their data, which is worse than either answer alone.
 ///
+/// The layer and the phase are both in the text, and both are load-bearing. The
+/// layer is `dctl-core`: `Vault::init` and `Vault::unlock` take a password and
+/// no factor, and a parameter is the only thing that could carry one — there is
+/// no arrangement of CLI code that mixes a keyfile into a KEK derived behind
+/// that signature. The phase is `PLAN.md` §8, which is Phase 0's "auth/key
+/// model" (§11): the password half of §8 shipped and the factor half did not, so
+/// this is an unfinished foundation rather than a future feature, and a reader
+/// deciding whether to wait deserves to know which.
+///
 /// Delete this, and the refusals that quote it, on the day the engine grows a
 /// factor parameter — not before.
 pub const KEY_FILE_UNSUPPORTED_REASON: &str = "This build derives the key-encryption key from the password alone, so the \
      file named by --key-file is never read and the second factor cannot be \
-     applied.";
+     applied. dctl_core::Vault::init and ::unlock take no factor parameter; \
+     PLAN.md §8 (the auth/key model of phase 0, §11) is where the missing half \
+     is specified.";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Vault initialisation (`dctl init`)
@@ -919,11 +976,12 @@ pub const CONFIG_COLUMN_STATUS: &str = "Status";
 
 /// The two words `dctl config verify` uses for a remote's encryption behaviour.
 ///
-/// The whole of invariant I4 in one column: what a remote does to the bytes
-/// passing through it is a property of the **name typed**, fixed when the remote
-/// was defined, and never a function of what the destination happens to contain
-/// today. So the report can state it from the configuration alone — no data
-/// access, no key, no network — which is exactly what makes it a compliance
+/// The whole of invariant I4 in one column: what a remote encrypts is determined
+/// solely by the **name typed**, fixed when the remote was defined. A
+/// destination's contents may cause DCTL to refuse a command; they never change
+/// what it does, so the two words below are never contingent on anything out
+/// there. The report can therefore state them from the configuration alone — no
+/// data access, no key, no network — which is exactly what makes it a compliance
 /// pre-flight rather than an audit.
 ///
 /// `sealed` and not `encrypted` because the word has to survive being read next
@@ -1106,6 +1164,28 @@ pub const CONFIG_FILE_EXPOSED_MODE_MASK: u32 = 0o077;
 /// permanent names for one concept.
 pub const PROVIDER_VAULT: &str = "vault";
 
+/// What kind of *place* a named remote turns out to be, as reported by
+/// [`crate::remote::Place`].
+///
+/// Three values rather than the provider's own name, because the write side asks
+/// a coarser question than "which provider is this": what a command may do to a
+/// remote is decided by whether it is sealed, whether it has real directories,
+/// and whether its modification times are settable — and all four cloud
+/// providers answer those three identically. Reported as slugs so a `--json`
+/// consumer branches on the same word a person read in the `Backend` row.
+///
+/// [`PLACE_SEALED`] is deliberately the same spelling as [`PROVIDER_VAULT`]: a
+/// sealed place is a vault remote, and giving one concept two words would make
+/// `provider=vault` and `backend=sealed` look like two different findings.
+pub const PLACE_SEALED: &str = PROVIDER_VAULT;
+/// See [`PLACE_SEALED`]. A directory tree on this machine, with real directories
+/// and settable timestamps.
+pub const PLACE_FILESYSTEM: &str = PROVIDER_LOCAL;
+/// See [`PLACE_SEALED`]. A bucket: keys only, no directories, and no settable
+/// modification time ([`TOUCH_OBJECT_STORE_FEATURE`]). Objects are stored and
+/// fetched through the backend, so a transfer writes one plainly.
+pub const PLACE_OBJECT_STORE: &str = "object-store";
+
 // ── The file-format vocabulary ───────────────────────────────────────────────
 //
 // Four of the keys below are spelled nowhere else in the running binary, and
@@ -1282,6 +1362,22 @@ pub const LOGICAL_PATH_SEPARATORS: &[char] = &[PATH_SEPARATOR, WINDOWS_PATH_SEPA
 /// resolve as a remote literally named `..`.
 pub const RELATIVE_PATH_MARKER: char = '.';
 
+/// How many symlink hops [`crate::platform::resolve`] will follow by hand.
+///
+/// The kernel resolves links for us whenever `canonicalize` succeeds, and this
+/// budget applies only where it cannot: a link whose target does not exist yet.
+/// That case is not exotic — a store directory deleted while a symlink to it
+/// remains is precisely when an operator is most likely to re-run a backup — and
+/// leaving the link unresolved there would mean the addressing rule missed a
+/// destination the kernel is about to create *inside a vault*.
+///
+/// Hand-following needs its own bound because a cycle (`a → b → a`) is
+/// representable on every filesystem and would otherwise loop forever. Forty
+/// matches Linux's own `ELOOP` threshold, so DCTL gives up at exactly the point
+/// the kernel would rather than inventing a stricter rule that refuses a
+/// deeply-linked layout the operating system is perfectly happy with.
+pub const PATH_SYMLINK_RESOLUTION_LIMIT: usize = 40;
+
 /// Setting naming the bucket a cloud remote stores objects in.
 ///
 /// Non-secret by design: a bucket name is not a credential, and keeping it in
@@ -1410,6 +1506,28 @@ pub const COMPARISON_SIZE_ONLY: &str = "size-only";
 /// match rather than that the metadata agrees.
 pub const COMPARISON_CHECKSUM: &str = "checksum";
 
+/// Told to anyone whose size-and-time comparison was answered by content
+/// instead, because a side of it stores the time of the *write*.
+///
+/// Printed as a warning rather than logged at `-v`, and that is the whole point
+/// of the constant existing. The substitution is not a detail: it changes what
+/// the run proves — upwards, since content equality is the stronger claim — and
+/// it changes what the run costs, because the side that records no hash has to
+/// be read end to end to produce one. A user who asked for the cheap comparison
+/// and silently got the expensive one would have no way to find out why their
+/// nightly job started reading the whole source tree.
+///
+/// The remedy is named in the same breath, and both halves of it are real:
+/// `--size-only` genuinely is honoured exactly as asked here (sizes need no
+/// timestamps), and `--checksum` asks for what is happening anyway, which stops
+/// the notice by making it true of the request rather than of the destination.
+///
+/// See [`crate::fidelity`] for why a sealed side cannot answer the question that
+/// was asked, and for the one change to `dctl-core` that would retire this.
+pub const WRITE_TIME_COMPARISON_NOTICE: &str = "records when each object was written, not when the source was modified, so this \
+     run compares contents instead of size and time — every file on the other side is \
+     read and hashed to do it. Pass --size-only to compare sizes alone.";
+
 /// One-character marks written by `check --combined`.
 ///
 /// Identical to rclone's, because the combined file is precisely the artefact
@@ -1502,6 +1620,40 @@ pub const HEALTH_HEALTHY: &str = "healthy";
 pub const HEALTH_DEGRADED: &str = "degraded";
 /// See [`HEALTH_HEALTHY`]. Damage found that could not be repaired.
 pub const HEALTH_DAMAGED: &str = "damaged";
+
+/// Grade for a run that read no objects at all.
+///
+/// A fourth word rather than a fourth shade of the other three, because it is
+/// not a health grade: the other three describe what reading found, and this one
+/// says nothing was read. `dctl --json scrub replica:` over a store whose index
+/// was empty published `healthy` with `scanned: 0`, and a consumer keying on the
+/// grade — which is what a grade is *for* — read that as a sound dataset. There
+/// is no claim to make about zero objects, and the honest output is a word that
+/// says so rather than the most reassuring of the three.
+///
+/// It travels with [`ExitCode::NoFilesTransferred`](crate::exit::ExitCode), so a
+/// text reader, a JSON consumer and a shell all learn the same thing.
+pub const HEALTH_UNVERIFIED: &str = "unverified";
+
+/// What a scrub says when it covered nothing.
+///
+/// The phrase is short and quotable because it is the one line that has to
+/// survive being pasted into a ticket without its context: not "0 objects", a
+/// figure a reader's eye slides over, but a sentence stating that no verification
+/// happened.
+pub const SCRUB_NOTHING_VERIFIED: &str = "nothing was verified";
+
+/// See [`SCRUB_NOTHING_VERIFIED`]. What to do about a scrub that covered nothing.
+///
+/// Names the three things that actually cause it, in the order they are worth
+/// checking: the prefix is the usual answer, an empty dataset is the alarming
+/// one, and the filters are the user's own doing. Nothing here suggests
+/// re-running with `--sample-percent 100` as a *fix*, because a sample that
+/// selected nothing on a small dataset is behaving correctly.
+pub const SCRUB_NOTHING_VERIFIED_HINT: &str = "Check the prefix with `dctl ls REMOTE:` — a path that matches no object \
+     scrubs nothing. If the listing is empty too, the dataset is empty or this \
+     machine's index has not seen it (`dctl index rebuild REMOTE:`). Filters and \
+     `--sample-percent` also narrow what a run covers.";
 
 /// What a successful read-back proved, reported alongside a scrub's grade.
 ///
@@ -1661,6 +1813,29 @@ pub const PLAN_REASON_EMPTY_SOURCE_DIR: &str = "empty-source-dir";
 /// See [`PLAN_REASON_MISSING`]. The destination was never listed
 /// (`--no-traverse`), so every source file is assumed absent.
 pub const PLAN_REASON_UNTRAVERSED: &str = "destination-not-listed";
+/// See [`PLAN_REASON_MISSING`]. The comparison fell back to content because a
+/// side stores the time of the write ([`crate::fidelity`]), and that side has no
+/// content hash recorded for this path.
+///
+/// A distinct slug rather than reuse of [`PLAN_REASON_MODIFIED`], because the
+/// two answer different questions. `modified` means "the timestamps were
+/// compared and disagreed"; this one means "nothing was compared, and the file
+/// is being sent because sending it is the safe direction". An operator asking
+/// why a rebuilt index re-uploads everything on its first run deserves the
+/// second answer, not the first.
+pub const PLAN_REASON_CONTENT_UNRECORDED: &str = "content-not-recorded";
+
+/// See [`PLAN_REASON_MISSING`]. One side has no recorded size for this path, so
+/// the sizes were never comparable and the file is being sent.
+///
+/// Distinct from [`PLAN_REASON_SIZE`], which means "the sizes were compared and
+/// disagreed". This one means the comparison could not run: an index row written
+/// by `dctl index rebuild` carries no size until the file is written again (see
+/// [`crate::source::Entry::size`]). The distinction is the whole point — an
+/// operator looking at a `sync` that re-sent everything needs to know it was
+/// missing metadata rather than changed files, and the slug is the only place a
+/// machine consumer can learn that.
+pub const PLAN_REASON_SIZE_UNRECORDED: &str = "size-not-recorded";
 
 /// Fraction of a destination whose removal by one `sync` is worth shouting
 /// about.
@@ -1730,17 +1905,71 @@ pub const TRANSFER_COMMAND_COPYTO: &str = "copyto";
 /// See [`TRANSFER_COMMAND_COPY`].
 pub const TRANSFER_COMMAND_MOVETO: &str = "moveto";
 
-/// Feature name reported when a transfer command reaches the engine boundary.
+/// Remediation hint for a file the whole-buffer transfer engine will not attempt.
 ///
-/// One constant, because the wording is a promise: the command parsed, the plan
-/// is real, and the *only* missing piece is execution. Five commands phrasing
-/// that differently would read as five separate bugs.
-pub const TRANSFER_ENGINE_FEATURE: &str = "the verified-write transfer engine";
-
-/// Remediation hint attached to [`TRANSFER_ENGINE_FEATURE`].
+/// One constant, because the wording is a promise about *where* the limit is:
+/// the command parsed, the plan is real, and the only thing missing is a
+/// streaming path through the core. Five commands phrasing that differently
+/// would read as five separate bugs. `backup` does not use it — see
+/// [`crate::commands::backup::store`], which streams and therefore has no such
+/// ceiling.
 pub const TRANSFER_ENGINE_HINT: &str = "The current engine moves whole files through memory, so very large objects \
      are refused rather than attempted. Streaming transfers (PLAN.md §6, §16.2) \
      lift this limit. Use --dry-run to see exactly what would be transferred.";
+
+/// Missing capability reported for a transfer between two remotes, one of which
+/// is sealed.
+///
+/// Names the capability and the crate that owns it, because those are the two
+/// facts that tell a reader whether the wait is theirs to end. Reading a sealed
+/// object and re-sealing it for another vault means holding two root keys and a
+/// decrypt-then-encrypt path in the same run; `dctl_core::Vault` has
+/// `get_file`/`put_file` on one vault and nothing that spans two. No amount of
+/// CLI work reaches it.
+pub const TRANSFER_SEALED_REMOTE_TO_REMOTE_FEATURE: &str = "a re-encrypting transfer between two remotes (missing in dctl-core: no \
+     path reads from one vault and reseals into another)";
+
+/// Remediation hint attached to [`TRANSFER_SEALED_REMOTE_TO_REMOTE_FEATURE`].
+///
+/// Kept apart from [`TRANSFER_REMOTE_TO_REMOTE_HINT`] because the two gaps are
+/// genuinely different waits, and telling a user the wrong one sends them to
+/// watch the wrong release. A sealed end needs a re-encrypting path through
+/// `dctl-core` that does not exist; two plain ends need nothing of the sort, and
+/// saying "re-encryption" about them would be untrue. The way out is the same in
+/// both cases, so both hints name it.
+///
+/// The phase is stated as **absent**, which is a roadmap fact rather than an
+/// evasion: `PLAN.md` §11 lists no phase that delivers vault-to-vault transfer,
+/// and §8 goes the other way by design — the root key is only ever *wrapped*, so
+/// the project has deliberately avoided building bulk re-encryption. A reader
+/// who is told "phase 4" would wait for something nobody has scheduled.
+pub const TRANSFER_SEALED_REMOTE_TO_REMOTE_HINT: &str = "Copy to a local path first, then copy that up. No PLAN.md §11 phase \
+     schedules a re-encrypting transfer — §8 keeps the root key wrapped rather \
+     than re-encrypting data — so this is not a release to wait for. To copy a \
+     vault's stored objects as they are, with no password and no re-encryption, \
+     use `dctl replicate STORE: DEST-STORE:`.";
+
+/// Missing capability reported for a transfer between two *plain* remotes.
+///
+/// No encryption is involved on either side, so the honest account of the gap is
+/// that this engine holds one remote at a time: whichever end is not a remote is
+/// the local filesystem. Naming that — and naming `dctl-cli` as the layer that
+/// owns it — is what stops a reader concluding the tool cannot move their data
+/// at all, or that they are waiting on the crypto core.
+pub const TRANSFER_REMOTE_TO_REMOTE_FEATURE: &str = "a transfer that connects two remotes at once (missing in dctl-cli: the \
+     engine holds one backend and one local side)";
+
+/// Remediation hint attached to [`TRANSFER_REMOTE_TO_REMOTE_FEATURE`].
+///
+/// States the phase as absent for the same reason the sealed hint does. `PLAN.md`
+/// §11 phase 1 delivers `copy`/`move`/`sync` in plain and crypt modes and says
+/// nothing about two remote ends, so claiming a phase would be inventing one.
+/// What it *can* say truthfully is that the work is a `dctl-cli` change and
+/// needs nothing from the core, which is the difference a reader is entitled to.
+pub const TRANSFER_REMOTE_TO_REMOTE_HINT: &str = "Copy to a local path first, then copy that up. Neither end is encrypted, \
+     so nothing has to be re-sealed and nothing is waiting on dctl-core — the \
+     engine simply connects one remote at a time. No PLAN.md §11 phase names \
+     remote-to-remote; it is a dctl-cli change whenever it is scheduled.";
 
 /// Object key under which a vault stores its wrapped root key.
 ///
@@ -1751,6 +1980,31 @@ pub const TRANSFER_ENGINE_HINT: &str = "The current engine moves whole files thr
 /// envelope. If `dctl-core` ever exposes this, delete this constant and use
 /// theirs — a test in `commands::transfer::engine` pins the behaviour either way.
 pub const VAULT_ENVELOPE_OBJECT_KEY: &str = "system/envelope.bin";
+
+/// Key prefix of a vault's per-file content objects (`docs/FORMAT.md` §3).
+///
+/// The same narrow duplication as [`VAULT_ENVELOPE_OBJECT_KEY`], and for the
+/// same reason: `dctl cleanup` has to recognise a *content* object among the
+/// keys a provider lists, without unsealing any of them. Nothing here decodes an
+/// object — the prefix only says which keys are candidates for the orphan sweep,
+/// so that a name record or the envelope can never be mistaken for one.
+///
+/// Frozen by the format, not by this file. `docs/FORMAT.md` §3 fixes the key as
+/// `o/` ‖ hex(file_id), and a vault written years ago has to stay sweepable.
+pub const VAULT_OBJECT_KEY_PREFIX: &str = "o/";
+
+/// Key prefix of a vault's §5 authoritative name records (`docs/FORMAT.md` §5).
+///
+/// One record per stored file, which is precisely what makes it useful here:
+/// `cleanup` counts them and compares the total against the number of rows in
+/// the index. Equal totals mean the index lists every file the vault holds, and
+/// only then is "no index record refers to this object" evidence that the object
+/// is debris. Unequal totals mean the index is stale and the sweep refuses (see
+/// [`CLEANUP_STALE_INDEX_HINT`]).
+///
+/// The records themselves are encrypted under keys `dctl-core` holds privately,
+/// so counting is the *only* thing this prefix is used for.
+pub const VAULT_NAME_KEY_PREFIX: &str = "n/";
 
 // ── The envelope header, as `docs/FORMAT.md` §2 freezes it ───────────────────
 //
@@ -1838,26 +2092,36 @@ pub const PLAIN_WRITE_INTO_VAULT_HINT: &str = "That directory holds a vault enve
 /// deleted together, not raised.
 pub const TRANSFER_WHOLE_FILE_LIMIT: u64 = 1024 * 1024 * 1024;
 
-/// Feature name reported when a pattern-based filter is requested.
-pub const PATTERN_FILTER_FEATURE: &str =
-    "pattern filtering (--include/--exclude/--filter-from/--files-from)";
-
-/// Remediation hint attached to [`PATTERN_FILTER_FEATURE`].
+/// Working-buffer size for hashing a local file under `--checksum`.
 ///
-/// The wording matters more than usual here. Quietly ignoring an `--exclude`
-/// during a `sync` would delete precisely the files the rule was written to
-/// protect, so refusing is a data-safety guarantee rather than an inconvenience.
-pub const PATTERN_FILTER_HINT: &str = "A filter that was silently ignored would make `sync` delete the files it was \
-     written to protect, so DCTL refuses instead. Narrow the transfer with an \
-     explicit SOURCE, or with --min-size/--max-size/--max-depth, which are \
-     honoured.";
+/// `--checksum` asks for content equality, which for a local file means reading
+/// it end to end. It must not mean *holding* it end to end: `PLAN.md` §16.2 caps
+/// memory at O(concurrency), and materialising a fifty-gigabyte file in order to
+/// decide whether to copy it would be the most absurd possible way to break that
+/// rule. So the file is streamed through a buffer of this size.
+///
+/// 128 KiB is the same working size `dctl-core`'s streaming seal uses, chosen
+/// for the same reason: it is several times the typical filesystem read-ahead
+/// window, so the syscall overhead per byte is already negligible, while being
+/// small enough that one buffer per concurrent transfer is invisible against the
+/// process's own footprint. Larger buffers measurably stop helping well below
+/// this point; smaller ones start costing syscalls.
+pub const CHECKSUM_STREAM_BUFFER_BYTES: usize = 128 * 1024;
 
-/// Feature name reported when a transfer command must enumerate a named remote.
-pub const REMOTE_ENUMERATION_FEATURE: &str = "listing a remote";
-
-/// Remediation hint attached to [`REMOTE_ENUMERATION_FEATURE`].
-pub const REMOTE_ENUMERATION_HINT: &str = "Enumerating a remote needs an unlocked vault, which the command context does \
-     not yet carry. Transfers between local paths can be planned today.";
+/// Remediation hint when `--checksum` cannot be answered by one of the sides.
+///
+/// The wording has to keep two things apart, because the remedy differs. A vault
+/// records a BLAKE3 of the plaintext at write time and can always answer; a
+/// local file can be read and hashed, so it can always answer too. What cannot
+/// answer is a **plain object store**, which knows only the provider's checksum
+/// of whatever bytes it happens to be holding — a different claim entirely.
+/// Comparing the two would produce a confident wrong verdict, and silently
+/// falling back to size-and-time would answer a question the user did not ask
+/// (`PLAN.md` §6).
+pub const CHECKSUM_UNAVAILABLE_HINT: &str = "A plain object store reports the provider's checksum of the bytes it holds, \
+     which is not the plaintext hash a vault records, so the two cannot be \
+     compared. Address the vault through its own remote, or compare by size and \
+     modification time (drop --checksum, or add --size-only).";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Point-in-time arguments — `--at`, `--since`, `--until`
@@ -2172,35 +2436,79 @@ pub const AUDIT_VERDICT_BROKEN: &str = "broken";
 /// contents would produce a plan that does not answer the question asked, and a
 /// restore whose output does not match its arguments is worse than one that
 /// refuses: the operator would have no reason to look twice.
-pub const POINT_IN_TIME_FEATURE: &str =
-    "restoring a snapshot or an earlier point in time (--snapshot/--at)";
+/// The layer is named because it is not this command's: `restore` walks whatever
+/// the index offers it, and the index offers one row per path. A versioned index
+/// is a `dctl-index` format change that `dctl-core` then has to read and write,
+/// so no amount of CLI work produces an earlier version to restore.
+pub const POINT_IN_TIME_FEATURE: &str = "restoring a snapshot or an earlier point in time (--snapshot/--at) \
+     (missing in dctl-index: the index format holds one current version per \
+     path, so there is no earlier one to select)";
 
 /// Remediation hint attached to [`POINT_IN_TIME_FEATURE`].
+///
+/// Names the phase and repeats the word `PLAN.md` uses for it. Phase 4 lists
+/// snapshots as **optional**, and the hint says so rather than promising a date:
+/// a reader planning a retention policy around point-in-time restore needs to
+/// know it is a maybe, not a when.
 pub const POINT_IN_TIME_HINT: &str = "The index records one current version per path in this build; selecting an \
-     earlier one needs the versioned, snapshot-backed index of PLAN.md §13.5. \
-     Restore the current contents by dropping the flag.";
+     earlier one needs the versioned, snapshot-backed index of PLAN.md §13.5, \
+     scheduled as phase 4 (§11) and marked optional there. Restore the current \
+     contents by dropping the flag, or keep dated backups in separate remotes.";
 
-/// Feature name reported when a recovery command is asked for a glob filter.
+/// Feature name reported when a backup is asked to record a snapshot.
 ///
-/// Deliberately distinct from [`PATTERN_FILTER_FEATURE`], which also names
-/// `--files-from`. A restore *does* honour `--files-from`: an exact list of
-/// logical paths needs no matcher, and it is the one input that lets the restore
-/// pre-flight (`PLAN.md` §13.6) run before the engine exists. Refusing it for
-/// symmetry would remove the only way to prove a restore is safe today.
-pub const GLOB_FILTER_FEATURE: &str = "glob filtering (--include/--exclude/--filter-from)";
-
-/// Feature name reported when the audit log itself has never been written.
+/// The mirror image of [`POINT_IN_TIME_FEATURE`], and refused for the same
+/// reason from the other end. A snapshot is only worth recording if something
+/// can later restore it, and the versioned index that would make
+/// `--snapshot nightly` restorable is `PLAN.md` §13.5 work that has not
+/// happened. Accepting the flag and storing the files anyway would write a
+/// backup whose operator believes a named point in time exists — and they would
+/// find out it does not on the day they reached for it, which is the single
+/// worst moment (`PLAN.md` §13.6).
 ///
-/// Named as the *writer*, not the reader: `dctl audit` reads and verifies a log
-/// today, and the missing half is the engine-side append that `PLAN.md` §7
-/// requires after every operation. Saying so precisely is what stops "no log
-/// found" from being mistaken for "nothing has happened".
-pub const AUDIT_WRITER_FEATURE: &str = "the tamper-evident audit log writer";
+/// A dry run still reports the name, because planning is not claiming.
+pub const SNAPSHOT_FEATURE: &str = "recording a backup as a named snapshot (--snapshot) (missing in \
+     dctl-index: the index format holds one current version per path, so a \
+     snapshot name would have nothing to pin)";
 
-/// Remediation hint attached to [`AUDIT_WRITER_FEATURE`].
-pub const AUDIT_WRITER_HINT: &str = "No audit log exists to inspect: appending a chained record after every \
-     operation (PLAN.md §7) needs the dctl-core engine. Verification works \
-     today — point --audit-log at a chain written elsewhere.";
+/// Remediation hint attached to [`SNAPSHOT_FEATURE`].
+///
+/// Names the same layer and the same phase as [`POINT_IN_TIME_HINT`], because
+/// they are two ends of one missing format and a reader who meets both must not
+/// conclude they are waiting on two separate things.
+pub const SNAPSHOT_HINT: &str = "The index records one current version per path in this build, so a snapshot \
+     name could be stored but never restored. The versioned, snapshot-backed \
+     index of PLAN.md §13.5 — phase 4 (§11), listed there as optional — is what \
+     makes it real. Back up without --snapshot; the files themselves are stored \
+     identically.";
+
+/// Reported when the reader is pointed at a log file that is not there.
+///
+/// A missing file is **not** an empty chain. An empty log is the claim "nothing
+/// has been appended"; a missing one is far more likely to mean the reader was
+/// pointed somewhere the writer never wrote — a different `--index`, a different
+/// machine, a log that was moved. Answering "0 records, chain intact" to that
+/// would hand back a clean bill of health for a chain nobody looked at, which is
+/// the one answer an evidence tool must never give.
+pub const AUDIT_LOG_ABSENT: &str = "no audit log";
+
+/// Remediation hint attached to [`AUDIT_LOG_ABSENT`].
+pub const AUDIT_LOG_ABSENT_HINT: &str = "A log is created by the first operation that changes data — a copy, a \
+     delete, an init — and lives beside the index the run used. If this vault \
+     has recorded work, check --index, or point --audit-log straight at the \
+     chain (a mirrored or offline copy verifies exactly the same way).";
+
+/// Remediation hint attached to every failure to append an audit record.
+///
+/// The sentence an operator needs is not "the write failed" but *what that means
+/// for the work that was being recorded*: the operation itself may well have
+/// succeeded and be sitting durably in the vault, unattested. Saying so stops
+/// the two most likely wrong reactions — assuming nothing happened, and
+/// re-running a destructive command to "make sure".
+pub const AUDIT_UNRECORDED_HINT: &str = "The operation this record describes is NOT recorded, whether or not it \
+     succeeded — check the vault before re-running anything destructive. \
+     PLAN.md §7 makes the chained record mandatory, so the command fails rather \
+     than continuing unaudited.";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Audit log writer — `crate::audit::write` (`PLAN.md` §7, durability from §6)
@@ -2402,19 +2710,21 @@ pub const LOCAL_STAGING_SUFFIX: &str = ".tmp";
 // costs in memory today is documented on `commands::cat::source` instead of
 // being hidden behind a capability string.
 
-/// Feature name reported when `rcat` is asked to store a stream into a remote.
-pub const STREAM_WRITE_FEATURE: &str = "storing a stream into a remote";
+// `rcat` used to carry a "storing a stream into a remote" refusal here. It is
+// gone: a stream bound for a vault is spooled to a temporary file and stored
+// with `Vault::put_file_from_path`, which seals straight from disk in
+// O(chunk_size) memory. What that costs — one temporary copy of the plaintext,
+// owner-readable and unlinked when the run ends — is documented on
+// `commands::rcat::spool` rather than hidden behind a capability string.
 
-/// Remediation hint attached to [`STREAM_WRITE_FEATURE`].
+/// Name prefix of the temporary file `rcat` spools a remote-bound stream into.
 ///
-/// The second half is the load-bearing part. `rcat` refuses *before* reading a
-/// byte, because a pipe cannot be rewound: consuming the producer's output and
-/// then failing would destroy data that was never stored anywhere.
-pub const STREAM_WRITE_HINT: &str = "Storing a stream in a remote needs the verified-write engine to accept an \
-     upload of unknown length (PLAN.md §6), which the command context does not \
-     yet carry. Nothing was read from standard input, so the producing command's \
-     output is intact — send it to a local path instead, or store the data with \
-     `dctl copy` once it is on disk.";
+/// Brand-named and purpose-named so an operator who finds one after a crash can
+/// tell what wrote it and why, without having to guess from the contents — which
+/// they must not have to open, because the contents are the user's plaintext.
+/// The random component and the owner-only mode come from `tempfile`; only the
+/// human-readable half is ours to choose.
+pub const RCAT_SPOOL_PREFIX: &str = "dctl-rcat-";
 
 /// Remediation hint for `cat --json` without `--discard`.
 ///
@@ -2423,6 +2733,44 @@ pub const STREAM_WRITE_HINT: &str = "Storing a stream in a remote needs the veri
 pub const CAT_JSON_STREAM_HINT: &str = "stdout carries either object bytes or JSON, never both — interleaving them \
      would corrupt the stream and the document. Add --discard to read the objects \
      and emit only the JSON report, or drop --json to get the bytes.";
+
+/// Object size at or above which a whole-object read served for a byte window
+/// is announced before it happens.
+///
+/// A sealed vault has no ranged read — `dctl_core` exposes `get_file` and
+/// nothing narrower — so `dctl cat b2vault:film.mkv --offset 0 --count 4` pulls
+/// and decrypts the entire object to hand back four bytes. That is documented on
+/// [`crate::source::vault`] and it is not faked, which is right: a short read or
+/// a refusal would trade a known cost for an unknown wrong answer. But a cost
+/// nobody sees until it is incurred is only honest in principle. On a metered
+/// backend the whole object leaves the provider, and the user finds out on an
+/// invoice rather than at the prompt.
+///
+/// Sixty-four mebibytes is where the two costs that matter both become real:
+///
+/// * **Memory.** The plaintext is buffered whole. Unattended runs live in
+///   containers and CI runners given 128–512 MiB, so this is the size at which
+///   the buffer alone is a material fraction of the budget rather than noise.
+/// * **Money.** At commodity egress rates a full object transfer at this size is
+///   the point where a scripted loop stops rounding to nothing.
+///
+/// It is deliberately well above the objects people window into casually —
+/// configuration files, logs, documents, photographs — so the ordinary
+/// `cat --head` never warns. That is the property that keeps the warning worth
+/// reading: one that fires on routine work is one an operator learns to skip,
+/// and it would then be missing for the disk image or the database dump, which
+/// is the case it exists for.
+pub const RANGED_READ_WHOLE_OBJECT_WARN_BYTES: u64 = 64 * 1024 * 1024;
+
+/// What the warning above says after it has quoted the two sizes.
+///
+/// Names the cause rather than only the effect. "This is slow" invites a retry;
+/// "there is no ranged read here, so the window costs the object" tells the
+/// reader that retrying costs the same again, and that the fix is to read the
+/// object once rather than to window it repeatedly.
+pub const RANGED_READ_WHOLE_OBJECT_NOTE: &str = "a sealed vault has no ranged read, so the window is served by fetching and \
+     decrypting the whole object. On a metered backend the whole object is what \
+     gets billed, and repeating the read costs the same again.";
 
 /// Outcome slugs in `rcat`'s JSON record.
 ///
@@ -2449,28 +2797,41 @@ pub const RCAT_TERMINAL_STDIN_HINT: &str = "rcat stores what a pipeline produces
 // Directory family — `mkdir`, `touch`
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Two commands that exist because an object store has neither directories nor a
-// settable modification time, and a user porting a shell script expects both.
-// The strings below are what makes the illusion consistent: one marker name that
-// every command must agree on, and one report vocabulary so `mkdir --dry-run`
-// and `touch --dry-run` read alike.
+// Two commands that exist because a user porting a shell script expects them,
+// and because what they mean differs sharply by backend. A local filesystem has
+// real directories and a settable modification time; a vault and an object store
+// have neither — a "directory" there is a shared prefix among keys, which exists
+// exactly when a key sits under it and cannot be created on its own.
+//
+// DCTL does not paper over that with a marker object. Writing `<dir>/.dctl-dir`
+// would put a file into the user's own namespace that `ls`, `size`, `check`,
+// `sync` and `hashsum` would all report and round-trip — inventing data to
+// simulate a directory, which is a worse lie than the absence it hides. So the
+// vocabulary below is about *outcomes*, including the honest outcome "there was
+// nothing to create here", so that `mkdir` and `touch` read alike across the
+// three kinds of place they can address.
 
-/// Name of the zero-byte object that stands in for a directory.
+/// Name of the zero-byte object other tools use to stand in for a directory.
 ///
-/// Object stores have no directories — `photos/2024/a.jpg` is one flat key with
-/// slashes in it, and a directory containing no objects simply does not exist.
-/// A `mkdir` therefore has to write something, and what it writes is an empty
-/// object at `<dir>/.dctl-dir`.
+/// **DCTL does not write one.** `mkdir` used to plan a marker at
+/// `<dir>/.dctl-dir` so that an empty prefix would survive a listing, and that
+/// idea is now rejected for the reason in the section note above: the marker is
+/// a real object in the user's own namespace, and every command that walks the
+/// namespace — `ls`, `size`, `check`, `sync`, `hashsum`, a restore — would carry
+/// it as data. Simulating a directory by fabricating a file is a larger
+/// misreport than the absence it was hiding.
+///
+/// The name survives because the *removal* family still has to recognise it: a
+/// marker written by an older build, or by another object-store tool pointed at
+/// the same bucket, must be treated as a directory declaration rather than as
+/// one of the user's files — otherwise `rmdir` would report a directory as
+/// non-empty because of a placeholder nobody considers content. Reading the name
+/// is safe and useful; writing it is what stopped.
 ///
 /// A dot-prefixed name for the usual reason (invisible in a casual listing), and
 /// brand-named so it can never collide with a user's own file: nobody has a
 /// `.dctl-dir` they care about, whereas `.keep` and `.gitkeep` are real files in
 /// real trees that a `sync` must round-trip untouched.
-///
-/// Every listing command is responsible for hiding markers, and `rmdir` for
-/// treating a directory that holds nothing but its marker as empty. Renaming
-/// this constant orphans existing markers, so it is effectively frozen once a
-/// vault has been written.
 pub const DIRECTORY_MARKER_NAME: &str = ".dctl-dir";
 
 /// Column headers of the directory-family plan table.
@@ -2495,8 +2856,11 @@ pub const DIRECTORY_LABEL_TARGET: &str = "Target";
 pub const DIRECTORY_LABEL_MODE: &str = "Mode";
 /// See [`DIRECTORY_LABEL_COMMAND`]. One row per directory in a `--parents` chain.
 pub const DIRECTORY_LABEL_DIRECTORY: &str = "Directory";
-/// See [`DIRECTORY_LABEL_COMMAND`]. The marker object a directory resolves to.
-pub const DIRECTORY_LABEL_MARKER: &str = "Marker";
+/// See [`DIRECTORY_LABEL_COMMAND`]. What kind of place the remote turned out to
+/// be, because it is what decides whether anything is written at all.
+pub const DIRECTORY_LABEL_PLACE: &str = "Backend";
+/// See [`DIRECTORY_LABEL_COMMAND`]. What the run actually did.
+pub const DIRECTORY_LABEL_OUTCOME: &str = "Outcome";
 /// See [`DIRECTORY_LABEL_COMMAND`]. Whether missing parents are created too.
 pub const DIRECTORY_LABEL_PARENTS: &str = "Parents";
 /// See [`DIRECTORY_LABEL_COMMAND`]. The object `touch` addresses.
@@ -2517,12 +2881,61 @@ pub const DIRECTORY_MODE_DRY_RUN: &str = "dry-run";
 /// See [`DIRECTORY_MODE_DRY_RUN`].
 pub const DIRECTORY_MODE_EXECUTE: &str = "execute";
 
-/// Value of the JSON `status` field on a directory-family plan.
+/// Value of the JSON `status` field on a directory-family **plan**.
 ///
-/// Only ever this. A plan describes a request that has *not* run, and `PLAN.md`
-/// §6 forbids reporting work that did not happen — so there is no `"created"`
-/// spelling for a document to accidentally carry.
+/// The only status a `--dry-run` can carry. A plan describes a request that has
+/// *not* run, and `PLAN.md` §6 forbids reporting work that did not happen — so a
+/// rehearsal can never be spelled `created`, whatever the engine would have
+/// done. The outcome slugs below are produced by the engine *after* the fact and
+/// are the only other values this field takes.
 pub const DIRECTORY_STATUS_PLANNED: &str = "planned";
+
+/// Outcome slugs of a real directory-family run, in the JSON `status` field and
+/// in the `Outcome` row.
+///
+/// Stable machine values a script branches on, and deliberately five rather than
+/// a boolean: "I made one" and "there was never anything to make" are different
+/// answers to `mkdir`, and reporting the second as the first is the misreport
+/// `PLAN.md` §6 exists to prevent. Every one of them is a *success* — a failure
+/// leaves by the error channel with an exit code, never as a status word.
+pub const DIRECTORY_OUTCOME_CREATED: &str = "created";
+/// See [`DIRECTORY_OUTCOME_CREATED`]. It was already there; nothing was written.
+pub const DIRECTORY_OUTCOME_PRESENT: &str = "already_present";
+/// See [`DIRECTORY_OUTCOME_CREATED`]. This backend has no directories to create:
+/// the prefix exists exactly when an object sits under it (see the section note).
+pub const DIRECTORY_OUTCOME_NOT_REQUIRED: &str = "not_required";
+/// See [`DIRECTORY_OUTCOME_CREATED`]. `--no-create` and the object is not there.
+pub const DIRECTORY_OUTCOME_SKIPPED: &str = "skipped";
+/// See [`DIRECTORY_OUTCOME_CREATED`]. An existing object's time was rewritten.
+pub const DIRECTORY_OUTCOME_STAMPED: &str = "stamped";
+
+/// Sentences the directory family prints on stderr for each outcome.
+///
+/// Written out per outcome rather than assembled from fragments: each one is the
+/// single line an operator reads to learn what happened, and "created" and
+/// "nothing needed creating" have to be unmistakable at a glance.
+pub const DIRECTORY_SAID_CREATED_DIRECTORY: &str = "created directory";
+/// See [`DIRECTORY_SAID_CREATED_DIRECTORY`].
+pub const DIRECTORY_SAID_PRESENT_DIRECTORY: &str = "directory already exists";
+/// See [`DIRECTORY_SAID_CREATED_DIRECTORY`].
+pub const DIRECTORY_SAID_CREATED_OBJECT: &str = "created empty object";
+/// See [`DIRECTORY_SAID_CREATED_DIRECTORY`].
+pub const DIRECTORY_SAID_STAMPED_OBJECT: &str = "set the modification time of";
+/// See [`DIRECTORY_SAID_CREATED_DIRECTORY`].
+pub const DIRECTORY_SAID_SKIPPED_OBJECT: &str =
+    "not there and --no-create was given, so nothing was done for";
+
+/// What `mkdir` reports on a backend that has no directories at all.
+///
+/// The whole justification for succeeding rather than refusing, in one line the
+/// user actually sees. A vault and an object store store keys, not directories:
+/// `photos/2024` comes into existence with the first object stored under it and
+/// disappears with the last, so there is no state for `mkdir` to establish and
+/// nothing missing when it returns. Refusing would break the ordinary
+/// `mkdir && copy` script for a condition that is not an error, and writing a
+/// marker object would put a file in the user's namespace that nobody asked for.
+pub const DIRECTORY_NOTHING_TO_CREATE: &str = "has no directories: a path there exists exactly while an object is stored \
+     under it, so there is nothing to create and nothing is missing";
 
 /// How a boolean option is rendered in the plan table.
 ///
@@ -2547,14 +2960,123 @@ pub const DIRECTORY_TIMESTAMP_SOURCE_NOW: &str = "now";
 /// See [`DIRECTORY_TIMESTAMP_SOURCE_NOW`]. Supplied with `--timestamp`.
 pub const DIRECTORY_TIMESTAMP_SOURCE_EXPLICIT: &str = "explicit";
 
-/// Remediation hint attached to the directory family's `unimplemented` error.
+/// Feature name reported when `touch` is asked to re-stamp an object that a
+/// vault already holds.
 ///
-/// Says precisely how far the command got, because "not implemented" on its own
-/// invites the user to doubt their arguments when the arguments were fine.
-pub const DIRECTORY_ENGINE_HINT: &str = "Parsing, validation and planning are complete: re-run with --dry-run to see \
-     exactly what would be created. Writing the object needs a dctl-core vault \
-     handle (PLAN.md §6) reachable from the command context, which the CLI does \
-     not carry yet.";
+/// Names the **missing `dctl-core` call**, not the command. This distinction is
+/// the whole content of the message. Everything else `dctl touch` does against a
+/// vault works — an object that is not there is created, `--no-create` is
+/// honoured, and the time is read back out of the index afterwards rather than
+/// assumed — so a refusal phrased as "dctl touch is not implemented" would send
+/// a reader to look at this command for a branch that is missing. There is no
+/// such branch. A vault keeps modification times in
+/// [`dctl_index::Record::modified_unix`] inside the encrypted index; the index
+/// handle is a private field of `dctl_core::Vault`; and nothing on the vault's
+/// public surface — whole-object writes, whole-object reads, verification,
+/// listing, deletion, index rebuild, the recipient operations — updates a
+/// record's time. The gap is one function that does not exist in another crate,
+/// and the message says so by naming it.
+pub const TOUCH_RESTAMP_FEATURE: &str = "a dctl_core::Vault call that updates the modification time of a stored \
+     record — which is what re-stamping an object a vault already holds would \
+     need —";
+
+/// Remediation hint attached to [`TOUCH_RESTAMP_FEATURE`].
+///
+/// States the gap precisely, because it is a `dctl-core` boundary and not a
+/// missing branch here: the modification time lives in the encrypted index,
+/// `dctl_core::Vault` exposes no operation that updates a record's
+/// `modified_unix`, and the index itself is private to the core — so there is no
+/// call for this command to make. Re-storing the object would move the time to
+/// *now* rather than to the time that was asked for, which is a different write
+/// than the one requested and is therefore not done silently.
+pub const TOUCH_RESTAMP_HINT: &str = "The object was not modified. A vault keeps modification times in its \
+     encrypted index and dctl-core exposes no call that updates one, so DCTL \
+     will not pretend to. Re-write the object (`dctl copy` or `dctl rcat`) if a \
+     current time is what you need, or run `touch` against a plain local remote, \
+     where the filesystem's own timestamps are settable.";
+
+/// Feature name reported when `--timestamp` is aimed at a sealed vault.
+///
+/// Names the missing `dctl-core` capability for the same reason
+/// [`TOUCH_RESTAMP_FEATURE`] does, and it is a *different* missing capability
+/// rather than the same one twice. Re-stamping needs a call that updates an
+/// existing record; this needs the **write** to accept a time at all.
+/// `Vault::put_file` and `Vault::put_file_from_path` both stamp the record with
+/// the moment of the write (`now_unix()`) and take no timestamp from the caller,
+/// so there is no argument for `--timestamp` to become. A reader who is told
+/// "dctl touch cannot do this" would go looking for the flag plumbing; the
+/// plumbing is complete, and the signature it would call does not take the
+/// value.
+pub const TOUCH_EXPLICIT_TIME_FEATURE: &str = "a dctl_core::Vault write that accepts a modification time — which is what \
+     storing a chosen one in a vault would need —";
+
+/// Remediation hint attached to [`TOUCH_EXPLICIT_TIME_FEATURE`].
+///
+/// Refused *before* anything is written, and that ordering is the point. The
+/// only write available here is `Vault::put_file`, which stamps the record with
+/// the moment of the write; creating the object and then reporting the requested
+/// time would be a lie, and creating it and reporting a different time would be
+/// an operation the user did not ask for. So nothing is created at all.
+pub const TOUCH_EXPLICIT_TIME_HINT: &str = "Nothing was created or modified. A vault records the time of the write \
+     itself and dctl-core takes no timestamp, so the time you asked for could \
+     not be stored. Drop --timestamp to create the object with the time of the \
+     write, or address a plain local remote, whose filesystem timestamps are \
+     settable.";
+
+/// Feature name reported when `touch` is aimed at a plain object store.
+///
+/// **Not a build gap, and the wording must never suggest one.** A transfer
+/// (`dctl copy`, `move`, `sync`) writes a plain object into a bucket today, so
+/// "this build cannot write there" is simply false. What an object store has no
+/// notion of is a *settable* modification time: B2, S3 and R2 all assign
+/// `Last-Modified` themselves when the object is stored, and their APIs expose
+/// no operation that moves it afterwards. `touch` is the command whose entire
+/// purpose is to move it.
+///
+/// So the missing capability belongs to the **provider**, one layer below
+/// `dctl-store`, and no `PLAN.md` phase delivers it — there is nothing to
+/// schedule. That is why the hint offers the two things that *are* possible
+/// instead of a release to wait for.
+pub const TOUCH_OBJECT_STORE_FEATURE: &str = "setting the modification time of an object in an object store — the \
+     provider assigns it on write and exposes no way to change it —";
+
+/// Remediation hint attached to [`TOUCH_OBJECT_STORE_FEATURE`].
+///
+/// Names the one half of `touch` that an object store *could* satisfy, so the
+/// reader is not left thinking a bucket is closed to them: creating an empty
+/// object is an ordinary write, and `dctl rcat` is the command for it — once it
+/// grows the object-store arm ([`RCAT_OBJECT_STORE_FEATURE`]). Until then the
+/// honest route to an empty object in a bucket is a transfer of an empty file.
+pub const TOUCH_OBJECT_STORE_HINT: &str = "Nothing was written. A bucket's 'last modified' is the time the provider \
+     stored the object, not a value DCTL can set — no phase of PLAN.md changes \
+     that, because it is the provider's own model. To create an empty object \
+     there, copy an empty file with `dctl copy`; to stamp a time, address a \
+     local remote, whose filesystem timestamps are settable.";
+
+/// Feature name reported when `rcat` is aimed at a plain object store.
+///
+/// A genuine **`dctl-cli` gap**, and the only refusal in the family that is one:
+/// `dctl_store::Backend::put_from_path` would store the spooled stream under the
+/// key, verified, exactly as a transfer does. What is missing is the arm in this
+/// command — `rcat` has a filesystem path and a vault path and no third one —
+/// so it is `PLAN.md` phase 1 work (§11: `copy`/`move`/`sync` in both plain and
+/// crypt modes), finished for the transfer family and not yet extended here.
+///
+/// Named separately from [`TOUCH_OBJECT_STORE_FEATURE`] because the two are not
+/// one gap: this one is a branch somebody can write, and that one is a property
+/// of every object store there has ever been.
+pub const RCAT_OBJECT_STORE_FEATURE: &str = "streaming standard input into an object store — dctl-cli has no \
+     object-store arm in rcat, though dctl-store can store the object —";
+
+/// Remediation hint attached to [`RCAT_OBJECT_STORE_FEATURE`].
+///
+/// Says what did *not* happen first. `rcat` refuses before it reads, so the
+/// producer's output is intact — and that is the single most useful fact for
+/// someone whose `pg_dump` is on the other end of the pipe.
+pub const RCAT_OBJECT_STORE_HINT: &str = "Nothing was read from standard input. Spool the stream to a file and \
+     transfer it (`dctl copy FILE REMOTE:PATH`), which writes plain objects to \
+     a bucket today, or address a vault remote to have it sealed. PLAN.md \
+     phase 1 (§11) is the phase that gives rcat the same arm.";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Timestamps (`dctl touch --timestamp`)
@@ -2767,15 +3289,30 @@ pub const MOUNT_DEFAULT_VFS_READ_AHEAD: &str = "0";
 /// bare `0` at the use site reads as a bug rather than as a setting.
 pub const MOUNT_SIZE_DISABLED: u64 = 0;
 
-/// Remediation hint attached to `mount`'s `unimplemented` error.
+/// Missing capability reported by `mount`.
+///
+/// Names the adapter rather than the command, and the difference is the whole
+/// value of the message. "dctl mount is not implemented" invites a reader to
+/// wonder whether their arguments, their remote or their platform is the
+/// problem; every one of those has already been checked and passed by the time
+/// this error is built. What is absent is one thing: the crate that turns a
+/// remote into a filesystem the kernel will talk to — `dctl-mount` in the
+/// workspace layout of `PLAN.md` §16.1, which does not exist yet.
+pub const MOUNT_ADAPTER_FEATURE: &str = "a filesystem adapter (missing crate dctl-mount: no FUSE/FSKit/WinFSP \
+     layer to attach a remote through)";
+
+/// Remediation hint attached to [`MOUNT_ADAPTER_FEATURE`].
 ///
 /// States what *is* finished, so the failure reads as a scheduled absence rather
 /// than as a broken command: everything except the filesystem adapter itself has
-/// already run by the time the user sees this.
+/// already run by the time the user sees this. The phase is named because there
+/// genuinely is one — unlike most of the refusals in this file, `mount` is on the
+/// roadmap by name.
 pub const MOUNT_ENGINE_HINT: &str = "The mountpoint checks, the flag surface and the per-platform backend choice \
      are final and have already run — only the filesystem adapter is missing. It \
      is PLAN.md phase 2 (§11, §15): FUSE3 on Linux, FSKit/fuse-t/macFUSE on \
-     macOS, WinFSP on Windows.";
+     macOS, WinFSP on Windows. Until then, `dctl copy` and `dctl cat --offset` \
+     read the same data without a mount.";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Removal family — `delete`, `deletefile`, `purge`, `rmdir`, `rmdirs`, `cleanup`
@@ -2895,19 +3432,124 @@ pub const REMOVAL_BOOL_YES: &str = DESTRUCTIVE_CONFIRMATION;
 pub const REMOVAL_BOOL_NO: &str = "no";
 
 /// Prefix on the removal family's `unimplemented` error hint, introducing the
-/// engine capability the command is waiting on.
-pub const REMOVAL_ENGINE_MISSING: &str = "The removal itself is not wired up yet, because it needs";
+/// capability a *class* of debris would need before it could be swept.
+///
+/// The removal engine itself runs. What remains unavailable is narrower and
+/// belongs to the storage layer: [`dctl_store::Backend`] exposes `put`, `get`,
+/// `head`, `delete` and `list_page`, and nothing that can enumerate a provider's
+/// in-progress multipart uploads or an object's superseded versions. A `cleanup`
+/// asked for one of those classes by name therefore refuses, because reporting
+/// "0 reclaimed" for a sweep that was never able to look is the misreport
+/// `PLAN.md` §6 exists to forbid.
+pub const REMOVAL_ENGINE_MISSING: &str = "This backend exposes no way of";
 
 /// Remediation hint attached to the removal family's `unimplemented` error.
 ///
 /// States how far the command got, because "not implemented" on its own invites
 /// the user to doubt their arguments when the arguments were fine — and, for a
 /// destructive command especially, to wonder whether something was half-removed.
-/// Nothing was: the refusal happens before any mutation.
-pub const REMOVAL_ENGINE_HINT: &str = "Nothing was changed. Parsing, target \
-     resolution, filter validation and the destructive gate all ran — re-run \
-     with --dry-run to see the resolved request. See PLAN.md §11 for the phase \
-     that delivers the rest.";
+/// The classes that *are* supported have already been swept by the time this is
+/// raised, so it names the remedy rather than implying the whole run was lost.
+pub const REMOVAL_ENGINE_HINT: &str = "Nothing of that class was touched. Run \
+     the sweep without that --class to reclaim the classes this backend can \
+     enumerate, or use the provider's own console for the rest.";
+
+// ── The removal report ───────────────────────────────────────────────────────
+//
+// One vocabulary for six commands, because a script that greps a `delete` must
+// keep working against a `purge`. Every status below is a *fact about one
+// object*, never a summary of the run: `PLAN.md` §6 forbids reporting work that
+// did not happen, and the only way to guarantee that at scale is for the record
+// to be written at the moment the work either happened or did not.
+
+/// Status of an object a dry run would have removed.
+///
+/// Deliberately not `removed`: the whole contract of `--dry-run` is that a
+/// consumer can tell a rehearsal from a run by reading the record, without also
+/// having to have seen the command line.
+pub const REMOVAL_STATUS_WOULD_REMOVE: &str = "would-remove";
+
+/// Status of an object that is now gone.
+///
+/// Written only after the store confirmed the removal — for a vault, only after
+/// the index row was committed away, which is what makes a file count as gone.
+pub const REMOVAL_STATUS_REMOVED: &str = "removed";
+
+/// Status of an object that was selected and then found to be already absent.
+///
+/// Not an error and not a removal. Something else deleted it between the listing
+/// and the delete, and counting it as either would be inventing an outcome.
+pub const REMOVAL_STATUS_ABSENT: &str = "absent";
+
+/// Status of an object that could not be removed.
+///
+/// Every one of these is counted as an error, which is what turns a partially
+/// successful run into [`crate::exit::ExitCode::PartialFailure`] rather than a
+/// clean exit that hides three survivors among seven deletions.
+pub const REMOVAL_STATUS_FAILED: &str = "failed";
+
+/// Status of a debris class this backend cannot enumerate.
+pub const REMOVAL_STATUS_UNSUPPORTED: &str = "unsupported";
+
+/// Status of the single closing record that carries the run's totals.
+pub const REMOVAL_STATUS_SUMMARY: &str = "summary";
+
+/// Kind reported for an ordinary stored file.
+pub const REMOVAL_KIND_OBJECT: &str = "object";
+
+/// Kind reported for the zero-byte object that stands in for a directory.
+///
+/// Separate from [`REMOVAL_KIND_OBJECT`] because removing one destroys no user
+/// data at all — it un-declares a container — and an operator reading a report
+/// of a thousand removals needs to see at a glance which were files.
+pub const REMOVAL_KIND_DIRECTORY: &str = "directory";
+
+/// Kind reported for an object left under a staging key by an interrupted write.
+pub const REMOVAL_KIND_STAGING: &str = "staging";
+
+/// Kind reported for a content object no index record refers to.
+pub const REMOVAL_KIND_ORPHAN: &str = "orphan";
+
+/// Width of the status column in the text report.
+///
+/// Wide enough for the longest status above plus a space, so the size and path
+/// columns start in the same place on every line and `awk '{print $3}'` reads
+/// the path. A status that outgrew this would misalign the whole report rather
+/// than truncate, which is the safer failure of the two.
+pub const REMOVAL_STATUS_WIDTH: usize = 13;
+
+/// Width of the size column in the text report.
+///
+/// Fits `1023.99 GiB` — every value [`crate::output::size::bytes`] produces
+/// below a terabyte — right-aligned so magnitudes line up and an outlier is
+/// visible without reading the digits.
+pub const REMOVAL_SIZE_WIDTH: usize = 11;
+
+/// What the text report prints in the size column when there is no size.
+///
+/// A dash rather than `0`: a directory marker's length and a failed removal's
+/// length are *not known to be zero*, they are not applicable, and printing a
+/// zero would put a number in a total that nobody measured.
+pub const REMOVAL_SIZE_ABSENT: &str = "-";
+
+/// Hint on the refusal to remove a directory that still holds objects.
+///
+/// Names both alternatives because the two are the whole distinction the removal
+/// family is built around, and a user who reaches this message is by definition
+/// one who has not yet internalised it.
+pub const REMOVAL_NOT_EMPTY_HINT: &str = "Use `dctl purge` to remove a \
+     directory and everything in it, or `dctl delete` to remove the objects and \
+     leave the structure standing.";
+
+/// Hint on the refusal to sweep orphans against an index that is out of date.
+///
+/// The guard exists because an orphan is defined by *absence* from the index, so
+/// an index that is missing rows would classify live objects as debris. Saying
+/// which command repairs it is the difference between a safe refusal and an
+/// obstacle.
+pub const CLEANUP_STALE_INDEX_HINT: &str = "The index does not list every file \
+     this vault holds, so an object missing from it is not evidence of anything. \
+     Run `dctl index rebuild` and sweep again.";
 
 /// How `purge` describes the scope it is refusing to assume consent for.
 ///
@@ -3074,16 +3716,31 @@ pub const VERSION_FEATURES_NONE: &str = "none";
 
 /// Feature name reported when `dctl version --check` is asked to look for an
 /// update.
-pub const VERSION_UPDATE_CHECK_FEATURE: &str = "dctl version --check";
+///
+/// The only refusal in the tool whose missing piece is not code at all, and the
+/// message says so. There is no release feed for a client to query — no
+/// published endpoint, no signed manifest, no channel — so writing the HTTP call
+/// would produce a command that fails against a URL that does not resolve. The
+/// layer named is therefore *the project*, not a crate, and that is the honest
+/// answer: `dctl-cli` is not waiting on `dctl-core` here, it is waiting on a
+/// distribution decision nobody has taken.
+pub const VERSION_UPDATE_CHECK_FEATURE: &str = "dctl version --check: an update check against a release feed (missing \
+     outside the workspace: the project publishes no release endpoint to ask)";
 
 /// Remediation hint attached to [`VERSION_UPDATE_CHECK_FEATURE`].
 ///
 /// Says what *did* happen as well as what did not: the report above the error is
 /// real, and a user reading only the last line should not conclude that the
 /// whole command failed.
+///
+/// The phase is stated as absent. `PLAN.md` §11 runs to phase 5 and none of the
+/// five mentions distribution, so a reader is told there is nothing to wait for
+/// rather than being sent to re-read the roadmap for an entry that is not there.
 pub const VERSION_UPDATE_CHECK_HINT: &str = "The build information above is complete and was printed. Only the update \
-     lookup is missing: DCTL has no release feed to query in this build, and \
-     inventing an 'up to date' answer would be worse than saying so.";
+     lookup is missing: DCTL publishes no release feed to query, and no PLAN.md \
+     §11 phase adds one — inventing an 'up to date' answer would be worse than \
+     saying so. Compare the version above against however you obtained this \
+     build.";
 
 // ── `dctl about` output ──────────────────────────────────────────────────────
 
@@ -3135,19 +3792,67 @@ pub const ABOUT_FIELD_CAPABILITIES: &str = "capabilities";
 pub const ABOUT_TARGET_HINT: &str = "Name the remote in the command ('dctl about vault:'), or set a default with \
      --remote / DCTL_REMOTE.";
 
-/// Feature name reported when `dctl about` is asked for usage and quota.
+/// Row labels and JSON field names of the `dctl about` usage report.
 ///
-/// Spelled as the *missing measurement* rather than as the command, because
-/// everything else `about` does — resolving the remote, following a vault chain,
-/// reporting capabilities — works, and a user told "`dctl about` is not
-/// implemented" would reasonably stop reading there.
-pub const ABOUT_USAGE_FEATURE: &str = "reading usage and quota from a remote";
+/// Spelled once for the reason [`ABOUT_FIELD_REMOTE`] is: the row label *is* the
+/// JSON key, so a person reading the table and a script reading the document are
+/// looking at the same names.
+pub const ABOUT_FIELD_OBJECTS: &str = "objects";
+/// See [`ABOUT_FIELD_OBJECTS`]. Their total size, on the basis named below.
+pub const ABOUT_FIELD_BYTES: &str = "bytes";
+/// See [`ABOUT_FIELD_OBJECTS`]. Which basis that was — plaintext, or as stored.
+pub const ABOUT_FIELD_SIZES: &str = "sizes";
+/// See [`ABOUT_FIELD_OBJECTS`]. How many of them carried no recorded size.
+///
+/// Printed only when it is non-zero, so the row's presence is itself the signal
+/// that the byte figure above it is a lower bound rather than a total.
+pub const ABOUT_FIELD_UNMEASURED: &str = "unmeasured";
+/// See [`ABOUT_FIELD_OBJECTS`]. The allowance, if one could be read. It cannot.
+pub const ABOUT_FIELD_TOTAL_BYTES: &str = "total_bytes";
+/// See [`ABOUT_FIELD_OBJECTS`]. What is left of that allowance. Likewise.
+pub const ABOUT_FIELD_FREE_BYTES: &str = "free_bytes";
+/// See [`ABOUT_FIELD_OBJECTS`]. Why the two above are `null`.
+pub const ABOUT_FIELD_LIMITS_NOTE: &str = "limits_note";
 
-/// Remediation hint attached to [`ABOUT_USAGE_FEATURE`].
-pub const ABOUT_USAGE_HINT: &str = "No provider in this build can be asked how much it is holding — \
-     `dctl_store::Backend` has no usage or quota call, which is why both appear \
-     as unsupported in the capability table. `dctl about --capabilities REMOTE` \
-     reports what the remote can do, offline and without credentials.";
+/// Value printed in the `total_bytes` and `free_bytes` rows.
+///
+/// A short sentence rather than a dash, because those two rows are the ones a
+/// capacity script's author will look at hardest, and a blank cell reads as "we
+/// measured zero". [`ABOUT_LIMITS_NOTE`] carries the full account on the row
+/// below it; this says enough that a reader who stops here is not misled.
+pub const ABOUT_LIMIT_NOT_REPORTED: &str = "not reported — nothing in this build can measure it";
+
+/// The complete account of why an allowance is not reported, printed as its own
+/// row and carried in the JSON.
+///
+/// Two independent reasons, and both are named because they have different
+/// remedies. The provider half is a missing trait method: `dctl_store::Backend`
+/// has `put`, `get`, `head`, `list_page` and no usage or quota call at all,
+/// which is exactly what the `usage_reporting` and `quota_reporting` rows of the
+/// capability table say — so there is no request to make, on any provider, and a
+/// figure here would be invented. The local half is a missing *safe* API:
+/// free space needs `statvfs`, the standard library exposes no equivalent, and
+/// this crate is `#![forbid(unsafe_code)]`, so the syscall is unreachable from
+/// here by a rule the crate applies to itself.
+///
+/// What *is* reported is measured rather than asked for: the object count and
+/// total size come from walking the remote's own listing, which is why they are
+/// exact and why they cost one listing pass.
+pub const ABOUT_LIMITS_NOTE: &str = "no allowance is reported: dctl_store::Backend exposes no usage or quota \
+     call on any provider (see the usage_reporting and quota_reporting rows), \
+     and a local filesystem's free space needs a statvfs syscall this crate \
+     cannot make under #![forbid(unsafe_code)]. The objects and bytes above are \
+     measured by listing the remote, not asked of it.";
+
+/// Notice printed before the usage figures, so nobody reads them as a provider's
+/// own accounting.
+///
+/// The distinction matters when the two disagree: a bucket may hold objects DCTL
+/// did not write, and a vault's plaintext total is smaller than the ciphertext
+/// the provider bills for. Saying where the number came from is what makes the
+/// difference diagnosable instead of alarming.
+pub const ABOUT_USAGE_NOTICE: &str = "usage is measured by listing the remote — it counts what DCTL can see, not \
+     what the provider is billing for";
 
 /// Notice printed before a capability report, so nobody reads it as a live
 /// answer from the provider.
@@ -4065,9 +4770,56 @@ mod tests {
 
     #[test]
     fn health_grades_are_distinct() {
-        assert_ne!(HEALTH_HEALTHY, HEALTH_DEGRADED);
-        assert_ne!(HEALTH_DEGRADED, HEALTH_DAMAGED);
-        assert_ne!(HEALTH_HEALTHY, HEALTH_DAMAGED);
+        // Four words, and `unverified` most of all: it is the one that must not
+        // collapse into `healthy`, because a run that read nothing publishing
+        // the most reassuring grade is the whole of defect D2.
+        let grades = [
+            HEALTH_HEALTHY,
+            HEALTH_DEGRADED,
+            HEALTH_DAMAGED,
+            HEALTH_UNVERIFIED,
+        ];
+        for (index, grade) in grades.iter().enumerate() {
+            assert!(!grade.is_empty());
+            assert!(!grade.contains(' '), "'{grade}' must be one token");
+            assert!(
+                !grades[index + 1..].contains(grade),
+                "'{grade}' listed twice"
+            );
+        }
+    }
+
+    #[test]
+    fn a_scrub_that_covered_nothing_has_words_of_its_own() {
+        // The phrase is quoted in a message somebody pastes into a ticket
+        // without its context, so it has to state that no verification happened
+        // rather than leave that to be inferred from a zero.
+        assert!(SCRUB_NOTHING_VERIFIED.contains("nothing"));
+        assert!(
+            !SCRUB_NOTHING_VERIFIED.contains('0'),
+            "a figure is not a sentence"
+        );
+        // And the hint has to name the prefix first: it is the usual cause, and
+        // an empty listing is how the operator tells it from an empty dataset.
+        assert!(SCRUB_NOTHING_VERIFIED_HINT.contains("dctl ls"));
+        assert!(SCRUB_NOTHING_VERIFIED_HINT.contains("index rebuild"));
+    }
+
+    #[test]
+    fn the_unmeasured_note_names_the_remedy_that_actually_works() {
+        // `dctl_core`'s own documentation says these sizes "populate on first
+        // read of each file"; they do not in this build — `cat`, `hashsum` and a
+        // whole `scrub` all leave the row unmeasured, and only writing the file
+        // again records a size. Naming a read as the fix would send an operator
+        // to spend a full egress bill on a run that changes nothing.
+        assert!(SIZE_UNMEASURED_NOTE.contains("writing the file again"));
+        assert!(
+            !SIZE_UNMEASURED_NOTE.contains("scrub"),
+            "a read does not settle them, so the note must not suggest one"
+        );
+        // And the qualifier it explains has to be the one printed on the line.
+        assert!(!SIZE_REPORT_LOWER_BOUND.is_empty());
+        assert!(SIZE_REPORT_LABEL_UNMEASURED.ends_with(':'));
     }
 
     #[test]
@@ -4109,6 +4861,8 @@ mod tests {
             PLAN_REASON_EXTRA,
             PLAN_REASON_EMPTY_SOURCE_DIR,
             PLAN_REASON_UNTRAVERSED,
+            PLAN_REASON_CONTENT_UNRECORDED,
+            PLAN_REASON_SIZE_UNRECORDED,
         ];
         for (index, reason) in reasons.iter().enumerate() {
             assert!(!reasons[index + 1..].contains(reason), "'{reason}' twice");
@@ -4173,13 +4927,153 @@ mod tests {
         // every one of them carries a next step.
         for hint in [
             TRANSFER_ENGINE_HINT,
-            PATTERN_FILTER_HINT,
-            REMOTE_ENUMERATION_HINT,
+            TRANSFER_SEALED_REMOTE_TO_REMOTE_HINT,
+            TRANSFER_REMOTE_TO_REMOTE_HINT,
+            CHECKSUM_UNAVAILABLE_HINT,
+            POINT_IN_TIME_HINT,
+            SNAPSHOT_HINT,
         ] {
             assert!(!hint.is_empty());
         }
-        // The filter refusal must say *why* silence would be worse than failure.
-        assert!(PATTERN_FILTER_HINT.contains("sync"));
+        // The two remote-to-remote refusals must stay distinguishable: they
+        // describe different missing work, and a reader who is told about
+        // re-encryption when neither end is encrypted goes looking for a vault
+        // they do not have.
+        assert!(TRANSFER_SEALED_REMOTE_TO_REMOTE_HINT.contains("re-encrypting"));
+        assert!(
+            !TRANSFER_REMOTE_TO_REMOTE_HINT.contains("re-encrypt"),
+            "two plain stores have nothing to re-encrypt"
+        );
+        // A `--checksum` refusal must name the flags that *do* work, or the
+        // operator is left with a stopped run and no way forward.
+        assert!(CHECKSUM_UNAVAILABLE_HINT.contains("--size-only"));
+        // And the two point-in-time refusals must name the phase, so nobody
+        // reads them as a bug rather than as work that has not happened yet.
+        assert!(POINT_IN_TIME_HINT.contains("§13.5"));
+        assert!(SNAPSHOT_HINT.contains("§13.5"));
+    }
+
+    #[test]
+    fn every_capability_gap_names_its_layer_and_answers_the_phase_question() {
+        // The property this whole family of constants exists for, checked as a
+        // set rather than one refusal at a time — because the way these decay is
+        // one message at a time, each edited by someone looking only at the
+        // command in front of them.
+        //
+        // A refusal is a roadmap entry when it says *what* is missing, *whose*
+        // it is, and *when* it lands. The third answer is allowed to be "no
+        // phase schedules this", and for three of the rows below that is the
+        // true answer — a bucket will never have settable timestamps, nobody has
+        // scheduled vault-to-vault re-encryption, and there is no release feed
+        // on the roadmap. What is forbidden is silence, which is what turns a
+        // refusal into a dead end.
+        //
+        // `feature` carries the layer because the message is what a `--json`
+        // consumer and a support ticket quote; the hint carries the phase
+        // because that is guidance rather than diagnosis.
+        for (feature, hint, layer) in [
+            (
+                TRANSFER_SEALED_REMOTE_TO_REMOTE_FEATURE,
+                TRANSFER_SEALED_REMOTE_TO_REMOTE_HINT,
+                "dctl-core",
+            ),
+            (
+                TRANSFER_REMOTE_TO_REMOTE_FEATURE,
+                TRANSFER_REMOTE_TO_REMOTE_HINT,
+                "dctl-cli",
+            ),
+            (MOUNT_ADAPTER_FEATURE, MOUNT_ENGINE_HINT, "dctl-mount"),
+            (POINT_IN_TIME_FEATURE, POINT_IN_TIME_HINT, "dctl-index"),
+            (SNAPSHOT_FEATURE, SNAPSHOT_HINT, "dctl-index"),
+            (
+                VERSION_UPDATE_CHECK_FEATURE,
+                VERSION_UPDATE_CHECK_HINT,
+                "outside the workspace",
+            ),
+            (
+                TOUCH_OBJECT_STORE_FEATURE,
+                TOUCH_OBJECT_STORE_HINT,
+                "provider",
+            ),
+            (
+                RCAT_OBJECT_STORE_FEATURE,
+                RCAT_OBJECT_STORE_HINT,
+                "dctl-cli",
+            ),
+        ] {
+            assert!(
+                feature.contains(layer),
+                "the missing capability must name the layer that owes it \
+                 ('{layer}' absent from): {feature}"
+            );
+            assert!(
+                hint.contains("phase") || hint.contains("PLAN.md"),
+                "and the hint must answer the phase question, even when the \
+                 answer is that there is none: {hint}"
+            );
+        }
+
+        // The `--key-file` refusal is built from one shared reason rather than a
+        // feature/hint pair, and it has to satisfy the same rule.
+        assert!(
+            KEY_FILE_UNSUPPORTED_REASON.contains("dctl_core::Vault"),
+            "the layer that owes the factor parameter must be named"
+        );
+        assert!(
+            KEY_FILE_UNSUPPORTED_REASON.contains("§8"),
+            "and the section that specifies it"
+        );
+    }
+
+    #[test]
+    fn the_two_object_store_refusals_describe_two_different_gaps() {
+        // They used to be one string, and it said "nothing in this build writes
+        // a plain object into a bucket". A transfer does, so the shared sentence
+        // became false for all three of its callers at once — the failure mode
+        // this pair exists to prevent.
+        //
+        // `touch` is refused by the provider's own model and no release changes
+        // it; `rcat` is refused by a branch nobody has written yet. Telling
+        // either user the other's story sends them somewhere useless.
+        assert!(
+            TOUCH_OBJECT_STORE_HINT.contains("no phase"),
+            "a gap no release closes must not name a phase: {TOUCH_OBJECT_STORE_HINT}"
+        );
+        assert!(
+            RCAT_OBJECT_STORE_HINT.contains("phase 1"),
+            "a gap somebody can write must name the phase that does: \
+             {RCAT_OBJECT_STORE_HINT}"
+        );
+        assert!(
+            !TOUCH_OBJECT_STORE_FEATURE.contains("dctl-cli")
+                && !TOUCH_OBJECT_STORE_HINT.contains("dctl-cli"),
+            "touch is not waiting on the CLI"
+        );
+        for text in [
+            TOUCH_OBJECT_STORE_FEATURE,
+            TOUCH_OBJECT_STORE_HINT,
+            RCAT_OBJECT_STORE_FEATURE,
+            RCAT_OBJECT_STORE_HINT,
+        ] {
+            assert!(
+                !text.contains("writing a plain object into an object store"),
+                "a transfer writes plain objects today: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_write_time_notice_says_what_changed_what_it_costs_and_what_to_type() {
+        // A substitution the user did not ask for has to answer all three
+        // questions, or it reads as noise and gets ignored — and the one it is
+        // most tempting to leave out is the cost, which is the only reason
+        // somebody would want to opt out of it.
+        assert!(WRITE_TIME_COMPARISON_NOTICE.contains("compares contents"));
+        assert!(WRITE_TIME_COMPARISON_NOTICE.contains("read and hashed"));
+        assert!(WRITE_TIME_COMPARISON_NOTICE.contains("--size-only"));
+        // It is appended to a side's name, so it must not open with a capital or
+        // repeat the subject: "'archive:' records when each object was written".
+        assert!(WRITE_TIME_COMPARISON_NOTICE.starts_with("records"));
     }
 
     #[test]
@@ -4352,6 +5246,58 @@ mod tests {
         assert_ne!(REMOVAL_MODE_DRY_RUN, REMOVAL_MODE_EXECUTE);
         assert_eq!(REMOVAL_BOOL_YES, DESTRUCTIVE_CONFIRMATION);
         assert_ne!(REMOVAL_BOOL_YES, REMOVAL_BOOL_NO);
+    }
+
+    #[test]
+    fn every_removal_status_is_a_distinct_slug() {
+        // A script branches on these, so two that collide would make two
+        // different outcomes indistinguishable — and one of the pairs is
+        // "removed" against "would-remove".
+        let statuses = [
+            REMOVAL_STATUS_PLANNED,
+            REMOVAL_STATUS_WOULD_REMOVE,
+            REMOVAL_STATUS_REMOVED,
+            REMOVAL_STATUS_ABSENT,
+            REMOVAL_STATUS_FAILED,
+            REMOVAL_STATUS_UNSUPPORTED,
+            REMOVAL_STATUS_SUMMARY,
+        ];
+        for (index, status) in statuses.iter().enumerate() {
+            assert_eq!(*status, status.to_lowercase(), "'{status}' is not a slug");
+            assert!(!status.contains(' '), "'{status}' is not a slug");
+            assert!(!statuses[index + 1..].contains(status), "'{status}' twice");
+            assert!(
+                status.len() < REMOVAL_STATUS_WIDTH,
+                "'{status}' does not fit the text report's status column"
+            );
+        }
+    }
+
+    #[test]
+    fn every_removal_kind_is_a_distinct_slug() {
+        let kinds = [
+            REMOVAL_KIND_OBJECT,
+            REMOVAL_KIND_DIRECTORY,
+            REMOVAL_KIND_STAGING,
+            REMOVAL_KIND_ORPHAN,
+        ];
+        for (index, kind) in kinds.iter().enumerate() {
+            assert_eq!(*kind, kind.to_lowercase());
+            assert!(!kinds[index + 1..].contains(kind), "'{kind}' twice");
+        }
+    }
+
+    #[test]
+    fn the_vault_layout_prefixes_cannot_be_confused_with_each_other() {
+        // The orphan sweep decides what to delete from these two prefixes. If
+        // either could match the other's keys — or the envelope's — a cleanup
+        // would delete the map that makes the vault restorable.
+        assert!(VAULT_OBJECT_KEY_PREFIX.ends_with(PATH_SEPARATOR));
+        assert!(VAULT_NAME_KEY_PREFIX.ends_with(PATH_SEPARATOR));
+        assert!(!VAULT_OBJECT_KEY_PREFIX.starts_with(VAULT_NAME_KEY_PREFIX));
+        assert!(!VAULT_NAME_KEY_PREFIX.starts_with(VAULT_OBJECT_KEY_PREFIX));
+        assert!(!VAULT_ENVELOPE_OBJECT_KEY.starts_with(VAULT_OBJECT_KEY_PREFIX));
+        assert!(!VAULT_ENVELOPE_OBJECT_KEY.starts_with(VAULT_NAME_KEY_PREFIX));
     }
 
     #[test]

@@ -75,8 +75,9 @@ There is a specific consequence for a single-file `copyto`: if the size filters
 exclude the one file that was named, the command fails with a usage error rather
 than transferring nothing and reporting success. Silently doing nothing is the
 hardest failure to notice, so it is refused. The pattern filters — `--include`,
-`--exclude`, `--filter-from`, `--files-from` — are refused with exit 7 across the
-whole family; see [`sync`](dctl_sync.md) for why.
+`--exclude`, `--filter-from`, `--files-from` — are honoured through the same
+engine the whole family uses; see [`sync`](dctl_sync.md) for why one engine
+answering for both sides is what makes them safe.
 
 **`--dry-run` is authoritative.** The plan is computed without touching either
 side, and the same value is either printed or executed. A renamed transfer shows
@@ -305,9 +306,9 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 0 | `success` | The object was transferred, or a `--dry-run` completed, or the destination already held a matching object. |
 | 1 | `usage` | Unparseable command line; `DEST` names no object (a bare root); `DEST` is an existing directory; source and destination are the same place; the size filters excluded the single named file; an unparseable or unsatisfiable size range; `--immutable` together with `--no-traverse`. |
 | 3 | `dir_not_found` | `SOURCE` does not exist. |
-| 5 | `temporary_error` | A cloud backend failed in a way worth retrying. Not reachable today — transfers cannot address a cloud backend yet. |
+| 5 | `temporary_error` | A cloud backend failed in a way worth retrying. Reachable wherever a cloud backend is contacted: reading a plain `b2:`/`s3:`/`r2:` source, writing a plain object into one, or a vault whose store is one of them. |
 | 6 | `partial_failure` | A directory source finished with at least one file failing. |
-| 7 | `fatal_error` | A named remote had to be listed; the file exceeded the whole-file limit; `DEST` is inside a local directory holding a vault; `--checksum` with no hashes; a pattern filter was passed; both sides are remotes; `--immutable` and `DEST` already exists, which is refused before any byte moves. |
+| 7 | `fatal_error` | The file exceeded the whole-file limit; `DEST` is inside a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and `DEST` already exists, which is refused before any byte moves. |
 | 20 | `checksum_mismatch` | The backend stored bytes other than the ones sent. Nothing was committed. |
 | 21 | `integrity_failure` | `--verify sample`/`strict` could not authenticate what was written. |
 | 22 | `vault_locked` | No password was available, or the envelope did not unwrap. |

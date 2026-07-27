@@ -33,6 +33,11 @@ is the truth. A mixed listing is normal after an index rebuild from object
 headers, and the padding is what keeps the path column aligned across both
 kinds of row.
 
+The **size** column does the same thing for the same reason. A rebuilt index row
+carries no size either, and it prints `-` rather than `0 B`; a row straight after
+`dctl index rebuild` therefore reads `-` in both measured columns. A file that
+genuinely is zero bytes long still prints `0 B`.
+
 The column widths are fixed and the offsets never move: ten characters of size,
 one space, twenty characters of time, one space, then the unpadded path. That is
 what makes `cut -c12-31` and `sort -k2` meaningful over an `lsl` listing, and

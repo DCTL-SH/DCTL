@@ -99,27 +99,43 @@ destructive gate: `--dry-run` declines and prints `[dry-run] would overwrite`,
 proceeds. Exporting over last month's evidence bundle is precisely the accident
 worth one confirmation.
 
-### Status in this build
+### What is in the log
 
-**The reader is complete; the writer is not.** The chain walk, all four failure
-diagnoses, the filters and all three renderings work today on any conforming log,
-and are exercised by the unit tests. What does not exist is the engine-side
-append that `PLAN.md` §7 requires after every operation — it belongs to the
-verified-write state machine in **Phase 0** of `PLAN.md` §11, alongside the WAL
-and the error taxonomy.
+Every operation that changes stored data appends one chained record, after its
+durable commit and with an `fsync` before the command reports success:
 
-So when no log file exists, `dctl audit` reports
-`the tamper-evident audit log writer is not implemented in this build` and exits
-**7**. It deliberately does *not* report "0 records, chain intact", which would be
-a clean bill of health for a system that has never recorded anything. Point
-`--audit-log` at a chain written elsewhere — a mirrored copy, an evidence bundle,
-a colleague's export — and every verb works for real.
+* the transfer family — `copy`, `move`, `sync`, `copyto`, `moveto` — one record
+  per file, and for a `move` after the source has been removed;
+* the removal family — `delete`, `deletefile`, `purge`, `rmdir`, `rmdirs`,
+  `cleanup` — one record per object, after the store confirms;
+* `rcat`, `replicate`, `init` and `index rebuild`.
 
-One rough edge follows from that: a *mistyped* `--audit-log` path produces the
-same "writer is not implemented" message and exit 7, because the check is
-"nothing is there", not "the default location is empty". The hint always names
-the path that was looked for, so read it before concluding the feature is
-missing.
+**Failures are in there too**, carrying the command's own slug from
+`docs/EXIT_CODES.md`, because a log of nothing but successes cannot answer "what
+went wrong on the 3rd?". A command refused *before* it reached the store — a
+mistyped remote, a path the vault does not hold — records nothing: it attempted
+nothing, and filling an evidence file with typing helps nobody.
+
+Reads append nothing. Neither does `--dry-run`, which changed nothing and so has
+nothing to attest to. `docs/AUDIT_LOG.md` §9 is the normative table, including
+which hash fields each family populates.
+
+If a record cannot be written, **the command fails** — exit 24 when the log is
+not a chain that may be extended, exit 7 for any other write failure. Carrying on
+unaudited would be exactly the misreporting `PLAN.md` §7 forbids.
+
+### A missing log is not an empty one
+
+An **empty** log verifies and reports `0 records`: "nothing has been appended" is
+a real answer, and a fresh vault gives it until its first `init` or `copy`.
+
+An **absent** file is exit **4** (`file_not_found`), naming the path that was
+looked for. It far more often means the reader was pointed somewhere the writer
+never wrote — a different `--index`, a different machine, a log that was moved —
+than that nothing ever happened, and "0 records, chain intact" would be a clean
+bill of health for a chain nobody looked at. Point `--audit-log` at a chain
+written elsewhere — a mirrored copy, an evidence bundle, a colleague's export —
+and every verb works on it exactly as it does on the local one.
 
 ```
 dctl audit verify [flags]
@@ -285,7 +301,8 @@ array document instead.
 | 1 | `usage` | No verb given, an unknown flag, an unparseable `--since`/`--until`, a `--path` containing `..`, or `--interactive` with no terminal to prompt on. |
 | 2 | `uncategorised` | An I/O error other than "not found" or "permission denied" while reading the log or writing `--output`, or a serialisation failure while encoding an export. |
 | 4 | `file_not_found` | A component of the `--output` path does not exist. |
-| 7 | `fatal_error` | **No log file at the resolved path** — reported as "the tamper-evident audit log writer is not implemented in this build", including when the path came from an explicit `--audit-log` — or the log could not be read for want of permission. |
+| 4 | `file_not_found` | **No log file at the resolved path**, including when the path came from an explicit `--audit-log`. The message names the path that was looked for. |
+| 7 | `fatal_error` | The log exists but could not be read — permission, or a device error. |
 | 24 | `audit_chain_broken` | **The chain failed.** Returned by all three verbs, after their output has been produced. Also returned when a line in the log is not a parseable record, since that is indistinguishable from tampering. |
 | 25 | `cancelled` | An `--interactive` overwrite of `--output` was declined, or Ctrl-C / SIGTERM. |
 

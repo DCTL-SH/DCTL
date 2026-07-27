@@ -102,6 +102,12 @@ trailing sentence appended to it would break `dctl tree | grep`. The byte total
 is the whole subtree's, including anything `--level` pruned from the picture:
 the drawing was truncated, the vault was not.
 
+The byte figure reads `-` when any object in the tree has no recorded size — the
+state of every row straight after `dctl index rebuild`, which lists object names
+without reading their bodies. A total that silently dropped the unmeasured files
+would be short by an unknown amount and would still look like a total. The
+directory and file counts are unaffected.
+
 ### Scope, writes and empty results
 
 Scope is shared with the rest of the family: repeatable `--include`/`--exclude`

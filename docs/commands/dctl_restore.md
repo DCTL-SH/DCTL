@@ -34,16 +34,17 @@ means it would fail somewhere else but not here. Nothing is ever renamed to make
 it fit: DCTL restores exactly the name it stored, and silently mangling one would
 break the promise the backup was taken on.
 
-**Which files a restore considers** comes from `--files-from` and from the scope
-of the `REMOTE:PATH` operand, and from nothing else. Glob filters —
-`--include`, `--exclude`, `--filter-from` — are **refused** with exit 7 rather
-than ignored, because a filter that was silently dropped is how a restore ends up
-writing files somebody explicitly excluded. `--min-size`, `--max-size` and
-`--max-depth` are parsed and validated (crossed bounds are a usage error) but do
-not narrow a restore in this build: an object's plaintext size lives in the
-index, which needs the unlocked vault this command cannot yet open, so filtering
-on it would either be a guess or a silent no-op. Narrow the run with the operand
-or with `--files-from` instead.
+**Which files a restore considers** comes from the scope of the `REMOTE:PATH`
+operand and from the filter flags, all of which are honoured: `--include`,
+`--exclude`, `--filter-from`, `--files-from`, `--min-size`, `--max-size` and
+`--max-depth` go through the same `crate::filter` engine `dctl copy` and
+`dctl backup` use, so one rule means one thing everywhere. They are matched
+against the path **relative to the tree that was named**, matching how `copy`
+treats a source directory: under `dctl restore archive:photos /out`,
+`--include '2024/**'` means what a reader of `/out` expects rather than silently
+requiring the `photos/` prefix that is about to be stripped. A filter that will
+not *compile* is a usage error before anything is read, because a run that
+proceeded with a rule the operator believes is in force is the data-loss case.
 
 **A blocked path stops the whole restore unless `--skip-unwritable` is given.**
 That default is the conservative one, because a partial restore that *looks*
@@ -84,45 +85,51 @@ than a remote called `C`. Logical paths are canonicalised (`/`-separated, NFC, n
 `.` or `..`) so two spellings of one filename cannot address two different
 objects.
 
-**The verified-write contract governs the local writes too** (`PLAN.md` §6).
-Nothing is reported as restored until its bytes have been checksum-verified and
-committed; an AEAD authentication failure on read means the data was **not**
-served and exits **21**; a checksum mismatch exits **20** having written nothing.
-`--verify` selects the strength.
+**Every object is verified as it lands, and the writes are constant-memory.**
+Each file is streamed out of the vault chunk by chunk into a temporary sibling of
+its destination and renamed into place only after the whole object authenticates:
+every chunk tag and the object footer are checked, and a streaming BLAKE3 over
+the emitted plaintext is compared against the object's own DEK-authenticated
+content hash. A mismatch removes the temporary file and leaves **no destination
+file at all** — not a partial one, not a stale one — and exits **21**. Peak
+memory is O(chunk) per file, so the largest object in the vault restores on a
+laptop (`PLAN.md` §16.2).
+
+On top of that, the length of what landed is compared against the length the
+index recorded. The core proves an object is consistent with *itself*; this
+catches an **index that disagrees with the store**, which is what a partial
+rebuild or a database restored from an older backup looks like. Rows whose size
+was never measured — `dctl index rebuild` writes those deliberately, as a
+list-only pass — are exempt and the run says so rather than silently reporting a
+total of zero.
+
+**One bad object does not abandon the restore.** A per-file failure is counted,
+reported by name, and skipped; the run continues and the exit code reflects it
+(**6**, or **20** when the failure was an integrity check). A locked vault stops
+the run, because every remaining file would fail identically.
 
 ### Status in this build
 
-**A real `dctl restore` run is not implemented**, and two of the pieces it needs
-are missing in ways that are reported as errors rather than worked around.
+**`dctl restore` runs for real.** It unlocks the vault, enumerates the tree that
+was named, pre-flights every path, prints the plan, applies the safety gates, and
+then streams every object onto disk.
 
-* **Enumerating the vault** needs an unlocked vault the command context does not
-  yet carry. Without a path list, `restore` exits **7** with
-  `listing a remote is not implemented in this build` — it does not pretend the
-  vault was empty. Supply the paths with `--files-from` and everything else
-  works: that is what makes the pre-flight usable today, and it is how a restore
-  can be *proved* safe before the engine exists.
-* **Point-in-time selection** is refused, not approximated. `--at` and
-  `--snapshot` exit **7**: the index records one current version per path in this
-  build, and quietly planning *today's* contents for `--at 2d` would answer a
-  question nobody asked. The values are still parsed and validated first, so a
-  malformed `--at yesterday` is reported as a usage error (exit 1) rather than
-  sending the operator hunting for a missing feature.
-* **The verified-write engine** does the writing. A real run reaches the end of
-  the pre-flight and the overwrite gate and then fails with
-  `dctl restore is not implemented in this build` at exit **7** — never a success
-  message for files that were never written.
+The vault is unlocked even for `--dry-run`, and that is not an oversight: a
+restore cannot pre-flight names it has not read, so a rehearsal that skipped the
+listing would rehearse nothing. It is a read-only operation and writes nothing.
 
-The safety gates deliberately outrank the engine gate: a restore that *would*
-have half-written a tree says so even in a build that could not have written it.
-Sizes in the plan are `0` because the plaintext size of an object lives in the
-index, which needs an unlocked vault; reporting a made-up number would be worse
-than reporting none.
+Plan sizes are the **plaintext sizes the index recorded**, so what a `--dry-run`
+says it will write is what a real run writes. (They used to be `0` for every row,
+because the command had no vault to ask.)
 
-Everything else runs for real today: argument, snapshot and point-in-time
-validation, the destination checks, the full pre-flight, the overwrite policy and
-its destructive gate, and the plan in all three output formats. `PLAN.md` §11
-puts the engine in **Phase 0/1** and snapshots/versioning in **Phase 4
-(Hardening)**.
+One thing is still refused rather than approximated. **Point-in-time selection**
+— `--at` and `--snapshot` — exits **7**: the index records one current version
+per path in this build, and quietly planning *today's* contents for `--at 2d`
+would answer a question nobody asked. The values are still parsed and validated
+first, so a malformed `--at yesterday` is a usage error (exit **1**) rather than
+sending the operator hunting for a missing feature. The versioned,
+snapshot-backed index that makes it real is **Phase 4 (Hardening)** in
+`PLAN.md` §11 — the same phase [`dctl backup --snapshot`](dctl_backup.md) names.
 
 ```
 dctl restore REMOTE:PATH LOCAL [flags]
@@ -130,23 +137,22 @@ dctl restore REMOTE:PATH LOCAL [flags]
 
 ## Examples
 
-Rehearse a restore before the day you need it. `--files-from` supplies the path
-set, the pre-flight inspects every name against *this* machine's rules, and
-`--dry-run` guarantees nothing is written — the destination directory is not even
-created.
+Rehearse a restore before the day you need it. The vault is enumerated, the
+pre-flight inspects every name against *this* machine's rules, and `--dry-run`
+guarantees nothing is written — the destination directory is not even created.
 
 ```
-dctl restore vault: /srv/restore-drill --files-from /etc/dctl/manifest.txt --dry-run
+dctl restore vault: /srv/restore-drill --dry-run
 Severity     Path                      Problem
 -----------  ------------------------  -------------------------------------------------------------------------------
 blocking     photos/2024/readme.md     differs from 'photos/2024/README.md' only in case, which macos cannot represent
 portability  reports/report:final.pdf  'report:final.pdf': contains ':', which Windows does not allow in a filename
-Action   Size  Path
--------  ----  -----------------------------------------------------------------------
-restore   0 B  vault:photos/2024/IMG_4417.CR3 -> /srv/restore-drill/photos/2024/IMG_4417.CR3
-restore   0 B  vault:photos/2024/README.md -> /srv/restore-drill/photos/2024/README.md
-skip      0 B  vault:photos/2024/readme.md -> /srv/restore-drill/photos/2024/readme.md
-restore   0 B  vault:reports/report:final.pdf -> /srv/restore-drill/reports/report:final.pdf
+Action     Size  Path
+-------  ------  ---------------------------------------------------------------------
+restore  28 MiB  vault:photos/2024/IMG_4417.CR3 -> /srv/restore-drill/photos/2024/IMG_4417.CR3
+restore    10 B  vault:photos/2024/README.md -> /srv/restore-drill/photos/2024/README.md
+skip       10 B  vault:photos/2024/readme.md -> /srv/restore-drill/photos/2024/readme.md
+restore     4 B  vault:reports/report:final.pdf -> /srv/restore-drill/reports/report:final.pdf
 error: 1 of 4 path(s) cannot be written on this platform
   hint: Every one is listed above. Rename them in the vault, restore somewhere
   with different rules, or pass --skip-unwritable to restore the rest and be told
@@ -162,8 +168,35 @@ Restore the rest anyway, and be told exactly what was left out. The skipped row
 stays in the plan so it is visible rather than absent:
 
 ```
-dctl restore vault: /srv/restore-drill --files-from /etc/dctl/manifest.txt --skip-unwritable --dry-run
+dctl restore vault: /srv/restore-drill --skip-unwritable --dry-run
 warning: 1 path(s) will be skipped: they cannot be written here
+```
+
+Then perform the restore. The whole tree comes back, streamed and verified:
+
+```
+dctl restore archive: /srv/out
+Action        Size  Path
+-------  ---------  --------------------------------------------------------------
+restore       10 B  archive:README.md -> /srv/out/README.md
+restore        9 B  archive:notes/café.txt -> /srv/out/notes/café.txt
+restore        0 B  archive:notes/empty.txt -> /srv/out/notes/empty.txt
+restore  293.0 KiB  archive:photos/2024/a.jpg -> /srv/out/photos/2024/a.jpg
+
+ Transferred: 293.0 KiB / 293.0 KiB, 100%, 54.1 KiB/s
+       Files: 4 / 4
+      Errors: 0
+     Elapsed: 5s
+
+$ diff -r /srv/photos /srv/out && echo IDENTICAL
+IDENTICAL
+```
+
+Restore only part of a vault, with a rule. Filters are matched against the path
+relative to the tree that was named:
+
+```
+dctl restore archive: /srv/out --exclude 'photos/**'
 ```
 
 Pull one tree out of a B2 vault onto a Windows workstation. The vault side is
@@ -172,7 +205,7 @@ repeated underneath the destination, so `photos/2024/IMG_4417.CR3` lands at
 `C:\Restores\2024\IMG_4417.CR3`:
 
 ```
-dctl restore b2prod:bucket/photos C:\Restores --files-from C:\lists\photos.txt --dry-run
+dctl restore b2prod:bucket/photos C:\Restores --dry-run
 ```
 
 Getting the two operands the wrong way round is caught before anything is read:
@@ -189,24 +222,26 @@ counts them; `--overwrite` allows it, and `--dry-run` still declines to touch
 anything while telling you what would go:
 
 ```
-dctl restore vault:photos /srv/photos --files-from /etc/dctl/manifest.txt --dry-run
+dctl restore vault:photos /srv/photos --dry-run
 error: the restore would replace 1 existing file(s) under /srv/photos
   hint: Restore into an empty directory, or pass --overwrite to replace what is
   already there.
 
-dctl restore vault:photos /srv/photos --files-from /etc/dctl/manifest.txt --overwrite --dry-run
+dctl restore vault:photos /srv/photos --overwrite --dry-run
 warning: [dry-run] would overwrite: 1 existing file(s) under /srv/photos
 ```
 
 Ask for an earlier point in time and be refused rather than misled:
 
 ```
-dctl restore vault:photos /srv/out --at 2d --files-from /etc/dctl/manifest.txt
-error: restoring a snapshot or an earlier point in time (--snapshot/--at) is not
-  implemented in this build
-  hint: The index records one current version per path in this build; selecting an
-  earlier one needs the versioned, snapshot-backed index of PLAN.md §13.5. Restore
-  the current contents by dropping the flag.
+dctl restore vault:photos /srv/out --at 2d
+error: restoring a snapshot or an earlier point in time (--snapshot/--at)
+  (missing in dctl-index: the index format holds one current version per path,
+  so there is no earlier one to select) is not implemented in this build
+  hint: The index records one current version per path in this build; selecting
+  an earlier one needs the versioned, snapshot-backed index of PLAN.md §13.5,
+  scheduled as phase 4 (§11) and marked optional there. Restore the current
+  contents by dropping the flag, or keep dated backups in separate remotes.
 ```
 
 Feed a restore drill to a monitoring system. JSON Lines streams one
@@ -214,9 +249,8 @@ self-describing record per line and closes with a summary, so a ten-million-file
 plan never has to be buffered:
 
 ```
-dctl restore vault: /srv/drill --files-from /etc/dctl/manifest.txt --skip-unwritable \
-  --dry-run --format json-lines | tail -1
-{"record":"summary","operation":"restore","dry_run":true,"files":4,"bytes":0,"preflight":2,"blocking":1}
+dctl restore vault: /srv/drill --skip-unwritable --dry-run --format json-lines | tail -1
+{"record":"summary","operation":"restore","dry_run":true,"files":4,"bytes":300028,"preflight":2,"blocking":1}
 ```
 
 ## Options
@@ -242,12 +276,14 @@ future instant, because a backup holds nothing to restore from the future.
 ## Options inherited from parent commands
 
 Every global flag is accepted on `dctl restore`, before or after the subcommand.
-The ones that change what this command does are `--files-from` (which supplies
-the path set, and is the only way to run a restore in this build), `--dry-run`,
-`--immutable` (which makes any overwrite fatal), `--interactive`/`--force` (which
-decide whether the overwrite gate prompts), `--verify`/`--verify-samples` (the
-strength of the read-back verification), and
-`--format`/`--json`/`--units`/`--quiet`/`-v` (output). See
+The ones that change what this command does are every filter flag —
+`--include`, `--exclude`, `--filter-from`, `--files-from`, `--min-size`,
+`--max-size`, `--max-depth`, all honoured — plus `--dry-run`,
+`--password`/`--password-command`/`--password-file`/`--no-ask-password` (how the
+vault is unlocked), `--index` (which index is read), `--immutable` (which makes
+any overwrite fatal), `--interactive`/`--force` (which decide whether the
+overwrite gate prompts), and `--format`/`--json`/`--units`/`--quiet`/`-v`
+(output). See
 [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
 
 Output obeys the stdout/stderr split: the pre-flight findings and the planned
@@ -260,25 +296,26 @@ array and an `entries` array; `--format json-lines` emits
 `{"record":"preflight",…}`, `{"record":"entry",…}` and a closing
 `{"record":"summary",…}`. The `preflight` array is **always** present — an absent
 one would read as "not checked", and a restore that did not check is exactly what
-§13.6 forbids. An absent `entries` field means "not computed" (a real run stops
-before planning); an empty one means "computed, and there is nothing to restore".
+§13.6 forbids. An absent `entries` field means "not computed"; an
+empty one means "computed, and there is nothing to restore".
 
 ## Exit codes
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | A `--dry-run` completed with nothing blocked. Not reachable for a real restore in this build. |
+| 0 | `success` | Every planned object was restored and verified, or a `--dry-run` completed with nothing blocked. |
 | 1 | `usage` | A local path where the vault operand belongs (`C:\Backups`, `/srv/in`), a missing operand, a destination that exists and is not a directory, an unparseable `--at`, an invalid `--snapshot` name, `--at` together with `--snapshot`, an unparseable or crossed `--min-size`/`--max-size`, a negative `--max-depth`, a `--files-from` line containing `..`, or `--interactive` with no terminal to prompt on. |
 | 2 | `uncategorised` | An I/O error, other than "not found" or "permission denied", reading a `--files-from` list. |
 | 4 | `file_not_found` | A `--files-from` list does not exist. |
-| 7 | `fatal_error` | Returned by every real (non-`--dry-run`) invocation in this build (`not implemented`). Also: no `--files-from` was given, so the vault would have to be enumerated; `--at`/`--snapshot` was given; a glob filter was requested; at least one path cannot be written here and `--skip-unwritable` was not given; the restore would replace existing files and `--overwrite` was not given; or `--immutable` was given and it would replace something. |
-| 20 | `checksum_mismatch` | A verified write refused to commit. Nothing was written. Needs the engine described under *Status in this build*. |
-| 21 | `integrity_failure` | AEAD authentication failed on read — wrong key, tampered ciphertext, or wrong context. **The data was not served.** Needs the engine. |
+| 6 | `partial_failure` | At least one object could not be restored. The rest were, and each failure was named. |
+| 7 | `fatal_error` | `--at`/`--snapshot` was given; at least one path cannot be written here and `--skip-unwritable` was not given; the restore would replace existing files and `--overwrite` was not given; `--immutable` was given and it would replace something; or the remote is not configured. |
+| 20 | `checksum_mismatch` | An object did not verify as it landed. **No file was left under its name.** |
+| 21 | `integrity_failure` | AEAD authentication failed on read — wrong key, tampered ciphertext, or wrong context. **The data was not served**, and no file was written. |
+| 22 | `vault_locked` | No password was available, or the envelope would not unwrap. |
 | 25 | `cancelled` | An `--interactive` overwrite was declined (`restore cancelled: nothing was written`), or Ctrl-C / SIGTERM. |
 
-In this build only **1**, **2**, **4**, **7** and **25** are reachable, plus
-**0** for a clean `--dry-run`. Codes 0–10 mirror rclone's taxonomy; 20+ are
-DCTL's own. See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
+Codes 0–10 mirror rclone's taxonomy; 20+ are DCTL's own. See
+[../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 
 ## See also
 

@@ -20,19 +20,33 @@
 //!   has no sensible reading: the destination cannot both be the object's name
 //!   and contain it.
 //!
+//! Both sides are enumerated through [`super::listing`], which reaches a local
+//! tree and a named remote alike — so `SOURCE` may be a vault, and the whole
+//! transfer matrix is available rather than only the half that writes into one.
+//! Both functions are therefore `async`: opening a sealed source unlocks a
+//! vault, and that is I/O the planner has to await before it can diff anything.
+//!
 //! It is also the one place `--immutable` is applied, for the same reason: every
 //! verb in the family funnels through the two public functions below, so the gate
 //! sits on them rather than in five command bodies that could each forget it.
 //! See [`super::immutable`] for why the decision belongs to the plan and not to
 //! the write.
+//!
+//! The addressing rule ([`crate::addressing`]) is applied here on the same
+//! grounds, and *first*: it decides whether the destination may be written at
+//! all, and deciding that before anything is enumerated is what makes
+//! `--dry-run` rehearse the refusal instead of printing a plan the real run
+//! rejects. See [`refuse_a_plain_write_into_a_vault`].
 
 use crate::cli::GlobalArgs;
+use crate::constants::WRITE_TIME_COMPARISON_NOTICE;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
+use crate::fidelity;
 
 use crate::remote::RemoteSpec;
 
-use super::compare::{ComparePolicy, ensure_filters_are_supported};
+use super::compare::ComparePolicy;
 use super::endpoint;
 use super::entry::Entry;
 use super::immutable;
@@ -88,8 +102,13 @@ pub struct Request<'a> {
 
 impl Request<'_> {
     /// The comparison policy implied by the globals and the command's flags.
-    fn compare_policy(&self) -> ComparePolicy {
+    ///
+    /// `content_for_time` is not among them — it is not a flag — so it arrives
+    /// as an argument from [`adopt_a_content_comparison`], which is the only
+    /// thing entitled to decide it.
+    fn compare_policy(&self, content_for_time: bool) -> ComparePolicy {
         ComparePolicy::resolve(self.globals, self.compare)
+            .comparing_content_for_time(content_for_time)
     }
 
     /// The plan policy implied by the whole request.
@@ -98,8 +117,8 @@ impl Request<'_> {
     /// so the one field that separates a `copy` from a `sync` is chosen by a
     /// word — `copying` or `syncing` — instead of by a bare `true` that a
     /// careless edit could flip.
-    fn plan_policy(&self) -> Policy {
-        let compare = self.compare_policy();
+    fn plan_policy(&self, content_for_time: bool) -> Policy {
+        let compare = self.compare_policy(content_for_time);
         let base = if self.delete_extras {
             Policy::syncing(compare)
         } else {
@@ -120,11 +139,36 @@ impl Request<'_> {
 /// Usage errors for the argument combinations described in the module docs,
 /// whatever enumerating either side produces, and an `--immutable` refusal when
 /// the diff would replace or remove anything at the destination.
-pub fn directory_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared> {
+pub async fn directory_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared> {
+    refuse_a_plain_write_into_a_vault(ctx, request)?;
     immutable::ensure_traversal_can_enforce_it(request.globals, &request.traversal)?;
-    let prepared = diff_directory_transfer(ctx, request)?;
+    let prepared = diff_directory_transfer(ctx, request).await?;
     immutable::ensure_nothing_is_replaced(request.globals, &prepared.plan)?;
     Ok(prepared)
+}
+
+/// Refuse, before anything is listed, a destination this run may not write to.
+///
+/// The gate belongs here for the reason `--immutable`'s does: every verb in the
+/// family funnels through the two public functions above, so one call site
+/// covers five commands that could each forget it.
+///
+/// It is placed *first*, ahead of even the filter and traversal checks, for a
+/// reason specific to `--dry-run`. Each verb's body reads "plan, report, stop if
+/// this was a dry run, then execute", and the write path's own guard lives in
+/// [`super::Engine::connect`] — after the stop. So `dctl --dry-run copy ./src
+/// ./vault` printed a tidy plan to copy plaintext into a vault's object store,
+/// exited 0, and the real run then refused. Every one of those statements is
+/// individually defensible and together they are a lie: the whole value of a dry
+/// run is that a reviewer can approve it knowing the real run does that and
+/// nothing else. A rehearsal that omits the refusal is worse than no rehearsal,
+/// because it is trusted.
+///
+/// Nothing is read from the destination to decide this — see
+/// [`crate::addressing`] and invariant I4 — so asking early costs one config
+/// read and cannot change the answer.
+fn refuse_a_plain_write_into_a_vault(ctx: &Ctx, request: &Request<'_>) -> Result<()> {
+    crate::addressing::refuse_plain_write(ctx, &RemoteSpec::parse(request.dest_spec)?)
 }
 
 /// The diff itself, without the `--immutable` gate.
@@ -133,15 +177,18 @@ pub fn directory_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared> 
 /// into the body below would mean applying it next to each of the three
 /// `Plan::compute` calls, and the one that eventually gets missed is a silently
 /// unprotected transfer — the defect this whole file is closing.
-fn diff_directory_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared> {
-    ensure_filters_are_supported(request.globals)?;
-
+async fn diff_directory_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared> {
     let source = RemoteSpec::parse(request.source_spec)?;
     let dest = RemoteSpec::parse(request.dest_spec)?;
     reject_self_transfer(&source, &dest)?;
 
-    let options = ListOptions::resolve(request.globals, request.create_empty_src_dirs)?;
-    let source_listing = listing::source(&source, &options)?;
+    // The flags are resolved *before* the comparison is chosen, so a pattern
+    // that will not compile stops the run without first announcing a comparison
+    // that is never going to be made.
+    let flags = ListOptions::resolve(request.globals, request.create_empty_src_dirs)?;
+    let content_for_time = adopt_a_content_comparison(ctx, request, &source, &dest);
+    let options = flags.hashing_contents(content_for_time);
+    let source_listing = listing::source(ctx, &source, &options).await?;
     warn_about_omissions(ctx, &source_listing);
 
     if source_listing.is_single_file && request.delete_extras {
@@ -154,13 +201,13 @@ fn diff_directory_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared>
         ));
     }
 
-    let dest_listing = enumerate_destination(&dest, &options, request)?;
+    let dest_listing = enumerate_destination(ctx, &dest, &options, request).await?;
     reject_file_destination(&dest, &dest_listing)?;
 
     let plan = Plan::compute(
         &source_listing.entries,
         &dest_listing.entries,
-        &request.plan_policy(),
+        &request.plan_policy(content_for_time),
     )?;
 
     Ok(Prepared {
@@ -182,35 +229,39 @@ fn diff_directory_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared>
 /// # Errors
 /// A usage error when `DEST` names no object (a bare root) or names an existing
 /// directory, plus everything [`directory_transfer`] can raise.
-pub fn exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared> {
+pub async fn exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared> {
+    refuse_a_plain_write_into_a_vault(ctx, request)?;
     immutable::ensure_traversal_can_enforce_it(request.globals, &request.traversal)?;
-    let prepared = diff_exact_transfer(ctx, request)?;
+    let prepared = diff_exact_transfer(ctx, request).await?;
     immutable::ensure_nothing_is_replaced(request.globals, &prepared.plan)?;
     Ok(prepared)
 }
 
 /// The exact-name diff, without the `--immutable` gate — see
 /// [`diff_directory_transfer`] for why the split exists.
-fn diff_exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared> {
-    ensure_filters_are_supported(request.globals)?;
-
+async fn diff_exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared> {
     let source = RemoteSpec::parse(request.source_spec)?;
     let dest = RemoteSpec::parse(request.dest_spec)?;
     reject_self_transfer(&source, &dest)?;
 
-    let options = ListOptions::resolve(request.globals, request.create_empty_src_dirs)?;
-    let source_listing = listing::source(&source, &options)?;
+    // The flags are resolved *before* the comparison is chosen, so a pattern
+    // that will not compile stops the run without first announcing a comparison
+    // that is never going to be made.
+    let flags = ListOptions::resolve(request.globals, request.create_empty_src_dirs)?;
+    let content_for_time = adopt_a_content_comparison(ctx, request, &source, &dest);
+    let options = flags.hashing_contents(content_for_time);
+    let source_listing = listing::source(ctx, &source, &options).await?;
     warn_about_omissions(ctx, &source_listing);
 
     if !source_listing.is_single_file {
         // A whole tree under an exact name is just a directory transfer whose
         // destination root is the name itself.
-        let dest_listing = enumerate_destination(&dest, &options, request)?;
+        let dest_listing = enumerate_destination(ctx, &dest, &options, request).await?;
         reject_file_destination(&dest, &dest_listing)?;
         let plan = Plan::compute(
             &source_listing.entries,
             &dest_listing.entries,
-            &request.plan_policy(),
+            &request.plan_policy(content_for_time),
         )?;
         return Ok(Prepared {
             source,
@@ -238,12 +289,12 @@ fn diff_exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared> {
             .with_hint("Relax --min-size/--max-size, or name a different file.")
     })?;
 
-    let existing = existing_object(&dest, &options, request)?;
+    let existing = existing_object(ctx, &dest, &options, request).await?;
     let plan = Plan::compute_exact(
         source_entry,
         existing.as_ref(),
         &name,
-        &request.plan_policy(),
+        &request.plan_policy(content_for_time),
     )?;
 
     Ok(Prepared {
@@ -256,6 +307,52 @@ fn diff_exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepared> {
         plan,
         dest_file_count: usize::from(existing.is_some()),
     })
+}
+
+/// Decide whether this transfer's default comparison must be answered by
+/// content, and say so if it must.
+///
+/// One function for both halves on purpose. The substitution and the
+/// announcement are the same decision: a run that quietly read the whole source
+/// tree to hash it, when the user had asked for the one-metadata-round-trip
+/// comparison, would be answering a question nobody asked and charging for it.
+/// Splitting them would make it possible to add a third call site that does the
+/// first without the second.
+///
+/// Three cases decline before anything is classified, and each declines for its
+/// own reason:
+///
+/// * **`--checksum`** already compares content, so there is nothing to
+///   substitute and nothing to announce.
+/// * **`--size-only`** is an explicit request for the cheapest comparison there
+///   is, and it is not broken by a write-time timestamp: sizes need no clock.
+///   Upgrading it would spend a full read of the source on a question the user
+///   deliberately declined to ask.
+/// * **`--no-traverse`** never looks at the destination, so every source file is
+///   already `missing-at-destination` and nothing is compared at all. Hashing
+///   the source there would be pure cost for an answer no rule consults.
+///
+/// See [`crate::fidelity`] for what makes the remaining case necessary, and for
+/// the one change to `dctl-core` that retires it.
+fn adopt_a_content_comparison(
+    ctx: &Ctx,
+    request: &Request<'_>,
+    source: &RemoteSpec,
+    dest: &RemoteSpec,
+) -> bool {
+    if request.globals.checksum || request.globals.size_only || request.traversal.no_traverse {
+        return false;
+    }
+
+    let Some(side) = fidelity::comparing_by_time_is_meaningless(ctx, source, dest) else {
+        return false;
+    };
+
+    // A warning, not a `-v` note. It changes what the run costs, and the only
+    // person who can act on that is the one reading stderr on an ordinary run.
+    ctx.out
+        .warn(format!("'{side}' {WRITE_TIME_COMPARISON_NOTICE}"));
+    true
 }
 
 /// The directory a listing's paths are relative to.
@@ -288,7 +385,8 @@ fn reject_file_destination(dest: &RemoteSpec, listing: &Listing) -> Result<()> {
 }
 
 /// Enumerate the destination, unless `--no-traverse` said not to.
-fn enumerate_destination(
+async fn enumerate_destination(
+    ctx: &Ctx,
     dest: &RemoteSpec,
     options: &ListOptions,
     request: &Request<'_>,
@@ -296,7 +394,7 @@ fn enumerate_destination(
     if request.traversal.no_traverse {
         return Ok(listing::untraversed());
     }
-    listing::destination(dest, options)
+    listing::destination(ctx, dest, options).await
 }
 
 /// Look up the single object an exact-name transfer would overwrite.
@@ -304,7 +402,8 @@ fn enumerate_destination(
 /// Returns `None` when nothing is there — the ordinary case — and a usage error
 /// when `DEST` is an existing directory, which cannot simultaneously be the
 /// object's name and its container.
-fn existing_object(
+async fn existing_object(
+    ctx: &Ctx,
     dest: &RemoteSpec,
     options: &ListOptions,
     request: &Request<'_>,
@@ -313,7 +412,7 @@ fn existing_object(
         return Ok(None);
     }
 
-    let listing = listing::destination(dest, options)?;
+    let listing = listing::destination(ctx, dest, options).await?;
     if !listing.exists {
         return Ok(None);
     }
@@ -544,8 +643,8 @@ mod tests {
         assert!(reject_self_transfer(&plain, &dotted).is_err());
     }
 
-    #[test]
-    fn a_directory_transfer_diffs_both_sides() {
+    #[tokio::test]
+    async fn a_directory_transfer_diffs_both_sides() {
         let fixture = fixture();
         let ctx = ctx(&[]);
         let globals = globals(&[]);
@@ -554,6 +653,7 @@ mod tests {
             &ctx,
             &request(&globals, &flags, &fixture.source, &fixture.dest, false),
         )
+        .await
         .unwrap();
 
         let mut actions: Vec<(Op, &str)> = prepared
@@ -569,8 +669,8 @@ mod tests {
         assert_eq!(prepared.dest_file_count, 2);
     }
 
-    #[test]
-    fn a_sync_transfer_plans_the_deletions() {
+    #[tokio::test]
+    async fn a_sync_transfer_plans_the_deletions() {
         let fixture = fixture();
         let ctx = ctx(&[]);
         let globals = globals(&[]);
@@ -579,6 +679,7 @@ mod tests {
             &ctx,
             &request(&globals, &flags, &fixture.source, &fixture.dest, true),
         )
+        .await
         .unwrap();
 
         let deleted: Vec<&str> = prepared
@@ -589,8 +690,8 @@ mod tests {
         assert_eq!(deleted, ["stale.txt"]);
     }
 
-    #[test]
-    fn syncing_from_a_single_file_is_refused() {
+    #[tokio::test]
+    async fn syncing_from_a_single_file_is_refused() {
         // `dctl sync photo.jpg backups/` would empty the destination. Nobody
         // means that, so it is a usage error rather than a data-loss surprise.
         let fixture = fixture();
@@ -601,6 +702,7 @@ mod tests {
 
         let error =
             directory_transfer(&ctx, &request(&globals, &flags, &file, &fixture.dest, true))
+                .await
                 .unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
         assert!(error.hint().is_some_and(|hint| hint.contains("copyto")));
@@ -611,12 +713,13 @@ mod tests {
                 &ctx,
                 &request(&globals, &flags, &file, &fixture.dest, false)
             )
+            .await
             .is_ok()
         );
     }
 
-    #[test]
-    fn a_transfer_onto_itself_is_refused() {
+    #[tokio::test]
+    async fn a_transfer_onto_itself_is_refused() {
         let fixture = fixture();
         let ctx = ctx(&[]);
         let globals = globals(&[]);
@@ -626,6 +729,7 @@ mod tests {
             &ctx,
             &request(&globals, &flags, &fixture.source, &fixture.source, false),
         )
+        .await
         .unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
 
@@ -636,12 +740,13 @@ mod tests {
                 &ctx,
                 &request(&globals, &flags, &fixture.source, &dotted, false)
             )
+            .await
             .is_err()
         );
     }
 
-    #[test]
-    fn no_traverse_plans_without_touching_the_destination() {
+    #[tokio::test]
+    async fn no_traverse_plans_without_touching_the_destination() {
         // The one shape that works end-to-end against a remote today: the
         // destination is never listed, so nothing needs a vault.
         let fixture = fixture();
@@ -651,13 +756,13 @@ mod tests {
         let mut req = request(&globals, &flags, &fixture.source, "vault:photos", false);
         req.traversal = TraversalFlags { no_traverse: true };
 
-        let prepared = directory_transfer(&ctx, &req).unwrap();
+        let prepared = directory_transfer(&ctx, &req).await.unwrap();
         assert_eq!(prepared.plan.count(Op::Copy), 2);
         assert_eq!(prepared.dest_file_count, 0);
     }
 
-    #[test]
-    fn an_exact_transfer_renames_a_single_file() {
+    #[tokio::test]
+    async fn an_exact_transfer_renames_a_single_file() {
         let fixture = fixture();
         let ctx = ctx(&[]);
         let globals = globals(&[]);
@@ -665,8 +770,9 @@ mod tests {
         let file = format!("{}/a.txt", fixture.source);
         let target = format!("{}/renamed.txt", fixture.dest);
 
-        let prepared =
-            exact_transfer(&ctx, &request(&globals, &flags, &file, &target, false)).unwrap();
+        let prepared = exact_transfer(&ctx, &request(&globals, &flags, &file, &target, false))
+            .await
+            .unwrap();
 
         assert_eq!(prepared.plan.entries.len(), 1);
         let entry = &prepared.plan.entries[0];
@@ -675,8 +781,8 @@ mod tests {
         assert_eq!(entry.action, Op::Copy);
     }
 
-    #[test]
-    fn an_exact_transfer_onto_a_directory_is_refused() {
+    #[tokio::test]
+    async fn an_exact_transfer_onto_a_directory_is_refused() {
         // The destination cannot be both the object's name and its container.
         let fixture = fixture();
         let ctx = ctx(&[]);
@@ -688,12 +794,13 @@ mod tests {
             &ctx,
             &request(&globals, &flags, &file, &fixture.dest, false),
         )
+        .await
         .unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
     }
 
-    #[test]
-    fn an_exact_transfer_compares_against_the_named_object() {
+    #[tokio::test]
+    async fn an_exact_transfer_compares_against_the_named_object() {
         let fixture = fixture();
         let ctx = ctx(&[]);
         let globals = globals(&[]);
@@ -702,26 +809,28 @@ mod tests {
         let target = format!("{}/a.txt", fixture.dest);
 
         // Same name, different size: this is an update, not a first copy.
-        let prepared =
-            exact_transfer(&ctx, &request(&globals, &flags, &file, &target, false)).unwrap();
+        let prepared = exact_transfer(&ctx, &request(&globals, &flags, &file, &target, false))
+            .await
+            .unwrap();
         assert_eq!(prepared.plan.entries[0].action, Op::Update);
     }
 
-    #[test]
-    fn an_exact_destination_must_name_something() {
+    #[tokio::test]
+    async fn an_exact_destination_must_name_something() {
         let fixture = fixture();
         let ctx = ctx(&[]);
         let globals = globals(&[]);
         let flags = CompareFlags::default();
         let file = format!("{}/a.txt", fixture.source);
 
-        let error =
-            exact_transfer(&ctx, &request(&globals, &flags, &file, "vault:", false)).unwrap_err();
+        let error = exact_transfer(&ctx, &request(&globals, &flags, &file, "vault:", false))
+            .await
+            .unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
     }
 
-    #[test]
-    fn an_exact_transfer_of_a_tree_behaves_like_a_directory_transfer() {
+    #[tokio::test]
+    async fn an_exact_transfer_of_a_tree_behaves_like_a_directory_transfer() {
         let fixture = fixture();
         let ctx = ctx(&[]);
         let globals = globals(&[]);
@@ -732,28 +841,86 @@ mod tests {
             &ctx,
             &request(&globals, &flags, &fixture.source, &target, false),
         )
+        .await
         .unwrap();
         assert_eq!(prepared.plan.count(Op::Copy), 2);
     }
 
-    #[test]
-    fn a_pattern_filter_stops_planning_before_anything_is_listed() {
-        // The refusal has to come first: a plan computed with the filter ignored
-        // would be a plan to delete the protected files.
+    #[tokio::test]
+    async fn a_pattern_filter_narrows_the_plan_rather_than_stopping_it() {
+        // The engine is wired in, and what matters most is the `sync` direction:
+        // an `--exclude` has to hide a file from *both* listings, so the
+        // destination copy is not then seen as an extra and deleted. That is
+        // precisely what an ignored rule used to do.
         let fixture = fixture();
         let ctx = ctx(&[]);
-        let globals = globals(&["--exclude", "*.tmp"]);
+        let globals = globals(&["--exclude", "stale.*"]);
+        let flags = CompareFlags::default();
+        let prepared = directory_transfer(
+            &ctx,
+            &request(&globals, &flags, &fixture.source, &fixture.dest, true),
+        )
+        .await
+        .unwrap();
+
+        let deleted: Vec<&str> = prepared
+            .plan
+            .deletions()
+            .map(|entry| entry.dest.as_str())
+            .collect();
+        assert!(deleted.is_empty(), "the excluded file must be protected");
+
+        // …while the transfers the rule says nothing about are untouched.
+        let mut transferred: Vec<&str> = prepared
+            .plan
+            .transfers()
+            .map(|entry| entry.dest.as_str())
+            .collect();
+        transferred.sort_unstable();
+        assert_eq!(transferred, ["a.txt", "sub/b.txt"]);
+    }
+
+    #[tokio::test]
+    async fn an_exclusion_that_names_a_source_file_leaves_it_behind() {
+        // The other direction, and the ordinary reading of the flag.
+        let fixture = fixture();
+        let ctx = ctx(&[]);
+        let globals = globals(&["--exclude", "sub/**"]);
+        let flags = CompareFlags::default();
+        let prepared = directory_transfer(
+            &ctx,
+            &request(&globals, &flags, &fixture.source, &fixture.dest, false),
+        )
+        .await
+        .unwrap();
+
+        let transferred: Vec<&str> = prepared
+            .plan
+            .transfers()
+            .map(|entry| entry.dest.as_str())
+            .collect();
+        assert_eq!(transferred, ["a.txt"], "sub/b.txt was excluded");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_pattern_stops_planning_before_anything_is_listed() {
+        // A rule that will not compile cannot be honoured, and a transfer run
+        // with a rule the operator believes is in force is the data-loss case.
+        let fixture = fixture();
+        let ctx = ctx(&[]);
+        let globals = globals(&["--exclude", "a{b"]);
         let flags = CompareFlags::default();
         let error = directory_transfer(
             &ctx,
             &request(&globals, &flags, &fixture.source, &fixture.dest, true),
         )
+        .await
         .unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
+        assert_eq!(error.code(), ExitCode::Usage);
     }
 
-    #[test]
-    fn the_reported_roots_compose_with_the_plan_paths() {
+    #[tokio::test]
+    async fn the_reported_roots_compose_with_the_plan_paths() {
         // A consumer joins `Prepared.source`/`.dest` to each action's relative
         // path. If a root were the file itself, every composed path would gain a
         // phantom component — and a script acting on the JSON plan would touch
@@ -769,6 +936,7 @@ mod tests {
             &ctx,
             &request(&globals, &flags, &file, &fixture.dest, false),
         )
+        .await
         .unwrap();
         assert_eq!(prepared.source.to_string(), fixture.source);
         assert_eq!(prepared.dest.to_string(), fixture.dest);
@@ -776,15 +944,16 @@ mod tests {
 
         // Exact-name transfer: both roots are containers.
         let target = format!("{}/renamed.txt", fixture.dest);
-        let prepared =
-            exact_transfer(&ctx, &request(&globals, &flags, &file, &target, false)).unwrap();
+        let prepared = exact_transfer(&ctx, &request(&globals, &flags, &file, &target, false))
+            .await
+            .unwrap();
         assert_eq!(prepared.source.to_string(), fixture.source);
         assert_eq!(prepared.dest.to_string(), fixture.dest);
         assert_eq!(prepared.plan.entries[0].dest, "renamed.txt");
     }
 
-    #[test]
-    fn a_directory_transfer_into_a_file_is_refused() {
+    #[tokio::test]
+    async fn a_directory_transfer_into_a_file_is_refused() {
         // Otherwise the planner compares a whole tree against the one file it
         // found and plans to write objects *inside* it.
         let fixture = fixture();
@@ -797,13 +966,14 @@ mod tests {
             &ctx,
             &request(&globals, &flags, &fixture.source, &file, false),
         )
+        .await
         .unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
         assert!(error.hint().is_some_and(|hint| hint.contains("copyto")));
     }
 
-    #[test]
-    fn a_missing_source_is_reported_before_the_destination_is_touched() {
+    #[tokio::test]
+    async fn a_missing_source_is_reported_before_the_destination_is_touched() {
         let ctx = ctx(&[]);
         let globals = globals(&[]);
         let flags = CompareFlags::default();
@@ -811,6 +981,7 @@ mod tests {
             &ctx,
             &request(&globals, &flags, "/definitely/not/here", "/tmp", false),
         )
+        .await
         .unwrap_err();
         assert_eq!(error.code(), ExitCode::DirNotFound);
     }

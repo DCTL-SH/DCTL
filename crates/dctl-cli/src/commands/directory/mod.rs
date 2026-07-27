@@ -1,26 +1,47 @@
 //! Vocabulary shared by the directory family — `mkdir` and `touch`.
 //!
-//! Both verbs exist because an object store has neither of the two things a
-//! shell script assumes: a directory, and a modification time you can set. DCTL
-//! supplies both — a directory is a zero-byte marker object
-//! ([`crate::constants::DIRECTORY_MARKER_NAME`]), and a modification time is a
-//! field in the index — and the two commands then overlap in exactly three
-//! places, each of which lives here rather than being written twice:
+//! Both verbs exist because a shell script assumes two things that only a
+//! filesystem provides: a directory, and a modification time you can set. What
+//! DCTL does about that depends entirely on where the target is, and the family
+//! is honest about the three answers rather than smoothing them into one:
+//!
+//! | | filesystem remote | sealed vault | object store |
+//! |---|---|---|---|
+//! | `mkdir` | creates a real directory | nothing to create ([`Outcome::NotRequired`]) | nothing to create |
+//! | `touch` (missing) | creates an empty file | creates an empty object | refused: no plain write path |
+//! | `touch` (existing) | sets the time | refused: no such call in `dctl-core` | refused |
+//! | `--timestamp` | honoured | refused before anything is written | refused |
+//!
+//! The middle column is the one worth reading twice. A vault maps logical paths
+//! to sealed objects; `photos/2024` exists exactly while something is stored
+//! under it. There is no state for `mkdir` to establish, so it establishes none
+//! and says so — see [`crate::constants::DIRECTORY_NOTHING_TO_CREATE`] for why
+//! that is a success rather than a refusal, and
+//! [`crate::constants::DIRECTORY_MARKER_NAME`] for why it is not a marker object.
+//!
+//! Four things are shared rather than written twice:
 //!
 //! * [`target`] — turning a `REMOTE:PATH` argument into a remote name plus a
 //!   canonical logical path, with the drive-letter, `..` and empty-path rules
 //!   applied once.
-//! * [`plan`] — the request document: what would be written, where, and under
-//!   which options, rendered in every `--format`.
+//! * [`plan`] — the one document both verbs emit, describing a rehearsal or
+//!   reporting a completed run, in every `--format`.
+//! * [`outcome`] — the five things "it worked" can mean, as stable slugs.
 //! * [`command_name`] — how a command names itself in an error message.
+//!
+//! Which *kind* of place a target names is not here: that is
+//! [`crate::remote::Place`], because `rcat` needs the same answer and a second
+//! copy of the question is a second answer that can disagree with the first.
 //!
 //! It is deliberately not a `util` module. Everything here is directory-family
 //! domain vocabulary; a helper with nothing to do with naming or creating an
 //! object does not belong in it.
 
+pub mod outcome;
 pub mod plan;
 pub mod target;
 
+pub use outcome::Outcome;
 pub use plan::{Plan, PlanOptions, Row, emit, yes_no};
 pub use target::Target;
 

@@ -18,6 +18,8 @@
 //! locked vault or a cancelled run makes every remaining file fail identically,
 //! so the run stops rather than emitting ten million copies of one error.
 
+use crate::audit::record::Entry as AuditEntry;
+use crate::audit::sink;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -57,17 +59,28 @@ pub fn confirm(ctx: &Ctx, action: &str, target: &str) -> Result<()> {
 
 /// Transfer every copy/update entry, and create every empty directory.
 ///
+/// `op` is the verb the user typed, and it reaches this far down for one
+/// purpose: it is the `op` field of every audit record the run appends, and a
+/// log in which `sync` recorded itself as `copy` would misstate which files were
+/// at risk of deletion.
+///
 /// # Errors
 /// Only a fatal failure — the per-file kind is recorded and skipped. See the
-/// module docs.
-pub async fn transfers<D: StageDriver>(ctx: &Ctx, driver: &D, plan: &Plan) -> Result<()> {
+/// module docs. An operation that could not be *audited* is fatal by
+/// construction, because the log is unwritable for every file behind it too.
+pub async fn transfers<D: StageDriver>(
+    ctx: &Ctx,
+    op: &'static str,
+    driver: &D,
+    plan: &Plan,
+) -> Result<()> {
     for entry in plan.entries.iter().filter(|e| e.action.is_action()) {
         match entry.action {
             Op::Copy | Op::Update => {
                 perform(
                     ctx,
                     &entry.dest,
-                    pipeline::transfer_file(ctx, driver, entry).await,
+                    pipeline::transfer_file(ctx, op, driver, entry).await,
                 )?;
             }
             Op::CreateDir => {
@@ -92,6 +105,7 @@ pub async fn transfers<D: StageDriver>(ctx: &Ctx, driver: &D, plan: &Plan) -> Re
 /// Only a fatal failure; see [`transfers`].
 pub async fn moves<D: StageDriver, R: Reaper>(
     ctx: &Ctx,
+    op: &'static str,
     driver: &D,
     source_reaper: &R,
     plan: &Plan,
@@ -99,7 +113,7 @@ pub async fn moves<D: StageDriver, R: Reaper>(
     for entry in plan.entries.iter().filter(|e| e.action.is_action()) {
         match entry.action {
             Op::Copy | Op::Update => {
-                let outcome = pipeline::move_file(ctx, driver, source_reaper, entry).await;
+                let outcome = pipeline::move_file(ctx, op, driver, source_reaper, entry).await;
                 perform(ctx, &entry.dest, outcome)?;
             }
             Op::CreateDir => {
@@ -113,12 +127,32 @@ pub async fn moves<D: StageDriver, R: Reaper>(
 
 /// Remove every entry the plan marks for deletion.
 ///
+/// This is `sync`'s destructive half — the files that exist only at the
+/// destination — so each removal is audited exactly like a transfer is, after
+/// the deletion has been confirmed. A `sync` whose additions were provable and
+/// whose deletions were not would leave the log describing the half of the run
+/// nobody worries about.
+///
 /// # Errors
 /// Only a fatal failure; see [`transfers`].
-pub async fn deletions<R: Reaper>(ctx: &Ctx, reaper: &R, plan: &Plan) -> Result<()> {
+pub async fn deletions<R: Reaper>(
+    ctx: &Ctx,
+    op: &'static str,
+    reaper: &R,
+    plan: &Plan,
+) -> Result<()> {
     for entry in plan.deletions() {
         let outcome = reaper.remove(&entry.dest).await;
         let succeeded = outcome.is_ok();
+
+        // No size and no hash: a deletion stores nothing and hashes nothing, and
+        // the size the destination *used* to be is not a fact this run measured.
+        ctx.audit.record(
+            &AuditEntry::new(op, sink::outcome(&outcome))
+                .path(&entry.dest)
+                .remote(reaper.remote()),
+        )?;
+
         perform(ctx, &removal_subject(reaper, &entry.dest), outcome)?;
         if succeeded {
             ctx.stats.file_deleted();
@@ -189,7 +223,13 @@ pub fn account_for_skips(ctx: &Ctx, plan: &Plan) {
         ctx.stats.check_done();
     }
     ctx.progress
-        .set_totals(plan.bytes_to_transfer(), plan.transfers().count() as u64);
+        // Zero when the plan cannot total itself: an aggregate bar with no
+        // known length is drawn as indeterminate, which is the truthful
+        // rendering of "we do not know how much this will move".
+        .set_totals(
+            plan.bytes_to_transfer().unwrap_or_default(),
+            plan.transfers().count() as u64,
+        );
 }
 
 #[cfg(test)]
@@ -204,6 +244,13 @@ mod tests {
     use crate::error::CliError;
     use crate::exit::ExitCode;
     use std::cell::RefCell;
+
+    /// The remote the fake drivers claim to be connected to, so a record written
+    /// during a test still carries a plausible one.
+    const TEST_REMOTE: &str = "archive";
+
+    /// The verb the tests drive the executor with.
+    const TEST_OP: &str = "copy";
 
     /// A driver that records the paths it transferred, and can fail chosen ones.
     #[derive(Default)]
@@ -248,7 +295,7 @@ mod tests {
             Ok(())
         }
         async fn upload(&self, entry: &PlanEntry) -> Result<u64> {
-            Ok(entry.size)
+            Ok(entry.size.unwrap_or_default())
         }
         async fn verify(&self, _: &PlanEntry, _: VerifyMode) -> Result<()> {
             Ok(())
@@ -260,6 +307,12 @@ mod tests {
         async fn create_dir(&self, entry: &PlanEntry) -> Result<()> {
             self.created.borrow_mut().push(entry.dest.clone());
             Ok(())
+        }
+        fn remote(&self) -> &str {
+            TEST_REMOTE
+        }
+        fn take_plaintext_hash(&self, _: &PlanEntry) -> String {
+            String::new()
         }
     }
 
@@ -275,6 +328,9 @@ mod tests {
         }
         fn target(&self) -> &'static str {
             "destination"
+        }
+        fn remote(&self) -> &str {
+            TEST_REMOTE
         }
     }
 
@@ -303,7 +359,7 @@ mod tests {
         );
 
         let driver = Driver::default();
-        transfers(&ctx, &driver, &plan).await.unwrap();
+        transfers(&ctx, TEST_OP, &driver, &plan).await.unwrap();
 
         // `a` is new, `b` differs in size, `c` is identical.
         assert_eq!(driver.transferred.borrow().as_slice(), ["a", "b"]);
@@ -324,7 +380,7 @@ mod tests {
         );
 
         let driver = Driver::failing(&["bad"]);
-        transfers(&ctx, &driver, &plan).await.unwrap();
+        transfers(&ctx, TEST_OP, &driver, &plan).await.unwrap();
 
         assert_eq!(driver.transferred.borrow().as_slice(), ["a", "c"]);
         // …but the failure is never rolled up into success.
@@ -341,7 +397,9 @@ mod tests {
             &sync_policy(),
         );
 
-        let error = transfers(&ctx, &Driver::fatal(), &plan).await.unwrap_err();
+        let error = transfers(&ctx, TEST_OP, &Driver::fatal(), &plan)
+            .await
+            .unwrap_err();
         assert_eq!(error.code(), ExitCode::VaultLocked);
         // A locked vault fails every remaining file identically; emitting one
         // error per file would bury the cause.
@@ -358,7 +416,7 @@ mod tests {
         );
 
         let reaper = Sink::default();
-        deletions(&ctx, &reaper, &plan).await.unwrap();
+        deletions(&ctx, TEST_OP, &reaper, &plan).await.unwrap();
 
         assert_eq!(reaper.removed.borrow().as_slice(), ["gone", "also"]);
         assert_eq!(ctx.stats.snapshot().files_deleted, 2);
@@ -375,7 +433,7 @@ mod tests {
 
         let driver = Driver::default();
         let reaper = Sink::default();
-        moves(&ctx, &driver, &reaper, &plan).await.unwrap();
+        moves(&ctx, TEST_OP, &driver, &reaper, &plan).await.unwrap();
 
         assert_eq!(driver.transferred.borrow().as_slice(), ["a", "b"]);
         assert_eq!(reaper.removed.borrow().as_slice(), ["a", "b"]);
@@ -392,7 +450,7 @@ mod tests {
 
         let driver = Driver::failing(&["bad"]);
         let reaper = Sink::default();
-        moves(&ctx, &driver, &reaper, &plan).await.unwrap();
+        moves(&ctx, TEST_OP, &driver, &reaper, &plan).await.unwrap();
 
         // The failed file's source survives; the successful one's does not.
         assert_eq!(reaper.removed.borrow().as_slice(), ["ok"]);
@@ -409,7 +467,7 @@ mod tests {
         );
 
         let driver = Driver::default();
-        transfers(&ctx, &driver, &plan).await.unwrap();
+        transfers(&ctx, TEST_OP, &driver, &plan).await.unwrap();
 
         assert_eq!(driver.created.borrow().as_slice(), ["empty"]);
         assert_eq!(driver.transferred.borrow().as_slice(), ["a"]);

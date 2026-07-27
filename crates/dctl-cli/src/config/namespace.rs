@@ -44,7 +44,9 @@
 //! later disagree, and the disagreement would be visible as a refusal in one
 //! command and a plaintext write in another.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::platform::resolve::real_path;
 
 use super::location::Location;
 use super::model::{Config, RemoteDef};
@@ -83,73 +85,38 @@ impl VaultNamespace {
 
     /// Whether a bare filesystem path lies in a configured store's location.
     ///
-    /// Ancestors are walked, and that is essential rather than thorough:
-    /// checking only the exact path meant naming any subdirectory defeated the
-    /// rule entirely — `/srv/vault` was refused while `/srv/vault/photos` was a
-    /// plain write into the middle of a vault's object tree. A rule one extra
-    /// path component disables is worse than none, because it reads as
-    /// protection.
+    /// Every spelling of the destination is compared against every spelling of
+    /// every declared store — see [`spellings`] for which and why. The answer
+    /// must be the same for `vault`, `./vault`, `/srv/vault`,
+    /// `staging/../vault`, a symlink to it and any subdirectory of it, because
+    /// an operator who reaches the same directory by a different route has not
+    /// asked for different encryption behaviour.
     ///
-    /// The refusal names the **configured** directory rather than the path the
-    /// user happened to type: `'/srv/vault' is the object store for 'archive'`
-    /// is what tells an operator what they hit, where
-    /// `'/srv/vault/photos/2024/raw'` only tells them what they typed.
+    /// The refusal names the **store's root** rather than the full path the user
+    /// happened to type: `'/srv/vault' is the object store for 'archive'` is what
+    /// tells an operator what they hit, where `'/srv/vault/photos/2024/raw'` only
+    /// tells them what they typed.
     #[must_use]
     pub fn of_path(config: &Config, path: &Path) -> Option<Self> {
-        for ancestor in path
-            .ancestors()
-            .filter(|ancestor| !ancestor.as_os_str().is_empty())
-        {
-            // Two spellings, because one is not enough.
-            //
-            // `Location` is deliberately pure — it never touches a filesystem,
-            // so config validation works on a machine that has never seen the
-            // paths it validates. That purity is right for validation and wrong
-            // here: the destination arrives as the user typed it, and `./srv`
-            // does not compare equal to the `/srv` the file records. The claim
-            // then missed, the write path fell through to sniffing the
-            // destination for an envelope, and the encryption decision became a
-            // function of the destination's *contents* — the one thing the
-            // addressing model forbids. Moving the same command between an
-            // absolute and a relative spelling flipped it between refusing and
-            // writing plaintext.
-            //
-            // So the comparison is made twice: once as spelled, which is free
-            // and catches the common case, and once canonicalised, which costs a
-            // `stat` and catches `./srv`, `srv/../srv`, a symlink and a
-            // different mount spelling of one directory. Canonicalisation is
-            // best-effort by necessity — it fails for a path that does not exist
-            // yet — and a failure simply leaves the as-spelled answer standing.
-            let place = Location::of_path(ancestor);
-            let canonical = ancestor
-                .canonicalize()
-                .ok()
-                .map(|real| Location::of_path(&real));
+        if path.as_os_str().is_empty() {
+            return None;
+        }
 
-            let store = config.names().find(|name| {
-                config.get(name).is_some_and(|remote| {
-                    if !remote.require_vault() {
-                        return false;
-                    }
-                    let Some(configured) = Location::of(remote) else {
-                        return false;
-                    };
-                    if configured == place {
-                        return true;
-                    }
-                    // The configured side needs the same treatment: it is just
-                    // as likely to be the relative spelling of the two.
-                    canonical.as_ref().is_some_and(|here| {
-                        *here == configured || configured_canonical(remote).as_ref() == Some(here)
-                    })
-                })
-            });
+        let stores = vault_only_stores(config);
+        if stores.is_empty() {
+            // The overwhelming majority of configurations. Answering here costs
+            // nothing and, more importantly, resolves no paths: a machine with
+            // no vault at all must not pay a `stat` per destination.
+            return None;
+        }
 
-            if let Some(store) = store {
+        for ancestor in spellings(path) {
+            let place = Location::of_path(&ancestor);
+            if let Some(store) = stores.iter().find(|store| store.is(&place)) {
                 return Some(Self {
                     subject: ancestor.display().to_string(),
-                    store: store.to_string(),
-                    vault: sealed_view(config, store),
+                    store: store.name.to_string(),
+                    vault: sealed_view(config, store.name),
                 });
             }
         }
@@ -157,21 +124,112 @@ impl VaultNamespace {
     }
 }
 
-/// The canonical [`Location`] of a remote, when it names a local path that
-/// exists.
+/// A configured store, in both the spelling the file uses and the place it
+/// resolves to.
+///
+/// Two readings, because one is not enough.
+///
+/// [`Location`] is deliberately pure — it never touches a filesystem, so config
+/// validation works on a machine that has never seen the paths it validates.
+/// That purity is right for validation and wrong here: the destination arrives
+/// as the user typed it, and `./srv` does not compare equal to the `/srv` the
+/// file records. The claim then missed, the write path fell through to sniffing
+/// the destination for an envelope, and the encryption decision became a
+/// function of the destination's *contents* — the one thing the addressing model
+/// forbids. Moving the same command between an absolute and a relative spelling
+/// flipped it between refusing and writing plaintext.
+struct Store<'a> {
+    name: &'a str,
+    /// Exactly as the configuration file spells it.
+    spelled: Location,
+    /// Where that spelling actually leads, for a local path. `None` for a
+    /// bucket, which has one spelling and nothing to resolve.
+    real: Option<Location>,
+}
+
+impl Store<'_> {
+    /// Whether `place` is this store, under either reading.
+    fn is(&self, place: &Location) -> bool {
+        self.spelled == *place || self.real.as_ref() == Some(place)
+    }
+}
+
+/// Every remote that declares itself a vault's object store, resolved once.
+///
+/// Resolved once per call rather than once per ancestor: a deep destination and
+/// a handful of remotes would otherwise re-resolve the same configured paths a
+/// dozen times, and the answer cannot change within one decision.
+fn vault_only_stores(config: &Config) -> Vec<Store<'_>> {
+    config
+        .names()
+        .filter_map(|name| {
+            let remote = config.get(name)?;
+            if !remote.require_vault() {
+                return None;
+            }
+            Some(Store {
+                name,
+                spelled: Location::of(remote)?,
+                real: configured_real(remote),
+            })
+        })
+        .collect()
+}
+
+/// The resolved [`Location`] of a remote that names a local path.
 ///
 /// Separate from [`Location::of`] so the pure, I/O-free version stays the one
 /// config validation uses. Only the write-path check pays for the `stat`.
-fn configured_canonical(remote: &RemoteDef) -> Option<Location> {
+fn configured_real(remote: &RemoteDef) -> Option<Location> {
     let RemoteDef::Local(def) = remote else {
         // Only a filesystem path has spellings to reconcile. A bucket name is
         // already canonical: there is one spelling of `photos`.
         return None;
     };
-    def.path
-        .canonicalize()
-        .ok()
-        .map(|real| Location::of_path(&real))
+    real_path(&def.path).map(|real| Location::of_path(&real))
+}
+
+/// Every place a destination could be claimed at: each ancestor of the spelling
+/// typed, then each ancestor of the place it resolves to.
+///
+/// Ancestors are walked, and that is essential rather than thorough: checking
+/// only the exact path meant naming any subdirectory defeated the rule entirely
+/// — `/srv/vault` was refused while `/srv/vault/photos` was a plain write into
+/// the middle of a vault's object tree. A rule one extra path component disables
+/// is worse than none, because it reads as protection.
+///
+/// The typed spelling comes first so a refusal names something the operator
+/// recognises from their own command line. The resolved spelling follows and is
+/// what catches `./vault`, `staging/../vault`, a symlink, and a second mount
+/// path for one directory — spellings under which the string comparison alone
+/// silently permitted the write.
+fn spellings(path: &Path) -> impl Iterator<Item = PathBuf> {
+    let typed: Vec<PathBuf> = ancestors(path);
+
+    // The resolved path is ALWAYS consulted, never filtered against the typed
+    // one. It used to be skipped when `real == path`, and that comparison is
+    // `Path`'s component-wise equality — which normalises away precisely `/`,
+    // `//`, `/.` and a trailing separator. Those are exactly the spellings the
+    // string identity used to miss, so the safety net was disabled for the only
+    // cases that needed it: the two halves agreed only where neither was
+    // required. Re-checking an identical resolved path costs one `stat` and
+    // removes the whole class.
+    let real = real_path(path);
+    typed
+        .into_iter()
+        .chain(real.into_iter().flat_map(|real| ancestors(&real)))
+}
+
+/// A path's ancestors, deepest first, with the empty tail dropped.
+///
+/// The empty path is not an ancestor of anything for this purpose: a store
+/// configured with no path at all would otherwise claim every destination on the
+/// machine.
+fn ancestors(path: &Path) -> Vec<PathBuf> {
+    path.ancestors()
+        .filter(|ancestor| !ancestor.as_os_str().is_empty())
+        .map(Path::to_path_buf)
+        .collect()
 }
 
 impl VaultNamespace {

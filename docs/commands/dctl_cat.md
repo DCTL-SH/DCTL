@@ -115,9 +115,9 @@ is not reachable. `--verify`, `--verify-samples`, `--checksum`, `--size-only` an
 rule that DCTL never reports work it did not do, which is why an unreadable
 argument aborts the whole run before output starts, why a dry run emits no bytes,
 and why a remote object fails loudly instead of producing an empty successful
-stream. When the vault read path lands, every chunk served is AEAD-authenticated
-on the way out, and a chunk that fails authentication will abort with exit 21
-rather than hand corrupt plaintext to the pipeline.
+stream. A vault's bytes are AEAD-authenticated before they are returned, and an
+object that fails authentication aborts with exit 21 rather than handing corrupt
+plaintext to the pipeline.
 
 ### What runs today
 
@@ -125,24 +125,54 @@ rather than hand corrupt plaintext to the pipeline.
 bounded read, the copy loop, the broken-pipe rule, `--discard`, `--dry-run` and
 both JSON formats all work now and are exercised against real files.
 
-**Reading an object out of a remote is not implemented in this build.** It needs
-an unlocked vault and a ranged read of the stored chunks covering the request,
-which the command context does not yet carry. Such an invocation parses,
-validates its flags and resolves its range, then fails during pre-flight with
-exit **7** before anything is printed:
+**Remote objects are read too**, through the one source abstraction, so
+`dctl cat archive:notes.md` (a sealed vault) and `dctl cat archive-store:<key>`
+(the plain object store beneath it) both work, with every range flag honoured.
+This page previously said remote reads were unimplemented and quoted an exit-7
+refusal; that has not been true for some time.
+
+### What a windowed read of a sealed object costs
+
+**A vault has no ranged read.** `dctl-core` exposes `get_file`, which decrypts
+and authenticates a whole object, and nothing narrower. So a vault serves a byte
+window by fetching and decrypting the *entire* object and slicing the result:
 
 ```
-error: reading an object out of a remote (dctl cat) is not implemented in this build
-warning: Reading a remote object needs an unlocked vault and a ranged read of the
-chunks covering the request (PLAN.md §11), which the command context does not yet
-carry. `cat` works on local paths today, including --head, --tail, --offset and
---count.
+dctl cat b2vault:film.mkv --offset 0 --count 4
 ```
 
-The vault, encrypted index and B2 backend arrive with `PLAN.md` §11 **Phase 1
-(B2 MVP)**; the Range reader that makes `--offset 40G` cost one request rather
-than 40 GB of egress is **Phase 2 (Streaming mount)**, the same work that backs
-[`mount`](dctl_mount.md).
+returns four bytes and transfers the whole film. Cost is O(object) in memory and
+in egress, not O(window). On a metered backend the whole object is what gets
+billed, and repeating the read costs the same again.
+
+This is not faked and it is not capped. Returning a short read, or refusing above
+some size, would trade a known cost for an unknown wrong answer.
+
+**Above 64 MiB the cost is announced before it is paid.** When the object is at
+least that large and the window is smaller than the object, `cat` writes a
+warning to stderr during pre-flight — before any byte is transferred, while the
+run can still be interrupted:
+
+```
+warning: b2vault:film.mkv: reading 4 B of a 3.7 GiB object will transfer all
+3.7 GiB of it (3.7 GiB more than requested): a sealed vault has no ranged read,
+so the window is served by fetching and decrypting the whole object. On a
+metered backend the whole object is what gets billed, and repeating the read
+costs the same again.
+```
+
+The threshold is deliberately well above the objects people window into casually,
+so an ordinary `--head` on a document or a log never warns — a warning that fires
+on routine work is one an operator learns to skip. It is silenced by `--quiet`
+like any other warning, and it never appears for a plain object store, which
+serves a genuine ranged request and spends nothing extra. Asking for the whole
+object does not warn either: the cost is real, but it is exactly what was asked
+for.
+
+The limit disappears when `dctl-core` grows a chunked reader — `PLAN.md` §11
+**Phase 2 (Streaming mount)**, the same work that backs
+[`mount`](dctl_mount.md). At that point the vault serves windows natively and the
+warning stops firing on its own, with no call site changing.
 
 ```
 dctl cat REMOTE:PATH... [flags]
@@ -245,16 +275,17 @@ C:\> dctl cat C:\Media\clip.mkv --head 4K --discard
 C:\> dctl cat \\nas01\media\clip.mkv --discard
 ```
 
-A vault object is refused loudly rather than served as an empty stream. Note that
-this happens during pre-flight, so the readable first argument is never written:
+An argument that cannot be read is refused loudly rather than served as an empty
+stream, and because that happens during pre-flight, the readable first argument
+is never written either — a truncated file that looks complete is the failure
+`PLAN.md` §6 exists to prevent:
 
 ```console
-$ dctl cat /srv/media/a.mkv vault:photos/2024/IMG_0001.jpg > out.bin
-error: reading an object out of a remote (dctl cat) is not implemented in this build
-warning: Reading a remote object needs an unlocked vault and a ranged read of the
-chunks covering the request (PLAN.md §11), which the command context does not yet
-carry. `cat` works on local paths today, including --head, --tail, --offset and
---count.
+$ dctl cat /srv/media/a.mkv vault:photos/2024/nosuch.jpg > out.bin
+error: 'vault:photos/2024/nosuch.jpg' is not there
+warning: Check the path with `dctl ls`. If the object was written from another
+machine, this machine's index has not seen it yet — `dctl index rebuild` rescans
+the store.
 $ ls -l out.bin
 -rw-r--r--  1 me  staff  0 26 Jul 15:41 out.bin
 ```
@@ -312,14 +343,14 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 0 | `success` | Every requested byte was written, **or** the consumer closed the pipe early, **or** the run was a `--dry-run`. |
 | 1 | `usage` | Unknown flag, no arguments, an unparseable size or offset, contradictory range flags, `--json`/`--format json*` without `--discard`, a bare `vault:`, an empty argument, a `..` component in a remote path, a directory, or a device/socket/FIFO. |
 | 2 | `uncategorised` | Any other I/O failure while reading or writing — a full disk on a redirected stdout, or a failure to emit a JSON record. |
-| 4 | `file_not_found` | A local path does not exist. Raised during pre-flight, so nothing was written. |
-| 7 | `fatal_error` | The argument names a remote (**not implemented in this build**), or a local file could not be opened for lack of permission. |
+| 4 | `file_not_found` | A local path does not exist, or a remote object is not there. Raised during pre-flight, so nothing was written. |
+| 7 | `fatal_error` | The argument names a remote that cannot be resolved or unlocked, or a local file could not be opened for lack of permission. |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. Partial output may already have reached the pipe, but nothing was reported as complete. |
 
 Exit 20 (`checksum_mismatch`) cannot occur: `cat` commits nothing. Exit 6
 (`partial_failure`) is not reachable either — a failed argument aborts the run
-rather than degrading it. Exit 21 (`integrity_failure`) becomes reachable when
-reading from a remote lands, for an object whose chunks fail authentication.
+rather than degrading it. Exit 21 (`integrity_failure`) is reachable when a vault
+object fails authentication, in which case its bytes are **not** written.
 
 ## See also
 

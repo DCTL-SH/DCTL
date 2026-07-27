@@ -11,6 +11,7 @@ use std::fmt;
 use dctl_core::CoreError;
 use dctl_store::StoreError;
 
+use crate::constants::VAULT_ENVELOPE_OBJECT_KEY;
 use crate::exit::ExitCode;
 
 /// A classified command failure.
@@ -127,6 +128,11 @@ impl From<StoreError> for CliError {
 impl From<CoreError> for CliError {
     fn from(error: CoreError) -> Self {
         match error {
+            // This is the most frightening message the tool produces: it is read
+            // by somebody who believes their vault may be lost, and it will be
+            // acted on literally. So every remedy named here has to be one this
+            // build actually provides.
+            //
             // Deliberately does not mention `--key-file`. This build cannot mix
             // a second factor into the KEK at all — `crate::session::factor`
             // refuses the flag before an unlock is even attempted — so naming it
@@ -134,12 +140,28 @@ impl From<CoreError> for CliError {
             // exist, and would imply a protection the vault does not have.
             // `--password-file` is named because it really is a password source
             // and really can be the culprit (a trailing byte, the wrong line).
+            //
+            // It also no longer sends the reader to a `vault recover` subcommand
+            // with "your BIP39 phrase". Neither has ever existed: there is no
+            // `vault` verb in any build, and `dctl init` writes a single
+            // password key slot and issues no phrase, so the instruction spent
+            // the one attempt a frightened operator had on a command that
+            // answers `unrecognized subcommand`. What is left is the truth —
+            // the password is the only way in, and the envelope's only backup is
+            // a copy of the store — which is worse news and better advice.
             CoreError::Unlock => Self::new(ExitCode::VaultLocked, error.to_string()).with_hint(
-                "Check the password, including how it reached DCTL — a \
-                 --password-file or --password-command that emits a stray \
-                 character produces a different secret than the one you typed. \
-                 If the password is right, the envelope may be damaged — recover \
-                 with `dctl vault recover` using your BIP39 phrase.",
+                format!(
+                    "Check the password, including how it reached DCTL — a \
+                     --password-file or --password-command that emits a stray \
+                     character produces a different secret than the one you \
+                     typed. There is no second way in: this build unlocks a \
+                     vault with a password and nothing else, and issues no \
+                     recovery phrase. If the password is definitely right, the \
+                     envelope itself may be damaged; it is stored as \
+                     '{VAULT_ENVELOPE_OBJECT_KEY}' in the object store, and \
+                     restoring that one object from a replica of the store \
+                     (`dctl replicate` copies it) is the only repair.",
+                ),
             ),
 
             CoreError::NotFound(ref path) => Self::new(ExitCode::FileNotFound, error.to_string())
@@ -200,7 +222,7 @@ pub type Result<T> = std::result::Result<T, CliError>;
 
 #[cfg(test)]
 mod tests {
-    use super::{CliError, ExitCode};
+    use super::{CliError, ExitCode, VAULT_ENVELOPE_OBJECT_KEY};
     use dctl_store::StoreError;
 
     #[test]
@@ -236,6 +258,36 @@ mod tests {
         assert!(
             !hint.contains("--key-file"),
             "the unlock hint must not imply --key-file was applied: {hint}"
+        );
+    }
+
+    #[test]
+    fn the_unlock_hint_promises_no_recovery_this_build_cannot_perform() {
+        // Defect D6. The hint told the reader to run a `vault recover`
+        // subcommand with "your BIP39 phrase". There is no `vault` verb, and
+        // `dctl init`
+        // creates one password key slot and issues no phrase — so both halves
+        // named something that has never existed, in the message read by
+        // someone who believes their vault may be lost.
+        //
+        // `crate::cli::mentions` catches the command half across the whole
+        // crate. This pins the promise as well as the spelling: an offer of
+        // recovery is what makes an operator stop looking for their password.
+        let err = CliError::from(dctl_core::CoreError::Unlock);
+        let hint = err.hint().expect("an unlock failure must explain itself");
+        for absent in ["vault recover", "BIP39", "phrase generated"] {
+            assert!(
+                !hint.contains(absent),
+                "the unlock hint must not offer a recovery route this build \
+                 does not have ('{absent}'): {hint}"
+            );
+        }
+        // And it must still name the one repair that is real, which was
+        // verified by hand: `dctl replicate` copies the envelope object
+        // byte-for-byte into a second store.
+        assert!(
+            hint.contains(VAULT_ENVELOPE_OBJECT_KEY),
+            "the hint must name the object that would have to be restored: {hint}"
         );
     }
 

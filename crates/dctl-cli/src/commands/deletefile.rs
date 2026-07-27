@@ -10,18 +10,11 @@
 //! **A directory is an error, not a recursion.** `deletefile vault:photos`
 //! must never quietly become a tree removal: that is [`purge`](super::purge)'s
 //! job, and confusing the two is how a user loses a decade of photographs
-//! meaning to remove one file. The syntactic half of that check runs now — a
-//! target written with a trailing separator names a directory, and a bare
-//! `REMOTE:` names the root — while the index half (is this path a directory
-//! *in the vault*?) needs a listing the engine does not expose yet.
-//!
-//! ## What runs today
-//!
-//! Everything except the removal: argument parsing, target resolution, the
-//! directory refusal above, the destructive gate and the `--dry-run` plan.
-//! `Vault::delete_file` exists, but [`Ctx`] carries no vault handle to call it
-//! on, so the command fails with a real exit code rather than reporting a
-//! deletion that never happened. See [`super::removal::engine`].
+//! meaning to remove one file. The check has two halves and both run: the
+//! syntactic one here — a target written with a trailing separator names a
+//! directory, and a bare `REMOTE:` names the root — and the factual one in
+//! [`super::removal::selection`], which refuses a path the remote holds objects
+//! *under* rather than *at*.
 
 use clap::Args;
 
@@ -29,13 +22,10 @@ use crate::constants::{PATH_SEPARATOR, REMOTE_PATH_VALUE_NAME, REMOVAL_ACTION_DE
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 
-use super::removal::{NoOptions, Removal, Target, execute};
+use super::removal::{NoOptions, Operation, Removal, Target, execute};
 
 /// Stable command name. Must match `Command::name()` in `cli/mod.rs`.
 const COMMAND: &str = "deletefile";
-
-/// The engine capability this command is waiting on.
-const CAPABILITY: &str = "removing a named object from a vault";
 
 /// `dctl deletefile REMOTE:PATH`
 #[derive(Args, Debug)]
@@ -49,8 +39,8 @@ pub struct DeletefileArgs {
 ///
 /// # Errors
 /// [`crate::exit::ExitCode::Usage`] for a malformed target or one that names a
-/// directory; [`crate::exit::ExitCode::Cancelled`] if the user declines;
-/// otherwise the unimplemented refusal described above.
+/// directory; [`crate::exit::ExitCode::FileNotFound`] when the remote holds no
+/// such object; [`crate::exit::ExitCode::Cancelled`] if the user declines.
 pub async fn run(ctx: &Ctx, args: &DeletefileArgs) -> Result<()> {
     let target = Target::parse(&args.path)?;
     refuse_directories(&args.path, &target)?;
@@ -62,10 +52,10 @@ pub async fn run(ctx: &Ctx, args: &DeletefileArgs) -> Result<()> {
         // Filters cannot narrow a target the user named exactly.
         filters: None,
         options: NoOptions {},
-        capability: CAPABILITY,
+        operation: Operation::DeleteFile,
     };
 
-    execute(ctx, &removal)
+    execute(ctx, &removal).await
 }
 
 /// Refuse anything that is syntactically a directory rather than an object.
@@ -150,28 +140,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dry_run_never_reports_a_deletion() {
-        let error = run_with(&["vault:a.jpg", "--dry-run", "--quiet"])
+    async fn the_directory_refusal_runs_before_any_store_is_opened() {
+        // The syntactic half of the check. It must not need a remote to exist,
+        // because the mistake it catches is worst on a remote that does.
+        let error = run_with(&["vault:photos/", "--force", "--quiet", "--no-ask-password"])
             .await
             .unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
-    }
-
-    #[tokio::test]
-    async fn a_real_run_never_reports_a_deletion_either() {
-        let error = run_with(&["vault:a.jpg", "--force", "--quiet"])
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
-    }
-
-    #[tokio::test]
-    async fn every_output_format_is_supported() {
-        for format in [vec!["--json"], vec!["--format", "json-lines"], vec![]] {
-            let mut args = vec!["vault:a.jpg", "--dry-run", "--quiet"];
-            args.extend(format.iter().copied());
-            assert!(run_with(&args).await.is_err(), "{format:?}");
-        }
+        assert_eq!(error.code(), ExitCode::Usage);
     }
 
     #[test]

@@ -201,19 +201,20 @@ impl Resolved {
 
     /// The logical path inside the remote; `""` addresses its root.
     ///
-    /// For a local remote this is empty and the whole path lives in the target's
-    /// root, because a filesystem backend is rooted at a directory rather than
-    /// at a bucket that a prefix hangs off.
+    /// For a **bare local path** this is empty and the whole path lives in the
+    /// target's root, because a filesystem backend is rooted at a directory
+    /// rather than at a bucket that a prefix hangs off. For a *named* remote it
+    /// is the path inside it, and for a provider shorthand it is what remains
+    /// after the bucket: `b2:mybucket/photos` resolves to the bucket `mybucket`
+    /// and the path `photos`, so a caller that used the spec's own path as a key
+    /// would address `mybucket/photos` *inside* `mybucket`.
     ///
-    /// `cfg(test)` for now, and the reason is worth knowing: both production
-    /// routes through this module —
-    /// [`build_backend`](super::registry::build_backend) for `dctl init`, and
-    /// `crate::session::open` for the transfer family — resolve a spec and then
-    /// **discard the path**, because all either one keeps is a backend. Every
-    /// command therefore addresses a remote's root today. The accessor is how
-    /// the resolver's own tests prove the path was split off correctly, and it
-    /// is what a command will read the day one keeps its `Resolved`.
-    #[cfg(test)]
+    /// That last sentence is why this is no longer test-only.
+    /// [`build_backend`](super::registry::build_backend) and
+    /// `crate::session::open` still discard it — all either keeps is a backend,
+    /// which is the gap `commands::transfer::engine` documents — but
+    /// [`super::place`] keeps its `Resolved` precisely so a write lands under the
+    /// prefix the user named rather than at the remote's root.
     #[must_use]
     pub fn path(&self) -> &str {
         &self.path
@@ -370,13 +371,20 @@ fn bucket(name: &str, container: &str) -> Result<String> {
 }
 
 /// A setting a provider cannot work without.
+///
+/// The hint names `config update`, which is the verb that exists. It said
+/// `config set` until the check in [`crate::cli`] read it back against the
+/// parser: nothing has ever answered to `set`, so the one instruction given to
+/// somebody whose remote will not resolve was itself unrunnable.
 fn required<'a>(name: &str, entry: &'a RemoteEntry, key: &str) -> Result<&'a str> {
     entry.setting(key).ok_or_else(|| {
         CliError::fatal(format!(
             "remote '{name}' ({}) has no '{key}' setting",
             entry.provider
         ))
-        .with_hint(format!("Set it with `dctl config set {name} {key}=VALUE`."))
+        .with_hint(format!(
+            "Set it with `dctl config update {name} {key}=VALUE`."
+        ))
     })
 }
 

@@ -31,14 +31,11 @@
 //! purpose-named setters and no free-form "extra" field: the defence is that
 //! there is nowhere for an unclassified string to go.
 //!
-//! ## Why nothing outside the tests calls this yet
+//! ## Who calls this
 //!
-//! It is called by [`super::record::Entry`], which is itself called only by the
-//! tests until the writer is wired into the transfer and removal families. See
-//! the note at the top of [`super::write`] — the same reasoning applies, and the
-//! `dead_code` allow comes off with the same commit that wires it up.
-
-#![allow(dead_code)]
+//! [`super::record::Entry`], and only it. Every field of every record goes
+//! through here on the way in, because a mandatory scrub that has to be
+//! remembered at each call site is an optional one.
 
 use crate::constants::{
     AUDIT_CONTROL_ESCAPE_PREFIX, AUDIT_CONTROL_ESCAPE_WIDTH, URL_SCHEME_SEPARATOR,

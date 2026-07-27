@@ -25,6 +25,14 @@
 //! which of them are in scope, and [`stream`] joins the two so a renderer sees
 //! one `Entry` at a time and never a `Vec` of all of them.
 //!
+//! [`filter`] is an *adapter* and not an engine: the rules live in
+//! [`crate::filter`], which is the binary's one implementation of the filtering
+//! flags and is also what the transfer and recovery families consult. That is
+//! not tidiness. A file this family shows and the `copy` that follows omits is a
+//! data-loss-shaped bug — the listing is what a person reads before deciding
+//! what is safe to delete from the source — so the agreement is pinned by a test
+//! in [`agreement`] rather than left to review.
+//!
 //! ## Why paging, when the index hands back a `Vec` today
 //!
 //! `PLAN.md` §16.2 forbids ever holding the full file list in RAM, and
@@ -56,11 +64,11 @@
 //! records in arbitrary order would not fail loudly — it would silently produce
 //! a wrong tree — so the requirement is stated on the trait and tested there.
 
+pub mod agreement;
 pub mod dirs;
 pub mod emit;
 pub mod entry;
 pub mod filter;
-pub mod glob;
 pub mod json;
 pub mod render;
 pub mod source;

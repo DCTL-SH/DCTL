@@ -5,135 +5,78 @@
 //! each command interpreting `--exclude` for itself — produces a tool where
 //! `dctl size` and `dctl ls` report different vaults and neither is wrong.
 //!
-//! ## Anchoring
+//! ## This is an adapter, not an engine
 //!
-//! rclone's rule, because rclone's patterns are the ones users bring:
+//! The rules themselves live in [`crate::filter`], which is the binary's single
+//! implementation of `--include`, `--exclude`, `--filter-from`, `--files-from`,
+//! `--min-size`, `--max-size` and `--max-depth`. The transfer family and the
+//! recovery family already consult it; this file is how the listing family does,
+//! and it is deliberately thin — a type conversion and four forwarding methods.
 //!
-//! * A pattern beginning with `/` is **anchored** at the listing root and is
-//!   matched against the whole root-relative path. `/tmp/*` matches `tmp/a` but
-//!   never `photos/tmp/a`.
-//! * A pattern containing no `/` at all is matched against the **file name**, at
-//!   any depth. `*.jpg` means what everyone assumes it means.
-//! * Anything else is matched against the root-relative path **and against every
-//!   suffix of it that starts on a component boundary**, so `tmp/*` finds
-//!   `photos/tmp/a` as well as `tmp/a`.
+//! It exists at all because the two layers speak about different things. The
+//! engine decides about a [`Candidate`](crate::filter::Candidate): a
+//! root-relative logical path, a size, and whether it is a directory. A listing
+//! holds an [`Entry`], which knows its *absolute* path as well, carries a
+//! content hash and a modification time for rendering, and remembers where the
+//! listing root ended inside it. Converting once, here, is what stops six
+//! renderers from each deciding for themselves which of an entry's two path
+//! spellings a pattern is matched against — and matching an absolute path where
+//! the transfer family matched a relative one is precisely how `ls` and the
+//! `copy` that follows come to disagree.
 //!
-//! ## Precedence
+//! ## Why that agreement is the point
 //!
-//! `--exclude` wins. An entry that matches any exclusion is gone regardless of
-//! what it also matches, and `--include` then narrows whatever survived. This is
-//! the conservative reading: the two flags can be combined into a contradiction,
-//! and of the two possible answers, "show less than asked" is recoverable by
-//! re-running while "show a file the user told us to hide" is not.
+//! A file that `dctl ls --exclude X` hides and `dctl copy --exclude X` then
+//! transfers is a reporting bug. A file that `ls` *shows* and the copy omits is
+//! worse: the listing is what a person reads before deciding what is safe to
+//! delete from the source. And during a `sync`, a rule that means two things on
+//! the two sides shows a file on one, hides it on the other, and deletes it for
+//! being an extra. So there is one engine and the semantics are its, including
+//! the parts that surprise people — most of all that using `--include` at all
+//! appends an implicit `--exclude '**'`, so `--include '*.jpg' --exclude '*.png'`
+//! means "the JPEGs only" and not "everything but the PNGs". That is rclone's
+//! behaviour and [`crate::filter`] explains at length why DCTL matches it rather
+//! than inventing a kinder rule.
 //!
-//! ## Refusals
+//! [`super::agreement`] holds the test that pins this: the same flags over the
+//! same tree, through the listing family and through the transfer family, must
+//! select the same files.
 //!
-//! `--filter-from` and `--files-from` parse but are not honoured, so they are a
-//! hard error rather than a shrug. A silently-dropped rule file makes a listing
-//! *look* complete, and listings are what people read before deciding what to
-//! delete.
+//! ## `--files-from` narrows a listing without disabling its walk
+//!
+//! [`FilterSet::disables_traversal`] tells a *transfer* to look each named path
+//! up directly instead of walking. A listing cannot do that and does not need
+//! to: it is already reading a flat, ordered enumeration from an index or a
+//! provider, so there is no directory recursion for a path list to prune. The
+//! set of entries shown is identical either way — which is the property that
+//! matters — and the cost of the walk is the cost of the listing that was asked
+//! for regardless.
 
 use crate::cli::globals::GlobalArgs;
-use crate::constants::{MAX_DEPTH_UNLIMITED, PATH_SEPARATOR, RULE_FILE_FEATURE, RULE_FILE_HINT};
-use crate::error::{CliError, Result};
-use crate::output::size::parse_size;
+use crate::error::Result;
+use crate::filter::{Candidate, FilterSet};
 
 use super::entry::Entry;
-use super::glob::Glob;
-
-/// Where a pattern is allowed to match.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Anchor {
-    /// Against the whole root-relative path only.
-    Root,
-    /// Against the final path component, at any depth.
-    Name,
-    /// Against the root-relative path or any component-aligned suffix of it.
-    Suffix,
-}
-
-/// One `--include` or `--exclude` rule.
-#[derive(Clone, Debug)]
-struct Rule {
-    glob: Glob,
-    anchor: Anchor,
-}
-
-impl Rule {
-    /// Compile a rule, deciding its anchoring from its shape.
-    fn compile(pattern: &str, flag: &str) -> Result<Self> {
-        let (anchor, body) = match pattern.strip_prefix(PATH_SEPARATOR) {
-            Some(rest) => (Anchor::Root, rest),
-            None if pattern.contains(PATH_SEPARATOR) => (Anchor::Suffix, pattern),
-            None => (Anchor::Name, pattern),
-        };
-
-        let glob = Glob::compile(body).map_err(|reason| {
-            CliError::usage(format!("{flag}: {reason}")).with_hint(
-                "Patterns use '*' within a path component, '**' across them, \
-                 '?' for one character and '[a-z]' for a class.",
-            )
-        })?;
-
-        Ok(Self { glob, anchor })
-    }
-
-    /// Whether this rule selects `entry`.
-    fn matches(&self, entry: &Entry) -> bool {
-        match self.anchor {
-            Anchor::Root => self.glob.matches(entry.relative()),
-            Anchor::Name => self.glob.matches(entry.name()),
-            Anchor::Suffix => {
-                component_suffixes(entry.relative()).any(|suffix| self.glob.matches(suffix))
-            }
-        }
-    }
-}
-
-/// Every suffix of `path` that begins on a component boundary, longest first.
-///
-/// `a/b/c` yields `a/b/c`, `b/c`, `c`. Longest first because the common case is
-/// a rule that matches the whole path, and a matcher that finds it on the first
-/// try does no allocation and no backtracking.
-fn component_suffixes(path: &str) -> impl Iterator<Item = &str> {
-    std::iter::once(path).chain(
-        path.match_indices(PATH_SEPARATOR)
-            .filter_map(move |(index, _)| path.get(index + PATH_SEPARATOR.len_utf8()..)),
-    )
-}
 
 /// The scope of one listing.
 #[derive(Clone, Debug, Default)]
 pub struct Filter {
-    include: Vec<Rule>,
-    exclude: Vec<Rule>,
-    min_size: Option<u64>,
-    max_size: Option<u64>,
-    max_depth: Option<usize>,
+    set: FilterSet,
 }
 
 impl Filter {
     /// Build the filter from the global flags.
     ///
     /// # Errors
-    /// [`ExitCode::Usage`](crate::exit::ExitCode::Usage) for a malformed pattern
-    /// or size, and [`ExitCode::FatalError`](crate::exit::ExitCode::FatalError)
-    /// for a rule file, which is refused rather than ignored — see the module
-    /// docs.
+    /// [`ExitCode::Usage`](crate::exit::ExitCode::Usage) for a malformed
+    /// pattern, size or depth, or for a `--filter-from`/`--files-from` file that
+    /// cannot be read or understood. Every one of those names the flag and, for
+    /// a file, the line — a rule that was quietly dropped would make a listing
+    /// *look* complete, and listings are what people read before deciding what
+    /// to delete.
     pub fn from_globals(globals: &GlobalArgs) -> Result<Self> {
-        if !globals.filter_from.is_empty() || !globals.files_from.is_empty() {
-            return Err(CliError::unimplemented(RULE_FILE_FEATURE).with_hint(RULE_FILE_HINT));
-        }
-
-        let include = compile_all(&globals.include, "--include")?;
-        let exclude = compile_all(&globals.exclude, "--exclude")?;
-
         Ok(Self {
-            include,
-            exclude,
-            min_size: parse_limit(globals.min_size.as_deref(), "--min-size")?,
-            max_size: parse_limit(globals.max_size.as_deref(), "--max-size")?,
-            max_depth: depth_from_flag(globals.max_depth),
+            set: FilterSet::from_globals(globals)?,
         })
     }
 
@@ -145,76 +88,73 @@ impl Filter {
     /// this, `dctl lsd --max-depth 1` would report a top-level directory as
     /// empty because every object in it sits at depth 2.
     #[must_use]
-    pub fn with_depth_limit(mut self, depth: Option<usize>) -> Self {
-        self.max_depth = depth;
-        self
+    pub fn with_depth_limit(self, depth: Option<usize>) -> Self {
+        Self {
+            set: self.set.with_depth_limit(depth),
+        }
     }
 
     /// Whether `entry` is in scope.
+    ///
+    /// [`FilterSet::admits_enumerated`] rather than
+    /// [`FilterSet::admits`](crate::filter::FilterSet::admits), because a
+    /// listing has no walk to prune: it reads a flat, already complete set of
+    /// paths out of an index or a provider, so the ancestor directories a
+    /// walking caller would simply never have opened have to be asked about
+    /// explicitly. `--exclude 'cache/'` hides everything under `cache` either
+    /// way, which is the point.
     #[must_use]
     pub fn matches(&self, entry: &Entry) -> bool {
-        if self.max_depth.is_some_and(|limit| entry.depth() > limit) {
-            return false;
-        }
-
-        // Size limits apply to objects. A directory's size is an aggregate, and
-        // excluding a directory because its total exceeds `--max-size` would
-        // hide every small file inside it.
-        if !entry.is_dir() {
-            if self.min_size.is_some_and(|min| entry.size() < min) {
-                return false;
-            }
-            if self.max_size.is_some_and(|max| entry.size() > max) {
-                return false;
-            }
-        }
-
-        if self.exclude.iter().any(|rule| rule.matches(entry)) {
-            return false;
-        }
-
-        self.include.is_empty() || self.include.iter().any(|rule| rule.matches(entry))
+        self.set.admits_enumerated(&candidate(entry))
     }
 
-    /// Whether any pattern, size or depth restriction is in force.
+    /// Why `entry` was admitted or refused, in one line.
+    ///
+    /// `cfg(test)` deliberately, in the same spirit as
+    /// [`Target::is_remote`](super::Target): the engine can name the rule that
+    /// decided a file's fate, and no listing verb prints it yet. Exposing it to
+    /// production before something renders it would be a second, unreviewed
+    /// wording of a decision the engine already words. What it is doing here is
+    /// pinning that the adapter hands the engine an entry the engine can
+    /// *explain* — which is the same conversion `matches` relies on, checked
+    /// from the other side.
+    #[cfg(test)]
+    #[must_use]
+    pub fn explain(&self, entry: &Entry) -> String {
+        self.set.decide(&candidate(entry)).describe()
+    }
+
+    /// Whether any pattern, path list, size or depth restriction is in force.
     ///
     /// Used by the commands to word an empty result: "nothing here" and
     /// "nothing survived your filters" are different answers, and reporting the
     /// first when the second is true sends the user looking for missing data.
     #[must_use]
     pub fn is_restricting(&self) -> bool {
-        !self.include.is_empty()
-            || !self.exclude.is_empty()
-            || self.min_size.is_some()
-            || self.max_size.is_some()
-            || self.max_depth.is_some()
+        self.set.is_restricting()
     }
 }
 
-/// Compile every pattern given to one flag.
-fn compile_all(patterns: &[String], flag: &str) -> Result<Vec<Rule>> {
-    patterns
-        .iter()
-        .map(|pattern| Rule::compile(pattern, flag))
-        .collect()
-}
-
-/// Parse one size limit, naming the flag in any failure.
-fn parse_limit(value: Option<&str>, flag: &str) -> Result<Option<u64>> {
-    match value {
-        None => Ok(None),
-        Some(text) => {
-            parse_size(text).map_err(|reason| CliError::usage(format!("{flag}: {reason}")))
-        }
-    }
-}
-
-/// Turn the `--max-depth` sentinel into an optional limit.
-fn depth_from_flag(value: i32) -> Option<usize> {
-    if value <= MAX_DEPTH_UNLIMITED {
-        None
-    } else {
-        usize::try_from(value).ok()
+/// The engine's view of one listing entry.
+///
+/// The **root-relative** path, always: `--max-depth 1` under
+/// `dctl ls vault:photos` means one level below `photos`, and a pattern the user
+/// wrote for the tree they are looking at must not have to know how deep inside
+/// the vault that tree happens to sit. It is also the spelling the transfer
+/// family offers the same engine, which is what makes the two agree.
+///
+/// A directory carries no size. Its size is the aggregate of everything beneath
+/// it, and letting that number reach `--max-size` would hide every small file in
+/// a large tree.
+fn candidate(entry: &Entry) -> Candidate<'_> {
+    match (entry.is_dir(), entry.size()) {
+        (true, _) => Candidate::directory(entry.relative()),
+        (false, Some(size)) => Candidate::file(entry.relative(), size),
+        // A row from a rebuilt vault index. The engine is told the size is
+        // unknown rather than handed a zero, because a zero would answer
+        // `--min-size`/`--max-size` confidently and wrongly; see
+        // [`Candidate::unmeasured_file`].
+        (false, None) => Candidate::unmeasured_file(entry.relative()),
     }
 }
 
@@ -228,9 +168,28 @@ mod tests {
         Filter::from_globals(&ctx(args).globals).expect("flags should compile")
     }
 
+    fn refuses(args: &[&str]) -> crate::error::CliError {
+        Filter::from_globals(&ctx(args).globals).expect_err("flags should be refused")
+    }
+
     fn shows(filter: &Filter, path: &str) -> bool {
         filter.matches(&entry("", path, 1024))
     }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let dir =
+            std::env::temp_dir().join(format!("dctl-listing-filter-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temporary directory");
+        dir
+    }
+
+    fn write(dir: &std::path::Path, name: &str, contents: &str) -> String {
+        let path = dir.join(name);
+        std::fs::write(&path, contents).expect("write the filter file");
+        path.to_string_lossy().into_owned()
+    }
+
+    // ── The default ──────────────────────────────────────────────────────
 
     #[test]
     fn an_empty_filter_shows_everything() {
@@ -238,7 +197,10 @@ mod tests {
         assert!(!filter.is_restricting());
         assert!(shows(&filter, "a/b/c.txt"));
         assert!(shows(&filter, "x.jpg"));
+        assert!(Filter::default().matches(&entry("", "anything", u64::MAX)));
     }
+
+    // ── Anchoring, which is the engine's and must not be re-derived here ──
 
     #[test]
     fn a_bare_pattern_matches_the_name_at_any_depth() {
@@ -264,21 +226,30 @@ mod tests {
         assert!(shows(&filter, "photos/a"));
         // `*` does not cross a separator, so a deeper file survives the rule.
         assert!(shows(&filter, "tmp/a/b"));
-    }
-
-    #[test]
-    fn a_component_suffix_never_starts_mid_component() {
-        // The bug a naive `contains` would have: `photos-tmp/a` is not under a
+        // And a suffix never starts mid-component: `photos-tmp/a` is not under a
         // directory called `tmp`.
-        let filter = filter(&["--exclude", "tmp/*"]);
         assert!(shows(&filter, "photos-tmp/a"));
     }
 
+    // ── The asymmetry a listing must share with a transfer ────────────────
+
     #[test]
-    fn exclusion_beats_inclusion() {
-        let filter = filter(&["--include", "*.jpg", "--exclude", "private/**"]);
-        assert!(shows(&filter, "holiday/a.jpg"));
-        assert!(!shows(&filter, "private/a.jpg"));
+    fn an_include_drops_what_it_does_not_name() {
+        // rclone's rule, and the engine's: using `--include` at all appends an
+        // implicit `- **`. A listing that kept the unmentioned files while the
+        // `copy` that follows dropped them would be the disagreement this whole
+        // arrangement exists to prevent.
+        let filter = filter(&["--include", "*.jpg", "--exclude", "*.png"]);
+        assert!(shows(&filter, "a.jpg"));
+        assert!(!shows(&filter, "a.png"));
+        assert!(!shows(&filter, "a.txt"), "the unmentioned file goes too");
+    }
+
+    #[test]
+    fn an_exclude_alone_keeps_everything_else() {
+        let filter = filter(&["--exclude", "*.tmp"]);
+        assert!(!shows(&filter, "a.tmp"));
+        assert!(shows(&filter, "deep/tree/b.bin"));
     }
 
     #[test]
@@ -288,6 +259,18 @@ mod tests {
         assert!(shows(&filter, "a.raw"));
         assert!(!shows(&filter, "a.txt"));
     }
+
+    #[test]
+    fn exclusions_are_applied_before_the_reconstructed_inclusions() {
+        // `clap` discards the command-line interleaving; of the two ways the
+        // reconstruction can be wrong, showing a file the operator excluded is
+        // the one that cannot be taken back.
+        let filter = filter(&["--include", "**", "--exclude", "private/**"]);
+        assert!(shows(&filter, "holiday/a.jpg"));
+        assert!(!shows(&filter, "private/a.jpg"));
+    }
+
+    // ── Size and depth ───────────────────────────────────────────────────
 
     #[test]
     fn size_limits_bound_both_ends() {
@@ -303,7 +286,7 @@ mod tests {
         // A directory's size is the total beneath it; excluding it would hide
         // every small file inside a large tree.
         let filter = filter(&["--max-size", "1K"]);
-        let dir = Entry::directory("big".into(), "", 1 << 30);
+        let dir = Entry::directory("big".into(), "", Some(1 << 30));
         assert!(filter.matches(&dir));
     }
 
@@ -315,11 +298,22 @@ mod tests {
     }
 
     #[test]
-    fn the_unlimited_sentinel_means_no_limit() {
-        assert!(shows(&filter(&[]), "a/b/c/d/e.txt"));
-        assert_eq!(depth_from_flag(MAX_DEPTH_UNLIMITED), None);
-        assert_eq!(depth_from_flag(-7), None);
-        assert_eq!(depth_from_flag(3), Some(3));
+    fn depth_is_measured_below_the_listing_root_and_not_inside_the_vault() {
+        // `dctl ls vault:photos --max-depth 1` means one level below `photos`.
+        // Matching the absolute path here would make the same flag mean
+        // something different depending on how deep the tree happens to sit.
+        let filter = filter(&["--max-depth", "1"]);
+        assert!(filter.matches(&entry("photos", "photos/a.jpg", 1)));
+        assert!(!filter.matches(&entry("photos", "photos/2024/a.jpg", 1)));
+    }
+
+    #[test]
+    fn patterns_are_matched_against_the_root_relative_path() {
+        // The other half of the same rule, and the one that keeps a listing and
+        // a transfer in step: both offer the engine the relative spelling.
+        let filter = filter(&["--include", "/2024/*"]);
+        assert!(filter.matches(&entry("photos", "photos/2024/a.jpg", 1)));
+        assert!(!filter.matches(&entry("photos", "photos/2025/a.jpg", 1)));
     }
 
     #[test]
@@ -335,31 +329,82 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn a_rule_file_is_refused_rather_than_ignored() {
-        // The failure mode this prevents: a listing that looks complete while
-        // silently ignoring the rules that were meant to shape it.
-        let error =
-            Filter::from_globals(&ctx(&["--filter-from", "rules.txt"]).globals).unwrap_err();
-        assert_ne!(error.code(), ExitCode::Success);
-        assert!(error.hint().is_some());
+    // ── Rule files and path lists: honoured, not refused ──────────────────
 
-        let error = Filter::from_globals(&ctx(&["--files-from", "list.txt"]).globals).unwrap_err();
-        assert_ne!(error.code(), ExitCode::Success);
+    #[test]
+    fn a_rule_file_shapes_a_listing_in_file_order() {
+        // Previously refused outright. A listing that ignored `--filter-from`
+        // would look complete while hiding nothing it was told to hide.
+        let dir = scratch("rules");
+        let path = write(
+            &dir,
+            "rules.txt",
+            "# keep the sources, drop the build output\n\
+             - /work/**/target/**\n\
+             + /work/**\n\
+             - **\n",
+        );
+        let filter = filter(&["--filter-from", &path]);
+
+        assert!(shows(&filter, "work/src/main.rs"));
+        assert!(!shows(&filter, "work/src/target/debug/x"));
+        assert!(!shows(&filter, "notes.txt"));
+        assert!(filter.is_restricting());
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
+    fn a_files_from_list_narrows_a_listing_to_exactly_those_paths() {
+        let dir = scratch("list");
+        let path = write(&dir, "list.txt", "photos/2024/a.jpg\nnotes/todo.md\n");
+        let filter = filter(&["--files-from", &path]);
+
+        assert!(shows(&filter, "photos/2024/a.jpg"));
+        assert!(shows(&filter, "notes/todo.md"));
+        assert!(!shows(&filter, "photos/2024/b.jpg"));
+        // No globbing: the list is a lookup, not a search.
+        assert!(!shows(&filter, "photos/2024/a.jpg.bak"));
+        // The containing directories stay in scope, so `lsd` and `tree` still
+        // show the containers the listed files live in.
+        assert!(filter.matches(&Entry::directory("photos/2024".into(), "", Some(1))));
+        assert!(!filter.matches(&Entry::directory("music".into(), "", Some(1))));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_missing_rule_file_is_refused_rather_than_ignored() {
+        // The failure mode the refusal exists for, kept now that the feature is
+        // real: silently continuing would leave a listing believing a filter is
+        // in force that is not.
+        let error = refuses(&["--filter-from", "no/such/rules.txt"]);
+        assert_eq!(error.code(), ExitCode::Usage);
+        assert!(error.message().contains("rules.txt"));
+    }
+
+    // ── Malformed input ──────────────────────────────────────────────────
+
+    #[test]
     fn a_malformed_pattern_names_its_flag() {
-        let error = Filter::from_globals(&ctx(&["--include", "[abc"]).globals).unwrap_err();
+        let error = refuses(&["--include", "[abc"]);
         assert_eq!(error.code(), ExitCode::Usage);
         assert!(error.message().contains("--include"));
+        assert!(error.hint().is_some());
     }
 
     #[test]
     fn a_malformed_size_names_its_flag() {
-        let error = Filter::from_globals(&ctx(&["--max-size", "banana"]).globals).unwrap_err();
+        let error = refuses(&["--max-size", "banana"]);
         assert_eq!(error.code(), ExitCode::Usage);
         assert!(error.message().contains("--max-size"));
+    }
+
+    #[test]
+    fn a_negative_depth_that_is_not_the_sentinel_is_refused() {
+        // -1 means unlimited; anything else negative is an arithmetic slip in a
+        // wrapper script, and both ways of clamping it are answers nobody asked
+        // for.
+        let error = refuses(&["--max-depth=-7"]);
+        assert_eq!(error.code(), ExitCode::Usage);
     }
 
     #[test]
@@ -369,12 +414,7 @@ mod tests {
         assert!(!filter.is_restricting());
     }
 
-    #[test]
-    fn component_suffixes_are_component_aligned_and_longest_first() {
-        let suffixes: Vec<&str> = component_suffixes("a/b/c").collect();
-        assert_eq!(suffixes, vec!["a/b/c", "b/c", "c"]);
-        assert_eq!(component_suffixes("solo").collect::<Vec<_>>(), vec!["solo"]);
-    }
+    // ── Reporting ────────────────────────────────────────────────────────
 
     #[test]
     fn restriction_is_reported_whenever_any_dial_is_turned() {
@@ -382,5 +422,14 @@ mod tests {
         assert!(filter(&["--exclude", "*.tmp"]).is_restricting());
         assert!(filter(&["--min-size", "1K"]).is_restricting());
         assert!(filter(&["--max-depth", "2"]).is_restricting());
+    }
+
+    #[test]
+    fn a_refused_entry_can_name_the_rule_that_refused_it() {
+        let filter = filter(&["--exclude", "*.tmp"]);
+        let text = filter.explain(&entry("", "a.tmp", 1));
+        assert!(text.contains("excluded"), "got: {text}");
+        assert!(text.contains("*.tmp"), "got: {text}");
+        assert!(filter.explain(&entry("", "a.txt", 1)).contains("included"));
     }
 }

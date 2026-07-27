@@ -19,13 +19,10 @@
 //! | `missing`    | indexed, but absent at the provider           | rebuild/reconcile     |
 //! | `unreadable` | the provider never answered                   | retry                 |
 
-// Two items below have no caller yet. `scrub` reaches a real engine now and
-// uses `Verdict`, `is_failure`, `worse`, `slug` and `failure`; `is_corruption`
-// and `object_failure` are the single-object forms, for `verify` and `hashsum`,
-// which are still unwired. They are kept with their tests because the wording
-// `object_failure` produces is the product's promise — that bytes which failed
-// authentication were not handed over — and a sentence that first appears on the
-// day it is needed is a sentence nobody reviewed.
+// One item below has no caller outside this module's tests: `is_corruption`, the
+// narrow "was this real damage" question a future repair path needs. It is kept
+// with the test that pins it because the distinction it draws — an outage is not
+// bit rot — is the one this whole file exists to preserve.
 #![allow(dead_code)]
 
 use crate::constants::{
@@ -175,6 +172,32 @@ pub fn object_failure(path: &str, verdict: Verdict) -> CliError {
     CliError::new(verdict.exit_code(), message).with_hint(hint_for(verdict))
 }
 
+/// Which finding a failed read-back represents.
+///
+/// Three outcomes rather than one, because the operator's next action differs
+/// for each and a report that collapsed them would send them to the wrong place:
+/// corruption means restore from another copy, a missing object means the index
+/// and the provider disagree, and an unreadable one may need nothing but a
+/// retry.
+///
+/// It lives here rather than in any one command because `verify`, `scrub` and
+/// `hashsum` all ask the same question of the same errors, and three copies of
+/// this `match` would drift one commit at a time — with the first divergence
+/// being some command reporting an outage as corruption and sending an operator
+/// hunting for damage that is not there.
+#[must_use]
+pub fn classify(error: &CliError) -> Verdict {
+    match error.code() {
+        // The bytes came back and were not the bytes that were stored. This is
+        // the only verdict that means data is gone rather than out of reach.
+        ExitCode::IntegrityFailure | ExitCode::ChecksumMismatch => Verdict::Corrupt,
+        ExitCode::FileNotFound => Verdict::Missing,
+        // Everything else — an outage, a permission change, a network path that
+        // stayed broken past the retry budget — is an availability problem.
+        _ => Verdict::Unreadable,
+    }
+}
+
 /// The remediation hint that fits a verdict.
 fn hint_for(verdict: Verdict) -> &'static str {
     match verdict {
@@ -276,6 +299,31 @@ mod tests {
         assert_eq!(error.code(), ExitCode::IntegrityFailure);
         assert!(error.message().contains("photos/a.jpg"));
         assert!(error.message().contains(INTEGRITY_NOT_SERVED_NOTICE));
+    }
+
+    #[test]
+    fn a_failed_read_is_classified_by_what_it_means_for_the_data() {
+        assert_eq!(
+            classify(&CliError::new(ExitCode::IntegrityFailure, "x")),
+            Verdict::Corrupt
+        );
+        assert_eq!(
+            classify(&CliError::new(ExitCode::ChecksumMismatch, "x")),
+            Verdict::Corrupt
+        );
+        assert_eq!(
+            classify(&CliError::new(ExitCode::FileNotFound, "x")),
+            Verdict::Missing
+        );
+        // An outage is availability, not damage.
+        assert_eq!(
+            classify(&CliError::new(ExitCode::TemporaryError, "x")),
+            Verdict::Unreadable
+        );
+        assert_eq!(
+            classify(&CliError::new(ExitCode::Uncategorised, "x")),
+            Verdict::Unreadable
+        );
     }
 
     #[test]

@@ -104,9 +104,8 @@ impl AuditRecord {
 /// adding a field later cannot silently leave existing call sites constructing
 /// a record with a stale idea of what belongs in one.
 ///
-/// See the note on [`crate::audit::write`] for why nothing outside the tests
-/// constructs one of these yet.
-#[allow(dead_code)]
+/// Constructed by every command that changes stored data, through
+/// [`crate::audit::sink::Sink::record`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Entry {
     time: String,
@@ -119,7 +118,6 @@ pub struct Entry {
     remote: String,
 }
 
-#[allow(dead_code)]
 impl Entry {
     /// An entry for `op` that ended in `outcome`, stamped with the current time.
     ///

@@ -1,13 +1,14 @@
 //! `dctl backup LOCAL REMOTE:` — store a local tree in a vault.
 //!
-//! `backup` is `copy` with two additions that only make sense for an archive:
-//! it can mark the run as a **snapshot**, and it runs the name pre-flight over
-//! everything it is about to store (`PLAN.md` §13.6). The second is the point.
-//! A filename that is legal on this machine and illegal on the machine that will
-//! one day restore it — `report:final.pdf`, `aux.txt`, `data.` — is a defect
-//! introduced at *backup* time and discovered years later, at the worst possible
-//! moment. Reporting it while the operator is still here to rename the file is
-//! most of the value.
+//! `backup` is `copy` with two additions that only make sense for an archive: it
+//! runs the name pre-flight over everything it is about to store (`PLAN.md`
+//! §13.6), and it stores by **streaming** rather than by buffering.
+//!
+//! The pre-flight is the first. A filename that is legal on this machine and
+//! illegal on the machine that will one day restore it — `report:final.pdf`,
+//! `aux.txt`, `data.` — is a defect introduced at *backup* time and discovered
+//! years later, at the worst possible moment. Reporting it while the operator is
+//! still here to rename the file is most of the value.
 //!
 //! Those findings are warnings, not refusals, unless `--strict-names` is given.
 //! The bytes are perfectly storable; refusing to back up a legal local file
@@ -16,45 +17,49 @@
 //! which no filesystem anywhere accepts and which therefore guarantees an object
 //! nobody can ever restore.
 //!
-//! ## What runs today
+//! The second is [`store`], and it is why `backup` exists as its own verb rather
+//! than as a flag on `copy`: it uses the core's constant-memory streaming store,
+//! so the largest file on the disk is storable rather than refused.
 //!
-//! Everything up to the first byte: argument and snapshot validation, the tree
-//! walk, the filters DCTL can evaluate exactly, the pre-flight, and the full
-//! plan in all three output formats. What does not exist is the verified-write
-//! engine (`PLAN.md` §6), so a real run stops at
-//! [`crate::constants::TRANSFER_ENGINE_FEATURE`] — an error with a real exit
-//! code, never a success message for work that did not happen.
+//! ## What is refused, and why it is refused rather than approximated
 //!
-//! The engine check comes **before** the walk on a real run, deliberately.
-//! Scanning four million files to then report that the transfer cannot happen
-//! wastes an hour to tell the operator something a millisecond of argument
-//! checking already knew; `--dry-run` is the flag that asks for the scan, and
-//! the error's hint says so.
+//! `--snapshot` names a point in time that this build cannot restore, so a real
+//! run refuses it ([`crate::constants::SNAPSHOT_FEATURE`]). Storing the files and
+//! dropping the name would leave an operator believing a named point in time
+//! exists — and they would find out it does not on the day they reached for it.
+//! A dry run still plans it, because planning is not claiming.
+//!
+//! ## Order of operations
+//!
+//! Cheap total validation, then the walk, then the pre-flight, then the report,
+//! then — on a real run — the vault is unlocked and the bytes move. The
+//! unlocking comes *after* the report so `--dry-run` never asks for a password,
+//! and the validation comes before the walk so a typo costs a millisecond rather
+//! than an hour of scanning four million files.
 
 pub mod scan;
+pub mod store;
 
 use std::path::PathBuf;
 
 use clap::Args;
 
-use crate::constants::{
-    PATH_SEPARATOR, PLAN_ACTION_STORE, TRANSFER_ENGINE_FEATURE, TRANSFER_ENGINE_HINT,
-};
+use crate::constants::PLAN_ACTION_STORE;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
 use crate::output::size;
 
 use super::recovery::report::{self, Document};
-use super::recovery::{Audience, Entry, Plan, Selection, SnapshotName, Target, command_name};
+use super::recovery::{Audience, Entry, Plan, Selection, SnapshotName, Target};
 use super::recovery::{preflight, timespec};
 
 /// The verb this module implements.
 ///
 /// Named once because it appears in the `operation` field of the plan document
-/// *and* in the message that tells the user which command is not implemented; a
-/// rename that updated one and not the other would produce a document
-/// describing a command the error does not name.
+/// *and* in the messages that name the command; a rename that updated one and
+/// not the other would produce a document describing a command the error does
+/// not name.
 const VERB: &str = "backup";
 
 /// Arguments for `dctl backup`.
@@ -103,15 +108,10 @@ pub async fn run(ctx: &Ctx, args: &BackupArgs) -> Result<()> {
         .with_hint("The first operand is the local tree to back up."));
     }
 
-    // Nothing below this line can move a byte, so say so before spending an
-    // hour proving it.
-    if !ctx.is_dry_run() {
-        return Err(
-            CliError::unimplemented(command_name(VERB)).with_hint(format!(
-                "{TRANSFER_ENGINE_HINT} ({TRANSFER_ENGINE_FEATURE})"
-            )),
-        );
-    }
+    // Nothing below this line can honour a snapshot, so say so before spending
+    // an hour proving it — and before a single byte is stored under a name that
+    // would suggest it can be restored as one.
+    store::refuse_unsupported_snapshot(ctx, args.snapshot)?;
 
     let scan = scan::walk(&args.source, &selection, args.follow_symlinks);
     for problem in &scan.problems {
@@ -144,14 +144,22 @@ pub async fn run(ctx: &Ctx, args: &BackupArgs) -> Result<()> {
     if plan.is_empty() {
         // Said out loud, because "no output and exit 0" is indistinguishable
         // from "it worked", and a backup that stored nothing is worth noticing.
-        ctx.out.warn(format!(
-            "nothing to back up under {}",
-            args.source.display()
-        ));
+        // The wording separates the two reasons: an empty tree and a tree the
+        // filters emptied are different problems with different fixes.
+        ctx.out.warn(if selection.is_restricting() {
+            format!(
+                "nothing to back up under {}: every file was excluded by the filters",
+                args.source.display()
+            )
+        } else {
+            format!("nothing to back up under {}", args.source.display())
+        });
     }
 
     ctx.stats.set_total_files(plan.len() as u64);
     ctx.stats.set_total_bytes(plan.total_bytes());
+    ctx.progress
+        .set_totals(plan.total_bytes(), plan.len() as u64);
 
     report::emit(
         ctx,
@@ -161,7 +169,7 @@ pub async fn run(ctx: &Ctx, args: &BackupArgs) -> Result<()> {
             destination: &args.destination,
             snapshot: snapshot.as_ref(),
             at: None,
-            dry_run: true,
+            dry_run: ctx.is_dry_run(),
             files: plan.len(),
             bytes: plan.total_bytes(),
             preflight: &findings.findings,
@@ -169,7 +177,18 @@ pub async fn run(ctx: &Ctx, args: &BackupArgs) -> Result<()> {
         },
     )?;
 
-    summarise(ctx, &scan, &findings, args.strict_names)
+    // The name gate runs before anything is stored, so a `--strict-names` run
+    // that would have refused halfway refuses at the start instead.
+    summarise(ctx, &scan, &findings, args.strict_names)?;
+
+    if ctx.is_dry_run() {
+        return Ok(());
+    }
+
+    // The vault is opened only now: a dry run must never ask for a password,
+    // and a run refused above must never have asked for one either.
+    let store = store::Store::connect(ctx, &target).await?;
+    store::everything(ctx, &store, &scan.files).await
 }
 
 /// Where a scanned file lands in the vault, written the way a user would type
@@ -182,7 +201,7 @@ fn vault_path(target: &Target, logical: &str) -> String {
     if target.is_root() {
         format!("{target}{logical}")
     } else {
-        format!("{target}{PATH_SEPARATOR}{logical}")
+        format!("{target}{}{logical}", crate::constants::PATH_SEPARATOR)
     }
 }
 
@@ -259,8 +278,20 @@ mod tests {
     }
 
     /// A context and the command's own arguments, from one command line.
+    ///
+    /// `--config` is pinned to a path that does not exist, so a unit test never
+    /// reads the developer's own configuration and the suite does not pass or
+    /// fail depending on whose machine it runs on.
     fn setup(args: &[&str]) -> (Ctx, BackupArgs) {
-        let harness = parse(args);
+        let mut argv: Vec<String> = std::iter::once("dctl")
+            .chain(args.iter().copied())
+            .map(String::from)
+            .collect();
+        if !args.contains(&"--config") {
+            argv.push("--config".to_string());
+            argv.push(crate::config::absent_path().to_string_lossy().into_owned());
+        }
+        let harness = Harness::parse_from(argv);
         (Ctx::new(harness.globals.clone()), harness.backup)
     }
 
@@ -320,31 +351,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_missing_source_is_reported_before_the_engine_check() {
-        // A typo in the source must not be reported as "not implemented".
+    async fn a_missing_source_is_reported_before_anything_else() {
+        // A typo in the source must not be reported as a missing feature.
         let (ctx, args) = setup(&["/nonexistent/tree", "vault:", "--dry-run"]);
         let error = run(&ctx, &args).await.unwrap_err();
         assert_eq!(error.code(), ExitCode::DirNotFound);
     }
 
     #[tokio::test]
-    async fn a_real_run_fails_loudly_rather_than_claiming_success() {
-        // PLAN.md §6: never report work that did not happen.
+    async fn a_snapshot_is_refused_on_a_real_run_rather_than_silently_dropped() {
+        // PLAN.md §13.6: an operator who believes a named point in time exists
+        // discovers otherwise on the day they reach for it.
         let dir = tree();
         let source = dir.path().display().to_string();
-        let (ctx, args) = setup(&[source.as_str(), "vault:archive"]);
+        let (ctx, args) = setup(&[source.as_str(), "vault:archive", "--snapshot"]);
 
         let error = run(&ctx, &args).await.unwrap_err();
-        assert_ne!(error.code(), ExitCode::Success);
-        assert!(error.message().contains("backup"));
-        assert!(error.hint().unwrap().contains("--dry-run"));
+        assert_eq!(error.code(), ExitCode::FatalError);
+        assert!(
+            error.message().contains("--snapshot"),
+            "{}",
+            error.message()
+        );
+        assert!(error.hint().is_some_and(|hint| hint.contains("13.5")));
     }
 
     #[tokio::test]
-    async fn a_dry_run_plans_the_whole_tree() {
+    async fn an_unconfigured_remote_is_named_rather_than_read_as_a_directory() {
+        // S6 on the write side: `vault:` has no colon once the name is taken
+        // alone, so a re-parse would turn it into the directory `./vault` and a
+        // backup would store plaintext there and report success.
         let dir = tree();
         let source = dir.path().display().to_string();
-        let (ctx, args) = setup(&[source.as_str(), "vault:archive", "--dry-run"]);
+        let (ctx, args) = setup(&[source.as_str(), "vault:archive", "--no-ask-password"]);
+
+        let error = run(&ctx, &args).await.unwrap_err();
+        assert_eq!(error.code(), ExitCode::FatalError);
+        assert!(error.message().contains("vault"), "{}", error.message());
+        assert!(!dir.path().join("vault").exists(), "nothing was created");
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_plans_the_whole_tree_without_asking_for_a_password() {
+        let dir = tree();
+        let source = dir.path().display().to_string();
+        // `--no-ask-password` is the proof: a dry run that reached the unlock
+        // would fail with VaultLocked instead of succeeding.
+        let (ctx, args) = setup(&[
+            source.as_str(),
+            "vault:archive",
+            "--dry-run",
+            "--no-ask-password",
+        ]);
 
         run(&ctx, &args).await.unwrap();
 
@@ -356,13 +414,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_glob_filter_is_refused_before_the_tree_is_walked() {
+    async fn a_glob_filter_narrows_the_backup_rather_than_stopping_it() {
+        // The engine is wired in: `--exclude` used to refuse the command
+        // outright, which meant a backup could not be narrowed at all.
         let dir = tree();
         let source = dir.path().display().to_string();
-        let (ctx, args) = setup(&[source.as_str(), "vault:", "--dry-run", "--exclude", "*.txt"]);
+        let (ctx, args) = setup(&[
+            source.as_str(),
+            "vault:",
+            "--dry-run",
+            "--no-ask-password",
+            "--exclude",
+            "b.txt",
+        ]);
 
-        let error = run(&ctx, &args).await.unwrap_err();
-        assert!(error.message().contains("glob filtering"));
+        run(&ctx, &args).await.unwrap();
+        assert_eq!(ctx.stats.snapshot().files_total, 1);
     }
 
     #[test]

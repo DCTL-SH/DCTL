@@ -54,7 +54,7 @@ use crate::constants::{
 };
 use crate::ctx::Ctx;
 use crate::error::Result;
-use crate::output::size::{bytes, count};
+use crate::output::size::{bytes_or_unknown, count};
 
 use self::glyphs::Glyphs;
 use self::node::Tree;
@@ -134,7 +134,7 @@ pub async fn run(ctx: &Ctx, args: &TreeArgs) -> Result<()> {
         "{} {TREE_SUMMARY_DIRECTORIES}, {} {TREE_SUMMARY_FILES}, {}",
         count(counts.directories),
         count(counts.files),
-        bytes(tree.total_bytes(), ctx.out.units())
+        bytes_or_unknown(tree.total_bytes(), ctx.out.units())
     ));
 
     if tree.is_empty() {

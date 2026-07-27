@@ -44,8 +44,9 @@ struct Node {
     name: String,
     /// Whether anything can hang below it.
     is_dir: bool,
-    /// Total bytes beneath it; for a file, its own size.
-    size: u64,
+    /// Total bytes beneath it; for a file, its own size. [`None`] once anything
+    /// with no recorded size has landed in it — see [`Tree::total_bytes`].
+    size: Option<u64>,
     /// Child indices, in insertion order.
     children: Vec<usize>,
 }
@@ -84,7 +85,8 @@ impl Tree {
             nodes: vec![Node {
                 name: label.into(),
                 is_dir: true,
-                size: 0,
+                // A known zero: a node with nothing under it yet holds nothing.
+                size: Some(0),
                 children: Vec::new(),
             }],
             level,
@@ -97,7 +99,7 @@ impl Tree {
     /// the deepest node that is kept, and that node is drawn as a directory:
     /// truncating the *picture* must not truncate the arithmetic, or a pruned
     /// branch reports as empty.
-    pub fn insert(&mut self, relative: &str, size: u64) {
+    pub fn insert(&mut self, relative: &str, size: Option<u64>) {
         let components: Vec<&str> = relative
             .split(PATH_SEPARATOR)
             .filter(|part| !part.is_empty())
@@ -116,10 +118,17 @@ impl Tree {
         }
     }
 
-    /// Total bytes beneath the root, including objects pruned by `--level`.
+    /// Total bytes beneath the root, including objects pruned by `--level` — or
+    /// [`None`] when any object in the tree had no recorded size.
+    ///
+    /// Absorbing rather than partial. A vault whose index was rebuilt from
+    /// object headers records no sizes at all, and a footer reading
+    /// `3 files, 0 B` under a drawing of three real files is the same confident
+    /// zero this whole change exists to remove. A sum that quietly omitted the
+    /// unmeasured files would be the same lie with better manners.
     #[must_use]
-    pub fn total_bytes(&self) -> u64 {
-        self.nodes.get(ROOT).map_or(0, |root| root.size)
+    pub fn total_bytes(&self) -> Option<u64> {
+        self.nodes.get(ROOT).and_then(|root| root.size)
     }
 
     /// Whether anything at all was added.
@@ -220,7 +229,7 @@ impl Tree {
         self.nodes.push(Node {
             name: name.to_string(),
             is_dir,
-            size: 0,
+            size: Some(0),
             children: Vec::new(),
         });
         if let Some(node) = self.nodes.get_mut(parent) {
@@ -229,10 +238,13 @@ impl Tree {
         index
     }
 
-    /// Add `size` to a node's running total.
-    fn add_size(&mut self, node: usize, size: u64) {
+    /// Add `size` to a node's running total, or make that total unknown.
+    fn add_size(&mut self, node: usize, size: Option<u64>) {
         if let Some(node) = self.nodes.get_mut(node) {
-            node.size = node.size.saturating_add(size);
+            node.size = node
+                .size
+                .zip(size)
+                .map(|(total, added)| total.saturating_add(added));
         }
     }
 
@@ -286,7 +298,7 @@ mod tests {
     fn draw(paths: &[&str], level: Option<usize>, dirs_only: bool, glyphs: Glyphs) -> Vec<String> {
         let mut tree = Tree::new(".", level);
         for path in paths {
-            tree.insert(path, 1);
+            tree.insert(path, Some(1));
         }
         let mut lines = Vec::new();
         {
@@ -303,7 +315,7 @@ mod tests {
     fn counts(paths: &[&str], dirs_only: bool) -> Counts {
         let mut tree = Tree::new(".", None);
         for path in paths {
-            tree.insert(path, 1);
+            tree.insert(path, Some(1));
         }
         let mut sink = |_: &str| -> Result<()> { Ok(()) };
         tree.render(Glyphs::UNICODE, dirs_only, &mut sink)
@@ -356,8 +368,8 @@ mod tests {
     #[test]
     fn a_level_limit_prunes_the_picture_but_not_the_arithmetic() {
         let mut tree = Tree::new(".", Some(2));
-        tree.insert("a/b/c/deep.bin", 1000);
-        tree.insert("a/x.bin", 1);
+        tree.insert("a/b/c/deep.bin", Some(1000));
+        tree.insert("a/x.bin", Some(1));
         let mut lines = Vec::new();
         {
             let mut emit = |line: &str| -> Result<()> {
@@ -368,7 +380,7 @@ mod tests {
         }
         assert_eq!(lines, vec![".", "└── a/", "    ├── b/", "    └── x.bin"]);
         // The pruned object still counts towards the total.
-        assert_eq!(tree.total_bytes(), 1001);
+        assert_eq!(tree.total_bytes(), Some(1001));
     }
 
     #[test]
@@ -406,7 +418,7 @@ mod tests {
         let mut tree = Tree::new("vault:", None);
         assert!(tree.is_empty());
         assert_eq!(draw(&[], None, false, Glyphs::UNICODE), vec!["."]);
-        tree.insert("a.txt", 1);
+        tree.insert("a.txt", Some(1));
         assert!(!tree.is_empty());
     }
 
@@ -450,7 +462,7 @@ mod tests {
     #[test]
     fn an_emit_failure_stops_the_drawing() {
         let mut tree = Tree::new(".", None);
-        tree.insert("a/b.txt", 1);
+        tree.insert("a/b.txt", Some(1));
         let mut failing = |_: &str| -> Result<()> {
             Err(CliError::new(ExitCode::Uncategorised, "stdout closed"))
         };

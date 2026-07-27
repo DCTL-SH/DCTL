@@ -77,11 +77,7 @@ pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Session> {
     // for while exiting 0. See `super::factor` for the full reasoning. It is
     // checked before the remote so the more serious of two problems is the one
     // reported — a misspelled remote is a typo, a discarded factor is not.
-    factor::refuse_if_present(
-        &ctx.globals,
-        "the --key-file second factor",
-        NOTHING_HAPPENED,
-    )?;
+    factor::refuse_if_present(&ctx.globals, "unlocking a vault", NOTHING_HAPPENED)?;
 
     let index = index_path(ctx);
     let backend = build_backend(ctx, spec)?;

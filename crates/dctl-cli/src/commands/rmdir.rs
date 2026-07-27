@@ -15,14 +15,23 @@
 //!   on objects at all. Use [`rmdirs`](super::rmdirs) to sweep many empty
 //!   directories under a path.
 //!
-//! ## What runs today
+//! ## What "empty" means without directories
 //!
-//! Argument parsing, target resolution, the root refusal, the destructive gate
-//! and the `--dry-run` plan. The emptiness check and the removal both need
-//! directory enumeration, which the vault does not expose — and [`Ctx`] carries
-//! no vault handle to ask — so the command fails with a real exit code rather
-//! than reporting a removal that never happened. See
-//! [`super::removal::engine`].
+//! An object store holds one flat namespace of keys, so a directory containing
+//! no objects is not stored anywhere at all — and `dctl mkdir` exists precisely
+//! to make one expressible, by writing a zero-byte marker. The three answers
+//! this command can give follow from that, and each is what a user of POSIX
+//! `rmdir` would expect:
+//!
+//! * The directory holds an object, at any depth → **refused**, naming one.
+//! * The directory holds a subdirectory → **refused**, naming it. `rmdir` is not
+//!   recursive, and an empty child is still a child.
+//! * Nothing is stored under the path at all → **missing**, exactly as `rmdir`
+//!   answers for a path that does not exist. A vault cannot tell an empty
+//!   directory from one that was never created unless somebody ran `mkdir`.
+//!
+//! [`super::removal::dirs`] holds the full reasoning, and says plainly where
+//! this differs from a filesystem and why the difference is unavoidable.
 
 use clap::Args;
 
@@ -30,13 +39,10 @@ use crate::constants::{REMOTE_PATH_VALUE_NAME, REMOVAL_ACTION_REMOVE_DIR};
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 
-use super::removal::{NoOptions, Removal, Target, execute};
+use super::removal::{NoOptions, Operation, Removal, Target, execute};
 
 /// Stable command name. Must match `Command::name()` in `cli/mod.rs`.
 const COMMAND: &str = "rmdir";
-
-/// The engine capability this command is waiting on.
-const CAPABILITY: &str = "checking that a directory is empty and removing it";
 
 /// `dctl rmdir REMOTE:PATH`
 #[derive(Args, Debug)]
@@ -49,10 +55,10 @@ pub struct RmdirArgs {
 /// Run `dctl rmdir`.
 ///
 /// # Errors
-/// [`crate::exit::ExitCode::Usage`] for a malformed target or the vault root;
-/// [`crate::exit::ExitCode::Cancelled`] if the user declines; otherwise the
-/// unimplemented refusal described above. Once the engine can enumerate, a
-/// non-empty directory joins this list as a failure — never as a recursion.
+/// [`crate::exit::ExitCode::Usage`] for a malformed target, the vault root, or
+/// a directory that is not empty — never a recursion;
+/// [`crate::exit::ExitCode::DirNotFound`] for a path nothing is stored under;
+/// [`crate::exit::ExitCode::Cancelled`] if the user declines.
 pub async fn run(ctx: &Ctx, args: &RmdirArgs) -> Result<()> {
     let target = Target::parse(&args.path)?;
     refuse_the_root(&target)?;
@@ -64,10 +70,10 @@ pub async fn run(ctx: &Ctx, args: &RmdirArgs) -> Result<()> {
         // A filter selects objects; this command removes a container.
         filters: None,
         options: NoOptions {},
-        capability: CAPABILITY,
+        operation: Operation::Rmdir,
     };
 
-    execute(ctx, &removal)
+    execute(ctx, &removal).await
 }
 
 /// Refuse `dctl rmdir vault:`.
@@ -138,30 +144,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dry_run_never_reports_a_removal() {
-        let error = run_with(&["vault:photos/2024", "--dry-run", "--quiet"])
+    async fn the_root_refusal_runs_before_any_store_is_opened() {
+        // The guard has to hold on a remote that does not resolve, because the
+        // mistake it catches is worst on one that does.
+        let error = run_with(&["vault:", "--force", "--quiet", "--no-ask-password"])
             .await
             .unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
-    }
-
-    #[tokio::test]
-    async fn a_real_run_never_reports_a_removal_either() {
-        // Especially important here: an empty-directory removal is the kind of
-        // no-op a tool is tempted to report as success.
-        let error = run_with(&["vault:photos/2024", "--force", "--quiet"])
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
-    }
-
-    #[tokio::test]
-    async fn every_output_format_is_supported() {
-        for format in [vec!["--json"], vec!["--format", "json-lines"], vec![]] {
-            let mut args = vec!["vault:photos/2024", "--dry-run", "--quiet"];
-            args.extend(format.iter().copied());
-            assert!(run_with(&args).await.is_err(), "{format:?}");
-        }
+        assert_eq!(error.code(), ExitCode::Usage);
     }
 
     #[test]

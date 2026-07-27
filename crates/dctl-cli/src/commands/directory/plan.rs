@@ -1,11 +1,18 @@
-//! What a `mkdir` or `touch` *would* write, rendered in every output format.
+//! What a `mkdir` or `touch` would write, and — for a run that really happened —
+//! what it did, rendered in every output format.
 //!
-//! A plan is not a result. It carries no counters and never claims that anything
-//! was created — `PLAN.md` §6 forbids reporting work that did not happen, and a
-//! document containing `"created": true` beside an operation that never ran
-//! would be exactly that lie. The JSON shape is therefore limited to the
-//! *request*: which command, which target, which options, and a `status` that
-//! says the run got as far as planning.
+//! One document, two lives, and the `status` field is the whole difference. A
+//! **rehearsal** carries [`DIRECTORY_STATUS_PLANNED`] and nothing else can be
+//! put there: `PLAN.md` §6 forbids reporting work that did not happen, and a
+//! `--dry-run` that answered `created` would be exactly that lie. A **real run**
+//! carries the slug of an [`Outcome`](super::Outcome) the engine produced after
+//! the fact — which is a report of what happened rather than a promise, and is
+//! the same document shape so that a consumer parses one thing.
+//!
+//! Nothing here can invent either value. [`Plan::new`] hard-codes `planned` and
+//! [`Plan::done`] takes an `Outcome`, so a status is either a constant or a
+//! value the engine returned; there is no path by which a command's own
+//! optimism becomes a field.
 //!
 //! Rendering lives here rather than in each command because both verbs answer
 //! the same question in the same shape, and a user who has read one `--dry-run`
@@ -23,13 +30,14 @@ use serde::Serialize;
 
 use crate::constants::{
     DIRECTORY_BOOL_NO, DIRECTORY_BOOL_YES, DIRECTORY_COLUMN_FIELD, DIRECTORY_COLUMN_VALUE,
-    DIRECTORY_LABEL_COMMAND, DIRECTORY_LABEL_MODE, DIRECTORY_LABEL_TARGET, DIRECTORY_MODE_DRY_RUN,
-    DIRECTORY_MODE_EXECUTE, DIRECTORY_STATUS_PLANNED,
+    DIRECTORY_LABEL_COMMAND, DIRECTORY_LABEL_MODE, DIRECTORY_LABEL_OUTCOME, DIRECTORY_LABEL_TARGET,
+    DIRECTORY_MODE_DRY_RUN, DIRECTORY_MODE_EXECUTE, DIRECTORY_STATUS_PLANNED,
 };
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::output::{Align, Column, Format, Table};
 
+use super::outcome::Outcome;
 use super::target::Target;
 
 /// One label/value pair in the text rendering of a plan.
@@ -54,13 +62,17 @@ pub struct Plan<'a, O: PlanOptions> {
     /// Whether this run was forbidden from changing anything.
     pub dry_run: bool,
     pub options: &'a O,
-    /// How far the run got. Never "created": a plan is not an outcome.
+    /// How far the run got: `planned` for a rehearsal, an
+    /// [`Outcome`](super::Outcome) slug for a run that really happened.
     pub status: &'static str,
 }
 
 impl<'a, O: PlanOptions> Plan<'a, O> {
-    /// Assemble a plan. `status` is fixed rather than a parameter — this type
-    /// exists only to describe an operation that has not run.
+    /// Assemble the document for a run that has **not** happened.
+    ///
+    /// `status` is hard-coded rather than taken as a parameter, which is the
+    /// whole guarantee: no caller can spell a completed-work status into a
+    /// rehearsal, however the rehearsal turned out.
     #[must_use]
     pub fn new(command: &'static str, target: &'a Target, dry_run: bool, options: &'a O) -> Self {
         Self {
@@ -72,10 +84,35 @@ impl<'a, O: PlanOptions> Plan<'a, O> {
         }
     }
 
+    /// Assemble the document for a run that **did** happen.
+    ///
+    /// Takes an [`Outcome`] rather than a string, so the status can only be one
+    /// the engine produced — a command cannot describe its own result, it can
+    /// only report the one it was handed. `dry_run` is `false` by construction:
+    /// a run that produced an outcome was not a rehearsal.
+    #[must_use]
+    pub fn done(
+        command: &'static str,
+        target: &'a Target,
+        options: &'a O,
+        outcome: Outcome,
+    ) -> Self {
+        Self {
+            command,
+            target,
+            dry_run: false,
+            options,
+            status: outcome.slug(),
+        }
+    }
+
     /// Every row of the text rendering, in display order.
     ///
     /// Command, target and mode first, always in that order: they are the three
-    /// facts that decide whether the rest of the table is worth reading.
+    /// facts that decide whether the rest of the table is worth reading. The
+    /// outcome comes last, after the options that produced it, and only on a
+    /// real run — a rehearsal's status is already spelled in the `Mode` row and
+    /// repeating it as an outcome would read as a result.
     #[must_use]
     fn rows(&self) -> Vec<Row> {
         let mut rows = vec![
@@ -84,6 +121,9 @@ impl<'a, O: PlanOptions> Plan<'a, O> {
             (DIRECTORY_LABEL_MODE, self.mode().to_string()),
         ];
         rows.extend(self.options.rows());
+        if self.status != DIRECTORY_STATUS_PLANNED {
+            rows.push((DIRECTORY_LABEL_OUTCOME, self.status.to_string()));
+        }
         rows
     }
 
@@ -196,6 +236,40 @@ mod tests {
         let options = TestOptions { parents: false };
         let plan = Plan::new("mkdir", &target, false, &options);
         assert_eq!(plan.rows()[2].1, DIRECTORY_MODE_EXECUTE);
+    }
+
+    #[test]
+    fn a_completed_run_reports_the_outcome_the_engine_produced() {
+        let target = target();
+        let options = TestOptions { parents: false };
+        let plan = Plan::done("mkdir", &target, &options, Outcome::NotRequired);
+        let value = serde_json::to_value(&plan).unwrap();
+
+        assert_eq!(value["status"], Outcome::NotRequired.slug());
+        assert_eq!(value["dry_run"], false);
+        // And the distinction that matters: nothing says a directory was made.
+        assert_ne!(value["status"], Outcome::Created.slug());
+
+        let rows = plan.rows();
+        let last = rows.last().expect("the outcome row");
+        assert_eq!(last.0, DIRECTORY_LABEL_OUTCOME);
+        assert_eq!(last.1, Outcome::NotRequired.slug());
+    }
+
+    #[test]
+    fn a_rehearsal_never_carries_an_outcome_row() {
+        // The `Mode` row already says `dry-run`; an outcome beside it would read
+        // as something the run did.
+        let target = target();
+        let options = TestOptions { parents: false };
+        let plan = Plan::new("mkdir", &target, true, &options);
+        assert!(
+            !plan
+                .rows()
+                .iter()
+                .any(|(label, _)| *label == DIRECTORY_LABEL_OUTCOME)
+        );
+        assert_eq!(plan.status, DIRECTORY_STATUS_PLANNED);
     }
 
     #[test]

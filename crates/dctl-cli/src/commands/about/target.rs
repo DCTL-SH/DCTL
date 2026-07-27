@@ -42,6 +42,14 @@ use crate::remote::RemoteSpec;
 /// A remote, resolved as far as it can be without connecting to it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Described {
+    /// The parsed spec, kept so the usage report can open the *same* address
+    /// this description is about.
+    ///
+    /// Re-parsing the argument downstream would work today and would be a second
+    /// place where `C:\data` is decided to be a path — the one rule in this CLI
+    /// that silently sends data somewhere nobody named. A spec that has already
+    /// been classified cannot be re-classified.
+    pub spec: RemoteSpec,
     /// The remote as the user wrote it, normalised through [`RemoteSpec`].
     pub remote: String,
     /// The named remote's own provider type — `vault` for a vault remote.
@@ -81,9 +89,10 @@ impl Described {
         // path, and `vault:./a//b` comes back canonicalised.
         let display = parsed.to_string();
 
-        match parsed {
+        match &parsed {
             // A path needs no configuration, no credentials and no lookup.
             RemoteSpec::Local(_) => Ok(Self {
+                spec: parsed.clone(),
                 remote: display,
                 provider: PROVIDER_LOCAL,
                 storage_provider: PROVIDER_LOCAL,
@@ -91,12 +100,15 @@ impl Described {
                 chain: Vec::new(),
             }),
 
-            RemoteSpec::Named { remote, .. } => Self::named(ctx, &remote, display),
+            RemoteSpec::Named { remote, .. } => {
+                let remote = remote.clone();
+                Self::named(ctx, &parsed, &remote, display)
+            }
         }
     }
 
     /// Resolve a name that is not a filesystem path.
-    fn named(ctx: &Ctx, remote: &str, display: String) -> Result<Self> {
+    fn named(ctx: &Ctx, spec: &RemoteSpec, remote: &str, display: String) -> Result<Self> {
         let path = config::resolve_path(ctx.globals.config.as_deref());
         let configured = config::load_or_default(&path)?;
 
@@ -119,6 +131,7 @@ impl Described {
                 .any(|def| def.is_vault());
 
             return Ok(Self {
+                spec: spec.clone(),
                 remote: display,
                 provider,
                 storage_provider,
@@ -129,6 +142,7 @@ impl Described {
 
         if let Some(provider) = shorthand(remote) {
             return Ok(Self {
+                spec: spec.clone(),
                 remote: display,
                 provider,
                 storage_provider: provider,

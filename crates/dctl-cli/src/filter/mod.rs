@@ -71,13 +71,19 @@
 //! an aggregate, and excluding a directory because its total exceeded
 //! `--max-size` would hide every small file inside a large tree.
 
-// This module is complete and tested but not yet wired into the three call
-// sites that currently refuse these flags (`commands/transfer/compare.rs`,
-// `commands/listing/filter.rs`, `commands/recovery/selection.rs`). Building the
-// engine first and connecting it in a separate step is what keeps the three
-// from being given three subtly different implementations; until that step
-// lands, every item here is unreachable from `main` and the compiler is right
-// to say so.
+// All three call sites are connected: the transfer family
+// (`commands/transfer/listing.rs`), the recovery family
+// (`commands/recovery/selection.rs`) and the listing family
+// (`commands/listing/filter.rs`, which every listing verb, `check`, `scrub`,
+// `hashsum`, `verify` and the removal verbs reach the engine through).
+//
+// What remains unreachable from `main` is the reporting surface — `Reason`,
+// `Decision::describe`, `Rule::pattern` and the accessors behind them — which
+// exists for `--dump filters`, the flag that answers "why did this file
+// disappear". It is kept, with the tests that pin its wording, because a rule
+// that drops a file for a reason nobody can name is the failure this module was
+// written to prevent, and a diagnostic that first appears on the day it is
+// needed is a diagnostic nobody reviewed.
 #![allow(dead_code)]
 
 mod depth;
@@ -119,7 +125,7 @@ use crate::error::{CliError, Result};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Candidate<'a> {
     path: &'a str,
-    size: u64,
+    size: Option<u64>,
     is_dir: bool,
 }
 
@@ -128,7 +134,31 @@ impl<'a> Candidate<'a> {
     pub const fn file(path: &'a str, size: u64) -> Self {
         Self {
             path,
-            size,
+            size: Some(size),
+            is_dir: false,
+        }
+    }
+
+    /// A file whose size nothing has measured.
+    ///
+    /// Reached only from a listing over a vault whose index was rebuilt: that
+    /// pass records object names without reading their bodies, so the rows it
+    /// writes carry no size until each file is next read (see
+    /// [`crate::source::Entry::size`]).
+    ///
+    /// The size bounds are then **not applied**, rather than applied to a zero.
+    /// Both alternatives are wrong in the same direction and one of them is
+    /// silent: `--max-size 1K` over a rebuilt index would have admitted every
+    /// object in the vault, and `--min-size 1K` would have hidden all of them —
+    /// including a forty-terabyte file that plainly qualifies. Showing the row
+    /// and letting the size column say `-` puts the uncertainty where the user
+    /// can see it, which matters most in the listing somebody reads before
+    /// deciding what to delete. Every other rule — globs, path lists, depth —
+    /// still applies untouched.
+    pub const fn unmeasured_file(path: &'a str) -> Self {
+        Self {
+            path,
+            size: None,
             is_dir: false,
         }
     }
@@ -141,7 +171,7 @@ impl<'a> Candidate<'a> {
     pub const fn directory(path: &'a str) -> Self {
         Self {
             path,
-            size: 0,
+            size: None,
             is_dir: true,
         }
     }
@@ -151,8 +181,9 @@ impl<'a> Candidate<'a> {
         self.path
     }
 
-    /// The size in bytes; always zero for a directory.
-    pub const fn size(&self) -> u64 {
+    /// The size in bytes; always absent for a directory, and for a file whose
+    /// size was never measured.
+    pub const fn size(&self) -> Option<u64> {
         self.size
     }
 
@@ -374,9 +405,9 @@ impl FilterSet {
             }
         }
 
-        // Files only: see the note on `Candidate::directory`.
-        if !candidate.is_dir() {
-            let size = candidate.size();
+        // Files only, and only files somebody has measured: see the notes on
+        // `Candidate::directory` and `Candidate::unmeasured_file`.
+        if let Some(size) = candidate.size() {
             if let Some(limit) = self.sizes.min() {
                 if size < limit {
                     return Decision::new(Action::Exclude, Reason::TooSmall { size, limit });
@@ -399,8 +430,43 @@ impl FilterSet {
     }
 
     /// Whether a candidate is in scope.
+    ///
+    /// The rules alone, with no account of the tree the candidate sits in. A
+    /// caller that walks a directory structure wants this, because it has
+    /// already refused to enter the directories [`FilterSet::may_descend`]
+    /// pruned. A caller reading a *flat* enumeration wants
+    /// [`FilterSet::admits_enumerated`] instead — see there.
     pub fn admits(&self, candidate: &Candidate<'_>) -> bool {
         self.decide(candidate).admits()
+    }
+
+    /// Whether a candidate is in scope for a caller that has no walk to prune.
+    ///
+    /// An index range scan and a provider listing both hand back a flat, already
+    /// complete set of paths. There is no recursion in them for
+    /// [`FilterSet::may_descend`] to stop, so the pruning a walking caller gets
+    /// for free has to be applied explicitly here — by asking of every ancestor
+    /// directory the same question the walk would have asked before opening it.
+    ///
+    /// Without this, `--exclude 'cache/'` means two different things depending
+    /// on how the caller happens to enumerate: a local walk never opens `cache`
+    /// and transfers nothing from it, while a listing of the same tree in a
+    /// vault shows `cache/a.o` because a directories-only rule cannot match a
+    /// file. That is not a cosmetic difference. A person reads `dctl ls
+    /// --exclude 'cache/'`, sees the file, and concludes it was stored — then
+    /// deletes their copy. The two must give one answer, and this is where a
+    /// caller that cannot prune gets it.
+    ///
+    /// It is deliberately not folded into [`FilterSet::admits`]. A walking
+    /// caller asking this would re-walk every ancestor of every file, turning a
+    /// linear walk into a quadratic one for an answer it has already computed.
+    pub fn admits_enumerated(&self, candidate: &Candidate<'_>) -> bool {
+        self.admits(candidate) && ancestors(candidate.path()).all(|dir| self.may_descend(dir))
+    }
+
+    /// Whether a flat enumeration should show this file.
+    pub fn admits_enumerated_file(&self, path: &str, size: u64) -> bool {
+        self.admits_enumerated(&Candidate::file(path, size))
     }
 
     /// Whether a file is in scope.
@@ -431,10 +497,16 @@ impl FilterSet {
         // `--exclude '*.tmp'` says nothing about the tree, and refusing to enter
         // a directory whose *name* happened to match would drop everything under
         // it. A trailing-slash rule is the form that does mean "not this tree".
-        !self
-            .rules
-            .iter()
-            .any(|rule| rule.directories_only() && rule.matches(&Candidate::directory(path)))
+        //
+        // And only an *exclusion* prunes. `+ photos/` says the directory is
+        // wanted; treating it as a reason not to open it would make the rule
+        // hide precisely the tree it was written to keep — which is not a
+        // reading of `+` that anybody has.
+        !self.rules.iter().any(|rule| {
+            rule.action() == Action::Exclude
+                && rule.directories_only()
+                && rule.matches(&Candidate::directory(path))
+        })
     }
 
     /// Whether `--files-from` was given, which replaces traversal with lookups.
@@ -479,6 +551,22 @@ impl FilterSet {
             || self.sizes.is_limited()
             || self.depth.is_limited()
     }
+}
+
+/// Every proper ancestor directory of `path`, shallowest first.
+///
+/// `a/b/c.txt` yields `""` (the transfer root), `a`, then `a/b`. The root is
+/// always included: `--max-depth 0` and a `--files-from` list that names nothing
+/// both refuse it, and a caller that started at `a` would never learn that the
+/// walk it is imitating would not have begun at all.
+///
+/// Shallowest first because the rule that prunes is usually near the top, and
+/// the caller is an `all()` that stops at the first `false`.
+fn ancestors(path: &str) -> impl Iterator<Item = &str> {
+    std::iter::once("").chain(
+        path.match_indices(PATH_SEPARATOR)
+            .filter_map(move |(index, _)| path.get(..index)),
+    )
 }
 
 /// Whether the set holds `path` itself or anything beneath it.
@@ -1138,6 +1226,85 @@ mod tests {
         assert!(!by_directory.admits_dir("a/build"));
         assert!(!by_directory.may_descend("a/build"));
         assert!(by_directory.may_descend("a/src"));
+    }
+
+    #[test]
+    fn an_inclusion_never_prunes_the_tree_it_names() {
+        // `+ photos/` says the directory is wanted. Treating a directories-only
+        // rule as a reason not to open it, whichever way it pointed, would make
+        // the rule hide precisely the tree it was written to keep.
+        let set = FilterSet::builder()
+            .rule(Action::Include, "photos/", "test")
+            .expect("a directory inclusion")
+            .build();
+        assert!(set.may_descend("a/photos"));
+        assert!(set.admits_dir("a/photos"));
+    }
+
+    // ── Flat enumerations, which have no walk to prune ────────────────────
+
+    #[test]
+    fn a_directory_rule_reaches_the_contents_of_a_flat_enumeration() {
+        // The divergence this method exists to close: a local walk never opens
+        // `cache` and transfers nothing from it, while an index range scan hands
+        // back `cache/a.o` — which a directories-only rule cannot match. One
+        // rule has to mean one thing, or a person reads `ls --exclude 'cache/'`,
+        // sees the file, concludes it was stored, and deletes their copy.
+        let set = filters(&["--exclude", "cache/"]);
+
+        // The rules alone cannot see it...
+        assert!(set.admits_file("a/cache/x.o", 1));
+        // ...and the question a flat caller has to ask can.
+        assert!(!set.admits_enumerated_file("a/cache/x.o", 1));
+        assert!(!set.admits_enumerated_file("cache/deep/x.o", 1));
+        assert!(set.admits_enumerated_file("a/src/x.rs", 1));
+    }
+
+    #[test]
+    fn a_files_from_list_reaches_a_flat_enumeration_the_same_way() {
+        let mut listed = BTreeSet::new();
+        listed.insert("photos/2024/a.jpg".to_string());
+        let set = FilterSet::builder().only(listed).build();
+
+        assert!(set.admits_enumerated_file("photos/2024/a.jpg", 1));
+        assert!(!set.admits_enumerated_file("photos/2024/b.jpg", 1));
+        assert!(!set.admits_enumerated_file("music/x.mp3", 1));
+    }
+
+    #[test]
+    fn the_flat_and_walking_answers_agree_wherever_a_walk_could_have_pruned() {
+        // The equivalence being claimed: "the walk never entered it" and "no
+        // path under it is admitted" have to be the same statement, or the two
+        // enumerations are two policies.
+        let set = filters(&["--exclude", "cache/", "--max-depth", "3"]);
+        for path in [
+            "a.txt",
+            "a/b.txt",
+            "a/b/c.txt",
+            "a/cache/c.txt",
+            "cache/c.txt",
+            "a/b/c/d.txt",
+        ] {
+            let walked =
+                ancestors(path).all(|dir| set.may_descend(dir)) && set.admits_file(path, 1);
+            assert_eq!(
+                walked,
+                set.admits_enumerated_file(path, 1),
+                "the two enumerations disagree about {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn ancestors_start_at_the_root_and_stop_before_the_name() {
+        assert_eq!(
+            ancestors("a/b/c.txt").collect::<Vec<_>>(),
+            vec!["", "a", "a/b"]
+        );
+        // A file in the root still has one ancestor: the root, which
+        // `--max-depth 0` and an empty `--files-from` both refuse.
+        assert_eq!(ancestors("c.txt").collect::<Vec<_>>(), vec![""]);
+        assert_eq!(ancestors("").collect::<Vec<_>>(), vec![""]);
     }
 
     // ── Reporting ────────────────────────────────────────────────────────

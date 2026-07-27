@@ -17,8 +17,8 @@
 //! * [`timespec`] — the point-in-time arguments (`--at`, `--since`, `--until`).
 //! * [`snapshot`] — what a snapshot may be called, and what it is called when
 //!   the user does not say.
-//! * [`selection`] — which files a run considers, and the loud refusal of the
-//!   filters that cannot yet be honoured.
+//! * [`selection`] — which files a run considers, resolved through the one
+//!   filter engine ([`crate::filter`]) every other command family uses.
 //! * [`preflight`] — every reason a name could fail to be written, gathered
 //!   before anything is.
 //! * [`plan`] and [`report`] — what a run *would* do, and how that is rendered
@@ -42,31 +42,30 @@ pub use selection::Selection;
 pub use snapshot::SnapshotName;
 pub use target::Target;
 
-/// The fully-qualified name of a command, e.g. `dctl restore`.
-///
-/// Built from [`dctl_meta::BINARY_NAME`] rather than typed out, so the messages
-/// that name a command — most importantly the `unimplemented` error, which tells
-/// the user exactly what to run once the engine supports it — follow a rebrand
-/// automatically instead of quietly naming a binary that no longer exists.
-///
-/// The integrity family carries its own copy of this for the same reason it
-/// carries its own `target.rs`: the two families are independent, and neither
-/// should break because the other was restructured.
-#[must_use]
-pub fn command_name(verb: &str) -> String {
-    format!("{} {verb}", dctl_meta::BINARY_NAME)
-}
-
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-    use super::command_name;
+    use super::{Selection, Target};
 
     #[test]
-    fn command_names_carry_the_binary_name() {
-        let name = command_name("restore");
-        assert!(name.starts_with(dctl_meta::BINARY_NAME));
-        assert!(name.ends_with(" restore"));
+    fn the_family_shares_one_vocabulary_for_the_vault_side() {
+        // `backup` writes into a `Target` and `restore` reads out of one, so a
+        // single parse decides both. Asserted here rather than twice, because
+        // two parses of `REMOTE:PATH` are two chances to disagree about scope —
+        // and disagreeing about scope means restoring the wrong tree.
+        let target = Target::parse("archive:photos").unwrap();
+        assert_eq!(target.remote, "archive");
+        assert!(target.covers("photos/2024/a.jpg"));
+        assert_eq!(target.relative("photos/2024/a.jpg"), "2024/a.jpg");
+    }
+
+    #[test]
+    fn an_unfiltered_selection_is_shared_by_both_verbs() {
+        // The default has to admit everything: a `Selection` that quietly
+        // restricted would make a backup store less than it was asked to.
+        let selection = Selection::default();
+        assert!(selection.admits_file("anything/at/all.bin", u64::MAX));
+        assert!(!selection.is_restricting());
     }
 }

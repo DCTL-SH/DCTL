@@ -15,14 +15,20 @@
 //! ## Why this is a command and not a detection
 //!
 //! DCTL could notice an envelope during a copy and quietly start encrypting.
-//! It must not, and invariant I4 is the reason: what a command does to the bytes
-//! passing through it is a function of the **remote name typed**, fixed when the
-//! remote was defined, and never of what the destination happens to contain
-//! today. A tool that switched to encrypting because it found a file would have
+//! It must not, and invariant I4 is the reason: what a command encrypts is
+//! determined solely by the **remote name typed**, fixed when the remote was
+//! defined. A destination's contents may cause DCTL to *refuse* — that is the
+//! fallback this command is the remedy for — but never to change what it does. A
+//! tool that switched to encrypting because it found a file would have
 //! encryption semantics that changed under a running backup job, and no operator
-//! could state, from a script, what that script does. So the inspection is
-//! explicit, deliberate, and produces *configuration* — after which every later
-//! command behaves exactly as it would have if `dctl init` had written it.
+//! could state, from a script, what that script does.
+//!
+//! That is the whole difference between this command and auto-detection, and it
+//! is a difference in kind rather than in politeness. Auto-detection *changes
+//! behaviour*; the refusal only ever *stops*. So the inspection is explicit,
+//! deliberate, and produces *configuration* — after which every later command
+//! behaves exactly as it would have if `dctl init` had written it, and stops
+//! consulting the destination at all.
 //!
 //! ## Naming
 //!

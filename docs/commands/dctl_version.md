@@ -80,10 +80,13 @@ one stream.
 
 ### Status in this build
 
-**`--check` is not implemented.** Asking whether a newer release exists needs a
-release feed to ask, and DCTL has none in this build. Rather than printing "you
-are up to date" — a claim about work that never happened, which `PLAN.md` §6
-forbids outright — the flag fails with exit code **7**.
+**`--check` is not implemented, and the missing piece is not code.** Asking
+whether a newer release exists needs a release feed to ask, and the project
+publishes none — no endpoint, no signed manifest, no channel. The gap is
+therefore *outside the workspace*: `dctl-cli` is not waiting on `dctl-core` or
+on any crate, and the refusal says so rather than naming one. Rather than
+printing "you are up to date" — a claim about work that never happened, which
+`PLAN.md` §6 forbids outright — the flag fails with exit code **7**.
 
 The build report is still printed first, and deliberately so: `--check` is typed
 by somebody whose machine is already misbehaving, and swallowing the one part of
@@ -91,8 +94,11 @@ the command that does work would leave them with nothing. The non-zero exit says
 precisely what did not happen, and the hint says it in words: *the build
 information above is complete and was printed*.
 
-Everything else on this page works today. `PLAN.md` §11 does not schedule an
-update check in any phase; it needs a release feed to exist first.
+Everything else on this page works today. `PLAN.md` §11 runs to phase 5 and
+**none of the five schedules an update check**, because a release feed has to
+exist before a client can query one — so this is a refusal with no phase behind
+it, and it says that rather than leaving a reader to search the roadmap for an
+entry that is not there.
 
 ```
 dctl version [flags]
@@ -172,10 +178,14 @@ os                macos
 arch              aarch64
 features          none
 debug_assertions  true
-error: dctl version --check is not implemented in this build
+error: dctl version --check: an update check against a release feed (missing
+  outside the workspace: the project publishes no release endpoint to ask) is
+  not implemented in this build
 warning: The build information above is complete and was printed. Only the
-  update lookup is missing: DCTL has no release feed to query in this build, and
-  inventing an 'up to date' answer would be worse than saying so.
+  update lookup is missing: DCTL publishes no release feed to query, and no
+  PLAN.md §11 phase adds one — inventing an 'up to date' answer would be worse
+  than saying so. Compare the version above against however you obtained this
+  build.
 ```
 
 The single-line form, for a script that only wants the release number:

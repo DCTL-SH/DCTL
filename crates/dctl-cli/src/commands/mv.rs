@@ -87,7 +87,7 @@ pub async fn run(ctx: &Ctx, args: &MoveArgs) -> Result<()> {
         delete_extras: false,
     };
 
-    let prepared = prepare::directory_transfer(ctx, &request)?;
+    let prepared = prepare::directory_transfer(ctx, &request).await?;
     report::announce(ctx, &prepared.plan, prepared.dest_file_count);
 
     if ctx.is_dry_run() {
@@ -132,7 +132,7 @@ pub async fn run(ctx: &Ctx, args: &MoveArgs) -> Result<()> {
     )
     .await?;
 
-    execute::moves(ctx, &engine, &reaper, &prepared.plan).await
+    execute::moves(ctx, TRANSFER_COMMAND_MOVE, &engine, &reaper, &prepared.plan).await
 }
 
 #[cfg(test)]
@@ -253,8 +253,8 @@ mod tests {
         assert_eq!(ctx.stats.snapshot().files_deleted, 0);
     }
 
-    #[test]
-    fn move_plans_the_same_transfers_as_copy() {
+    #[tokio::test]
+    async fn move_plans_the_same_transfers_as_copy() {
         // `move` differs from `copy` in step 7 only; the diff itself is shared.
         let (_dir, source, dest) = fixture();
         let ctx = ctx(&[]);
@@ -267,7 +267,7 @@ mod tests {
             create_empty_src_dirs: false,
             delete_extras: false,
         };
-        let prepared = prepare::directory_transfer(&ctx, &request).unwrap();
+        let prepared = prepare::directory_transfer(&ctx, &request).await.unwrap();
 
         assert_eq!(prepared.plan.count(Op::Copy), 2);
         assert!(

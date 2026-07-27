@@ -8,13 +8,17 @@
 //!
 //! ## A missing log is not an empty log
 //!
-//! `PLAN.md` §7 requires the engine to append a chained record after every
-//! operation, and this build's engine does not do that yet. So when the file is
-//! absent, the honest answer is *"the writer is not implemented"* — an error
-//! with a real exit code — and not "0 records, chain intact", which would be a
-//! clean bill of health for a system that has never recorded anything. The
-//! reader is complete and works today: point `--audit-log` at a chain written
-//! anywhere and it is verified for real.
+//! Every operation that changes data appends a record through
+//! [`crate::audit::sink`], so a log exists from the first `copy`, `delete` or
+//! `init` a vault ever sees. An **empty** file is therefore a real answer — "the
+//! chain is intact and nothing has been appended" — and `verify` gives it.
+//!
+//! An **absent** file is not. It is far more likely to mean the reader was
+//! pointed somewhere the writer never wrote: a different `--index`, a different
+//! machine, a log that was moved or deleted. Answering "0 records, chain intact"
+//! to that would hand back a clean bill of health for a chain nobody looked at,
+//! so it is an error — [`ExitCode::FileNotFound`], naming the path it looked for
+//! and the two flags that decide it.
 //!
 //! ## A record that will not parse is treated as tampering
 //!
@@ -28,7 +32,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::cli::globals::GlobalArgs;
-use crate::constants::{AUDIT_LOG_FILE_NAME, AUDIT_WRITER_FEATURE, AUDIT_WRITER_HINT};
+use crate::constants::{AUDIT_LOG_ABSENT, AUDIT_LOG_ABSENT_HINT, AUDIT_LOG_FILE_NAME};
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
 
@@ -63,8 +67,8 @@ pub fn resolve_path(globals: &GlobalArgs, explicit: Option<&Path>) -> PathBuf {
 /// Read and parse the log.
 ///
 /// # Errors
-/// [`ExitCode::FatalError`] when no log exists, because the writer described in
-/// `PLAN.md` §7 is not implemented in this build.
+/// [`ExitCode::FileNotFound`] when the file is absent — see the module docs for
+/// why that is not the same claim as an empty chain.
 /// [`ExitCode::AuditChainBroken`] when a line cannot be parsed as a record —
 /// see the module docs for why that is tampering and not a formatting problem.
 /// Any other read failure is classified by [`CliError`]'s I/O conversion.
@@ -72,12 +76,11 @@ pub fn load(globals: &GlobalArgs, explicit: Option<&Path>) -> Result<Log> {
     let path = resolve_path(globals, explicit);
 
     if !path.exists() {
-        return Err(
-            CliError::unimplemented(AUDIT_WRITER_FEATURE).with_hint(format!(
-                "{AUDIT_WRITER_HINT} Looked for {}.",
-                path.display()
-            )),
-        );
+        return Err(CliError::new(
+            ExitCode::FileNotFound,
+            format!("{AUDIT_LOG_ABSENT} at {}", path.display()),
+        )
+        .with_hint(AUDIT_LOG_ABSENT_HINT));
     }
 
     let text = std::fs::read_to_string(&path).map_err(|error| {
@@ -171,15 +174,19 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_log_is_reported_as_an_unimplemented_writer() {
+    fn a_missing_log_is_reported_rather_than_read_as_an_empty_chain() {
         // Never as "0 records, intact": that would be a clean bill of health for
-        // a system that has never recorded anything.
+        // a chain nobody looked at.
         let dir = tempfile::tempdir().unwrap();
         let missing = dir.path().join("nothing.jsonl");
         let error = load(&globals(&[]), Some(&missing)).unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(error.message().contains("audit log writer"));
-        assert!(error.hint().unwrap().contains("nothing.jsonl"));
+        assert_eq!(error.code(), ExitCode::FileNotFound);
+        assert!(
+            error.message().contains("nothing.jsonl"),
+            "the path looked for must be named: {}",
+            error.message()
+        );
+        assert!(error.hint().is_some());
     }
 
     #[test]

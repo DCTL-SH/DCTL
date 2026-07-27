@@ -54,14 +54,21 @@ pub struct Directory {
     /// Byte length of the listing root, so [`Directory::to_entry`] can re-root
     /// without every directory carrying its own copy of the prefix string.
     root_len: usize,
-    bytes: u64,
+    bytes: Option<u64>,
     objects: u64,
 }
 
 impl Directory {
-    /// Total bytes of every object beneath it, at any depth.
+    /// Total bytes of every object beneath it, at any depth — or [`None`] when
+    /// any one of them had no recorded size.
+    ///
+    /// Absorbing rather than skipping: a subtree holding one unmeasured object
+    /// has no known total, and reporting the sum of the rest would be a smaller
+    /// number presented as the whole. That is the same lie a zero was, just
+    /// harder to notice, and `dctl lsd` is read to decide what is safe to
+    /// delete.
     #[must_use]
-    pub const fn bytes(&self) -> u64 {
+    pub const fn bytes(&self) -> Option<u64> {
         self.bytes
     }
 
@@ -89,7 +96,9 @@ struct Open {
     name: String,
     /// Its full logical path.
     path: String,
-    bytes: u64,
+    /// Running total, or [`None`] once an unmeasured object has landed in it.
+    /// Starts at a *known* zero: an empty directory is genuinely zero bytes.
+    bytes: Option<u64>,
     objects: u64,
     /// Descendants that have already closed, in the order they must print.
     buffered: Vec<Directory>,
@@ -156,7 +165,7 @@ impl Aggregator {
             self.stack.push(Open {
                 name: (*name).to_string(),
                 path,
-                bytes: 0,
+                bytes: Some(0),
                 objects: 0,
                 buffered: Vec::new(),
             });
@@ -165,7 +174,14 @@ impl Aggregator {
         // Every open directory contains this object, so every one of them counts
         // it. Costs O(depth), which is what makes the totals recursive for free.
         for open in &mut self.stack {
-            open.bytes = open.bytes.saturating_add(entry.size());
+            // `zip` is what makes the unknown absorbing: one object with no
+            // recorded size leaves every directory above it with no total, which
+            // is the truth. The object is still *counted*, so the row still says
+            // something happened here.
+            open.bytes = open
+                .bytes
+                .zip(entry.size())
+                .map(|(total, size)| total.saturating_add(size));
             open.objects = open.objects.saturating_add(1);
         }
 
@@ -245,15 +261,15 @@ mod tests {
         collected
     }
 
-    fn rows(dirs: &[Directory]) -> Vec<(String, u64, u64)> {
+    fn rows(dirs: &[Directory]) -> Vec<(String, Option<u64>, u64)> {
         dirs.iter()
             .map(|d| (d.to_entry().path().to_string(), d.bytes(), d.objects()))
             .collect()
     }
 
     /// The expected shape of a row, spelled the way the assertions read.
-    fn row(path: &str, bytes: u64, objects: u64) -> (String, u64, u64) {
-        (path.to_string(), bytes, objects)
+    fn row(path: &str, bytes: u64, objects: u64) -> (String, Option<u64>, u64) {
+        (path.to_string(), Some(bytes), objects)
     }
 
     #[test]
@@ -327,7 +343,7 @@ mod tests {
         let entry = dirs.first().expect("one directory").to_entry();
         assert_eq!(entry.relative(), "2024");
         assert!(entry.is_dir());
-        assert_eq!(entry.size(), 5);
+        assert_eq!(entry.size(), Some(5));
     }
 
     #[test]

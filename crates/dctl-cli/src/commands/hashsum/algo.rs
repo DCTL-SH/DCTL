@@ -17,20 +17,11 @@
 //! separator therefore lives in [`crate::constants`] with that reasoning
 //! attached, and [`format_line`] is the only thing allowed to assemble a line.
 //!
-//! Digest computation deliberately does **not** live here. The vault records a
-//! plaintext BLAKE3 for every object at write time, so `blake3` is answered from
-//! the index; SHA-1 and SHA-256 are not recorded and can only be produced by
-//! reading and decrypting the object, which is engine work. Putting a
-//! half-implemented `hash()` here would invite exactly the kind of quiet
-//! fallback this tool is not allowed to have.
-
-// Some of what follows is not reachable from this build's `run` body: the engine
-// has no entry point yet for the step that would call it (see the command's
-// module documentation). It is written and unit-tested now, with the tests that
-// pin its contract, rather than left until the engine lands — a machine-readable
-// output format that first appears on the day it is needed is a format nobody
-// reviewed.
-#![allow(dead_code)]
+//! Digest computation deliberately does **not** live here; it lives in
+//! [`super::digest`]. This file owns the part that has to stay byte-identical to
+//! coreutils for twenty years, and that job is easier to keep honest when its
+//! tests never need a hasher — and when the hasher's tests never need to know
+//! what a checksum file looks like.
 
 use clap::ValueEnum;
 

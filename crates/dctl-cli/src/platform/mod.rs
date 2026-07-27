@@ -17,9 +17,15 @@
 //!    perfectly legal elsewhere, so a tree synced from Linux can be impossible
 //!    to write on Windows. [`names`] detects this *before* a transfer starts
 //!    rather than failing halfway through.
+//! 4. **Path *identity*.** `./vault`, `vault`, `staging/../vault` and a symlink
+//!    to it are four spellings of one directory, and every platform lets an
+//!    operator type any of them. [`resolve`] reduces them to one answer, which
+//!    is what lets [`crate::addressing`] give the same answer to all four —
+//!    invariant I4 is a claim about spellings as much as about contents.
 
 pub mod names;
 pub mod path;
+pub mod resolve;
 
 /// True when the target platform's filesystem is case-insensitive by default.
 ///

@@ -130,10 +130,6 @@ pub fn compute_hash(record: &AuditRecord) -> String {
 /// This is the *only* way a record acquires its position and its hash. The
 /// caller supplies what happened; the chain supplies where it happened and what
 /// attests to it — see [`super::record::Entry`] for why those are kept apart.
-///
-/// See the note at the top of [`super::write`] for why nothing outside the
-/// tests calls this yet.
-#[allow(dead_code)]
 #[must_use]
 pub fn seal(entry: &Entry, index: u64, previous: &str) -> AuditRecord {
     let mut record = AuditRecord {

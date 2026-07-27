@@ -109,6 +109,16 @@ impl ObjectSpec {
     }
 
     /// Whether the object lives on the local filesystem.
+    ///
+    /// `cfg(test)` for the reason [`crate::remote::RemoteSpec::is_local`] spells
+    /// out at length: a command that asks this and then reaches for the side it
+    /// assumed is the shape of bug the two-sided type exists to prevent. The
+    /// commands ask [`ObjectSpec::remote`] instead and let the `Option` decide
+    /// the branch, so the local path and the remote name can never be taken from
+    /// a specification that does not have one. The parser's own tests still have
+    /// to be able to observe which side a specification landed on, which is what
+    /// this is for.
+    #[cfg(test)]
     #[must_use]
     pub const fn is_local(&self) -> bool {
         self.remote.is_none()

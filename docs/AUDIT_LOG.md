@@ -424,9 +424,87 @@ intact: 2 records, head de169675b8da96a4892e92a98fd20b952f389d93fcfb0a38d95cf51b
 
 ## 9. Relationship to the DCTL commands
 
+### 9.1 Which commands append
+
+**Every operation that changes stored data, and no operation that does not.**
+
+| Family | Commands | `op` values |
+|--------|----------|-------------|
+| Transfer | `copy`, `move`, `sync`, `copyto`, `moveto` | `copy`, `move`, `sync`, `copyto`, `moveto` |
+| Removal | `delete`, `deletefile`, `purge`, `rmdir`, `rmdirs`, `cleanup` | the same six words |
+| Content | `rcat` | `rcat` |
+| Replication | `replicate` | `replicate` |
+| Vault | `init`, `index rebuild` | `init`, `index rebuild` |
+
+Reads — `ls`, `lsd`, `lsl`, `lsjson`, `tree`, `size`, `cat`, `verify`, `check`,
+`scrub`, `hashsum`, `about` — append **nothing**. That is not an oversight. A log
+that recorded every listing would bury the events that matter under the events
+that do not, and the file whose value is that somebody will read it end to end is
+the file that must stay short enough to read.
+
+`--dry-run` appends nothing either, for the sharper reason: a rehearsal changed
+nothing, so a record for it would describe work that did not happen — and would
+be indistinguishable from a real record forever afterwards.
+
+### 9.2 When the record is appended
+
+**After the durable commit, never before** (`PLAN.md` §6 step 8), and the fsync
+of §6 completes before the command reports success. One record per file, per
+object, or per vault-wide operation:
+
+* a transfer records after the index commit; a **`move` records after the source
+  removal**, because until the source is gone the move has not happened;
+* a removal records after the store confirms — for a vault, after the index row
+  is committed away;
+* `init` records immediately after the envelope write, which is the irreversible
+  step, so a vault's chain begins with an `init` at index `0`;
+* `replicate` records after the destination's verified write returns.
+
+**Failures are recorded too**, carrying the command's own classified slug from
+`docs/EXIT_CODES.md` — `checksum_mismatch`, `file_not_found`, `temporary_error`.
+A log that contained only successes could not answer "what went wrong on the
+3rd?", which is most of why anybody reads one.
+
+The boundary is **an attempt on the store**, and it is worth stating exactly. A
+file that was read, sealed and refused by the destination is recorded, with the
+refusal. A command that was rejected *before* it reached the store — a malformed
+`REMOTE:PATH`, a remote no configuration defines, a vault that would not unlock,
+a `deletefile` naming a path the vault does not hold — records nothing, because
+it attempted nothing and changed nothing. Its failure is in the structured log
+and in the exit code, which is where a mistyped command belongs; putting it here
+would fill the evidence file with typing.
+
+**If the record cannot be written, the command fails.** Exit 24
+(`audit_chain_broken`) when the file on disk is not a chain that may be extended,
+and exit 7 (`fatal_error`) for any other failure to write — the disk is full, the
+directory is not writable. Deliberately *not* the underlying I/O classification:
+a `NotFound` on the log's own directory surfacing as exit 4 would tell a script
+something false about the user's data. Proceeding without the trail the operator
+configured is the misreporting `PLAN.md` §7 forbids, so the run stops instead.
+
+### 9.3 Which hash fields are populated, and which are not
+
+Stated plainly, because an empty field must not be mistaken for a claim:
+
+| Family | `plaintext_hash` | `ciphertext_hash` |
+|--------|------------------|-------------------|
+| Transfer | **yes** — BLAKE3 of the plaintext, computed while the bytes were in hand | empty |
+| Replication | empty — `replicate` holds no key and no plaintext exists in it | **yes** — the digest the destination's verified write was given |
+| Removal, `init`, `index rebuild` | empty — nothing is read | empty |
+| `rcat` | empty | empty |
+
+The two gaps are honest limitations rather than choices. `dctl-core`'s
+`Vault::put_file` does not return the digest of the object it stored, so a
+transfer has no ciphertext hash to record; and `rcat` streams its input to its
+destination without ever holding it whole — which is what lets it take a database
+dump larger than memory — so there is nothing to hash without giving that up.
+Both fields become populated when the underlying API supplies them; neither is
+filled with a plausible-looking value in the meantime.
+
+### 9.4 Which commands read
+
 | Command | What it does with this format |
 |---------|-------------------------------|
-| *(engine, after every operation)* | Appends one record, fsyncs, then reports success. `PLAN.md` §6 step 8. |
 | `dctl audit verify` | Walks the chain per §4 and names the record where it breaks. |
 | `dctl audit list` | Renders the records, with filters. |
 | `dctl audit export` | Writes the chain out byte-for-byte re-verifiable. |
@@ -434,3 +512,9 @@ intact: 2 records, head de169675b8da96a4892e92a98fd20b952f389d93fcfb0a38d95cf51b
 All three **walk the whole chain and exit 24 (`audit_chain_broken`) if it is
 broken** — a `list` that printed forged rows and exited 0 would put those rows on
 screen with an implicit clean bill of health.
+
+An **empty** log verifies and reports `0 records`: "nothing has been appended" is
+a real answer. An **absent** one is exit 4 (`file_not_found`), because it far more
+often means the reader was pointed somewhere the writer never wrote — a different
+`--index`, a different machine — than that nothing ever happened, and "0 records,
+chain intact" would be a clean bill of health for a chain nobody looked at.

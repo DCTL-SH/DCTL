@@ -34,11 +34,10 @@
 //! so that stopping early is a decision the operator makes explicitly, and the
 //! report records that it happened.
 
-use crate::commands::integrity::failure::Verdict;
+use crate::commands::integrity::failure::{Verdict, classify};
 use crate::commands::listing::{self, Filter};
 use crate::ctx::Ctx;
-use crate::error::{CliError, Result};
-use crate::exit::ExitCode;
+use crate::error::Result;
 use crate::source::Source;
 
 use super::plan::Plan;
@@ -101,6 +100,10 @@ pub async fn scrub(
 /// findings for hours and an operator wants them as they happen, and the report
 /// has no field for a provider's own wording — [`Record`] carries a verdict,
 /// which is the part a machine consumer can act on.
+///
+/// The error-to-verdict rule is [`classify`], which lives in the integrity
+/// family rather than here because `verify` and `hashsum` ask the same question
+/// of the same errors and three copies of it would drift.
 async fn examine(ctx: &Ctx, source: &dyn Source, path: &str) -> Verdict {
     match source.verify(path).await {
         Ok(()) => Verdict::Ok,
@@ -110,28 +113,6 @@ async fn examine(ctx: &Ctx, source: &dyn Source, path: &str) -> Verdict {
                 .warn(format!("{}: {}", verdict.slug(), error.message()));
             verdict
         }
-    }
-}
-
-/// Which finding a failed read-back represents.
-///
-/// Three outcomes rather than one, because the operator's next action differs
-/// for each and a report that collapsed them would send them to the wrong place:
-/// corruption means restore from another copy, a missing object means the index
-/// and the provider disagree, and an unreadable one may need nothing but a
-/// retry. That distinction is why [`Source::verify`] classifies its errors
-/// instead of returning a bare failure.
-fn classify(error: &CliError) -> Verdict {
-    match error.code() {
-        // The bytes came back and were not the bytes that were stored. This is
-        // the only verdict that means data is gone rather than out of reach.
-        ExitCode::IntegrityFailure | ExitCode::ChecksumMismatch => Verdict::Corrupt,
-        ExitCode::FileNotFound => Verdict::Missing,
-        // Everything else — an outage, a permission change, a network path that
-        // stayed broken past the retry budget — is an availability problem.
-        // Calling it corruption would send someone hunting for damage that is
-        // not there.
-        _ => Verdict::Unreadable,
     }
 }
 
@@ -203,7 +184,7 @@ mod tests {
 
         assert_eq!(report.coverage.scanned, 2);
         assert_eq!(report.coverage.healthy, 2);
-        assert_eq!(report.coverage.bytes, 3);
+        assert_eq!(report.coverage.bytes, Some(3));
         assert_eq!(report.coverage.skipped, 0);
         assert!(report.outcome().is_none());
     }
@@ -454,30 +435,5 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(report.coverage.scanned, 1);
-    }
-
-    #[test]
-    fn a_failed_read_is_classified_by_what_it_means_for_the_data() {
-        assert_eq!(
-            classify(&CliError::new(ExitCode::IntegrityFailure, "x")),
-            Verdict::Corrupt
-        );
-        assert_eq!(
-            classify(&CliError::new(ExitCode::ChecksumMismatch, "x")),
-            Verdict::Corrupt
-        );
-        assert_eq!(
-            classify(&CliError::new(ExitCode::FileNotFound, "x")),
-            Verdict::Missing
-        );
-        // An outage is availability, not damage.
-        assert_eq!(
-            classify(&CliError::new(ExitCode::TemporaryError, "x")),
-            Verdict::Unreadable
-        );
-        assert_eq!(
-            classify(&CliError::new(ExitCode::Uncategorised, "x")),
-            Verdict::Unreadable
-        );
     }
 }

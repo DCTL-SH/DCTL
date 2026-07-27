@@ -28,27 +28,42 @@
 //! inherited `DCTL_*` environment is cleared on every command too: a maintainer
 //! with `DCTL_REMOTE` exported must not see different results from CI.
 //!
-//! ## Deliberately not covered
+//! ## Both kinds of remote, end to end
 //!
-//! There is no end-to-end vault upload or download. Reaching
-//! `Direction::Upload`/`Download` needs a `RemoteSpec::Named` destination, and
-//! in this build `crate::session::open` resolves one against the *empty* catalog
-//! — so a remote defined in `--config` is rejected as unknown, and the only
-//! names that do resolve (`b2:`, `s3:`, `r2:`) need real cloud credentials.
-//! Enumerating a named remote is unimplemented besides. Those paths are covered
-//! by the engine's own unit tests until the CLI can address a local vault by
-//! name; asserting on them here would mean asserting on a shape the binary
-//! cannot currently reach.
+//! A named remote is now enumerated and written through for real, so the two
+//! shapes that matter are asserted here rather than only in unit tests:
+//! [`copy_into_a_plain_configured_remote_needs_no_password_and_lands_the_bytes`]
+//! stores bytes through an ordinary remote with prompting switched off, and
+//! [`copy_into_a_vault_remote_still_needs_the_key_and_still_seals`] proves the
+//! sealed remote still refuses without a key and still writes nothing readable
+//! when it has one. They are a pair on purpose: the defect they pin was one
+//! answer being given to both questions.
 //!
-//! What *is* asserted end-to-end is the refusal
+//! Also asserted end-to-end is the refusal
 //! ([`copy_to_a_provider_shorthand_never_lands_in_a_directory_of_that_name`]):
 //! a named remote must never quietly become a local directory, because that
 //! failure looked exactly like a successful backup.
+//!
+//! ## Deliberately not covered
+//!
+//! Nothing here contacts a cloud provider. `b2:`, `s3:` and `r2:` appear only in
+//! the tests that assert a *refusal*, and the inherited credentials are cleared
+//! so a maintainer with real keys cannot have a test upload to somebody's
+//! bucket.
+//!
+//! The addressing invariants themselves — including that no flag makes a vault
+//! write land as plaintext even while the sealed path is unfinished — live in
+//! `tests/invariant_i4/`, which asserts on the bytes under the store rather than
+//! on today's exit codes.
 
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
+// `.not()` on a predicate: a refusal that must *not* appear is as much a
+// property as one that must, and asserting its absence is how a reinstated
+// "not implemented" would be caught rather than quietly passing.
+use predicates::prelude::PredicateBooleanExt as _;
 use tempfile::TempDir;
 
 /// Environment variables that would silently redirect a run away from its
@@ -125,6 +140,25 @@ impl Sandbox {
         }
         std::fs::write(&path, bytes).expect("write file");
         path
+    }
+
+    /// Backdate a file's modification time by `seconds`.
+    ///
+    /// Not decoration. A source file written a moment ago and a destination
+    /// written a moment later fall inside `DEFAULT_MODIFY_WINDOW_SECS`, so a
+    /// comparison that is completely broken still *looks* right on a fixture
+    /// built and copied inside one second. Ageing the source is what makes the
+    /// difference between "the times agree" and "the times were never
+    /// comparable" observable — which is the whole of defect D5.
+    fn age(&self, relative: &str, seconds: u64) {
+        let path = self.path(relative);
+        let when = std::time::SystemTime::now() - std::time::Duration::from_secs(seconds);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open the file to backdate it")
+            .set_modified(when)
+            .expect("set the modification time");
     }
 
     fn read(&self, relative: &str) -> Vec<u8> {
@@ -691,6 +725,47 @@ fn an_unattended_run_with_no_password_exits_with_usage() {
     assert!(!sandbox.path("vault").join(ENVELOPE).exists());
 }
 
+#[test]
+fn the_key_file_refusal_names_the_flag_and_never_calls_a_working_command_missing() {
+    // The chokepoint in `main.rs` is the only `--key-file` check a user ever
+    // reaches — the per-command ones behind it are defence in depth — and it
+    // built its message from the command name alone. So `dctl init --key-file`
+    // reported `dctl init is not implemented in this build`: a false statement
+    // about a command that creates vaults perfectly well, made to somebody whose
+    // only mistake was asking for two factors.
+    //
+    // The unit tests in `session::factor` all passed, because every one of them
+    // hands `refuse_if_present` a subject with the flag already in it. Only a run
+    // of the real binary goes through the call site that did not, which is why
+    // this test lives here.
+    let sandbox = Sandbox::new();
+    sandbox.dir("vault");
+    let keyfile = sandbox.write("kf.bin", b"not a real factor");
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("--key-file")
+        .arg(&keyfile)
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .code(7)
+        .stderr(predicates::str::contains("--key-file"))
+        // The layer that owes the capability, so the reader knows the wait is
+        // not this command's…
+        .stderr(predicates::str::contains("dctl-core"))
+        // …and the section that specifies it, so the wait has an address.
+        .stderr(predicates::str::contains("§8"))
+        // The sentence that must never come back.
+        .stderr(predicates::str::contains("dctl init is not implemented").not());
+
+    // And nothing was created — a refusal that left a one-factor vault behind
+    // would be the exact failure the refusal exists to prevent.
+    assert!(!sandbox.path("vault").join(ENVELOPE).exists());
+}
+
 // ── 10. --json ────────────────────────────────────────────────────────────────
 
 #[test]
@@ -852,10 +927,23 @@ fn copy_to_a_provider_shorthand_never_lands_in_a_directory_of_that_name() {
         .arg("b2:mybucket")
         .arg("--no-traverse")
         .assert()
-        // FatalError (7): with no B2 credentials exported the bucket cannot be
-        // reached, and saying so is the only honest answer available.
+        // FatalError (7), and the message names the B2 credential that is not
+        // exported. That is the *whole* remaining reason this run cannot
+        // proceed, and pinning it is what keeps two regressions visible:
+        //
+        //  * it must not say "not implemented" — writing a plain object into a
+        //    bucket is implemented, through `Backend::put`, and a refusal would
+        //    mean the path had been closed again;
+        //  * it must not ask for a vault password — `b2:mybucket` is a plain
+        //    destination with no key, and demanding one is defect S6/D4, the
+        //    behaviour that put this file's data in `./b2` in the first place.
+        //
+        // The password *is* on the environment for this run, deliberately: if
+        // anything on the path still reached for a vault it would find one and
+        // succeed, and the assertion below would catch it.
         .code(7)
-        .stderr(predicates::str::contains("DCTL_B2_KEY_ID"));
+        .stderr(predicates::str::contains("DCTL_B2_KEY_ID"))
+        .stderr(predicates::str::contains("not implemented").not());
 
     assert_eq!(
         all_files(&sandbox.path("b2")).len(),
@@ -892,6 +980,435 @@ fn copy_to_an_unconfigured_remote_names_the_remote_and_writes_nothing() {
     );
 }
 
+// ── 12. a plain configured remote is a first-class destination ────────────────
+
+/// The remote `dctl config create backup local path=…` registers in these tests.
+const PLAIN_REMOTE: &str = "backup";
+
+#[test]
+fn copy_into_a_plain_configured_remote_needs_no_password_and_lands_the_bytes() {
+    // D4, end to end. `dctl config create backup local path=/mnt/backup` makes
+    // an ordinary remote — no vault wraps it, nothing about it is sealed — and
+    // `dctl --no-ask-password copy ./src backup:` exited 22 demanding a vault
+    // password, having written nothing. The engine decided from the argument's
+    // *shape*: anything with a colon was a vault.
+    //
+    // Invariant I3 is that a write to an ordinary location is plaintext and
+    // fully supported, so the assertion is the bytes under the remote's root,
+    // not the exit code and not the "Files: 1 / 1" line — a counter can be
+    // incremented by a stage that did nothing.
+    const PAYLOAD: &[u8] = b"ordinary bytes for an ordinary remote";
+
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", PAYLOAD);
+    sandbox.write("src/sub/b.txt", b"nested");
+    let root = sandbox.dir("store");
+
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", root.display()))
+        .assert()
+        .success();
+
+    sandbox
+        .dctl()
+        // No password on the environment *and* prompting forbidden: if anything
+        // on this path still reaches for a key, the run cannot succeed.
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success();
+
+    assert_eq!(sandbox.read("store/a.txt"), PAYLOAD);
+    assert_eq!(sandbox.read("store/sub/b.txt"), b"nested");
+    // …and the source is untouched, because `copy` is not `move`.
+    assert_eq!(sandbox.read("src/a.txt"), PAYLOAD);
+}
+
+#[test]
+fn copy_into_a_plain_configured_remote_honours_the_prefix() {
+    // `backup:photos` must land under `photos/`, which is where a listing of
+    // `backup:photos` looks. Writing at the root instead would make every run
+    // copy the same files again, for ever, and report success each time.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", b"prefixed");
+    let root = sandbox.dir("store");
+
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", root.display()))
+        .assert()
+        .success();
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:photos"))
+        .assert()
+        .success();
+
+    assert_eq!(sandbox.read("store/photos/a.txt"), b"prefixed");
+    assert!(
+        !sandbox.exists("store/a.txt"),
+        "the prefix the user named must not be dropped"
+    );
+}
+
+#[test]
+fn a_second_copy_into_a_plain_remote_re_transfers_and_size_only_is_the_way_out() {
+    // A limitation, pinned deliberately rather than discovered on a bill.
+    //
+    // `Backend::put` stores bytes under a key and carries no modification time —
+    // there is no parameter for one, and for a bucket there could not be: B2, S3
+    // and R2 stamp `Last-Modified` themselves. So a plain destination reports the
+    // time it was *written*, exactly as a sealed vault reports the time it was
+    // sealed (defect D5), and the default size-and-time comparison finds every
+    // file different on the next run.
+    //
+    // For a vault, `crate::fidelity` substitutes a content comparison, because
+    // the index recorded a plaintext BLAKE3 at write time. A plain remote has no
+    // such record: a store holds the object and nothing about it, and a bucket's
+    // own checksum is SHA-1 or an ETag rather than a BLAKE3 of the plaintext. So
+    // there is nothing to substitute, and the honest behaviour is the one
+    // asserted here — re-transfer — with `--size-only` as the comparison that
+    // needs no clock.
+    //
+    // Assert both halves, because the first alone would pass on a tool that
+    // simply never skipped anything.
+    let sandbox = Sandbox::new();
+    for (path, bytes) in AGED_TREE {
+        sandbox.write(path, bytes);
+        sandbox.age(path, A_DAY);
+    }
+    let root = sandbox.dir("store");
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", root.display()))
+        .assert()
+        .success();
+
+    for _ in 0..2 {
+        sandbox
+            .dctl()
+            .arg("--no-ask-password")
+            .arg("copy")
+            .arg(sandbox.path("src"))
+            .arg(format!("{PLAIN_REMOTE}:"))
+            .assert()
+            .success()
+            .stderr(predicates::str::contains("Files: 3 / 3"));
+    }
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("--size-only")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 0 / 0"));
+}
+
+#[test]
+fn copy_out_of_a_plain_configured_remote_needs_no_password_either() {
+    // The same defect in the read direction: `copy backup: ./out` also opened a
+    // vault session and also failed at exit 22.
+    const PAYLOAD: &[u8] = b"read back out of an ordinary remote";
+
+    let sandbox = Sandbox::new();
+    let root = sandbox.dir("store");
+    sandbox.write("store/a.txt", PAYLOAD);
+
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", root.display()))
+        .assert()
+        .success();
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .arg(sandbox.path("out"))
+        .assert()
+        .success();
+
+    assert_eq!(sandbox.read("out/a.txt"), PAYLOAD);
+}
+
+#[test]
+fn copy_into_a_vault_remote_still_needs_the_key_and_still_seals() {
+    // The control for all three above, and the half of invariant I1 that must
+    // not move: a write through a vault remote is sealed, so it still needs the
+    // key — refused at exit 22 without one — and when it does run, the plaintext
+    // is nowhere under the store.
+    //
+    // Both halves are asserted in one test on purpose. "It refused" alone would
+    // also pass if the sealed path were broken outright, and "it sealed" alone
+    // would also pass if the password were being ignored.
+    const SECRET: &[u8] = b"SEALED-PAYLOAD-THAT-MUST-NOT-APPEAR-IN-THE-CLEAR";
+
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", SECRET);
+    sandbox.dir("vault");
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success();
+
+    let after_init = all_files(&sandbox.path("vault"));
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        // VaultLocked (22) — the exact code the plain remote must *not* produce.
+        .code(22);
+
+    assert_eq!(
+        all_files(&sandbox.path("vault")).len(),
+        after_init.len(),
+        "a refused sealed transfer must store nothing"
+    );
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+
+    let stored = all_files(&sandbox.path("vault"));
+    assert!(
+        stored.len() > after_init.len(),
+        "the sealed transfer must have stored something"
+    );
+    for file in &stored {
+        let contents = std::fs::read(file).expect("read a stored object");
+        assert!(
+            !contains(&contents, SECRET),
+            "plaintext was written through a vault remote: {}",
+            file.display()
+        );
+    }
+}
+
+// ── a vault destination is comparable against its source ──────────────────────
+
+/// The tree the incremental-backup tests copy.
+const AGED_TREE: &[(&str, &[u8])] = &[
+    ("src/a.txt", b"first"),
+    ("src/b.txt", b"second"),
+    ("src/sub/c.txt", b"third"),
+];
+
+/// A day, in seconds — how far the fixture's files are backdated.
+///
+/// Any value comfortably outside the modify window would do; a day is chosen
+/// because it is what a real backup looks like, where the source was written
+/// long before the copy of it was.
+const A_DAY: u64 = 86_400;
+
+/// Build the sandbox `copy` → `check` → `copy` is exercised against.
+fn aged_source_and_vault() -> Sandbox {
+    let sandbox = Sandbox::new();
+    for (path, bytes) in AGED_TREE {
+        sandbox.write(path, bytes);
+        sandbox.age(path, A_DAY);
+    }
+    sandbox.dir("vault");
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success();
+    sandbox
+}
+
+#[test]
+fn a_second_copy_into_a_vault_skips_every_file_and_check_agrees() {
+    // Defect D5. `dctl_core::Vault::put_file` takes no modification time and
+    // records `now_unix()` instead, so the index's time describes the *write*
+    // and never the source. Compared by size and time — the default — a vault
+    // destination therefore never matched its source: `copy` re-uploaded the
+    // whole dataset on every run, and `check` reported a tree it had just
+    // written as entirely different.
+    //
+    // Three assertions, in the order a user meets them, because each one alone
+    // has a way of passing while the product is broken:
+    //
+    //  * `check` agreeing proves the comparison was fixed;
+    //  * the second `copy` transferring nothing proves the *same* answer reached
+    //    the planner, rather than the two commands being fixed apart;
+    //  * the first `copy` transferring everything proves the fixture is real and
+    //    the skip is not simply "nothing was ever stored".
+    let sandbox = aged_source_and_vault();
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 3 / 3"));
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("check")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success()
+        // A health gate that is silent when healthy cannot be told apart from
+        // one that did nothing, so the clean run states what it compared.
+        .stderr(predicates::str::contains("3 paths compared"))
+        .stderr(predicates::str::contains("checksum"))
+        // …and says nothing on stdout, which is where a finding would go.
+        .stdout("");
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 0 / 0"));
+}
+
+#[test]
+fn a_vault_destination_says_why_it_compared_contents_instead_of_times() {
+    // The user asked for the default size-and-time comparison and got a content
+    // comparison, which costs a full read of the source. Silently substituting
+    // one for the other would be answering a different question than the one
+    // asked, so the run names the side that forced it and what it now costs.
+    let sandbox = aged_source_and_vault();
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains(VAULT_NAME))
+        .stderr(predicates::str::contains("compares contents"))
+        .stderr(predicates::str::contains("--size-only"));
+}
+
+#[test]
+fn an_edited_file_is_still_re_uploaded_after_the_comparison_changed() {
+    // The dangerous direction of the D5 fix. Making a vault destination compare
+    // equal is only correct if it still compares *unequal* when the contents
+    // change — and a same-size edit is precisely the case a size comparison
+    // would wave through, so it is the one worth pinning.
+    let sandbox = aged_source_and_vault();
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+
+    // Same length, same backdated timestamp, different bytes.
+    sandbox.write("src/a.txt", b"FIRST");
+    sandbox.age("src/a.txt", A_DAY);
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("check")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .code(6)
+        .stdout(predicates::str::contains("a.txt"));
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 1 / 1"));
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:a.txt"))
+        .assert()
+        .success()
+        .stdout("FIRST");
+}
+
+#[test]
+fn size_only_is_still_honoured_exactly_against_a_vault() {
+    // The compensation must not swallow a dial the user set deliberately.
+    // `--size-only` is a request for the cheapest comparison there is, and a run
+    // that silently upgraded it to a full read of the source would be spending
+    // the user's money to answer a question they declined to ask.
+    let sandbox = aged_source_and_vault();
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+
+    // A same-size edit: invisible to --size-only, by definition.
+    sandbox.write("src/a.txt", b"FIRST");
+    sandbox.age("src/a.txt", A_DAY);
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("--size-only")
+        .arg("check")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("size-only"));
+}
+
 // ── the harness itself ────────────────────────────────────────────────────────
 
 #[test]
@@ -911,5 +1428,413 @@ fn the_binary_under_test_is_the_one_that_was_built() {
     assert!(
         String::from_utf8_lossy(&output.stdout).contains("dctl"),
         "unexpected --version output"
+    );
+}
+
+// ── a scrub reports what it covered, and a rebuilt index reports what it does
+//    not know ───────────────────────────────────────────────────────────────
+
+/// The tree the scrub and unmeasured-size tests seal.
+///
+/// One genuinely empty file is in it on purpose. "The index recorded no size"
+/// and "the file is zero bytes long" are the two cases a naive fix collapses,
+/// and a fixture that held only non-empty files would let that collapse pass.
+/// What a size column reads when nothing ever measured the object.
+///
+/// Mirrors `constants::UNKNOWN_VALUE`, spelled out here so the test pins the
+/// rendered output rather than following the code that produced it.
+const UNKNOWN_SIZE: &str = "-";
+
+const SCRUBBED_TREE: &[(&str, &[u8])] = &[
+    ("src/a.txt", b"hello world payload"),
+    ("src/sub/b.txt", b"second file here"),
+    ("src/empty.txt", b""),
+];
+
+/// A vault holding [`SCRUBBED_TREE`], sealed through the ordinary copy path.
+fn a_sealed_vault_with_content() -> Sandbox {
+    let sandbox = Sandbox::new();
+    for (path, bytes) in SCRUBBED_TREE {
+        sandbox.write(path, bytes);
+    }
+    sandbox.dir("vault");
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success();
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    sandbox
+}
+
+#[test]
+fn a_scrub_says_what_it_covered_without_being_asked_to() {
+    // Defect D2. A clean scrub printed nothing at all on either stream at
+    // default verbosity, so it was indistinguishable from a scrub that had
+    // found nothing to read. The coverage is the report: a run that verified
+    // three objects has to say so where the operator is already looking, not
+    // only behind `--json` or `-v`.
+    let sandbox = a_sealed_vault_with_content();
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--verify", "strict", "scrub"])
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("3"))
+        .stderr(predicates::str::contains("healthy"))
+        .stderr(predicates::str::contains("authenticated"));
+}
+
+#[test]
+fn a_scrub_that_verified_nothing_does_not_pass_for_a_clean_one() {
+    // The dangerous half of D2, and the reason the exit code has to move: a
+    // cron job wrapping `dctl scrub` stayed green while verifying nothing at
+    // all, because scanning zero objects exited 0 and printed nothing.
+    let sandbox = a_sealed_vault_with_content();
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--verify", "strict", "scrub"])
+        .arg(format!("{VAULT_NAME}:nonexistent"))
+        .assert()
+        // NoFilesTransferred (9): the run succeeded and covered nothing.
+        .code(9)
+        .stderr(predicates::str::contains("nothing"));
+}
+
+#[test]
+fn a_rebuilt_index_reports_sizes_as_unknown_rather_than_as_zero() {
+    // Defect D3. `index rebuild` is a list-only pass, so its rows carry no
+    // size — and every reader downstream rendered that absence as the number
+    // 0. A capacity monitor reading `--json size` after a disaster-recovery
+    // rebuild was told a 40 TB vault held nothing.
+    let sandbox = a_sealed_vault_with_content();
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["index", "rebuild"])
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+
+    // `ls` must not print a byte count it does not have.
+    let listing = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("ls")
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let listed = String::from_utf8_lossy(&listing.get_output().stdout).into_owned();
+    assert!(
+        !listed.contains("0 B"),
+        "an unmeasured row must not render as a measured zero:\n{listed}"
+    );
+    assert_eq!(listed.lines().count(), 3);
+    assert!(
+        listed
+            .lines()
+            .all(|line| line.split_whitespace().next() == Some(UNKNOWN_SIZE)),
+        "every unmeasured row's size column must read as unknown:\n{listed}"
+    );
+
+    // `size` must not report a total it could not compute.
+    let sized = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--json", "size"])
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let totals = json(&sized.get_output().stdout);
+    assert_eq!(totals["count"], 3);
+    assert!(
+        totals["bytes"].is_null(),
+        "a total over unmeasured rows is not a number: {totals}"
+    );
+    assert_eq!(totals["unmeasured"], 3);
+    assert_eq!(totals["measured_bytes"], 0);
+
+    // And the same absence has to reach the audit trail a scrub writes.
+    let scrubbed = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--json", "scrub"])
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let report = json(&scrubbed.get_output().stdout);
+    assert_eq!(report["coverage"]["scanned"], 3);
+    assert_eq!(report["coverage"]["unmeasured"], 3);
+    assert!(
+        report["coverage"]["bytes"].is_null(),
+        "a scrub that cannot total its bytes must not publish a zero: {report}"
+    );
+}
+
+#[test]
+fn a_measured_vault_still_reports_its_real_sizes_and_a_real_zero() {
+    // The control, and the trap the D3 fix must not fall into: an object that
+    // genuinely is zero bytes long has a recorded size of zero, and rendering
+    // *that* as unknown would be the same defect pointing the other way.
+    let sandbox = a_sealed_vault_with_content();
+
+    let listing = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("ls")
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let listed = String::from_utf8_lossy(&listing.get_output().stdout).into_owned();
+    assert!(
+        listed.contains("0 B") && listed.contains("empty.txt"),
+        "a real empty file still measures zero:\n{listed}"
+    );
+    assert!(
+        listed
+            .lines()
+            .all(|line| line.split_whitespace().next() != Some(UNKNOWN_SIZE)),
+        "nothing here is unmeasured:\n{listed}"
+    );
+
+    let sized = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--json", "size"])
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let totals = json(&sized.get_output().stdout);
+    assert_eq!(totals["count"], 3);
+    assert_eq!(totals["bytes"], 35);
+    assert_eq!(totals["measured_bytes"], 35);
+    assert_eq!(totals["unmeasured"], 0);
+}
+
+// ── addressing one object still names it ──────────────────────────────────────
+
+#[test]
+fn a_listing_of_one_exact_object_still_names_that_object() {
+    // Defect D7. Every listing verb resolves an entry's path against the root
+    // the listing was opened at, and `dctl lsjson archive:a.txt` opens the
+    // listing at the object's own full path — so the relative portion came out
+    // empty. `lsjson` emitted `"Path": ""`, `ls` printed a blank path column,
+    // and `tree` printed a header with nothing under it.
+    //
+    // The empty string is the dangerous part rather than the ugly part: a
+    // script doing `lsjson ... | jq -r '.[0].Path'` reads it back and may go on
+    // to write to `""`. rclone answers the same argument with the file's name,
+    // and so must this.
+    let sandbox = a_sealed_vault_with_content();
+
+    // An object at the vault root has no parent to be relative to, so its whole
+    // name is the answer.
+    let top = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("lsjson")
+        .arg(format!("{VAULT_NAME}:a.txt"))
+        .assert()
+        .success();
+    let rows = json(&top.get_output().stdout);
+    assert_eq!(rows.as_array().map(Vec::len), Some(1));
+    assert_eq!(rows[0]["Path"], "a.txt");
+    assert_eq!(rows[0]["Name"], "a.txt");
+
+    // An object inside a directory is named relative to that directory, which
+    // is the case that a fix hard-coding "just use the whole path" gets wrong.
+    let nested = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("lsjson")
+        .arg(format!("{VAULT_NAME}:sub/b.txt"))
+        .assert()
+        .success();
+    let rows = json(&nested.get_output().stdout);
+    assert_eq!(rows.as_array().map(Vec::len), Some(1));
+    assert_eq!(rows[0]["Path"], "b.txt");
+
+    // The same root reaches `ls`, which had been printing the size and then
+    // nothing at all.
+    let listed = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("ls")
+        .arg(format!("{VAULT_NAME}:sub/b.txt"))
+        .assert()
+        .success();
+    let text = String::from_utf8_lossy(&listed.get_output().stdout).into_owned();
+    assert!(
+        text.contains("b.txt"),
+        "ls must name the object it listed:\n{text}"
+    );
+
+    // And `tree`, whose header is the argument and whose body was empty.
+    let tree = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("tree")
+        .arg(format!("{VAULT_NAME}:sub/b.txt"))
+        .assert()
+        .success();
+    let drawn = String::from_utf8_lossy(&tree.get_output().stdout).into_owned();
+    assert!(
+        drawn.lines().skip(1).any(|line| line.contains("b.txt")),
+        "tree must draw an entry beneath its header:\n{drawn}"
+    );
+}
+
+#[test]
+fn listing_a_directory_still_reports_paths_relative_to_it() {
+    // The control for the test above. The fix changes how a root that *equals*
+    // an entry's path resolves, and the way to get that wrong is to stop
+    // stripping the root from entries genuinely beneath it — which would make
+    // every ordinary listing print absolute paths and break every script that
+    // joins them onto a destination.
+    let sandbox = a_sealed_vault_with_content();
+
+    let whole = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("lsjson")
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let rows = json(&whole.get_output().stdout);
+    let paths: Vec<&str> = rows
+        .as_array()
+        .expect("lsjson emits an array")
+        .iter()
+        .filter_map(|row| row["Path"].as_str())
+        .collect();
+    assert!(
+        paths.contains(&"sub/b.txt"),
+        "a listing of the whole vault keeps the subtree in the path: {paths:?}"
+    );
+
+    let subtree = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("lsjson")
+        .arg(format!("{VAULT_NAME}:sub"))
+        .assert()
+        .success();
+    let rows = json(&subtree.get_output().stdout);
+    assert_eq!(rows.as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        rows[0]["Path"], "b.txt",
+        "listing a directory reports its children relative to it"
+    );
+}
+
+// ── a windowed read of a sealed object says what it will cost ────────────────
+
+/// Object size at or above which a whole-object read is announced.
+///
+/// Mirrors `constants::RANGED_READ_WHOLE_OBJECT_WARN_BYTES`. Spelled out rather
+/// than imported because this crate ships no library target, and spelled as the
+/// same arithmetic so a reader can check the two by eye.
+const RANGED_READ_WARN_BYTES: usize = 64 * 1024 * 1024;
+
+#[test]
+fn a_window_of_a_large_sealed_object_warns_before_it_downloads_the_lot() {
+    // Defect D8. `dctl_core` exposes no ranged read, so a vault serves a byte
+    // window by fetching and decrypting the entire object. That is correct —
+    // faking a short read would be worse — and it was documented only in the
+    // source tree. `dctl cat b2vault:film.mkv --offset 0 --count 4` on a 40 GB
+    // object is a 40 GB download that returns four bytes and exits 0, and the
+    // user finds out on an invoice with nothing tying the charge to the command.
+    //
+    // The read still happens. What changes is that its price is stated at
+    // pre-flight, while the run could still be interrupted.
+    let sandbox = Sandbox::new();
+    sandbox.dir("vault");
+    // One byte over the threshold: the warning is what is being tested, so the
+    // fixture must sit on the warning side of the boundary rather than near it.
+    sandbox.write("src/huge.bin", &vec![0_u8; RANGED_READ_WARN_BYTES + 1]);
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success();
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+
+    // Four bytes asked for; the whole object moved. Both numbers have to appear,
+    // because the object size is the one that gets billed and the only one the
+    // reader can act on.
+    let windowed = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:huge.bin"))
+        .args(["--offset", "0", "--count", "4", "--discard"])
+        .assert()
+        .success();
+    let warned = String::from_utf8_lossy(&windowed.get_output().stderr).into_owned();
+    assert!(
+        warned.contains("warning"),
+        "a window served by a whole-object read must announce itself:\n{warned}"
+    );
+    assert!(
+        warned.contains("64.0 MiB") || warned.contains("65.0 MiB"),
+        "the warning must quote the size that will actually be transferred:\n{warned}"
+    );
+    assert!(
+        warned.contains("no ranged read"),
+        "the warning must name the cause, or a reader will simply retry:\n{warned}"
+    );
+
+    // The control that makes the assertion above mean something. A plain store
+    // serves the identical window of the identical bytes with a genuine ranged
+    // request, so it must stay silent — proving the warning tracks what the read
+    // costs and not merely how big the object is. A warning that fired on both
+    // would be noise, and noise is what gets filtered out before the run that
+    // mattered.
+    sandbox
+        .dctl()
+        .args(["config", "create", "plain", "local"])
+        .arg(format!("path={}", sandbox.path("src").display()))
+        .assert()
+        .success();
+    let plain = sandbox
+        .dctl()
+        .arg("cat")
+        .arg("plain:huge.bin")
+        .args(["--offset", "0", "--count", "4", "--discard"])
+        .arg("--no-ask-password")
+        .assert()
+        .success();
+    let quiet = String::from_utf8_lossy(&plain.get_output().stderr).into_owned();
+    assert!(
+        !quiet.contains("no ranged read"),
+        "a store that serves real ranges must not warn about egress it does not \
+         spend:\n{quiet}"
     );
 }

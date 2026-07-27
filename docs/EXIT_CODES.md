@@ -46,7 +46,7 @@ Slugs and descriptions below are taken verbatim from `ExitCode::slug()` and
 | 6 | `partial_failure` | Some files failed to transfer |
 | 7 | `fatal_error` | Fatal error; cannot continue |
 | 8 | `transfer_limit_exceeded` | `--max-transfer` limit reached |
-| 9 | `no_files_transferred` | Succeeded, but no files were transferred |
+| 9 | `no_files_transferred` | Succeeded, but the run did no work |
 | 10 | `duration_limit_exceeded` | `--max-duration` limit reached |
 | 20 | `checksum_mismatch` | Verified write refused: checksum mismatch |
 | 21 | `integrity_failure` | AEAD authentication failed on read |
@@ -55,8 +55,10 @@ Slugs and descriptions below are taken verbatim from `ExitCode::slug()` and
 | 24 | `audit_chain_broken` | Audit log hash chain verification failed |
 | 25 | `cancelled` | Operation cancelled |
 
-`dctl help exitcodes` prints the same table from the same source, so the two
-cannot drift.
+The same table is written once in the code, as `ExitCode::slug` and
+`ExitCode::describe` in `crates/dctl-cli/src/exit.rs`. This page is kept in step
+with it by hand; there is no `dctl help exitcodes` subcommand, and this page used
+to claim there was.
 
 The slug is also the machine channel: it appears as the `error_code` field in
 structured log records and in `--json` output, so a log pipeline can alert on
@@ -136,12 +138,22 @@ source. In a batch run this is classified fatal (see
 `transfer::pipeline::is_fatal`), so the run stops at the first occurrence rather
 than producing one identical failure per file across ten million files.
 
-**What to do.** Check the password and any second factor first; a wrong factor
-and a wrong password are indistinguishable at this layer by design. If the
-password is definitely right, the envelope may be damaged — recover with
-`dctl vault recover` using the BIP39 phrase generated at init. That phrase
-unwraps the root key independently of the password, which is the entire reason it
-exists.
+**What to do.** Check the password first, and check how it reached DCTL — a
+`--password-file` or `--password-command` that emits a stray character produces a
+different secret than the one you typed.
+
+**There is no second way in.** This build unlocks a vault with a password and
+nothing else. `dctl init` writes a single key slot and issues no recovery phrase,
+and no `dctl vault recover` subcommand has ever existed. This page previously
+told you to run one, using "the BIP39 phrase generated at init" — neither the
+command nor the phrase is real, and following that advice cost you the time you
+had to find the password instead.
+
+If the password is definitely right, the envelope itself may be damaged. It is a
+single object, `system/envelope.bin`, in the vault's object store. Restoring that
+one object from a replica of the store is the only repair — which is why
+`dctl replicate` is worth running before you need it: it copies the envelope
+byte-for-byte along with everything else, and needs no password to do so.
 
 ## 23 — `index_error`
 
@@ -413,11 +425,18 @@ seen this document.
 
 ## What is reachable in this build
 
-Codes 8 (`transfer_limit_exceeded`), 9 (`no_files_transferred`) and 10
-(`duration_limit_exceeded`) are defined and reserved but not yet produced:
-`--max-transfer` is parsed but not enforced, and `--max-duration` is not yet a
-flag. They are listed here because the numbers are already committed to and will
-not be reused for anything else.
+Codes 8 (`transfer_limit_exceeded`) and 10 (`duration_limit_exceeded`) are
+defined and reserved but not yet produced: `--max-transfer` is parsed but not
+enforced, and `--max-duration` is not yet a flag. They are listed here because
+the numbers are already committed to and will not be reused for anything else.
+
+Code 9 (`no_files_transferred`) **is** produced today, by
+[`dctl scrub`](commands/dctl_scrub.md): a run that read no object at all reports
+grade `unverified` and exits 9 rather than 0. Nothing failed — the prefix matched
+nothing, or the dataset is empty, or the filters or `--sample-percent` admitted
+nothing — but nothing was proved either, and a scheduled scrub that stays green
+while verifying nothing is the failure that discipline exists to prevent. No
+transfer verb produces it yet.
 
 Individual commands document which codes they can actually return today — see the
 **Exit codes** section of each page under [commands/](commands/).

@@ -32,8 +32,6 @@
 //! the redaction protects the *hash*, this protects the *framing*, and neither
 //! is allowed to depend on the other being correct.
 
-#![allow(dead_code)]
-
 use crate::constants::AUDIT_LOG_LINE_TERMINATOR;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;

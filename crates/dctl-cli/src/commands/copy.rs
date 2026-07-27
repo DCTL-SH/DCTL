@@ -77,7 +77,7 @@ pub async fn run(ctx: &Ctx, args: &CopyArgs) -> Result<()> {
         delete_extras: false,
     };
 
-    let prepared = prepare::directory_transfer(ctx, &request)?;
+    let prepared = prepare::directory_transfer(ctx, &request).await?;
     report::announce(ctx, &prepared.plan, prepared.dest_file_count);
 
     if ctx.is_dry_run() {
@@ -104,7 +104,7 @@ pub async fn run(ctx: &Ctx, args: &CopyArgs) -> Result<()> {
     execute::account_for_skips(ctx, &prepared.plan);
     let engine =
         Engine::connect(ctx, TRANSFER_COMMAND_COPY, &prepared.source, &prepared.dest).await?;
-    execute::transfers(ctx, &engine, &prepared.plan).await
+    execute::transfers(ctx, TRANSFER_COMMAND_COPY, &engine, &prepared.plan).await
 }
 
 #[cfg(test)]
@@ -229,6 +229,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_real_copy_leaves_a_verifiable_record_of_what_it_moved() {
+        // The whole engine, end to end: the file moves, and the chained record
+        // that proves it moved is on disk and verifies. Asserted on the record's
+        // *plaintext hash* rather than only its path, because that is what turns
+        // the log from an activity log ("something called b.txt was copied") into
+        // evidence ("the file whose plaintext hashes to … was copied").
+        let (dir, source, dest) = fixture();
+        let ctx = ctx(&[]);
+        run(&ctx, &args(&source, &dest, &[])).await.unwrap();
+
+        let body = std::fs::read_to_string(ctx.audit.path()).unwrap();
+        let records: Vec<crate::audit::record::AuditRecord> = body
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+
+        assert_eq!(records.len(), 1, "only b.txt was transferred: {body}");
+        assert_eq!(records[0].op, TRANSFER_COMMAND_COPY);
+        assert_eq!(records[0].path, "b.txt");
+        assert_eq!(records[0].result, ExitCode::Success.slug());
+        assert_eq!(
+            records[0].plaintext_hash,
+            dctl_store::ContentHash::blake3(&std::fs::read(dir.path().join("src/b.txt")).unwrap())
+                .hex(),
+            "the record must attest to the bytes that actually moved"
+        );
+        crate::audit::chain::verify(&records).expect("the chain holds");
+    }
+
+    #[tokio::test]
+    async fn a_skipped_file_is_not_recorded_as_a_transfer() {
+        // `a.txt` is identical at both ends, so nothing was written for it. A
+        // record would claim a transfer that did not happen — and would make the
+        // log grow with every no-op run of a nightly backup.
+        let (_dir, source, dest) = fixture();
+        let ctx = ctx(&["--size-only"]);
+        run(&ctx, &args(&source, &dest, &[])).await.unwrap();
+
+        let body = std::fs::read_to_string(ctx.audit.path()).unwrap_or_default();
+        assert!(!body.contains("a.txt"), "{body}");
+        assert!(body.contains("b.txt"), "{body}");
+    }
+
+    #[tokio::test]
     async fn copy_leaves_the_source_untouched() {
         // The property that separates `copy` from `move`, asserted on the
         // filesystem rather than on the plan.
@@ -260,8 +305,8 @@ mod tests {
         assert_eq!(ctx.outcome(), ExitCode::Success);
     }
 
-    #[test]
-    fn copy_never_plans_a_deletion() {
+    #[tokio::test]
+    async fn copy_never_plans_a_deletion() {
         // The single property that separates this verb from `sync`.
         let (_dir, source, dest) = fixture();
         let ctx = ctx(&["--size-only"]);
@@ -274,7 +319,7 @@ mod tests {
             create_empty_src_dirs: false,
             delete_extras: false,
         };
-        let prepared = prepare::directory_transfer(&ctx, &request).unwrap();
+        let prepared = prepare::directory_transfer(&ctx, &request).await.unwrap();
 
         assert!(!prepared.plan.destroys_anything());
         assert_eq!(prepared.plan.count(Op::Copy), 1, "only b.txt is missing");

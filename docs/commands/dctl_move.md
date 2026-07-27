@@ -90,8 +90,12 @@ the sources gone regardless, remove them explicitly with
 **Comparison, filters and failure policy** are the family's, identical to
 [`copy`](dctl_copy.md): size and modification time by default with a one-second
 tolerance, `--checksum` or `--size-only` to change it, `--ignore-existing` and
-`--update` to skip; `--max-depth`/`--min-size`/`--max-size` honoured and the
-pattern filters refused; per-file failures counted and survived (exit 6), fatal
+`--update` to skip — including the substitution a vault side forces, where the
+default becomes a content comparison and the run warns why, which matters more
+here than anywhere else because what this command does with "identical" is
+delete the source; every filter honoured through one engine
+(`--include`, `--exclude`, `--filter-from`, `--files-from`, `--min-size`,
+`--max-size`, `--max-depth`); per-file failures counted and survived (exit 6), fatal
 failures stopping the run. Symbolic links are never followed and are counted and
 warned about — a link is not moved, and therefore is not deleted either.
 
@@ -122,19 +126,21 @@ when something goes wrong. Until it is fixed, move into a vault in two steps:
 `dctl copy` the tree up, verify it, then remove the source deliberately with
 [`delete`](dctl_delete.md).
 
-**Moving *out of* a vault cannot be planned.** Listing a named remote is still
-unimplemented, so a `REMOTE:PATH` source stops at enumeration with exit **7**
-(`listing a remote is not implemented in this build`) before the engine is
-reached. Remote-to-remote stops at the same place, and would be refused by the
-engine as well: a direct vault-to-vault path needs re-encryption support that
-`dctl-core` does not expose.
+**Moving *out of* a vault plans and runs.** A `REMOTE:PATH` source is enumerated
+through `crate::source`, the same reader `dctl ls` uses, so the listing and the
+move agree about what is there; each object is fetched, authenticated, written
+durably, and only then removed from the vault. Remote-to-remote is still refused
+by the engine at connect time, naming which of two gaps applies: a sealed end
+needs a re-encrypting transfer `dctl-core` does not expose (no `PLAN.md` §11
+phase schedules one), and two plain ends need only a `dctl-cli` engine that
+holds two backends (no phase names that either).
 
 The refusals `copy` documents apply here unchanged, all exit **7** and all
 before anything is deleted: a **plain write into a directory that holds a
 vault**, a file **above the 1 GiB whole-file limit** (the whole-buffer core
 would otherwise take the machine down; the limit disappears with streaming,
-`PLAN.md` §16.2), a **pattern filter**, and **`--checksum`** when no hashes are
-available. The oversized-file refusal is fatal, so files earlier in plan order
+`PLAN.md` §16.2), and **`--checksum`** against a plain object store, whose
+provider checksum is not the plaintext hash a vault records. The oversized-file refusal is fatal, so files earlier in plan order
 have already been moved — sources and all — and nothing after it is attempted.
 
 `--immutable` **is** honoured, at plan time: a plan containing an `update` — an
@@ -307,9 +313,9 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 0 | `success` | Every planned file was transferred and its source removed, or a `--dry-run` completed, or every file was already at the destination so there was nothing to move. |
 | 1 | `usage` | Unparseable command line; an empty spec or one containing `..`; source and destination are the same place; `DEST` is an existing file rather than a directory; an unparseable or unsatisfiable size range; `--interactive` with no terminal to prompt on; `--immutable` together with `--no-traverse`. |
 | 3 | `dir_not_found` | `SOURCE` does not exist. |
-| 5 | `temporary_error` | A cloud backend failed in a way worth retrying; that source is not deleted. Not reachable today — transfers cannot address a cloud backend yet. |
+| 5 | `temporary_error` | A cloud backend failed in a way worth retrying; that source is not deleted. Reachable wherever a cloud backend is contacted: reading a plain `b2:`/`s3:`/`r2:` source, writing a plain object into one, or a vault whose store is one of them. |
 | 6 | `partial_failure` | The run finished with at least one failure. A file that failed to transfer keeps its source; a file that transferred but whose source removal failed exists twice, and the message names the side. |
-| 7 | `fatal_error` | A named remote had to be listed; a file exceeded the whole-file limit; `DEST` is a local directory holding a vault; `--checksum` with no hashes; a pattern filter was passed; both sides are remotes; `--immutable` and the plan would replace something at the destination. Files completed before the refusal are moved and nothing after it is attempted — except the `--immutable` refusal, which happens before any file is touched. |
+| 7 | `fatal_error` | A file exceeded the whole-file limit; `DEST` is a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and the plan would replace something at the destination. Files completed before the refusal are moved and nothing after it is attempted — except the `--immutable` refusal, which happens before any file is touched. |
 | 20 | `checksum_mismatch` | The backend stored the wrong bytes. Nothing was committed and that source is untouched. Not reachable today: no `move` reaches a vault transfer, and a local write has no second party to disagree with. |
 | 21 | `integrity_failure` | `--verify sample`/`strict` could not authenticate what was written. The source is untouched; investigate before deleting it by hand. Not reachable today, for the same reason as 20. |
 | 22 | `vault_locked` | No password was available, or the envelope did not unwrap. Nothing was transferred and nothing was deleted. |

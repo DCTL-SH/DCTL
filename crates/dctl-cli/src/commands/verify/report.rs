@@ -14,14 +14,6 @@
 //! the result — and a trailing summary record would force exactly that, or force
 //! every consumer to branch on the record's shape.
 
-// Some of what follows is not reachable from this build's `run` body: the engine
-// has no entry point yet for the step that would call it (see the command's
-// module documentation). It is written and unit-tested now, with the tests that
-// pin its contract, rather than left until the engine lands — a machine-readable
-// output format that first appears on the day it is needed is a format nobody
-// reviewed.
-#![allow(dead_code)]
-
 use serde::Serialize;
 
 use crate::commands::integrity::failure::{self, Verdict};
@@ -40,8 +32,14 @@ pub struct Record {
     pub path: String,
     /// The verdict, serialised as its stable slug.
     pub status: Verdict,
-    /// Plaintext size, as recorded in the index.
-    pub size: u64,
+    /// Plaintext size, as recorded in the index, or `null` when the index holds
+    /// no size for this object.
+    ///
+    /// The same absence [`crate::source::Entry::size`] carries, preserved
+    /// instead of flattened: a row written by `dctl index rebuild` has never
+    /// been measured, and a verification record claiming a real object is zero
+    /// bytes long misdescribes exactly the object somebody is checking.
+    pub size: Option<u64>,
     /// Why a non-`ok` verdict was reached. Absent when there is nothing to add.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -50,7 +48,7 @@ pub struct Record {
 impl Record {
     /// A record for one object.
     #[must_use]
-    pub fn new(path: impl Into<String>, status: Verdict, size: u64) -> Self {
+    pub fn new(path: impl Into<String>, status: Verdict, size: Option<u64>) -> Self {
         Self {
             path: path.into(),
             status,
@@ -72,12 +70,34 @@ impl Record {
 /// `examined` is carried explicitly rather than derived from the record count so
 /// that a run which stopped early (`--fail-fast`) reports how much of the target
 /// it actually looked at, instead of implying it covered everything.
-#[derive(Clone, Copy, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Serialize)]
 pub struct Summary {
     pub examined: u64,
     pub verified: u64,
     pub failed: u64,
-    pub bytes: u64,
+    /// Bytes examined, or `null` when any object had no recorded size. See
+    /// [`Record::size`]; the total is only a fact when every part of it was.
+    pub bytes: Option<u64>,
+    /// Bytes of the objects that did carry a recorded size — always a number, so
+    /// the countable part of the run is never lost behind the null.
+    pub measured_bytes: u64,
+    /// How many examined objects carried no recorded size.
+    pub unmeasured: u64,
+}
+
+impl Default for Summary {
+    /// A run that has examined nothing has read a *known* zero bytes. Derived,
+    /// `bytes` would start as `None` and no run could ever total itself.
+    fn default() -> Self {
+        Self {
+            examined: 0,
+            verified: 0,
+            failed: 0,
+            bytes: Some(0),
+            measured_bytes: 0,
+            unmeasured: 0,
+        }
+    }
 }
 
 /// The whole result of one `verify` run.
@@ -87,6 +107,13 @@ pub struct Report {
     pub target: String,
     /// Which `--verify` strength produced these verdicts.
     pub verify_mode: String,
+    /// Whether the run stopped at the first failure because `--fail-fast` asked
+    /// it to.
+    ///
+    /// Published, because a report that ended early describes less of the target
+    /// than it was pointed at, and a consumer reading only the JSON would
+    /// otherwise read `"failed": 1` as the full extent of the damage.
+    pub stopped_early: bool,
     pub objects: Vec<Record>,
     pub summary: Summary,
     /// The worst verdict seen, which decides the exit code. Not serialised: it
@@ -103,16 +130,35 @@ impl Report {
         Self {
             target: target.into(),
             verify_mode: verify_mode.into(),
+            stopped_early: false,
             objects: Vec::new(),
             summary: Summary::default(),
             worst: Verdict::Ok,
         }
     }
 
+    /// Note that the run stopped at the first failure.
+    ///
+    /// A method rather than a public assignment so the reason it exists travels
+    /// with it: `--fail-fast` trades the answer to "how much is damaged" for
+    /// speed, and the report has to say that the trade was made.
+    pub fn stopped_early(&mut self) {
+        self.stopped_early = true;
+    }
+
     /// Record one object's result, updating the tally.
     pub fn push(&mut self, record: Record) {
         self.summary.examined += 1;
-        self.summary.bytes += record.size;
+        match record.size {
+            Some(size) => {
+                self.summary.measured_bytes = self.summary.measured_bytes.saturating_add(size);
+                self.summary.bytes = self.summary.bytes.map(|t| t.saturating_add(size));
+            }
+            None => {
+                self.summary.unmeasured = self.summary.unmeasured.saturating_add(1);
+                self.summary.bytes = None;
+            }
+        }
         if record.status.is_failure() {
             self.summary.failed += 1;
         } else {
@@ -123,6 +169,15 @@ impl Report {
     }
 
     /// The worst verdict in the run.
+    ///
+    /// `cfg(test)` deliberately. Production reads [`Report::outcome`], which is
+    /// the reduction *and* the wording *and* the exit code in one place; a
+    /// command that could read the raw verdict instead would be a command that
+    /// could grow a second opinion about what a corrupt object means. What is
+    /// left is the observation point a test needs to assert the reduction
+    /// directly, which is worth having because the ordering — corruption
+    /// outranks everything — is the part that decides the exit status.
+    #[cfg(test)]
     #[must_use]
     pub const fn worst(&self) -> Verdict {
         self.worst
@@ -204,7 +259,7 @@ impl Report {
         for record in &self.objects {
             let mut cells = vec![
                 record.status.slug().to_string(),
-                size::bytes(record.size, out.units()),
+                size::bytes_or_unknown(record.size, out.units()),
             ];
             if details {
                 cells.push(
@@ -242,9 +297,9 @@ mod tests {
 
     fn sample() -> Report {
         let mut report = Report::new("vault:photos", "strict");
-        report.push(Record::new("photos/a.jpg", Verdict::Ok, 2048));
+        report.push(Record::new("photos/a.jpg", Verdict::Ok, Some(2048)));
         report.push(
-            Record::new("photos/b.jpg", Verdict::Corrupt, 4096)
+            Record::new("photos/b.jpg", Verdict::Corrupt, Some(4096))
                 .with_detail("chunk 3 failed authentication"),
         );
         report
@@ -256,13 +311,27 @@ mod tests {
         assert_eq!(report.summary.examined, 2);
         assert_eq!(report.summary.verified, 1);
         assert_eq!(report.summary.failed, 1);
-        assert_eq!(report.summary.bytes, 2048 + 4096);
+        assert_eq!(report.summary.bytes, Some(2048 + 4096));
+    }
+
+    #[test]
+    fn a_run_that_stopped_early_says_so_in_the_document() {
+        // Without it, `"failed": 1` from a `--fail-fast` run reads as the full
+        // extent of the damage rather than as the first of it.
+        let mut report = Report::new("vault:", "strict");
+        report.push(Record::new("a", Verdict::Corrupt, Some(1)));
+        assert!(!report.stopped_early);
+        report.stopped_early();
+
+        let rendered = report.render(&json_out(Format::Json)).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&rendered).unwrap();
+        assert_eq!(parsed["stopped_early"], true);
     }
 
     #[test]
     fn a_clean_run_has_no_outcome_error() {
         let mut report = Report::new("vault:", "checksum");
-        report.push(Record::new("a", Verdict::Ok, 1));
+        report.push(Record::new("a", Verdict::Ok, Some(1)));
         assert!(report.outcome().is_none());
         assert_eq!(report.worst(), Verdict::Ok);
     }
@@ -282,9 +351,9 @@ mod tests {
     fn corruption_outranks_an_unreadable_object() {
         // The worst verdict decides, whatever order the records arrived in.
         let mut report = Report::new("vault:", "strict");
-        report.push(Record::new("a", Verdict::Unreadable, 0));
-        report.push(Record::new("b", Verdict::Corrupt, 0));
-        report.push(Record::new("c", Verdict::Missing, 0));
+        report.push(Record::new("a", Verdict::Unreadable, Some(0)));
+        report.push(Record::new("b", Verdict::Corrupt, Some(0)));
+        report.push(Record::new("c", Verdict::Missing, Some(0)));
         assert_eq!(report.worst(), Verdict::Corrupt);
         assert_eq!(report.outcome().unwrap().code(), ExitCode::IntegrityFailure);
     }
@@ -343,7 +412,7 @@ mod tests {
     fn the_detail_column_appears_only_when_something_failed() {
         // A clean run should not pay for a column of dashes.
         let mut clean = Report::new("vault:", "checksum");
-        clean.push(Record::new("a", Verdict::Ok, 1));
+        clean.push(Record::new("a", Verdict::Ok, Some(1)));
         let rendered = clean.render(&Out::plain()).unwrap();
         assert!(!rendered.contains(INTEGRITY_COLUMN_DETAIL));
 

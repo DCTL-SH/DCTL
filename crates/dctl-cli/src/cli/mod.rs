@@ -16,6 +16,12 @@
 
 pub mod globals;
 
+// A test and nothing else: it reads this crate's own source and asks the parser
+// below whether every `dctl …` the binary writes down names a command that
+// exists. Four have not. See the module for why that is checked mechanically.
+#[cfg(test)]
+mod mentions;
+
 use clap::{Parser, Subcommand};
 
 use crate::commands;
@@ -36,7 +42,7 @@ contract applies to both.
 Paths are written as REMOTE:PATH, for example 'vault:photos/2024'. A bare path,
 a Windows drive path such as C:\\data, and a UNC path are all treated as local.
 
-Run 'dctl help exitcodes' for the exit-code contract, or see docs/commands/ for
+See docs/EXIT_CODES.md for the exit-code contract, or docs/commands/ for
 per-command documentation.";
 
 /// Top-level parsed command line.
@@ -288,8 +294,18 @@ impl Command {
 
     /// Whether this command needs an unlocked vault.
     ///
-    /// The commands that do not — `config`, `version`, `completion`, `about` —
-    /// must run without ever prompting for a password.
+    /// The commands that do not — `config`, `version`, `completion` — must run
+    /// without ever prompting for a password.
+    ///
+    /// `about` used to be in that list and no longer is. Its usage report
+    /// measures how much a remote holds by enumerating it, and for a sealed
+    /// remote that means opening the vault, so the claim stopped being true the
+    /// moment the report started being real. `dctl about --capabilities` still
+    /// answers offline — that promise is asserted in `commands::about` against
+    /// `--no-ask-password`, which is where a per-mode claim belongs — but this
+    /// classifier describes a whole command, and a command that can prompt must
+    /// not be listed here. A documented promise nobody can rely on is worse than
+    /// no promise.
     ///
     /// `replicate` joins them, and for a reason worth more than the others put
     /// together: it moves a vault's opaque ciphertext objects between two object
@@ -301,11 +317,7 @@ impl Command {
     pub const fn requires_vault(&self) -> bool {
         !matches!(
             self,
-            Self::Config(_)
-                | Self::Version(_)
-                | Self::Completion(_)
-                | Self::About(_)
-                | Self::Replicate(_)
+            Self::Config(_) | Self::Version(_) | Self::Completion(_) | Self::Replicate(_)
         )
     }
 

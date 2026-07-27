@@ -99,11 +99,14 @@ Everything except the filesystem adapter. In order, a run:
 6. fails with exit **7** (`fatal_error`):
 
 ```
-error: dctl mount is not implemented in this build
+error: dctl mount: a filesystem adapter (missing crate dctl-mount: no
+FUSE/FSKit/WinFSP layer to attach a remote through) is not implemented in this
+build
 warning: The mountpoint checks, the flag surface and the per-platform backend
 choice are final and have already run — only the filesystem adapter is missing.
 It is PLAN.md phase 2 (§11, §15): FUSE3 on Linux, FSKit/fuse-t/macFUSE on macOS,
-WinFSP on Windows.
+WinFSP on Windows. Until then, `dctl copy` and `dctl cat --offset` read the same
+data without a mount.
 ```
 
 The flag spellings and defaults on this page are final on purpose: `--help`, the
@@ -128,7 +131,9 @@ $ dctl mount vault: /mnt/vault -v
 would mount vault: at /mnt/vault
 backend: Linux FUSE3 (fuser)
 options: read-only=false, dir-cache=5m00s, attr-timeout=1s, vfs-cache=off, buffer=16.0 MiB, read-ahead=0 B, modtime=true
-error: dctl mount is not implemented in this build
+error: dctl mount: a filesystem adapter (missing crate dctl-mount: no
+FUSE/FSKit/WinFSP layer to attach a remote through) is not implemented in this
+build
 warning: The mountpoint checks, the flag surface and the per-platform backend
 choice are final and have already run — only the filesystem adapter is missing. ...
 $ echo $?
@@ -143,7 +148,9 @@ $ dctl mount vault:photos/2024 /Volumes/photos -v --read-only
 would mount vault:photos/2024 at /Volumes/photos
 backend: macOS FSKit (macOS 15+, no kernel extension) (falling back to fuse-t (no kernel extension, NFS loopback), macFUSE (kernel extension; opt-in, highest throughput))
 options: read-only=true, dir-cache=5m00s, attr-timeout=1s, vfs-cache=off, buffer=16.0 MiB, read-ahead=0 B, modtime=true
-error: dctl mount is not implemented in this build
+error: dctl mount: a filesystem adapter (missing crate dctl-mount: no
+FUSE/FSKit/WinFSP layer to attach a remote through) is not implemented in this
+build
 ```
 
 A media subtree tuned for scrubbing back and forth through large files: the
@@ -161,7 +168,9 @@ $ dctl mount b2prod:bucket/media /mnt/media \
 would mount b2prod:bucket/media at /mnt/media
 backend: Linux FUSE3 (fuser)
 options: read-only=true, dir-cache=30m00s, attr-timeout=1s, vfs-cache=full, buffer=32.0 MiB, read-ahead=128.0 MiB, modtime=true
-error: dctl mount is not implemented in this build
+error: dctl mount: a filesystem adapter (missing crate dctl-mount: no
+FUSE/FSKit/WinFSP layer to attach a remote through) is not implemented in this
+build
 ```
 
 Read-ahead without a cache to fill is a warning, not a refusal — the same flags
@@ -172,7 +181,9 @@ $ dctl mount vault: /mnt/vault --vfs-read-ahead 128M
 warning: --vfs-read-ahead does nothing with --vfs-cache-mode off: read-ahead
 fills the on-disk cache, and there is none. Use --buffer-size for in-memory
 read-ahead, or turn the cache on.
-error: dctl mount is not implemented in this build
+error: dctl mount: a filesystem adapter (missing crate dctl-mount: no
+FUSE/FSKit/WinFSP layer to attach a remote through) is not implemented in this
+build
 ```
 
 A non-empty mountpoint is refused, with a count, because the mount would hide
@@ -210,7 +221,9 @@ C:\> dctl mount vault:photos X: -v
 would mount vault:photos at X:
 backend: WinFSP
 options: read-only=false, dir-cache=5m00s, attr-timeout=1s, vfs-cache=off, buffer=16.0 MiB, read-ahead=0 B, modtime=true
-error: dctl mount is not implemented in this build
+error: dctl mount: a filesystem adapter (missing crate dctl-mount: no
+FUSE/FSKit/WinFSP layer to attach a remote through) is not implemented in this
+build
 ```
 
 Windows also warns about the POSIX-only dials, rather than failing a script that
@@ -222,7 +235,9 @@ warning: --allow-other and --allow-root are POSIX permission concepts and have
 no effect on Windows, where access follows the drive's ACL.
 warning: --daemon has no effect on Windows: a filesystem stays up as a service
 there, not as a detached process.
-error: dctl mount is not implemented in this build
+error: dctl mount: a filesystem adapter (missing crate dctl-mount: no
+FUSE/FSKit/WinFSP layer to attach a remote through) is not implemented in this
+build
 ```
 
 A local path as the *source* is refused: mounting one local directory onto

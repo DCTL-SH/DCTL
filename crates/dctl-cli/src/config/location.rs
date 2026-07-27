@@ -21,14 +21,31 @@
 //! pure by design, and a rule that needed I/O to decide could not be enforced
 //! when the file is written on one machine and read on another. Two spellings of
 //! one directory (`/srv/vault` and `/srv/../srv/vault`) are therefore two
-//! locations here, and the vault-only rule does not catch the second.
+//! locations *here*, and config validation does not catch the second.
 //!
-//! That is the honest trade and worth stating plainly: this catches the mistake
-//! people actually make — pointing a second, plain remote at a store they can
-//! see in `dctl config list` — and does not pretend to be a sandbox. The
-//! invariant that has no gaps is the one on the write path, where a vault remote
-//! always seals and a plain write into a store is refused by inspecting the
-//! bytes that are really there.
+//! That purity is right for validation and would be wrong on the write path, so
+//! the write path does not rely on it. [`super::namespace`] compares each
+//! [`Location`] twice — as the file spells it and as
+//! [`crate::platform::resolve`] resolves it — precisely so a destination cannot
+//! escape the vault-only rule by being typed differently. This module used to
+//! carry a paragraph excusing the gap on the grounds that the write path closed
+//! it by "inspecting the bytes that are really there". That excuse was wrong
+//! twice over, and both halves are worth recording so they are not reintroduced:
+//!
+//! * It was **factually wrong**. Inspecting bytes is the *fallback* for a
+//!   location no remote describes. For a configured store the decision is made
+//!   from the file alone, so a spelling this type failed to recognise was not
+//!   rescued by anything downstream — it was a plaintext write into a vault.
+//! * It described the **wrong shape of guarantee**. Invariant I4 (see
+//!   [`crate::addressing`]) says contents may only ever cause a refusal, never a
+//!   change in what a command does. A guard justified by what it reads off the
+//!   disk is a guard whose behaviour is a function of the disk, which is the
+//!   property the model exists to deny.
+//!
+//! What remains true, and is the honest limit of this type on its own: it
+//! catches the mistake people actually make — pointing a second, plain remote at
+//! a store they can see in `dctl config list` — and it does not pretend to be a
+//! sandbox.
 
 use std::fmt;
 use std::path::Path;
@@ -99,14 +116,51 @@ impl Location {
     /// a plain write into a vault's object store stops being refused.
     ///
     /// Kept as pure as everything else here: no canonicalisation, no symlink
-    /// expansion, no filesystem access at all. A path is taken exactly as it is
-    /// spelled, which is the trade the module documentation states.
+    /// expansion, no filesystem access at all. But *purity is not the same as
+    /// literalness*, and conflating the two cost this module its whole purpose.
+    ///
+    /// The identity was previously `path.display()` — a raw string — so
+    /// `/srv/store/` and `/srv/store` were two different places. They are one
+    /// directory spelled two ways, and a trailing slash is what shell
+    /// tab-completion produces. The consequence was not cosmetic:
+    /// `dctl copy ./src /srv/store/` wrote plaintext *into* a vault's object
+    /// store and exited 0, and `dctl sync ./src /srv/store/` deleted the
+    /// ciphertext objects already there.
+    ///
+    /// So the identity is built from the path's **components**, which is a pure,
+    /// I/O-free normalisation: it collapses `/`, `//`, `/.` and a trailing
+    /// separator, and leaves everything that genuinely distinguishes two places
+    /// alone. `..` is deliberately NOT resolved — that needs the filesystem to be
+    /// correct in the presence of symlinks, and guessing would be worse than the
+    /// resolved-path pass [`super::namespace`] already performs.
     #[must_use]
     pub fn of_path(path: &Path) -> Self {
-        Self(format!(
-            "{PROVIDER_LOCAL}{REMOTE_SEPARATOR}{}",
-            path.display()
-        ))
+        use std::path::Component;
+
+        let mut identity = String::new();
+        for component in path.components() {
+            match component {
+                Component::RootDir => identity.push('/'),
+                Component::CurDir => {}
+                Component::Prefix(prefix) => {
+                    identity.push_str(&prefix.as_os_str().to_string_lossy());
+                }
+                Component::ParentDir => {
+                    if !identity.is_empty() && !identity.ends_with('/') {
+                        identity.push('/');
+                    }
+                    identity.push_str("..");
+                }
+                Component::Normal(part) => {
+                    if !identity.is_empty() && !identity.ends_with('/') {
+                        identity.push('/');
+                    }
+                    identity.push_str(&part.to_string_lossy());
+                }
+            }
+        }
+
+        Self(format!("{PROVIDER_LOCAL}{REMOTE_SEPARATOR}{identity}"))
     }
 }
 
@@ -264,7 +318,9 @@ mod tests {
     fn a_path_is_taken_as_the_file_spells_it() {
         // Documented limitation, asserted so it cannot be assumed away: nothing
         // here touches a filesystem, so two spellings of one directory are two
-        // locations. The write-path guard is what closes that gap.
+        // locations. `super::namespace` closes that gap by resolving both sides
+        // before it compares them; this type stays pure so validation can run on
+        // a machine that has never seen the paths in the file.
         assert_ne!(
             Location::of(&local("/srv/vault")),
             Location::of(&local("/srv/../srv/vault"))

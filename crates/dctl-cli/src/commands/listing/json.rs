@@ -49,9 +49,17 @@ pub struct JsonEntry<'a> {
     /// Final path component.
     #[serde(rename = "Name")]
     pub name: &'a str,
-    /// Plaintext size in bytes; for a directory, the total beneath it.
+    /// Plaintext size in bytes; for a directory, the total beneath it. `null`
+    /// when nothing ever measured it.
+    ///
+    /// Null rather than `0`, for the same reason `ModTime` is null rather than
+    /// the epoch: a vault index rebuilt from object headers carries no sizes
+    /// until each file is next read, and a consumer summing this field must be
+    /// able to tell "this object is empty" from "nobody has weighed this
+    /// object". A zero silently understated a forty-terabyte vault; a null makes
+    /// the arithmetic fail where the reader can see it.
     #[serde(rename = "Size")]
-    pub size: u64,
+    pub size: Option<u64>,
     /// Last modification, RFC 3339 in UTC, or `null` when the index recorded
     /// none. Null rather than the epoch: "unknown" and "1970" are different
     /// answers and a consumer must be able to tell them apart.
@@ -135,7 +143,7 @@ mod tests {
 
     #[test]
     fn a_directory_carries_no_hashes_and_no_time() {
-        let dir = Entry::directory("photos/2024".into(), "photos", 4096);
+        let dir = Entry::directory("photos/2024".into(), "photos", Some(4096));
         assert_eq!(
             value(&dir),
             json!({

@@ -109,9 +109,13 @@ impl Stream {
                 // include that" without re-running with different flags. The
                 // *absolute* path, unlike the rendered output, because a log
                 // line has no listing root to be relative to.
+                // The size is recorded through `Debug` rather than as a bare
+                // integer: an unmeasured row has no byte count, and a trace
+                // line that logged `0` for it would put the same misreport into
+                // the record an operator reconstructs a run from.
                 tracing::trace!(
                     { fields::PATH } = entry.path(),
-                    { fields::BYTES } = entry.size(),
+                    { fields::BYTES } = tracing::field::debug(entry.size()),
                     "listed"
                 );
                 visit(entry)?;

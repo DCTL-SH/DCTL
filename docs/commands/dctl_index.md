@@ -46,15 +46,30 @@ before it starts, because the effect is visible immediately afterwards:
 
 ```
 dctl ls archive:
-       0 B a.txt
-       0 B sub/b.bin
+         - a.txt
+         - sub/b.bin
 ```
 
-Those files are not empty, and nothing that *matters* is wrong — `dctl cat`,
-`dctl scrub` and `dctl copy` all read the object itself and get the right bytes.
-`dctl cat` in particular measures the object rather than trusting an unmeasured
-zero, so it can never write a short stream and exit 0. What a listing shows is
-the index's own state, and the index genuinely does not know the sizes yet.
+Those files are not empty, and the listing says so: an unmeasured row renders as
+`-`, the same placeholder `lsl` already uses for a modification time the index
+never recorded. It used to render as `0 B`, which is a *number* — and a number
+gets believed, summed and acted on. `dctl size` reported `"bytes": 0` for a
+forty-terabyte vault, `dctl scrub` filed the same zero into its coverage record,
+and `dctl delete --dry-run` offered to free nothing. See
+[`dctl size`](dctl_size.md#when-the-total-cannot-be-computed) for the JSON shape
+that carries the absence.
+
+Nothing that *matters* is wrong — `dctl cat`, `dctl scrub` and `dctl copy` all
+read the object itself and get the right bytes. `dctl cat` in particular measures
+the object rather than trusting an unmeasured zero, so it can never write a short
+stream and exit 0. What a listing shows is the index's own state, and the index
+genuinely does not know the sizes yet.
+
+**A read does not settle them.** `rebuild_index`'s own documentation says the
+sizes "populate on first read of each file"; in this build they do not — `cat`,
+`hashsum` and a whole `scrub` all leave the row exactly as unmeasured as they
+found it. Only writing the file again records a size, so the remedy is to re-run
+the copy that produced the vault.
 
 ### Idempotent, and safe to repeat
 

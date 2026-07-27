@@ -64,7 +64,10 @@
 //!
 //! That makes a vault read O(object) in memory. It is stated on
 //! [`Source::read_range`] and repeated in [`vault`] because it is the kind of
-//! cost that must be found in the documentation rather than in an OOM.
+//! cost that must be found in the documentation rather than in an OOM — and,
+//! since documentation is only read by people who already suspect a problem, it
+//! is also reported by [`Source::ranged_read`] so a command can say so out loud
+//! before spending anybody's egress budget. See [`ranged`].
 //!
 //! ## The path vocabulary
 //!
@@ -80,12 +83,14 @@ pub mod assurance;
 pub mod entry;
 pub mod open;
 pub mod plain;
+pub mod ranged;
 pub mod sizes;
 pub mod vault;
 
 pub use assurance::Assurance;
 pub use entry::Entry;
 pub use open::open;
+pub use ranged::RangedRead;
 pub use sizes::Sizes;
 
 use async_trait::async_trait;
@@ -180,6 +185,10 @@ pub trait Source: Send + Sync {
     /// because `dctl_core` exposes no ranged read — so memory and egress are
     /// O(object), not O(window). See [`vault`].
     ///
+    /// That difference is not left for the caller to discover. [`Source::ranged_read`]
+    /// reports it before the read happens, which is what lets `cat` warn about a
+    /// four-byte window that is about to cost a 40 GB download.
+    ///
     /// # Errors
     /// As [`Source::read`].
     async fn read_range(
@@ -188,6 +197,19 @@ pub trait Source: Send + Sync {
         offset: u64,
         length: Option<u64>,
     ) -> Result<Zeroizing<Vec<u8>>>;
+
+    /// What a [`Source::read_range`] on this source costs.
+    ///
+    /// Deliberately has no default. A new implementation must state its price,
+    /// because the wrong answer here is silent: a source that inherited
+    /// [`RangedRead::Windowed`] without meaning to would spend a caller's egress
+    /// budget without ever saying so, which is the exact failure this exists to
+    /// close. Being made to answer is cheap; discovering the answer on an
+    /// invoice is not.
+    ///
+    /// This is not a way to ask which implementation is in hand — see
+    /// [`ranged`] — but what the next read will move.
+    fn ranged_read(&self) -> RangedRead;
 
     /// Describe one object without reading it, or [`None`] if it is not there.
     ///
@@ -203,6 +225,13 @@ pub trait Source: Send + Sync {
     /// that cannot describe an object from metadata alone must read it rather
     /// than answer with a placeholder; where that can happen is documented on
     /// the implementation (see [`vault`]).
+    ///
+    /// That is why a `Some` from here always carries a measured
+    /// [`Entry::size`], even though an *enumeration* legitimately yields entries
+    /// whose size nobody ever measured. Enumerating a vault must not cost a full
+    /// read of it, so a listing reports the absence honestly; a `stat` is asked
+    /// about one object by name and pays the read rather than leaving its caller
+    /// to invent a length.
     ///
     /// # Errors
     /// Whatever the index or provider reported while looking.

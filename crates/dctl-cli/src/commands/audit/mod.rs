@@ -28,16 +28,17 @@
 //! every record written after the drift reads as a forgery, and neither half is
 //! wrong enough to notice.
 //!
-//! ## What is implemented, and what is not
+//! ## What these verbs read
 //!
-//! The reader, the chain walk and all three renderings are complete and work on
-//! any conforming log. [`crate::audit::write`] is complete and tested too, but
-//! is **not yet called** by the transfer and removal families — the append has
-//! to sit after the durable index commit (`PLAN.md` §6 step 6) in every one of
-//! them. So a missing log is still reported as
-//! [`crate::constants::AUDIT_WRITER_FEATURE`] — an error with a real exit code —
-//! rather than as "0 records, chain intact", which would be a clean bill of
-//! health for a system that has never recorded anything.
+//! A real log. Every operation that changes stored data — the transfer family,
+//! the removal family, `rcat`, `replicate`, `init` and `index rebuild` — appends
+//! a chained record through [`crate::audit::sink`] after its durable commit, so
+//! the chain these verbs walk is the account of what this machine actually did.
+//!
+//! An **empty** log verifies, and says so: the claim "nothing has been appended"
+//! is a real answer. An **absent** one is an error, because it far more often
+//! means the reader was pointed somewhere the writer never wrote than that
+//! nothing ever happened — see [`source`].
 
 pub use crate::audit::{chain, record};
 

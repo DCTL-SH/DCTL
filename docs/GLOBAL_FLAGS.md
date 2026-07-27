@@ -34,8 +34,11 @@ global block, and are not repeated below.
 > command in this build. They are marked *not yet honoured* on the flag, and
 > listed together under [Flags that parse but do not yet act](#flags-that-parse-but-do-not-yet-act).
 > Nothing on that list silently degrades a guarantee: where honouring a flag
-> matters for correctness (`--filter-from`, `--files-from`, `--key-file`), the
-> command **fails** rather than proceeding without it.
+> matters for correctness (`--key-file`), the command **fails** rather than
+> proceeding without it. `--filter-from` and `--files-from` used to be on that
+> list for the listing verbs; they are now honoured by every command, through the
+> same engine, so a listing and the transfer that follows it select the same
+> files.
 
 ---
 
@@ -136,9 +139,14 @@ The second-factor keyfile from `PLAN.md` §8: something you *have* mixed into th
 KEK alongside something you *know*, so that a stolen password alone does not open
 the vault.
 
-**Not supported by the engine in this build.** The vault's key-encryption key is
-derived from the password alone, so the file this flag names is never opened and
-the factor cannot be applied to either creating a vault or opening one.
+**Not supported by the engine in this build**, and the layer is named because it
+is not the CLI's: `dctl_core::Vault::init` and `::unlock` take a password and no
+factor parameter, so there is no argument for a keyfile to become. The vault's
+key-encryption key is derived from the password alone, the file this flag names
+is never opened, and the factor cannot be applied to either creating a vault or
+opening one. `PLAN.md` §8 — the auth/key model of phase 0 (§11) — is where the
+missing half is specified: the password half shipped and the factor half did
+not, so this is an unfinished foundation rather than a future feature.
 
 Rather than proceed with one factor when you asked for two, the flag is refused
 with exit **7** at both of the places a key is derived:
@@ -150,8 +158,15 @@ with exit **7** at both of the places a key is derived:
   `dctl copy ./src vault: --key-file kf.bin` exits 7 having transferred nothing
   and read nothing.
 
-Both refusals name the flag and state what did not happen. A run given a keyfile
-never exits **0**, so a success can never be a run that silently dropped one.
+Both refusals name the flag, the capability, the crate that owes it, and what did
+not happen. A run given a keyfile never exits **0**, so a success can never be a
+run that silently dropped one.
+
+The message is assembled in one place rather than at each call site, which is a
+correctness property and not tidiness: the chokepoint every command passes
+through used to compose it from the command name alone, and `dctl init
+--key-file kf` therefore reported *"dctl init is not implemented in this
+build"* — a false statement about a command that works.
 
 (A command whose vault path is not implemented at all — the listings today —
 fails with its own exit **7** before reaching the unlock. The reason differs;
@@ -249,6 +264,16 @@ length. Conflicts with `--checksum` — the two ask for contradictory comparison
 so passing both is a usage error rather than a silent precedence rule. With
 neither flag, the default is size plus modification time within a one-second
 window.
+
+**One exception, and it is announced.** A sealed vault records the moment each
+object was written rather than the source file's modification time, so the
+default comparison cannot mean anything against one. When `copy`, `move`,
+`sync` or `check` has a vault on either side and neither flag was given, the
+default becomes a **content** comparison — the vault records a plaintext BLAKE3
+and can answer the stronger question — and the run warns on stderr naming the
+side that forced it. `--size-only` and `--checksum` are unaffected: both are
+explicit, and neither depends on a timestamp. See
+[dctl copy](commands/dctl_copy.md) for the cost and for what retires it.
 
 ### `--immutable`
 
@@ -398,30 +423,28 @@ script can tell the difference.
 | `--max-size` | `SIZE` | none | no |
 | `--max-depth` | `N` | `-1` (unlimited) | no |
 
-**Not every command honours every flag in this group yet, and the ones that
-cannot honour a flag refuse it rather than ignore it** (exit **7**). A filter
-that was silently dropped would make `sync` delete the files it was written to
-protect, and would make a listing *look* complete to somebody deciding what to
-delete next. The three groups of commands differ:
+**One engine answers for every command that takes these flags.** The transfer
+family (`copy`, `copyto`, `move`, `moveto`, `sync`) and the recovery family
+(`backup`, `restore`) both evaluate them through `crate::filter`, so a rule means
+exactly the same thing wherever it is typed. Three implementations of one flag
+would eventually disagree, and the way they disagree is that a listing shows a
+file the transfer then omits — or, in a `sync`, that a rule reaching only one
+side turns an excluded destination file into an "extra" and deletes it.
 
-| Flag | Listing (`ls`, `lsl`, `lsd`, `lsjson`, `tree`, `size`) | Transfer (`copy`, `copyto`, `move`, `moveto`, `sync`) | `backup`, `restore` |
-|------|-----------|----------|---------------------|
-| `--include`, `--exclude` | honoured | refused | refused |
-| `--filter-from` | refused | refused | refused |
-| `--files-from` | refused | refused | **honoured** |
-| `--min-size`, `--max-size`, `--max-depth` | honoured | honoured | honoured |
+**A filter is applied to both sides of a diff.** That is the property that makes
+`sync --exclude 'archive/**'` protect `archive/` at the destination rather than
+empty it: the rule hides the tree on both sides, so it is neither transferred nor
+deleted.
 
-The refusals name themselves in the error text —
-`reading filter rules from a file` for the listing commands,
-`pattern filtering (--include/--exclude/--filter-from/--files-from)` for the
-transfer commands, and
-`glob filtering (--include/--exclude/--filter-from)` for `backup`/`restore` — so
-the message tells you which of the three rules you hit. `purge` is the exception
-that neither honours nor refuses: it removes a whole tree by definition, so it
-**warns** that filters are being ignored and points at `delete` instead.
+**What is refused is a filter that will not compile** — a malformed pattern, an
+unreadable or unparseable rule file, a size that does not parse, a `--max-depth`
+that is not a depth. Those are usage errors (exit **1**) raised before anything
+is listed, because a run that proceeded with a rule the operator believes is in
+force is the data-loss case this whole group exists to prevent.
 
-The size and depth filters are the ones evaluated everywhere, which is what the
-hints on the refusals suggest reaching for.
+`purge` is the exception that neither honours nor refuses: it removes a whole
+tree by definition, so it **warns** that filters are being ignored and points at
+`delete` instead. The listing family's own coverage is documented per command.
 
 **Precedence: `--exclude` wins.** An entry matching any exclusion is gone
 regardless of what else it matches, and `--include` then narrows whatever
@@ -469,15 +492,19 @@ Drop paths matching this glob, repeatable in the same way, and applied before
 because it cannot be overridden by an include: caches, `node_modules`, editor
 droppings, another tool's staging directory.
 
-Honoured and refused by exactly the same commands as `--include`.
+Honoured by exactly the same commands as `--include`.
 
 ### `--filter-from PATH`
 
 Read include/exclude rules from a file, one per line — the form that scales past
-what fits on a command line and can be version-controlled. **Not yet honoured by
-any command**: passing it fails with exit **7** rather than running with the rules
-dropped, because a listing whose filter file was silently ignored *looks*
-complete, and listings are what people read before deciding what to delete.
+what fits on a command line and can be version-controlled. Honoured by the
+listing, transfer and recovery families. A rule file keeps its **internal order
+exactly**,
+because that order is the whole reason the form exists, and unlike the `--include`
+flag it does **not** append an implicit `- **`: a rule file is an ordered program
+whose author is expected to write their own final rule. A file that cannot be read
+or parsed is a usage error rather than a run with the rules dropped, because a
+transfer whose filter file was silently ignored *looks* complete.
 
 ### `--files-from PATH`
 
@@ -485,17 +512,19 @@ Transfer only the paths named in this file, one per line, skipping the directory
 walk entirely — the right tool when an upstream process already knows exactly
 which files changed. Repeatable; several lists are merged into one set.
 
-**Honoured today by `backup` and `restore`**, where it is more than a
-convenience: with vault enumeration not yet implemented, it is the only way to
-give `restore` a path set, which is what makes a restore drill possible in this
-build. Blank lines and `#` comments are skipped, and every surviving line is
+Honoured by the listing, transfer and recovery families. It is more than a
+convenience in `backup` and `restore`, where it is the way to give a restore
+drill an exact path set. Blank lines and `#` comments are skipped, and every
+surviving line is
 canonicalised the same way an index key is (`/`-separated, NFC), so a list
 written on Windows with backslashes selects the same objects as one written on
 Linux. A line containing `..` is a usage error (exit **1**) naming the file and
 line number, rather than a path quietly resolved outside the transfer root.
 
-The listing and transfer commands **refuse** it with exit **7**, for the same
-reason as `--filter-from`.
+A listing verb applies the list as an exact filter rather than as a way to skip
+a walk: an index range scan and a provider listing are already flat, so there is
+no directory recursion to be skipped. The **set of objects shown is the same set
+a transfer would take**, which is the property that matters.
 
 ### `--min-size SIZE`
 
@@ -716,6 +745,29 @@ existing remote, and a `sync` whose source is empty and which would therefore
 delete everything at the destination. `--dry-run` still wins — `--force --dry-run`
 changes nothing.
 
+`--force` is **not** an override for the addressing rule below. It approves work
+you are allowed to do; it does not grant permission DCTL does not have.
+
+### What no flag in this document does
+
+**No flag on this page changes what a command encrypts.** Not `--force`, not
+`--verify`, not `--remote`, not any combination of them. Encryption is decided by
+the remote name typed — see
+[the addressing invariants](commands/dctl.md#encryption-is-decided-by-the-name-you-type)
+— and the matrix in `crates/dctl-cli/tests/invariant_i4/` crosses every flag here
+with every write verb and asserts it on the bytes left on disk.
+
+That extends to `--dry-run`, and deliberately so: a rehearsal reaches the *same*
+addressing decision as the real run, so a plan you approved is a plan the run
+will actually perform. A dry run that printed "would copy" for a destination the
+real run refuses would be worse than no dry run, because it is trusted.
+
+The one behaviour that is not decided by the name typed is a **refusal**. For a
+bare path that no configured remote describes, DCTL inspects the destination for
+a vault envelope and fails closed if it finds one — it can stop a command, and
+that is all it can ever do. The reasoning, and the honest limits of it, are on
+the [root command page](commands/dctl.md#the-residual-a-location-no-configured-remote-describes).
+
 ---
 
 ## Environment variables
@@ -812,11 +864,9 @@ them in this build. They are listed here so that nobody plans a job around one:
 * `--dump` — the protocol tracing layer is not installed.
 
 The filtering flags are deliberately **not** on this list, because none of them is
-ever silently ignored. `--filter-from` refuses everywhere with exit **7**;
-`--include`/`--exclude` are honoured by the listing commands and refused by the
-rest; `--files-from` is honoured by `backup` and `restore` and refused by the
-rest; and `--min-size`/`--max-size`/`--max-depth` are honoured everywhere. See
-[Filtering](#filtering) for the table. `--key-file` is likewise absent: rather
+ever silently ignored: the transfer and recovery families evaluate all of them
+through one engine, and a rule that will not compile is a usage error rather than
+a run with the rule dropped. See [Filtering](#filtering). `--key-file` is likewise absent: rather
 than fall back to weaker protection than was asked for, it refuses everywhere
 with exit **7** — when creating a vault *and* when opening one. See
 [`--key-file PATH`](#--key-file-path).
@@ -830,6 +880,6 @@ a whole tree by definition and warns that it is ignoring them.
 
 * [docs/commands/](commands/) — per-command pages, each listing the global flags
   that change that command's behaviour.
-* `dctl help exitcodes` — the exit-code contract.
+* [docs/EXIT_CODES.md](EXIT_CODES.md) — the exit-code contract.
 * `PLAN.md` §6 (verified-write durability), §7 (logging and audit), §14
   (configuration and secrets).

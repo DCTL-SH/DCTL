@@ -183,7 +183,7 @@ mod tests {
         let mut cursor = source.enumerate("").await.expect("a listing opens");
         let entry = cursor.next().await.unwrap().expect("one entry");
         assert_eq!(entry.path, "a.txt");
-        assert_eq!(entry.size, 5);
+        assert_eq!(entry.size, Some(5));
         assert_eq!(source.read("a.txt").await.unwrap().as_slice(), b"hello");
     }
 

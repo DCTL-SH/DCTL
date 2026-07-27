@@ -170,21 +170,30 @@ the bucket root while the configuration said it was in a subdirectory, and every
 later command would look where the file pointed and find nothing. Address the
 container itself, or give the vault a container of its own.
 
-**`--key-file` is not implemented.** `PLAN.md` §8's second factor — "know" plus
-"have" — has no way into the engine in this build: the vault initialiser takes a
-password and nothing else. Passing `--key-file` therefore fails immediately with
-exit **7** rather than quietly creating a one-factor vault for someone who asked
-for two, which would be exactly the "reported as done when it did not happen"
-failure `PLAN.md` §6 exists to prevent:
+**`--key-file` is not implemented, and the gap is one crate down.** `PLAN.md`
+§8's second factor — "know" plus "have" — has no way into the engine in this
+build: `dctl_core::Vault::init` and `::unlock` take a password and no factor
+parameter, so no arrangement of CLI code supplies one. Passing `--key-file`
+therefore fails immediately with exit **7** rather than quietly creating a
+one-factor vault for someone who asked for two, which would be exactly the
+"reported as done when it did not happen" failure `PLAN.md` §6 exists to
+prevent:
 
 ```
-error: dctl init --key-file is not implemented in this build
-warning: The engine wraps the root key under a password alone in this build.
-Creating the vault without the second factor would protect it less than you
-asked for, so nothing was created.
+error: dctl init: the --key-file second factor (missing in dctl-core:
+Vault::init and ::unlock take a password and no factor parameter) is not
+implemented in this build
+warning: This build derives the key-encryption key from the password alone, so
+the file named by --key-file is never read and the second factor cannot be
+applied. dctl_core::Vault::init and ::unlock take no factor parameter; PLAN.md
+§8 (the auth/key model of phase 0, §11) is where the missing half is specified.
+No command was run and nothing was read or written.
 ```
 
-Two-factor unlock arrives with the `PLAN.md` §8 envelope-slot work.
+Note what the message does *not* say. It used to read "dctl init is not
+implemented in this build", which is false — `init` creates vaults perfectly
+well, and the only thing missing is the factor. Two-factor unlock arrives with
+the `PLAN.md` §8 envelope-slot work.
 
 **The index.** Each vault needs its own index database. It defaults to
 `vault.redb` inside the platform data directory (`~/.local/share/dctl/` on

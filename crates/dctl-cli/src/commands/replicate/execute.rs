@@ -38,7 +38,9 @@
 
 use dctl_store::{ByteRange, ContentHash, ObjectKey};
 
+use crate::audit::record::Entry as AuditEntry;
 use crate::cli::VerifyMode;
+use crate::commands::replicate::VERB;
 use crate::constants::{
     PLAN_REASON_CHECKSUM, PLAN_REASON_IDENTICAL, REPLICATE_REASON_MISMATCH,
     REPLICATE_REASON_TOO_LARGE, REPLICATE_REASON_UNREADABLE, REPLICATE_REASON_UNWRITABLE,
@@ -113,13 +115,66 @@ pub async fn run(ctx: &Ctx, plan: &Plan, source: &Store, destination: &Store) ->
                 ctx.stats.file_skipped();
                 item.clone()
             }
-            _ => one(ctx, item, source, destination, verify).await,
+            _ => {
+                let done = one(ctx, item, source, destination, verify).await;
+                // Step 8, after the destination's verified write has returned.
+                // A skip is not recorded: nothing was written, and a log in
+                // which "already there" and "copied there today" looked alike
+                // could not answer when a replica actually gained an object.
+                record(ctx, &done, destination)?;
+                done.item
+            }
         };
         tally(&mut summary, &done);
         items.push(done);
     }
 
     Ok(Outcome { items, summary })
+}
+
+/// Append one object's chained record.
+///
+/// The only family in DCTL whose records carry a **ciphertext** hash and no
+/// plaintext one, and the asymmetry is the command's whole point: `replicate`
+/// holds no key, derives nothing and unwraps nothing, so the sealed object's
+/// BLAKE3 is the only digest that exists here. A plaintext hash in one of these
+/// records would be a claim the command is built never to be able to make.
+///
+/// The digest is the one [`one`] handed to [`dctl_store::Backend::put`] — the
+/// value the destination's verified write refused to commit anything else
+/// against — so what the log attests to is exactly what the store accepted,
+/// rather than a second hash of bytes read at a second moment.
+///
+/// # Errors
+/// Whatever [`crate::audit::sink::Sink::record`] refused. Fatal to the run: the
+/// log is unwritable for every object behind this one too, and replicating
+/// 10 000 objects unrecorded is precisely what `PLAN.md` §7 forbids.
+fn record(ctx: &Ctx, done: &Replicated, destination: &Store) -> Result<()> {
+    let item = &done.item;
+    let outcome = if item.action == Action::Failed {
+        // The classification `failed` already chose, kept rather than
+        // re-derived: `checksum_mismatch` and "could not be read" are different
+        // findings and the log has to keep them apart.
+        if item.reason == REPLICATE_REASON_MISMATCH {
+            ExitCode::ChecksumMismatch
+        } else {
+            ExitCode::TemporaryError
+        }
+    } else {
+        ExitCode::Success
+    };
+
+    ctx.audit.record(
+        &AuditEntry::new(VERB, outcome)
+            .path(&item.key)
+            .size(item.size)
+            .ciphertext_hash(&done.hash)
+            // The resolved *name*, not the spec: `destination.spec` is the text
+            // the operator typed, colon and all, and `remote == replica` is the
+            // filter a compliance query runs years later. One remote must have
+            // one spelling in the log or that query silently returns nothing.
+            .remote(destination.name()),
+    )
 }
 
 /// Add one finished object to the counts.
@@ -152,9 +207,9 @@ async fn one(
     source: &Store,
     destination: &Store,
     verify: VerifyMode,
-) -> Item {
+) -> Replicated {
     if item.size > REPLICATE_WHOLE_OBJECT_LIMIT {
-        return failed(
+        return unread(failed(
             ctx,
             item,
             REPLICATE_REASON_TOO_LARGE,
@@ -164,7 +219,7 @@ async fn one(
                 size::bytes(item.size, ctx.out.units()),
                 size::bytes(REPLICATE_WHOLE_OBJECT_LIMIT, ctx.out.units())
             ),
-        );
+        ));
     }
 
     let key = ObjectKey::new(item.key.clone());
@@ -175,7 +230,7 @@ async fn one(
         Ok(bytes) => bytes,
         Err(error) => {
             ctx.progress.finish_file(handle);
-            return failed(
+            return unread(failed(
                 ctx,
                 item,
                 REPLICATE_REASON_UNREADABLE,
@@ -183,7 +238,7 @@ async fn one(
                     "'{}' could not be read from '{}': {error}",
                     item.key, source.spec
                 ),
-            );
+            ));
         }
     };
     let expected = ContentHash::blake3(&bytes);
@@ -204,10 +259,13 @@ async fn one(
                 ctx.progress.finish_file(handle);
                 ctx.stats.file_skipped();
                 ctx.stats.add_verified_bytes(item.size);
-                return Item {
-                    action: Action::Reverify,
-                    reason: PLAN_REASON_IDENTICAL,
-                    ..item.clone()
+                return Replicated {
+                    item: Item {
+                        action: Action::Reverify,
+                        reason: PLAN_REASON_IDENTICAL,
+                        ..item.clone()
+                    },
+                    hash: expected.hex(),
                 };
             }
             // Either the copy differs or it could not be read. Both are answered
@@ -231,17 +289,23 @@ async fn one(
         } else {
             REPLICATE_REASON_UNWRITABLE
         };
-        return failed(
-            ctx,
-            item,
-            reason,
-            &format!(
-                "'{}' could not be stored at '{}': {}",
-                item.key,
-                destination.spec,
-                classified.message()
+        return Replicated {
+            item: failed(
+                ctx,
+                item,
+                reason,
+                &format!(
+                    "'{}' could not be stored at '{}': {}",
+                    item.key,
+                    destination.spec,
+                    classified.message()
+                ),
             ),
-        );
+            // Read from the source and hashed, so the record can still name the
+            // object that failed to land — which is the object somebody has to
+            // go and check.
+            hash: expected.hex(),
+        };
     }
     // `Progress::advance` is what credits `Stats::add_bytes`, so the transferred
     // count is raised here and nowhere else. Adding it twice made a clean run
@@ -251,7 +315,10 @@ async fn one(
     ctx.progress.set_stage(&handle, Stage::Verifying);
     if let Err(problem) = read_back(destination, &key, &bytes, &expected, verify).await {
         ctx.progress.finish_file(handle);
-        return failed(ctx, item, REPLICATE_REASON_MISMATCH, &problem);
+        return Replicated {
+            item: failed(ctx, item, REPLICATE_REASON_MISMATCH, &problem),
+            hash: expected.hex(),
+        };
     }
 
     ctx.progress.set_stage(&handle, Stage::Done);
@@ -266,16 +333,43 @@ async fn one(
         "object replicated"
     );
 
-    Item {
-        action: Action::Replicate,
-        reason: if item.action == Action::Reverify {
-            // It was supposed to be identical and was not, which is the finding
-            // a strict run exists to produce.
-            PLAN_REASON_CHECKSUM
-        } else {
-            item.reason
+    Replicated {
+        item: Item {
+            action: Action::Replicate,
+            reason: if item.action == Action::Reverify {
+                // It was supposed to be identical and was not, which is the
+                // finding a strict run exists to produce.
+                PLAN_REASON_CHECKSUM
+            } else {
+                item.reason
+            },
+            ..item.clone()
         },
-        ..item.clone()
+        hash: expected.hex(),
+    }
+}
+
+/// One object's outcome, paired with the ciphertext digest that identifies it.
+///
+/// The pair exists because the report and the audit log want different halves of
+/// the same fact: the report renders the [`Item`], and the record needs the
+/// digest, which only lives for as long as the bytes were in hand.
+struct Replicated {
+    item: Item,
+    /// BLAKE3 of the sealed bytes, lower-case hex, or empty when the object was
+    /// never read and therefore never hashed.
+    hash: String,
+}
+
+/// An outcome for an object whose bytes were never obtained.
+///
+/// A separate constructor rather than a default, so that "there is no digest
+/// because nothing was read" is written down at each of the two places it is
+/// true — and cannot be reached by forgetting to supply one.
+const fn unread(item: Item) -> Replicated {
+    Replicated {
+        item,
+        hash: String::new(),
     }
 }
 
@@ -618,8 +712,8 @@ mod tests {
             VerifyMode::Checksum,
         )
         .await;
-        assert_eq!(done.action, Action::Failed);
-        assert_eq!(done.reason, REPLICATE_REASON_TOO_LARGE);
+        assert_eq!(done.item.action, Action::Failed);
+        assert_eq!(done.item.reason, REPLICATE_REASON_TOO_LARGE);
         assert_eq!(context.outcome(), ExitCode::PartialFailure);
     }
 

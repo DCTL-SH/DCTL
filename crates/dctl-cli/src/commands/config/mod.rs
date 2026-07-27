@@ -37,8 +37,9 @@
 //! [`import`] inspects a location, confirms a vault's envelope is there, and
 //! writes the same pair `dctl init` writes. It is the recovery path for a lost
 //! configuration, and it is an *explicit command an operator runs*, never a
-//! detection that fires during a copy: what a command does to bytes follows the
-//! remote name typed, not what the destination happens to contain.
+//! detection that fires during a copy: what a command encrypts follows the
+//! remote name typed. A destination's contents can refuse a command (which is
+//! what sends an operator here); they never change what it does.
 //!
 //! [`verify`] proves, from the file alone — no data, no key, no network — that
 //! every remote resolves, that no vault chain loops or dangles, and whether each

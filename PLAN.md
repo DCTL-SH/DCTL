@@ -52,6 +52,31 @@
   constant-memory — no design ever materializes the full file list in RAM. On-disk
   B-tree index, bounded-concurrency pipelines with backpressure, resumable WAL,
   rich CLI + structured progress/logs, professional typed errors (§16).
+- **D11 — addressing invariants (I1–I4):** a vault has **two** remote names —
+  `archive:` (sealed view) and `archive-store:` (object view) — because §13.3
+  requires replicating ciphertext provider-to-provider with **no re-encryption**,
+  which is only expressible if the objects have an address of their own. Four
+  invariants follow, enforced in `crates/dctl-cli/src/addressing.rs`:
+  - **I1** — a write through a vault remote is always sealed; no flag disables it.
+  - **I2** — foreign plaintext is never written into a vault's object store.
+  - **I3** — a write to an ordinary location is plaintext, fully supported.
+  - **I4** — **DCTL never applies or omits encryption because of a destination's
+    contents. What a command encrypts is determined solely by the remote name
+    typed. A destination's contents may cause DCTL to REFUSE, never to change
+    what it does.**
+
+  The outcome space for any destination is `{sealed, plain, refused}`. Contents
+  can only ever move an outcome to `refused`; they can never turn `plain` into
+  `sealed` or `sealed` into `plain`. That is why the envelope check on an
+  unconfigured location is safe, and why it is **not** auto-detection:
+  auto-detection *changes behaviour*, this only ever *stops*. A weaker earlier
+  wording ("behaviour is a function of the remote name typed, never of the
+  destination's current contents") was false — the fallback does read contents —
+  and is replaced by the above, which is both true of the code and a stronger
+  promise. I4 is a claim about **path spelling** as much as contents: `vault`,
+  `./vault`, `/srv/vault`, `staging/../vault`, a symlink and any subdirectory are
+  one destination and get one answer. Proven, not asserted, by
+  `crates/dctl-cli/tests/invariant_i4.rs`, which asserts on the bytes on disk.
 
 **North star:** maximum security *and* maximum performance for huge video +
 streaming, and **never lose or misreport data**. Where security and speed

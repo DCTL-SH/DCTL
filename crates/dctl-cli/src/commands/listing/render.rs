@@ -27,14 +27,21 @@ use crate::constants::{
     LISTING_MODTIME_COLUMN_WIDTH, LISTING_SIZE_COLUMN_WIDTH, TABLE_PAD_CHAR, UNKNOWN_VALUE,
 };
 use crate::output::Units;
-use crate::output::size::{bytes, count};
+use crate::output::size::{bytes_or_unknown, count};
 
 use super::time::rfc3339;
 
-/// A byte count in the size column.
+/// A byte count in the size column, or a placeholder when nothing measured it.
+///
+/// The placeholder is the same one [`modtime_column`] uses for a time the index
+/// never recorded, and it occupies the same column, so a listing that mixes
+/// measured and unmeasured rows still aligns. A vault whose index was rebuilt
+/// from object headers alone produces exactly that mix — every row until each
+/// file is next read — and printing `0 B` for those rows was the defect this
+/// column exists to have stopped.
 #[must_use]
-pub fn size_column(value: u64, units: Units) -> String {
-    right_align(&bytes(value, units), LISTING_SIZE_COLUMN_WIDTH)
+pub fn size_column(value: Option<u64>, units: Units) -> String {
+    right_align(&bytes_or_unknown(value, units), LISTING_SIZE_COLUMN_WIDTH)
 }
 
 /// An object count in the count column.
@@ -91,8 +98,8 @@ mod tests {
 
     #[test]
     fn the_size_column_is_fixed_width_and_right_aligned() {
-        let small = size_column(7, Units::Binary);
-        let large = size_column(1_536_000, Units::Binary);
+        let small = size_column(Some(7), Units::Binary);
+        let large = size_column(Some(1_536_000), Units::Binary);
         assert_eq!(small.chars().count(), LISTING_SIZE_COLUMN_WIDTH);
         assert_eq!(large.chars().count(), LISTING_SIZE_COLUMN_WIDTH);
         assert!(small.starts_with(TABLE_PAD_CHAR));
@@ -102,8 +109,8 @@ mod tests {
 
     #[test]
     fn the_size_column_follows_the_unit_convention() {
-        assert!(size_column(1000, Units::Decimal).contains("kB"));
-        assert!(size_column(1024, Units::Binary).contains("KiB"));
+        assert!(size_column(Some(1000), Units::Decimal).contains("kB"));
+        assert!(size_column(Some(1024), Units::Binary).contains("KiB"));
     }
 
     #[test]
@@ -139,7 +146,7 @@ mod tests {
     fn the_path_column_is_never_padded() {
         // `awk '{print $NF}'` has to keep working, which it does not if the last
         // field carries trailing spaces.
-        let rendered = row(&[&size_column(1, Units::Binary), "a/b.txt"]);
+        let rendered = row(&[&size_column(Some(1), Units::Binary), "a/b.txt"]);
         assert!(!rendered.ends_with(TABLE_PAD_CHAR));
         assert!(rendered.ends_with("a/b.txt"));
     }

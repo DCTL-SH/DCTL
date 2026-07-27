@@ -47,12 +47,28 @@ pub struct Entry {
     /// Logical path within the source.
     pub path: String,
 
-    /// Size in bytes of what a [`read`](super::Source::read) would return.
+    /// Size in bytes of what a [`read`](super::Source::read) would return, when
+    /// the source recorded one.
     ///
     /// For a vault this is the **plaintext** length, which is smaller than the
     /// stored object: reporting the ciphertext length would make `dctl ls` and
     /// `dctl cat | wc -c` disagree about the same file.
-    pub size: u64,
+    ///
+    /// [`None`] rather than `0`, for exactly the reason the hash below is an
+    /// [`Option`] rather than an empty `Vec`. "Nobody has measured this object"
+    /// and "this object is zero bytes long" are the same value if the field is a
+    /// `u64`, and the first of those is a real, reachable state: a vault index
+    /// rebuilt by [`Vault::rebuild_index`](dctl_core::Vault::rebuild_index) is a
+    /// list-only pass, so every row it writes carries no size until the file is
+    /// next read. Rendering that absence as the number 0 told a capacity monitor
+    /// that a forty-terabyte vault held nothing, and told `dctl scrub`'s audit
+    /// trail that it had verified zero bytes — both of them stated as fact
+    /// (`PLAN.md` §6).
+    ///
+    /// A plain object store always fills this in: the provider's listing carries
+    /// a byte count for every key, so `None` there would be a bug rather than an
+    /// honest unknown.
+    pub size: Option<u64>,
 
     /// Last-modified time in unix seconds, when the source recorded one.
     ///
@@ -83,7 +99,25 @@ impl Entry {
     pub fn new(path: impl Into<String>, size: u64) -> Self {
         Self {
             path: path.into(),
-            size,
+            size: Some(size),
+            modified_unix: None,
+            content_hash: None,
+        }
+    }
+
+    /// An entry whose size nobody has ever measured.
+    ///
+    /// A separate constructor rather than `new(path, None)` so that the case has
+    /// a name at every construction site. There is exactly one source of it —
+    /// an index row written by a rebuild, which lists object names without
+    /// reading their bodies — and a caller reaching for this should be able to
+    /// find the reasoning from the call itself rather than from an argument that
+    /// happens to be `None`. See [`super::vault::from_record`].
+    #[must_use]
+    pub fn unmeasured(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            size: None,
             modified_unix: None,
             content_hash: None,
         }
@@ -126,9 +160,19 @@ mod tests {
     fn the_optional_halves_default_to_absent() {
         let entry = Entry::new("photos/a.jpg", 12);
         assert_eq!(entry.path, "photos/a.jpg");
-        assert_eq!(entry.size, 12);
+        assert_eq!(entry.size, Some(12));
         assert_eq!(entry.modified_unix, None);
         assert_eq!(entry.content_hash, None);
+    }
+
+    #[test]
+    fn an_unmeasured_entry_is_not_a_zero_byte_one() {
+        // The distinction the whole field exists for: a rebuilt index row and a
+        // genuinely empty file are two different facts, and a `u64` cannot hold
+        // both.
+        assert_eq!(Entry::unmeasured("a.txt").size, None);
+        assert_eq!(Entry::new("empty.txt", 0).size, Some(0));
+        assert_ne!(Entry::unmeasured("a.txt").size, Entry::new("a.txt", 0).size);
     }
 
     #[test]

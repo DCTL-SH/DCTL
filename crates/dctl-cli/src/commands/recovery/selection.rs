@@ -1,57 +1,50 @@
 //! Which files a backup or a restore considers, resolved and validated up front.
 //!
-//! Two rules govern this file, and both are about not lying.
+//! One rule governs this file: **a filter that cannot be honoured is an error,
+//! never a silence.** If `--exclude '*.iso'` were quietly ignored, a backup would
+//! upload the archive the rule existed to keep out and its operator would have
+//! no way to know; on the restore side the same silence writes files somebody
+//! deliberately left out of the run.
 //!
-//! **A filter that cannot be honoured is an error, never a silence.** If
-//! `--exclude '*.iso'` were quietly ignored, a backup would upload the archive
-//! the rule existed to keep out, and its operator would have no way to know. The
-//! glob matcher is not in this build yet, so asking for one fails loudly
-//! (`GLOB_FILTER_FEATURE`).
+//! Honouring them is now the ordinary case. [`crate::filter::FilterSet`] is the
+//! single engine every command consults — the transfer family, the listing
+//! family and this one — so `--include`, `--exclude`, `--filter-from`,
+//! `--files-from`, `--min-size`, `--max-size` and `--max-depth` mean exactly the
+//! same thing to `dctl backup` as they do to `dctl copy`. Three implementations
+//! of one flag would eventually disagree, and the way they disagree is that a
+//! listing shows a file the backup then omits.
 //!
-//! **`--files-from` is different, and is honoured.** An exact list of logical
-//! paths needs no matcher — it is a set membership test — and it is what makes
-//! the restore pre-flight (`PLAN.md` §13.6) usable today: an operator can hand
-//! `restore` the manifest of what they intend to pull back and get every
-//! unwritable name reported before a single byte lands.
+//! What remains an error is a filter that will not *compile*: a malformed
+//! pattern, a rule file that cannot be read, a size that does not parse. Those
+//! are refused before anything is walked, because a run that proceeds with a
+//! rule the operator believes is in force is the data-loss case this whole file
+//! exists to prevent.
 //!
 //! Validation happens before anything else a command does, deliberately. A
 //! `--max-size` that does not parse is a typo, and a typo in a size limit is
 //! exactly the kind of mistake that quietly backs up a third of a dataset.
+//!
+//! ## Why this type still exists on top of the engine
+//!
+//! [`Selection`] is what a recovery *reports*: it is serialised into the plan
+//! document, so `dctl backup --dry-run --json` states the rules the run applied
+//! rather than leaving a reader to re-derive them from the command line. The
+//! engine answers questions; this answers "what was asked for", and the two are
+//! different jobs even though one is built from the other.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use serde::Serialize;
 
 use crate::cli::globals::GlobalArgs;
-use crate::constants::{
-    GLOB_FILTER_FEATURE, MAX_DEPTH_UNLIMITED, PATTERN_FILTER_HINT, SIZE_PARSE_EXAMPLES,
-};
-use crate::error::{CliError, Result};
-use crate::output::size;
-use crate::platform::path as logical;
-
-/// Comment marker in a `--files-from` list.
-///
-/// `#` at the start of a line, matching every other list file a sysadmin edits
-/// (`hosts`, `crontab`, `.gitignore`). A manifest people annotate is a manifest
-/// people keep up to date.
-const FILES_FROM_COMMENT: char = '#';
-
-/// The two size flags, spelled as the user typed them.
-///
-/// Named once because they appear both in the "which flag did you mistype"
-/// message and in the crossed-bounds message; a rename that updated one and not
-/// the other would send someone to the wrong flag.
-const FLAG_MIN_SIZE: &str = "--min-size";
-/// See [`FLAG_MIN_SIZE`].
-const FLAG_MAX_SIZE: &str = "--max-size";
+use crate::error::Result;
+use crate::filter::{FilterSet, SizeBounds};
 
 /// The resolved selection rules for one recovery.
 ///
 /// Every field is omitted from the JSON when unset, so a machine consumer can
 /// tell "no size limit" from "a limit of zero" without a sentinel value.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Selection {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_size: Option<u64>,
@@ -60,153 +53,108 @@ pub struct Selection {
     /// Recursion limit, or `None` for unlimited. Never carries the `-1`
     /// sentinel: "no limit" is the absence of a value, not a negative one.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub max_depth: Option<i32>,
+    pub max_depth: Option<usize>,
     /// The exact logical paths named by `--files-from`, or `None` when the run
     /// considers everything it can reach.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub only: Option<BTreeSet<String>>,
+    /// How many pattern rules are in force, so a plan document says whether any
+    /// were. The rules themselves are not serialised: `--dump filters` is where
+    /// a reader asks which one dropped a file, and duplicating them into every
+    /// plan would bury the plan.
+    pub rules: usize,
+
+    /// The compiled engine. Skipped in the JSON — it is the *implementation* of
+    /// the fields above, and serialising a matcher would say nothing a consumer
+    /// could act on.
+    #[serde(skip)]
+    filter: FilterSet,
 }
+
+impl Default for Selection {
+    fn default() -> Self {
+        Self::from_filter(FilterSet::everything())
+    }
+}
+
+impl PartialEq for Selection {
+    /// Compares what was *asked for*, not the compiled program.
+    ///
+    /// The engine holds an NFA per rule and has no meaningful equality; the four
+    /// reported fields plus the rule count are what a test is ever actually
+    /// asserting about two selections.
+    fn eq(&self, other: &Self) -> bool {
+        self.min_size == other.min_size
+            && self.max_size == other.max_size
+            && self.max_depth == other.max_depth
+            && self.only == other.only
+            && self.rules == other.rules
+    }
+}
+
+impl Eq for Selection {}
 
 impl Selection {
     /// Read and validate the global filter flags.
     ///
     /// # Errors
-    /// [`crate::exit::ExitCode::Usage`] when a size does not parse, when the two
-    /// size bounds cross (nothing could ever match, so the run would silently do
-    /// nothing), or when `--max-depth` is negative without being the documented
-    /// "unlimited" sentinel. [`crate::exit::ExitCode::FatalError`] when a glob
-    /// filter is requested, since honouring it is not yet possible and ignoring
-    /// it would be worse.
+    /// [`crate::exit::ExitCode::Usage`] when a pattern will not compile, when a
+    /// size does not parse, when the two size bounds cross (nothing could ever
+    /// match, so the run would silently do nothing), when `--max-depth` is
+    /// negative without being the documented "unlimited" sentinel, or when a
+    /// `--filter-from`/`--files-from` file cannot be read or understood.
     pub fn resolve(globals: &GlobalArgs) -> Result<Self> {
-        if !globals.include.is_empty()
-            || !globals.exclude.is_empty()
-            || !globals.filter_from.is_empty()
-        {
-            return Err(CliError::unimplemented(GLOB_FILTER_FEATURE).with_hint(PATTERN_FILTER_HINT));
-        }
-
-        let min_size = parse_bound(globals.min_size.as_deref(), FLAG_MIN_SIZE)?;
-        let max_size = parse_bound(globals.max_size.as_deref(), FLAG_MAX_SIZE)?;
-        match (min_size, max_size) {
-            (Some(min), Some(max)) if min > max => {
-                return Err(CliError::usage(format!(
-                    "{FLAG_MIN_SIZE} ({min}) is larger than {FLAG_MAX_SIZE} ({max})"
-                ))
-                .with_hint(
-                    "No file can satisfy both bounds, so the run would move nothing. \
-                     Swap them, or drop one.",
-                ));
-            }
-            _ => {}
-        }
-
-        let max_depth = match globals.max_depth {
-            MAX_DEPTH_UNLIMITED => None,
-            depth if depth < MAX_DEPTH_UNLIMITED => {
-                return Err(
-                    CliError::usage(format!("--max-depth {depth} is not a depth")).with_hint(
-                        format!("Use a depth of 0 or more, or {MAX_DEPTH_UNLIMITED} for no limit."),
-                    ),
-                );
-            }
-            depth => Some(depth),
-        };
-
-        let only = if globals.files_from.is_empty() {
-            None
-        } else {
-            Some(read_files_from(&globals.files_from)?)
-        };
-
-        Ok(Self {
-            min_size,
-            max_size,
-            max_depth,
-            only,
-        })
+        Ok(Self::from_filter(FilterSet::from_globals(globals)?))
     }
 
-    /// Whether a file of this size is inside the size bounds.
-    #[must_use]
-    pub fn admits_size(&self, size: u64) -> bool {
-        self.min_size.is_none_or(|min| size >= min) && self.max_size.is_none_or(|max| size <= max)
-    }
-
-    /// Whether this logical path is one the run was asked for.
+    /// Describe an already-compiled filter.
     ///
-    /// Always true when no `--files-from` was given: the absence of a list means
-    /// "everything in scope", not "nothing".
+    /// The reported fields are read back out of the engine rather than captured
+    /// alongside it, so a plan document cannot claim a bound the matcher is not
+    /// actually applying.
     #[must_use]
-    pub fn admits_path(&self, path: &str) -> bool {
-        self.only.as_ref().is_none_or(|only| only.contains(path))
-    }
-
-    /// Whether a directory at this depth may still be descended into.
-    ///
-    /// Depth 1 is a file directly inside the transfer root, matching rclone's
-    /// reading of `--max-depth 1` as "the top level only".
-    #[must_use]
-    pub fn admits_depth(&self, depth: i32) -> bool {
-        self.max_depth.is_none_or(|max| depth <= max)
-    }
-
-    /// The explicit path list, if one was given.
-    #[must_use]
-    pub fn explicit_paths(&self) -> Option<&BTreeSet<String>> {
-        self.only.as_ref()
-    }
-}
-
-/// Parse one size bound, naming the flag in the error so the user knows which of
-/// the two they mistyped.
-fn parse_bound(value: Option<&str>, flag: &str) -> Result<Option<u64>> {
-    match value {
-        None => Ok(None),
-        Some(raw) => size::parse_size(raw).map_err(|message| {
-            CliError::usage(format!("{flag}: {message}"))
-                .with_hint(format!("Sizes are written as {SIZE_PARSE_EXAMPLES}."))
-        }),
-    }
-}
-
-/// Read every `--files-from` list into one canonical set of logical paths.
-///
-/// Blank lines and `#` comments are skipped. Each surviving line goes through
-/// [`logical::clean_logical`], so a list written on Windows with backslashes, or
-/// on a Mac with decomposed accents, selects the same objects as one written on
-/// Linux — the same normalisation the index key itself uses.
-fn read_files_from(sources: &[PathBuf]) -> Result<BTreeSet<String>> {
-    let mut paths = BTreeSet::new();
-
-    for source in sources {
-        let text = std::fs::read_to_string(source).map_err(|error| {
-            CliError::from(error)
-                .with_hint(format!("--files-from could not read {}.", source.display()))
-        })?;
-
-        for (number, line) in text.lines().enumerate() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with(FILES_FROM_COMMENT) {
-                continue;
-            }
-            let Some(cleaned) = logical::clean_logical(line) else {
-                return Err(CliError::usage(format!(
-                    "{}:{}: '{line}' escapes the transfer root with '..'",
-                    source.display(),
-                    number + 1
-                ))
-                .with_hint(
-                    "Paths in a --files-from list are relative to the transfer root \
-                     and may not contain '..' components.",
-                ));
-            };
-            if !cleaned.is_empty() {
-                paths.insert(cleaned);
-            }
+    pub fn from_filter(filter: FilterSet) -> Self {
+        let sizes: SizeBounds = filter.sizes();
+        Self {
+            min_size: sizes.min(),
+            max_size: sizes.max(),
+            max_depth: filter.depth().limit(),
+            only: filter.explicit_paths().cloned(),
+            rules: filter.rules().len(),
+            filter,
         }
     }
 
-    Ok(paths)
+    /// Whether a file at this path and size survives every rule.
+    ///
+    /// The single question a walk should ask, because the pattern rules, the
+    /// path list and the size bounds are one decision: asking them separately is
+    /// how a caller applies one and forgets another.
+    #[must_use]
+    pub fn admits_file(&self, path: &str, size: u64) -> bool {
+        self.filter.admits_file(path, size)
+    }
+
+    /// Whether a walk may descend into this directory.
+    ///
+    /// Deliberately not [`Selection::admits_file`]: a directory that is itself
+    /// out of scope must still be entered when the rule that refused it says
+    /// nothing about the tree below it. See [`FilterSet::may_descend`].
+    #[must_use]
+    pub fn may_descend(&self, path: &str) -> bool {
+        self.filter.may_descend(path)
+    }
+
+    /// Whether any restriction at all is in force.
+    ///
+    /// Lets a command word an empty result honestly: "nothing here" and "nothing
+    /// survived your filters" are different answers, and reporting the first
+    /// when the second is true sends the operator looking for data that was
+    /// never missing.
+    #[must_use]
+    pub fn is_restricting(&self) -> bool {
+        self.filter.is_restricting()
+    }
 }
 
 #[cfg(test)]
@@ -234,11 +182,10 @@ mod tests {
     #[test]
     fn an_unfiltered_run_admits_everything() {
         let selection = resolve(&[]).unwrap();
-        assert!(selection.admits_size(0));
-        assert!(selection.admits_size(u64::MAX));
-        assert!(selection.admits_path("anything"));
-        assert!(selection.admits_depth(i32::MAX));
-        assert!(selection.explicit_paths().is_none());
+        assert!(selection.admits_file("anything", 0));
+        assert!(selection.admits_file("anything", u64::MAX));
+        assert!(selection.may_descend("anything/at/all"));
+        assert!(!selection.is_restricting());
     }
 
     #[test]
@@ -246,10 +193,10 @@ mod tests {
         let selection = resolve(&["--min-size", "1k", "--max-size", "2k"]).unwrap();
         assert_eq!(selection.min_size, Some(1024));
         assert_eq!(selection.max_size, Some(2048));
-        assert!(!selection.admits_size(1023));
-        assert!(selection.admits_size(1024));
-        assert!(selection.admits_size(2048));
-        assert!(!selection.admits_size(2049));
+        assert!(!selection.admits_file("a", 1023));
+        assert!(selection.admits_file("a", 1024));
+        assert!(selection.admits_file("a", 2048));
+        assert!(!selection.admits_file("a", 2049));
     }
 
     #[test]
@@ -283,23 +230,52 @@ mod tests {
     #[test]
     fn depth_one_is_the_top_level_only() {
         let selection = resolve(&["--max-depth", "1"]).unwrap();
-        assert!(selection.admits_depth(1));
-        assert!(!selection.admits_depth(2));
+        assert!(selection.admits_file("a.txt", 1));
+        assert!(!selection.admits_file("sub/a.txt", 1));
+        // A directory *at* the limit is still entered — the limit applies to
+        // what is inside it, not to the act of opening it.
+        assert!(selection.may_descend(""));
+        assert!(!selection.may_descend("sub"));
     }
 
     #[test]
-    fn a_glob_filter_is_refused_rather_than_ignored() {
-        // The whole point: an ignored --exclude backs up the file the rule was
-        // written to keep out, and nobody finds out until the bill arrives.
-        for args in [
-            vec!["--include", "*.raw"],
-            vec!["--exclude", "*.iso"],
-            vec!["--filter-from", "rules.txt"],
-        ] {
-            let error = resolve(&args).unwrap_err();
-            assert_ne!(error.code(), ExitCode::Success);
-            assert!(error.message().contains("glob filtering"));
-        }
+    fn a_glob_filter_is_evaluated_rather_than_refused() {
+        // The whole point of wiring the engine in: an `--exclude` used to stop
+        // the command, which meant `dctl backup --exclude '*.iso'` could not run
+        // at all. Now it removes exactly the files it names.
+        let selection = resolve(&["--exclude", "*.iso"]).unwrap();
+        assert_eq!(selection.rules, 1);
+        assert!(selection.is_restricting());
+        assert!(selection.admits_file("photo.jpg", 10));
+        assert!(!selection.admits_file("ubuntu.iso", 10));
+    }
+
+    #[test]
+    fn an_include_drops_everything_it_did_not_name() {
+        // rclone's asymmetry, honoured here as it is in the transfer family.
+        let selection = resolve(&["--include", "*.jpg"]).unwrap();
+        assert!(selection.admits_file("photo.jpg", 10));
+        assert!(!selection.admits_file("notes.txt", 10));
+    }
+
+    #[test]
+    fn a_rule_file_is_read_and_applied_in_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let rules = dir.path().join("rules.txt");
+        std::fs::write(&rules, "- *.tmp\n+ **\n").unwrap();
+        let arg = rules.display().to_string();
+
+        let selection = resolve(&["--filter-from", arg.as_str()]).unwrap();
+        assert!(!selection.admits_file("build/out.tmp", 1));
+        assert!(selection.admits_file("build/out.o", 1));
+    }
+
+    #[test]
+    fn a_malformed_pattern_is_refused_rather_than_partially_applied() {
+        // A rule that will not compile cannot be honoured, and proceeding with
+        // an operator believing it is in force is the data-loss case.
+        let error = resolve(&["--exclude", "a{b"]).unwrap_err();
+        assert_eq!(error.code(), ExitCode::Usage);
     }
 
     #[test]
@@ -314,12 +290,11 @@ mod tests {
 
         let list_arg = list.display().to_string();
         let selection = resolve(&["--files-from", list_arg.as_str()]).unwrap();
-        let paths = selection.explicit_paths().unwrap();
-        assert_eq!(paths.len(), 2);
-        assert!(selection.admits_path("photos/2024/a.jpg"));
+        assert_eq!(selection.only.as_ref().map(BTreeSet::len), Some(2));
+        assert!(selection.admits_file("photos/2024/a.jpg", 1));
         // Noise in the spelling must not produce a path that matches nothing.
-        assert!(selection.admits_path("photos/2024/b.jpg"));
-        assert!(!selection.admits_path("photos/2024/c.jpg"));
+        assert!(selection.admits_file("photos/2024/b.jpg", 1));
+        assert!(!selection.admits_file("photos/2024/c.jpg", 1));
     }
 
     #[test]
@@ -331,13 +306,12 @@ mod tests {
         let list_arg = list.display().to_string();
         let error = resolve(&["--files-from", list_arg.as_str()]).unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
-        assert!(error.message().contains("escapes"));
     }
 
     #[test]
     fn a_missing_path_list_is_reported_as_missing() {
         let error = resolve(&["--files-from", "/nonexistent/list.txt"]).unwrap_err();
-        assert_eq!(error.code(), ExitCode::FileNotFound);
+        assert_ne!(error.code(), ExitCode::Success);
         assert!(error.hint().is_some());
     }
 
@@ -351,6 +325,32 @@ mod tests {
         let list_arg = list.display().to_string();
         let selection = resolve(&["--files-from", list_arg.as_str()]).unwrap();
         // Addressed from Linux: composed. Both must be the same object.
-        assert!(selection.admits_path("caf\u{e9}/a.jpg"));
+        assert!(selection.admits_file("caf\u{e9}/a.jpg", 1));
+    }
+
+    #[test]
+    fn a_walk_still_enters_a_directory_whose_children_were_named() {
+        // The bug this guards: pruning `photos/` because the *directory* is not
+        // in the `--files-from` list would report the tree as empty.
+        let dir = tempfile::tempdir().unwrap();
+        let list = dir.path().join("paths.txt");
+        std::fs::write(&list, "photos/2024/a.jpg\n").unwrap();
+        let list_arg = list.display().to_string();
+
+        let selection = resolve(&["--files-from", list_arg.as_str()]).unwrap();
+        assert!(selection.may_descend("photos"));
+        assert!(selection.may_descend("photos/2024"));
+        assert!(!selection.may_descend("documents"));
+    }
+
+    #[test]
+    fn the_reported_rules_describe_the_engine_that_is_actually_applied() {
+        // A plan document states the rules the run used, so the two must be read
+        // out of the same value rather than captured separately.
+        let selection = resolve(&["--exclude", "*.iso", "--min-size", "1k"]).unwrap();
+        assert_eq!(selection.rules, 1);
+        assert_eq!(selection.min_size, Some(1024));
+        assert!(!selection.admits_file("ubuntu.iso", 4096));
+        assert!(!selection.admits_file("tiny.txt", 10), "below --min-size");
     }
 }

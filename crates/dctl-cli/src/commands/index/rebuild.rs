@@ -40,6 +40,8 @@
 
 use clap::Args;
 
+use crate::audit::record::Entry as AuditEntry;
+use crate::audit::sink;
 use crate::commands::integrity::{Target, command_name};
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
@@ -71,7 +73,7 @@ pub async fn run(ctx: &Ctx, args: &RebuildArgs) -> Result<()> {
     let target = Target::parse(&args.target)?;
     // The index maps a vault's plaintext paths to its objects. A local directory
     // has no such mapping and nothing to rebuild one from.
-    target.require_remote(&command)?;
+    let remote = target.require_remote(&command)?.to_string();
 
     if !target.path().is_empty() {
         // Refused rather than silently widened. `rebuild_index` enumerates every
@@ -106,7 +108,20 @@ pub async fn run(ctx: &Ctx, args: &RebuildArgs) -> Result<()> {
     );
 
     let session = session::open(ctx, &target.spec()).await?;
-    let files = session.vault.rebuild_index().await?;
+    let rebuilt = session.vault.rebuild_index().await.map_err(CliError::from);
+
+    // A rebuild replaces the whole local index, so it is a change to stored
+    // state and belongs in the chain — recorded after the rebuild returns, with
+    // no path, because it is the vault as a whole that was rewritten and naming
+    // one file inside it would understate the scope.
+    //
+    // A *failed* rebuild is recorded too, and it is the more interesting of the
+    // two: an index that could not be rebuilt is the state in which a listing
+    // and the backend disagree, and knowing when that started is the difference
+    // between a diagnosis and a guess.
+    ctx.audit
+        .record(&AuditEntry::new(VERB, sink::outcome(&rebuilt)).remote(&remote))?;
+    let files = rebuilt?;
 
     tracing::info!(
         files,

@@ -2,16 +2,39 @@
 //!
 //! A plan is a diff, and a diff needs both sides listed before it can name a
 //! single action. This module turns a [`RemoteSpec`] into the [`Entry`] set the
-//! planner compares, and is the only place in the family that touches a
-//! filesystem.
+//! planner compares — for a local tree by walking it, and for a named remote
+//! through [`crate::source`].
 //!
-//! ## What is honoured, and what is refused
+//! ## Why a named remote goes through `crate::source` and not through a walk
 //!
-//! `--max-depth`, `--min-size` and `--max-size` are evaluated here, for real.
-//! The pattern filters (`--include`, `--exclude`, `--filter-from`,
-//! `--files-from`) are **refused** by [`super::compare::ensure_filters_are_supported`]
-//! before a walk starts, because a dropped `--exclude` would make `sync` delete
-//! the files the rule was written to protect.
+//! [`crate::source::open`] is the one place in the binary that decides whether a
+//! spec addresses a sealed vault or a plain object store, and it is deliberately
+//! the *only* place: a command that could tell would eventually add a second
+//! `if` and get it wrong, which in this family means writing data somewhere
+//! nobody named. So this module asks for a [`Source`](crate::source::Source) and
+//! never learns which kind it got. The prefix rule (whole path components, so
+//! listing `photos` never reports `photos-backup`), the plaintext sizes and the
+//! recorded content hashes all arrive with it, already correct.
+//!
+//! That is what makes a vault a transfer **source**. `dctl copy archive: ./out`,
+//! `dctl sync archive: ./mirror` and `dctl check ./src archive:` are all the same
+//! diff as before with one side enumerated differently, so none of the planning,
+//! reporting or execution above this file changed to gain them.
+//!
+//! ## What is honoured
+//!
+//! Every filter, through one engine. [`crate::filter::FilterSet`] evaluates
+//! `--include`, `--exclude`, `--filter-from`, `--files-from`, `--min-size`,
+//! `--max-size` and `--max-depth`, and it does so identically for the local walk
+//! and the remote listing — which is the point of there being one engine. A rule
+//! that meant two things on the two sides of a `sync` would show a file on one
+//! side, hide it on the other, and delete it for being an extra.
+//!
+//! `--checksum` is the one filter-adjacent flag with a cost, and it is paid
+//! here: a vault side carries the hash it recorded at write time, and a local
+//! side is read and hashed ([`super::checksum`]). Both are only produced when
+//! the flag asked for them, because hashing a local tree costs the entire read
+//! the transfer itself would.
 //!
 //! ## Memory
 //!
@@ -20,94 +43,130 @@
 //! `sync` cannot name a destination *extra* until it has seen the whole source,
 //! so some state is unavoidable and the honest place for the streaming,
 //! on-disk-backed version is the engine that also does the transferring. What is
-//! here is bounded by `--max-depth` and the size filters, and is the same shape
-//! the engine will consume.
+//! here is bounded by the filters, and is the same shape the engine consumes.
 
 use std::fs;
 use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 use crate::cli::GlobalArgs;
-use crate::constants::{
-    MAX_DEPTH_UNLIMITED, REMOTE_ENUMERATION_FEATURE, REMOTE_ENUMERATION_HINT, SIZE_PARSE_EXAMPLES,
-    WALK_FOLLOW_SYMLINKS,
-};
+use crate::constants::WALK_FOLLOW_SYMLINKS;
+use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
-use crate::output::size::parse_size;
+use crate::filter::FilterSet;
 use crate::platform::path as logical;
 use crate::remote::RemoteSpec;
 
+use super::checksum;
 use super::entry::Entry;
 
-/// Which entries a walk keeps.
-#[derive(Clone, Copy, Debug)]
+/// Which entries a walk keeps, and how hard it works to describe them.
+///
+/// The default admits everything and hashes nothing, which is what
+/// [`FilterSet::everything`] and an unset `--checksum` mean.
+#[derive(Clone, Debug, Default)]
 pub struct ListOptions {
-    /// Recursion limit; [`MAX_DEPTH_UNLIMITED`] for no limit.
-    pub max_depth: i32,
-    /// Smallest file kept, in bytes.
-    pub min_size: Option<u64>,
-    /// Largest file kept, in bytes.
-    pub max_size: Option<u64>,
+    /// The one filter engine, built from the global flags.
+    ///
+    /// Held rather than re-derived per side so the two listings a diff compares
+    /// were produced by the identical rule set — the property that keeps a
+    /// `sync` from deleting what an `--exclude` was written to protect.
+    filter: FilterSet,
     /// Whether directories containing nothing are reported.
     ///
     /// Off unless `--create-empty-src-dirs` is given: an empty directory has no
     /// objects under it, so listing one costs a plan entry that would otherwise
     /// never turn into an action.
     pub include_empty_dirs: bool,
-}
-
-impl Default for ListOptions {
-    fn default() -> Self {
-        Self {
-            max_depth: MAX_DEPTH_UNLIMITED,
-            min_size: None,
-            max_size: None,
-            include_empty_dirs: false,
-        }
-    }
+    /// Whether every entry must carry a content hash.
+    ///
+    /// A separate flag rather than something inferred from the comparison
+    /// policy, because it is the *listing* that pays for it: a vault answers
+    /// from its index for free, and a local tree is read end to end.
+    ///
+    /// Set by `--checksum`, and also by the transfer whose destination stamps
+    /// its own write time and therefore has to be compared by content instead
+    /// ([`crate::fidelity`]). The two reach the same place because they need the
+    /// same thing; they are decided apart because only one of them is something
+    /// the user asked for.
+    pub hash_contents: bool,
 }
 
 impl ListOptions {
     /// Resolve the walk's limits from the global flags.
     ///
     /// # Errors
-    /// Returns a usage error when `--min-size`/`--max-size` cannot be parsed, or
-    /// when they exclude each other — a range that can never match would
+    /// [`ExitCode::Usage`] when a pattern will not compile, a size or depth does
+    /// not parse, the two size bounds cross (a range no file can match would
     /// silently transfer nothing, and "nothing happened" is the hardest failure
-    /// to notice.
+    /// to notice), or a `--filter-from`/`--files-from` file cannot be read.
     pub fn resolve(globals: &GlobalArgs, include_empty_dirs: bool) -> Result<Self> {
-        let min_size = parse_limit(globals.min_size.as_deref(), "--min-size")?;
-        let max_size = parse_limit(globals.max_size.as_deref(), "--max-size")?;
-
-        if let (Some(min), Some(max)) = (min_size, max_size) {
-            if min > max {
-                return Err(CliError::usage(format!(
-                    "--min-size ({min}) is larger than --max-size ({max}): no file can match"
-                )));
-            }
-        }
-
         Ok(Self {
-            max_depth: globals.max_depth,
-            min_size,
-            max_size,
+            filter: FilterSet::from_globals(globals)?,
             include_empty_dirs,
+            hash_contents: globals.checksum,
         })
     }
 
-    /// Whether a file of this size passes the size filters.
+    /// Also produce a content hash for every entry.
+    ///
+    /// Additive rather than assigning, so a caller compensating for a
+    /// write-stamped destination cannot accidentally *cancel* a `--checksum` the
+    /// user typed. The flag is a floor, never a switch.
     #[must_use]
-    pub fn accepts_size(&self, size: u64) -> bool {
-        self.min_size.is_none_or(|min| size >= min) && self.max_size.is_none_or(|max| size <= max)
+    pub const fn hashing_contents(mut self, also: bool) -> Self {
+        self.hash_contents |= also;
+        self
     }
 
-    /// Whether a walk may descend into a directory at this depth.
+    /// Whether a file at this logical path and size is in scope.
     ///
-    /// `depth` is the depth of the *directory's contents*: the root's immediate
-    /// children are depth 1, matching `--max-depth 1` meaning "one level".
+    /// Asked in the form that also checks the file's ancestor directories
+    /// ([`FilterSet::admits_enumerated`]), because the two enumerations below do
+    /// not both prune. [`walk_local`] descends deliberately and refuses to open
+    /// a directory a `--exclude 'cache/'` rule named; [`walk_remote`] receives a
+    /// flat set of keys from an index or a provider and has no descent to
+    /// refuse. Asking the cheaper question there would make one rule mean two
+    /// things depending on which side of a transfer it landed on — and a `sync`
+    /// whose two sides disagree deletes the difference.
+    ///
+    /// For the walking side the ancestor check is redundant rather than wrong:
+    /// every file it offers has already come out of a directory it chose to
+    /// enter, so the extra question can only agree.
     #[must_use]
-    pub const fn accepts_depth(&self, depth: i32) -> bool {
-        self.max_depth == MAX_DEPTH_UNLIMITED || depth <= self.max_depth
+    pub fn accepts_file(&self, path: &str, size: u64) -> bool {
+        self.filter.admits_enumerated_file(path, size)
+    }
+
+    /// Whether a file whose size nothing has measured is in scope.
+    ///
+    /// A separate method rather than an [`Option`] parameter, because every
+    /// local walk in this file knows its sizes and would otherwise have to spell
+    /// `Some(..)` at each call — which is where the one call site that should
+    /// have said `None` eventually gets written as `Some(0)`. The size bounds do
+    /// not apply here; see [`crate::filter::Candidate::unmeasured_file`] for the
+    /// full argument, which is the same one the listing family follows so that
+    /// `dctl ls --min-size` and the `copy` after it select the same files.
+    pub fn accepts_unmeasured_file(&self, path: &str) -> bool {
+        self.filter
+            .admits_enumerated(&crate::filter::Candidate::unmeasured_file(path))
+    }
+
+    /// Whether a walk may descend into this directory.
+    ///
+    /// Distinct from [`ListOptions::accepts_dir`]: a directory that is itself
+    /// out of scope must still be entered when the rule that refused it says
+    /// nothing about the tree below it. See [`FilterSet::may_descend`].
+    #[must_use]
+    pub fn may_descend(&self, path: &str) -> bool {
+        self.filter.may_descend(path)
+    }
+
+    /// Whether an empty directory is itself in scope.
+    #[must_use]
+    pub fn accepts_dir(&self, path: &str) -> bool {
+        self.filter.admits_dir(path)
     }
 }
 
@@ -148,10 +207,10 @@ impl Listing {
 /// continuing would report a successful transfer of nothing.
 ///
 /// # Errors
-/// [`ExitCode::DirNotFound`] when the endpoint does not exist, and an
-/// unimplemented error for a named remote.
-pub fn source(endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
-    let listing = enumerate(endpoint, options)?;
+/// [`ExitCode::DirNotFound`] when the endpoint does not exist, plus whatever
+/// opening or reading the remote reported.
+pub async fn source(ctx: &Ctx, endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
+    let listing = enumerate(ctx, endpoint, options).await?;
     if !listing.exists {
         return Err(CliError::new(
             ExitCode::DirNotFound,
@@ -168,9 +227,14 @@ pub fn source(endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
 /// the answer is simply that nothing is there yet.
 ///
 /// # Errors
-/// An unimplemented error for a named remote; I/O errors from the walk.
-pub fn destination(endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
-    enumerate(endpoint, options)
+/// I/O errors from the walk, and whatever opening or reading the remote
+/// reported.
+pub async fn destination(
+    ctx: &Ctx,
+    endpoint: &RemoteSpec,
+    options: &ListOptions,
+) -> Result<Listing> {
+    enumerate(ctx, endpoint, options).await
 }
 
 /// A destination that will not be listed at all (`--no-traverse`).
@@ -187,14 +251,140 @@ pub fn untraversed() -> Listing {
 }
 
 /// Enumerate an endpoint, whatever it turns out to be.
-fn enumerate(endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
+async fn enumerate(ctx: &Ctx, endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
     match endpoint {
-        RemoteSpec::Named { .. } => {
-            Err(CliError::unimplemented(REMOTE_ENUMERATION_FEATURE)
-                .with_hint(REMOTE_ENUMERATION_HINT))
-        }
+        RemoteSpec::Named { path, .. } => walk_remote(ctx, endpoint, path, options).await,
         RemoteSpec::Local(root) => walk_local(root, options),
     }
+}
+
+/// List everything under a named remote's prefix.
+///
+/// The listing arrives already ordered, already scoped to whole path components
+/// and already carrying plaintext sizes, because [`crate::source`] guarantees
+/// all three. What is left to do here is the part that is specific to a
+/// *transfer*: re-rooting each path at the prefix the user named, applying the
+/// filters, and deciding whether the prefix named one object or a tree.
+async fn walk_remote(
+    ctx: &Ctx,
+    endpoint: &RemoteSpec,
+    prefix: &str,
+    options: &ListOptions,
+) -> Result<Listing> {
+    let source = crate::source::open(ctx, endpoint).await?;
+    let mut cursor = source.enumerate(prefix).await?;
+
+    let mut listing = Listing::default();
+    // The object the prefix names exactly, if there is one. Held rather than
+    // acted on inside the loop because a prefix can legitimately match both an
+    // object and a tree beneath it, and only a second pass over the *whole*
+    // listing establishes which shape was addressed.
+    let mut exact: Option<crate::source::Entry> = None;
+
+    while let Some(object) = cursor.next().await? {
+        listing.exists = true;
+        if object.path == prefix {
+            exact = Some(object);
+            continue;
+        }
+        let relative = relative_to(prefix, &object.path);
+        if accepts(options, &relative, object.size) {
+            listing
+                .entries
+                .push(remote_entry(relative, &object, options));
+        }
+    }
+
+    if let Some(object) = exact {
+        // One object, addressed by its full path: `copy archive:notes/today.md
+        // ./out` must land `today.md` in `./out` rather than recreating
+        // `notes/` under it. Its logical path relative to the listing root is
+        // therefore its own name — exactly the shape a lone local file produces.
+        listing.is_single_file = true;
+        listing.entries.clear();
+
+        let leaf = logical::file_name(prefix).to_string();
+        if accepts(options, &leaf, object.size) {
+            listing.entries.push(remote_entry(leaf, &object, options));
+        }
+    }
+
+    // Deterministic order, matching the local walk, so a plan printed twice is
+    // byte-identical whichever side produced it.
+    listing.entries.sort_by(|a, b| a.path.cmp(&b.path));
+    Ok(listing)
+}
+
+/// Ask the filter about one enumerated remote object, measured or not.
+///
+/// One place, so the two call sites above cannot answer the question two ways.
+fn accepts(options: &ListOptions, path: &str, size: Option<u64>) -> bool {
+    size.map_or_else(
+        || options.accepts_unmeasured_file(path),
+        |size| options.accepts_file(path, size),
+    )
+}
+
+/// Build a transfer entry from one enumerated object.
+///
+/// The content hash is carried across only when `--checksum` asked for one. It
+/// costs nothing to read from a vault's index, but attaching it unconditionally
+/// would make a plan's JSON differ between a vault side and a local side for
+/// reasons that have nothing to do with the transfer.
+fn remote_entry(relative: String, object: &crate::source::Entry, options: &ListOptions) -> Entry {
+    // An object the index never measured becomes an entry that says so, rather
+    // than one claiming zero bytes: see `Entry::size` for what comparing that
+    // zero would have skipped.
+    let mut entry = match object.size {
+        Some(size) => Entry::file(relative, size),
+        None => Entry::unmeasured_file(relative),
+    };
+    if let Some(modified) = object.modified_unix.and_then(unix_seconds) {
+        entry = entry.with_modified(modified);
+    }
+    if options.hash_contents {
+        // `None` here is not an omission: a plain object store genuinely does
+        // not know the plaintext hash, and `super::compare` refuses rather than
+        // inventing one.
+        entry.hash = object.content_hash.as_deref().map(checksum::encode);
+    }
+    entry
+}
+
+/// Turn a unix timestamp into a [`SystemTime`], including before the epoch.
+///
+/// `None` for a value no clock can represent, which keeps "unknown" and "the
+/// epoch" distinguishable — a side that reported no usable time must not make
+/// every file look older than every local file and invert `--update`.
+fn unix_seconds(seconds: i64) -> Option<SystemTime> {
+    if seconds >= 0 {
+        u64::try_from(seconds)
+            .ok()
+            .and_then(|secs| SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(secs)))
+    } else {
+        seconds
+            .checked_neg()
+            .and_then(|secs| u64::try_from(secs).ok())
+            .and_then(|secs| SystemTime::UNIX_EPOCH.checked_sub(Duration::from_secs(secs)))
+    }
+}
+
+/// A logical path re-rooted at `prefix`.
+///
+/// Whole-component comparison is already guaranteed by the source, so this only
+/// has to remove the prefix and the separator behind it. An empty result means
+/// the path *is* the prefix.
+fn relative_to(prefix: &str, path: &str) -> String {
+    if prefix.is_empty() {
+        return path.to_string();
+    }
+    path.strip_prefix(prefix).map_or_else(
+        || path.to_string(),
+        |rest| {
+            rest.trim_start_matches(crate::constants::PATH_SEPARATOR)
+                .to_string()
+        },
+    )
 }
 
 /// Walk a local tree, breadth-first, without recursion.
@@ -217,8 +407,10 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
         listing.is_single_file = true;
         match root.file_name().map(logical::to_logical_component) {
             Some(Ok(name)) => {
-                if options.accepts_size(metadata.len()) {
-                    listing.entries.push(file_entry(name, &metadata));
+                if options.accepts_file(&name, metadata.len()) {
+                    listing
+                        .entries
+                        .push(file_entry(name, root, &metadata, options)?);
                 }
             }
             // Either the name has no logical spelling, or the path ends in `..`
@@ -235,14 +427,10 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
         return Ok(listing);
     }
 
-    // (directory, logical prefix, depth of the directory's *contents*)
-    let mut stack = vec![(root.to_path_buf(), String::new(), 1_i32)];
+    // (directory, its logical path relative to the root)
+    let mut stack = vec![(root.to_path_buf(), String::new())];
 
-    while let Some((directory, prefix, depth)) = stack.pop() {
-        if !options.accepts_depth(depth) {
-            continue;
-        }
-
+    while let Some((directory, prefix)) = stack.pop() {
         let children = fs::read_dir(&directory).map_err(|error| {
             CliError::from(error).with_hint(format!("Could not read {}", directory.display()))
         })?;
@@ -282,15 +470,23 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
             }
 
             if metadata.is_dir() {
-                stack.push((child.path(), path, depth + 1));
-            } else if metadata.is_file() && options.accepts_size(metadata.len()) {
-                listing.entries.push(file_entry(path, &metadata));
+                if options.may_descend(&path) {
+                    stack.push((child.path(), path));
+                }
+            } else if metadata.is_file() && options.accepts_file(&path, metadata.len()) {
+                listing
+                    .entries
+                    .push(file_entry(path, &child.path(), &metadata, options)?);
             }
         }
 
         // An empty directory holds no objects, so it would vanish through a
         // vault unless it is carried across explicitly.
-        if child_count == 0 && !prefix.is_empty() && options.include_empty_dirs {
+        if child_count == 0
+            && !prefix.is_empty()
+            && options.include_empty_dirs
+            && options.accepts_dir(&prefix)
+        {
             listing.entries.push(Entry::empty_dir(prefix));
         }
     }
@@ -302,31 +498,34 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
 }
 
 /// Build a file entry from filesystem metadata.
-fn file_entry(path: String, metadata: &fs::Metadata) -> Entry {
-    let entry = Entry::file(path, metadata.len());
-    match metadata.modified() {
-        Ok(modified) => entry.with_modified(modified),
-        // Some filesystems do not record modification times at all. Leaving the
-        // field unset is honest; substituting `now` would make every file look
-        // freshly modified on every run.
-        Err(_) => entry,
+///
+/// # Errors
+/// Only under `--checksum`, and only when the file cannot be read: a hash that
+/// could not be computed is refused rather than left absent, because an absent
+/// hash is what [`super::compare`] reads as "this side cannot answer".
+fn file_entry(
+    path: String,
+    native: &Path,
+    metadata: &fs::Metadata,
+    options: &ListOptions,
+) -> Result<Entry> {
+    let mut entry = Entry::file(path, metadata.len());
+    // A filesystem that does not record modification times leaves the field
+    // unset, which is honest: substituting `now` would make every file look
+    // freshly modified on every run and re-transfer the whole tree.
+    if let Ok(modified) = metadata.modified() {
+        entry = entry.with_modified(modified);
     }
-}
-
-/// Parse one size limit, naming the flag in any failure.
-fn parse_limit(value: Option<&str>, flag: &str) -> Result<Option<u64>> {
-    match value {
-        None => Ok(None),
-        Some(raw) => parse_size(raw).map_err(|message| {
-            CliError::usage(format!("{flag}: {message}"))
-                .with_hint(format!("Accepted forms: {SIZE_PARSE_EXAMPLES}."))
-        }),
+    if options.hash_contents {
+        entry.hash = Some(checksum::of_file(native)?);
     }
+    Ok(entry)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::commands::transfer::testing::ctx;
     use clap::Parser;
     use std::fs::File;
     use std::io::Write as _;
@@ -339,6 +538,10 @@ mod tests {
 
     fn globals(args: &[&str]) -> GlobalArgs {
         Harness::parse_from(std::iter::once("dctl").chain(args.iter().copied())).globals
+    }
+
+    fn options(args: &[&str]) -> ListOptions {
+        ListOptions::resolve(&globals(args), false).unwrap()
     }
 
     /// Build a small tree: `a.txt`, `sub/b.txt`, `sub/deep/c.txt`, `empty/`.
@@ -363,11 +566,13 @@ mod tests {
         listing.entries.iter().map(|e| e.path.as_str()).collect()
     }
 
-    #[test]
-    fn a_tree_lists_as_logical_paths_in_sorted_order() {
+    #[tokio::test]
+    async fn a_tree_lists_as_logical_paths_in_sorted_order() {
         let dir = tree();
         let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
-        let listing = source(&endpoint, &ListOptions::default()).unwrap();
+        let listing = source(&ctx(&[]), &endpoint, &ListOptions::default())
+            .await
+            .unwrap();
 
         assert!(listing.exists);
         assert!(!listing.is_single_file);
@@ -375,21 +580,26 @@ mod tests {
         assert_eq!(paths(&listing), ["a.txt", "sub/b.txt", "sub/deep/c.txt"]);
     }
 
-    #[test]
-    fn empty_directories_appear_only_when_asked_for() {
+    #[tokio::test]
+    async fn empty_directories_appear_only_when_asked_for() {
         let dir = tree();
         let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
+        let ctx = ctx(&[]);
 
-        let without = source(&endpoint, &ListOptions::default()).unwrap();
+        let without = source(&ctx, &endpoint, &ListOptions::default())
+            .await
+            .unwrap();
         assert!(!paths(&without).contains(&"empty"));
 
         let with = source(
+            &ctx,
             &endpoint,
             &ListOptions {
                 include_empty_dirs: true,
                 ..ListOptions::default()
             },
         )
+        .await
         .unwrap();
         assert!(paths(&with).contains(&"empty"));
         // It is a directory, not a zero-byte object.
@@ -397,76 +607,150 @@ mod tests {
         assert!(!entry.is_file());
     }
 
-    #[test]
-    fn max_depth_limits_the_walk() {
+    #[tokio::test]
+    async fn max_depth_limits_the_walk() {
         let dir = tree();
         let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
-        let options = ListOptions {
-            max_depth: 2,
-            ..ListOptions::default()
-        };
-        let listing = source(&endpoint, &options).unwrap();
+        let listing = source(&ctx(&[]), &endpoint, &options(&["--max-depth", "2"]))
+            .await
+            .unwrap();
         // Depth 1 is the root's children, depth 2 is `sub/`'s.
         assert_eq!(paths(&listing), ["a.txt", "sub/b.txt"]);
     }
 
-    #[test]
-    fn size_filters_are_evaluated_for_real() {
+    #[tokio::test]
+    async fn size_filters_are_evaluated_for_real() {
         let dir = tree();
         let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
         let listing = source(
+            &ctx(&[]),
             &endpoint,
-            &ListOptions {
-                min_size: Some(10),
-                max_size: Some(100),
-                ..ListOptions::default()
-            },
+            &options(&["--min-size", "10", "--max-size", "100"]),
         )
+        .await
         .unwrap();
         assert_eq!(paths(&listing), ["sub/b.txt"]);
     }
 
-    #[test]
-    fn a_single_file_lists_as_itself() {
+    #[tokio::test]
+    async fn a_pattern_filter_is_evaluated_rather_than_refused() {
+        // The engine is wired in: an `--exclude` that used to stop the command
+        // now removes exactly the files it names, and nothing else.
+        let dir = tree();
+        let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
+        let listing = source(&ctx(&[]), &endpoint, &options(&["--exclude", "sub/**"]))
+            .await
+            .unwrap();
+        assert_eq!(paths(&listing), ["a.txt"]);
+    }
+
+    #[tokio::test]
+    async fn an_include_drops_everything_it_did_not_name() {
+        // rclone's asymmetry, honoured: one `--include` makes the unmatched
+        // default an exclusion.
+        let dir = tree();
+        let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
+        let listing = source(&ctx(&[]), &endpoint, &options(&["--include", "sub/**"]))
+            .await
+            .unwrap();
+        assert_eq!(paths(&listing), ["sub/b.txt", "sub/deep/c.txt"]);
+    }
+
+    #[tokio::test]
+    async fn a_files_from_list_selects_exactly_those_paths() {
+        let dir = tree();
+        let list = dir.path().join("wanted.txt");
+        fs::write(&list, "sub/b.txt\n").unwrap();
+        let list_arg = list.display().to_string();
+
+        let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
+        let listing = source(
+            &ctx(&[]),
+            &endpoint,
+            &options(&["--files-from", list_arg.as_str()]),
+        )
+        .await
+        .unwrap();
+        assert_eq!(paths(&listing), ["sub/b.txt"]);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_pattern_is_a_usage_error_before_anything_is_walked() {
+        let error = ListOptions::resolve(&globals(&["--exclude", "a{b"]), false).unwrap_err();
+        assert_eq!(error.code(), ExitCode::Usage);
+    }
+
+    #[tokio::test]
+    async fn checksum_hashes_the_local_side() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("a.txt"), b"hello").unwrap();
+        let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
+
+        let plain = source(&ctx(&[]), &endpoint, &options(&[])).await.unwrap();
+        assert!(
+            plain.entries[0].hash.is_none(),
+            "never hashed speculatively"
+        );
+
+        let hashed = source(&ctx(&[]), &endpoint, &options(&["--checksum"]))
+            .await
+            .unwrap();
+        assert_eq!(
+            hashed.entries[0].hash.as_deref(),
+            Some(blake3::hash(b"hello").to_hex().to_string().as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn a_single_file_lists_as_itself() {
         let dir = tree();
         let endpoint = RemoteSpec::Local(dir.path().join("a.txt"));
-        let listing = source(&endpoint, &ListOptions::default()).unwrap();
+        let listing = source(&ctx(&[]), &endpoint, &ListOptions::default())
+            .await
+            .unwrap();
         assert!(listing.is_single_file);
         assert_eq!(paths(&listing), ["a.txt"]);
     }
 
-    #[test]
-    fn a_missing_source_is_an_error_but_a_missing_destination_is_not() {
+    #[tokio::test]
+    async fn a_missing_source_is_an_error_but_a_missing_destination_is_not() {
         let dir = tempfile::tempdir().unwrap();
         let endpoint = RemoteSpec::Local(dir.path().join("nowhere"));
+        let ctx = ctx(&[]);
 
-        let error = source(&endpoint, &ListOptions::default()).unwrap_err();
+        let error = source(&ctx, &endpoint, &ListOptions::default())
+            .await
+            .unwrap_err();
         assert_eq!(error.code(), ExitCode::DirNotFound);
 
         // First run: the destination legitimately does not exist yet.
-        let listing = destination(&endpoint, &ListOptions::default()).unwrap();
+        let listing = destination(&ctx, &endpoint, &ListOptions::default())
+            .await
+            .unwrap();
         assert!(!listing.exists);
         assert!(listing.entries.is_empty());
     }
 
     #[cfg(unix)]
-    #[test]
-    fn symlinks_are_skipped_and_counted_never_followed() {
+    #[tokio::test]
+    async fn symlinks_are_skipped_and_counted_never_followed() {
         // A link to an ancestor would make the walk loop forever; a link out of
         // the tree would copy data the user never named.
         let dir = tree();
         std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
 
         let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
-        let listing = source(&endpoint, &ListOptions::default()).unwrap();
+        let listing = source(&ctx(&[]), &endpoint, &ListOptions::default())
+            .await
+            .unwrap();
         assert_eq!(listing.symlinks_skipped, 1);
         assert!(listing.has_omissions());
         assert_eq!(paths(&listing), ["a.txt", "sub/b.txt", "sub/deep/c.txt"]);
     }
 
     #[cfg(unix)]
-    #[test]
-    fn a_backslash_in_a_name_is_refused_rather_than_keyed_two_ways() {
+    #[tokio::test]
+    async fn a_backslash_in_a_name_is_refused_rather_than_keyed_two_ways() {
         // `a\b.txt` is one legal filename here and a two-component path on
         // Windows. Listing it as one component while every spec naming it means
         // two would give one file two index keys.
@@ -477,7 +761,9 @@ mod tests {
         fs::write(dir.path().join("clean.txt"), "z").unwrap();
 
         let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
-        let listing = source(&endpoint, &ListOptions::default()).unwrap();
+        let listing = source(&ctx(&[]), &endpoint, &ListOptions::default())
+            .await
+            .unwrap();
 
         // Only the representable file is listed, and the walk does not descend
         // into a directory whose own name has no logical spelling.
@@ -487,27 +773,37 @@ mod tests {
     }
 
     #[cfg(unix)]
-    #[test]
-    fn a_single_file_named_with_a_backslash_is_refused() {
+    #[tokio::test]
+    async fn a_single_file_named_with_a_backslash_is_refused() {
         let dir = tempfile::tempdir().unwrap();
         fs::write(dir.path().join(r"a\b.txt"), "x").unwrap();
 
         let endpoint = RemoteSpec::Local(dir.path().join(r"a\b.txt"));
-        let listing = source(&endpoint, &ListOptions::default()).unwrap();
+        let listing = source(&ctx(&[]), &endpoint, &ListOptions::default())
+            .await
+            .unwrap();
         assert!(listing.is_single_file);
         assert!(listing.entries.is_empty());
         assert_eq!(listing.unrepresentable_skipped, 1);
     }
 
-    #[test]
-    fn a_remote_endpoint_is_refused_not_faked() {
+    #[tokio::test]
+    async fn an_unconfigured_remote_is_reported_rather_than_read_as_a_directory() {
+        // S6 in the read direction: a remote nobody configured must be named,
+        // never quietly reinterpreted as the relative directory `vault`.
         let endpoint = RemoteSpec::Named {
             remote: "vault".into(),
             path: "photos".into(),
         };
-        let error = source(&endpoint, &ListOptions::default()).unwrap_err();
+        let error = source(
+            &ctx(&["--no-ask-password"]),
+            &endpoint,
+            &ListOptions::default(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(error.hint().is_some());
+        assert!(error.message().contains("vault"), "{}", error.message());
     }
 
     #[test]
@@ -524,10 +820,10 @@ mod tests {
         let options =
             ListOptions::resolve(&globals(&["--min-size", "1k", "--max-depth", "3"]), true)
                 .unwrap();
-        assert_eq!(options.min_size, Some(1024));
-        assert_eq!(options.max_size, None);
-        assert_eq!(options.max_depth, 3);
         assert!(options.include_empty_dirs);
+        assert!(!options.accepts_file("a.txt", 1023));
+        assert!(options.accepts_file("a.txt", 1024));
+        assert!(!options.accepts_file("a/b/c/d.txt", 4096));
     }
 
     #[test]
@@ -547,22 +843,25 @@ mod tests {
     }
 
     #[test]
-    fn depth_and_size_predicates_agree_with_their_flags() {
-        let unlimited = ListOptions::default();
-        assert!(unlimited.accepts_depth(1_000));
-        assert!(unlimited.accepts_size(0));
+    fn a_remote_path_is_re_rooted_at_the_prefix_that_named_it() {
+        assert_eq!(relative_to("", "photos/a.jpg"), "photos/a.jpg");
+        assert_eq!(relative_to("photos", "photos/a.jpg"), "a.jpg");
+        assert_eq!(relative_to("photos/2024", "photos/2024/a.jpg"), "a.jpg");
+        // The prefix naming the object itself leaves nothing behind, which is
+        // what marks the single-file case.
+        assert_eq!(relative_to("photos/a.jpg", "photos/a.jpg"), "");
+    }
 
-        let bounded = ListOptions {
-            max_depth: 2,
-            min_size: Some(10),
-            max_size: Some(20),
-            include_empty_dirs: false,
-        };
-        assert!(bounded.accepts_depth(2));
-        assert!(!bounded.accepts_depth(3));
-        assert!(!bounded.accepts_size(9));
-        assert!(bounded.accepts_size(10));
-        assert!(bounded.accepts_size(20));
-        assert!(!bounded.accepts_size(21));
+    #[test]
+    fn a_timestamp_survives_the_trip_in_both_directions() {
+        assert_eq!(
+            unix_seconds(1_700_000_000),
+            Some(SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000))
+        );
+        // Before the epoch is a real timestamp, not a missing one.
+        assert_eq!(
+            unix_seconds(-86_400),
+            Some(SystemTime::UNIX_EPOCH - Duration::from_secs(86_400))
+        );
     }
 }

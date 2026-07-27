@@ -93,8 +93,9 @@ declined confirmation exits **25** (`cancelled`), never a silent zero.
 `--ignore-existing` then `--update` can skip; otherwise size and modification
 time decide by default with a one-second tolerance, content hashes under the
 global `--checksum`, size alone under `--size-only`. `--max-depth`,
-`--min-size` and `--max-size` are honoured; the pattern filters are refused with
-exit 7. A skip is also a non-deletion: the source is only ever removed for a
+`--min-size` and `--max-size` are honoured, as are `--include`, `--exclude`,
+`--filter-from` and `--files-from`, all through one engine. A skip is also a
+non-deletion: the source is only ever removed for a
 file whose own commit succeeded.
 
 **`--dry-run` is authoritative and deletes nothing.** The plan is computed
@@ -140,7 +141,8 @@ support `dctl-core` does not expose.
 The family's refusals apply unchanged, all exit **7** and all before anything is
 deleted: a **plain write into a directory that holds a vault**, a file **above
 the 1 GiB whole-file limit** (the core is whole-buffer; streaming is `PLAN.md`
-§16.2), a **pattern filter**, and **`--checksum`** when no hashes are available.
+§16.2), and **`--checksum`** against a plain object store, which cannot supply a
+plaintext hash.
 `--no-traverse` still skips the destination lookup, and therefore also skips the
 "`DEST` is an existing directory" refusal.
 
@@ -317,9 +319,9 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 0 | `success` | The object was transferred and its source removed, or a `--dry-run` completed, or the destination already held a matching object. |
 | 1 | `usage` | Unparseable command line; `DEST` names no object (a bare root); `DEST` is an existing directory; source and destination are the same file; the size filters excluded the single named file; an unparseable or unsatisfiable size range; `--interactive` with no terminal; `--immutable` together with `--no-traverse`. |
 | 3 | `dir_not_found` | `SOURCE` does not exist. |
-| 5 | `temporary_error` | A cloud backend failed in a way worth retrying; the source is untouched. Not reachable today — transfers cannot address a cloud backend yet. |
+| 5 | `temporary_error` | A cloud backend failed in a way worth retrying; the source is untouched. Reachable wherever a cloud backend is contacted: reading a plain `b2:`/`s3:`/`r2:` source, writing a plain object into one, or a vault whose store is one of them. |
 | 6 | `partial_failure` | A directory source finished with at least one file failing. A file that failed keeps its source; a file whose source removal failed exists twice, and the message names the side. |
-| 7 | `fatal_error` | A named remote had to be listed; the file exceeded the whole-file limit; `DEST` is inside a local directory holding a vault; `--checksum` with no hashes; a pattern filter was passed; both sides are remotes; `--immutable` and `DEST` already exists. Nothing was transferred and nothing was deleted. |
+| 7 | `fatal_error` | The file exceeded the whole-file limit; `DEST` is inside a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and `DEST` already exists. Nothing was transferred and nothing was deleted. |
 | 20 | `checksum_mismatch` | The backend stored the wrong bytes. Nothing was committed and the source is untouched. Not reachable today: no `moveto` reaches a vault transfer, and a local write has no second party to disagree with. |
 | 21 | `integrity_failure` | `--verify sample`/`strict` could not authenticate what was written. The source is untouched; investigate before removing it by hand. Not reachable today, for the same reason as 20. |
 | 22 | `vault_locked` | No password was available, or the envelope did not unwrap. Nothing was transferred or deleted. |

@@ -7,28 +7,72 @@ Show remote usage, quota and capability information.
 `dctl about` answers the question "what is actually on the other end of this
 name?". rclone's command of the same name answers three questions at once — how
 much is stored, how much the account is allowed, and what the backend can do —
-and DCTL deliberately splits them, because in this build only the third has an
-honest answer.
+and DCTL answers each of them as well as it honestly can, which is not equally
+well:
 
-**`dctl about --capabilities REMOTE` is the half that works, and it needs
-nothing.** It reads `config.toml` and stops: no credential is looked up, no
-backend is constructed, no HTTP request is made, no vault is unlocked and no
-password is ever prompted for (`dctl about` is one of the four commands
-`Command::requires_vault` excludes, alongside `config`, `version` and
-`completion`). That makes it usable as a configuration check on a machine where
-nothing has been set up yet — which is exactly when someone needs to know
-whether `vault:` points where they think it does.
+| Question | Answer here | How |
+|----------|-------------|-----|
+| How much is stored? | **exact** | measured, by enumerating the remote |
+| What is the allowance? | **not reported**, with the reason | there is no call to make |
+| What can the backend do? | **exact** | a fact about this binary, read offline |
 
-**`dctl about REMOTE` without `--capabilities` fails with exit 7.** See *Status
-in this build* below. It does not print zeroes, an empty table or a cheerful
-"0 B used": a number nobody measured is worse than no number, because it gets
-believed and then gets used to decide whether a backup will fit.
+**Stored is measured, not asked for.** For a **vault** the walk is the local
+encrypted index, so the object count and the total *plaintext* size are exact and
+cost no provider request. For a **plain** remote — a local directory, a bucket,
+or a vault's own object store — it is that remote's listing, so the figure is the
+objects *as stored*. The basis is printed beside the number, because a plaintext
+total and a stored total are both true, are not equal, and get reconciled against
+invoices: the same data reads `195.3 KiB (plaintext)` through `archive:` and
+`197.0 KiB (stored)` through `archive-store:`, and the difference is the
+encryption overhead the provider bills for.
+
+Measuring a vault means unlocking it, so **`dctl about archive:` asks for a
+password**. `dctl about archive-store:` does not, and reports the ciphertext side
+of the same data — which is one of the things `dctl init`'s two remotes exist
+for. (`about` is therefore no longer in the set of commands that never need a
+vault; `config`, `version` and `completion` still are.)
+
+**The allowance is not reported, and the report says exactly why**, in the
+`limits_note` row and in the JSON beside the two `null`s it explains:
+
+```
+total_bytes  not reported — nothing in this build can measure it
+free_bytes   not reported — nothing in this build can measure it
+limits_note  no allowance is reported: dctl_store::Backend exposes no usage or
+             quota call on any provider (see the usage_reporting and
+             quota_reporting rows), and a local filesystem's free space needs a
+             statvfs syscall this crate cannot make under
+             #![forbid(unsafe_code)]. The objects and bytes above are measured by
+             listing the remote, not asked of it.
+```
+
+Two independent reasons, both named because they have different remedies. The
+provider half is a missing trait method: `dctl_store::Backend` has `put`, `get`,
+`head`, `list_page` and no usage or quota call at all — so there is no request to
+make, on any provider, and a figure here would be invented. The local half is a
+missing *safe* API: free space needs `statvfs`, the standard library exposes no
+equivalent, and `dctl-cli` is `#![forbid(unsafe_code)]`, so the syscall is
+unreachable from here by a rule the crate applies to itself.
+
+The keys stay in the JSON as `null` rather than disappearing: a key that vanished
+when the answer was unknown would make a consumer's `.total_bytes` silently
+`undefined`, and a `0` would be believed and then used to decide whether a backup
+will fit.
+
+**`dctl about --capabilities REMOTE` still needs nothing.** It reads
+`config.toml` and stops: no credential is looked up, no backend is constructed,
+no HTTP request is made, no listing is performed, no vault is unlocked and no
+password is ever prompted for. That makes it usable as a configuration check on a
+machine where nothing has been set up yet — which is exactly when someone needs
+to know whether `vault:` points where they think it does.
 
 ### What a capability report tells you
 
 Two tables in text, one JSON document in `--json`, the same facts in both.
 
-The **summary** says what was addressed and what is really behind it:
+The **summary** says what was addressed, what is really behind it, and how much
+is in it. Every row label is the JSON field name it corresponds to, so the two
+renderings can be read against each other without a legend:
 
 | Row | Meaning |
 |-----|---------|
@@ -37,12 +81,23 @@ The **summary** says what was addressed and what is really behind it:
 | `storage_provider` | the provider at the far end of the vault chain — the one that will actually hold the bytes, and the one the capability rows describe |
 | `encrypted` | whether anything in the chain encrypts on the way through |
 | `chain` | the remote names walked, nearest first, joined with ` -> ` |
+| `objects` | how many objects the remote holds, counted by listing it |
+| `bytes` | their total size, rounded for a human *and* exact in the same cell |
+| `sizes` | which basis that total used: `plaintext` or `stored` |
+| `total_bytes` | the allowance. Always unknown — see the note below it |
+| `free_bytes` | what is left of it. Likewise |
+| `limits_note` | why those two are unknown, in full |
 
 The chain row is **omitted from the text table** for a filesystem path, which is
 not a named remote and has no chain; an empty cell there would read as a missing
 value rather than an inapplicable one. The JSON keeps the `chain` key as `[]`,
 because a machine consumer reads the shape once and must not have it change
 between remotes.
+
+The six usage rows are omitted from the text table under `--capabilities`, which
+measured nothing, for the same reason — a `0` there would be read as an empty
+remote. Their JSON keys stay present and `null`, which is the difference between
+"not measured" and "none".
 
 The **capability matrix** lists every capability, supported or not, always all
 seven rows. A report that listed only what a provider *can* do would leave a
@@ -137,8 +192,15 @@ positional wins.
 * **Output goes to stdout, commentary to stderr.** `dctl about --capabilities
   vault: --json | jq -r .storage_provider` is a working pipeline. A closed pipe
   (`| head`) is a success, not a failure.
-* **The remote is resolved before the unimplemented gate.** A user who typed a
-  remote that does not exist is told about the typo, not about a missing engine.
+* **The remote is resolved before anything is measured.** A user who typed a
+  remote that does not exist is told about the typo, not about a listing that
+  failed.
+* **A listing that fails is an error, never a zero.** "The backup is empty" is a
+  conclusion people act on, so an unreachable bucket or an unreadable index ends
+  the run with a non-zero code and no usage figures at all.
+* **Measuring costs one listing pass.** On a vault that is a local index scan;
+  on a bucket it is a real paged listing, which is the honest price of an exact
+  answer. Memory is two integers however large the remote is.
 * **`--dry-run` changes nothing.** The command only reads, so there is no
   mutation to withhold and a `[dry-run] would describe` line would be noise.
 * If the configuration file is readable by anyone but its owner, a warning about
@@ -147,29 +209,28 @@ positional wins.
 
 ### Status in this build
 
-**Usage and quota reporting is not implemented, and says so.**
-`dctl_store::Backend` has no usage or quota call — there is no method to invoke,
-on any provider — so `dctl about REMOTE` cannot report either. A complete
-invocation resolves the remote, validates the configuration, and then fails
-with:
+**Usage reporting works.** It is measured by listing rather than asked of the
+provider, and the report says so on stderr at `-v`:
 
 ```
-error: reading usage and quota from a remote is not implemented in this build
+usage is measured by listing the remote — it counts what DCTL can see, not what
+the provider is billing for
 ```
 
-and exit code **7**. The refusal is not a special case bolted on:
+That distinction matters when the two disagree: a bucket may hold objects DCTL
+did not write, and a vault's plaintext total is smaller than the ciphertext it
+costs to store.
+
+**Quota and free-space reporting do not, and cannot yet.** Both reasons are in
+`limits_note` above, and neither is a missing branch in this command:
 `usage_reporting` and `quota_reporting` are rows in the capability matrix like
 any other, unsupported by every provider, and a unit test fails the moment a
-backend gains either — which is the reminder to delete the gate.
+backend gains either — which is the reminder to come back here. `PLAN.md` §11
+does not schedule them in any phase; they become possible when the `Backend`
+trait gains the call, not before.
 
-`PLAN.md` §11 does not schedule usage or quota reporting in any phase; it
-becomes possible when the `Backend` trait gains the call, not before. If you
-need to know how much a remote holds today, the honest answer is to count it by
-listing — [dctl size](dctl_size.md), which reports a measured total rather than
-a claimed one (and which is itself waiting on the vault handle in Phase 1).
-
-The capability half is **complete**: `dctl about --capabilities` succeeds today
-with no configuration, no credentials and no network.
+The capability half is unchanged and **complete**: `dctl about --capabilities`
+succeeds today with no configuration, no credentials, no listing and no network.
 
 ```
 dctl about [REMOTE] [flags]
@@ -177,13 +238,60 @@ dctl about [REMOTE] [flags]
 
 ## Examples
 
-Find out what `vault:` really is before trusting a backup script to it. The
-remote is a vault wrapper, so the report follows the chain and describes
-`b2prod` — the remote that will actually hold the bytes — while recording that
-everything passing through is encrypted:
+Ask a vault how much it is holding. The remote is a vault wrapper, so the report
+follows the chain and describes `archive-store` — the remote that actually holds
+the bytes — while the totals come from the sealed side, in plaintext bytes:
 
+```console
+$ dctl about archive:
+remote            archive:
+provider          vault
+storage_provider  local
+encrypted         true
+chain             archive -> archive-store
+objects           4
+bytes             195.3 KiB (200018 bytes)
+sizes             plaintext
+total_bytes       not reported — nothing in this build can measure it
+free_bytes        not reported — nothing in this build can measure it
+limits_note       no allowance is reported: dctl_store::Backend exposes no usage or quota call on any provider (see the usage_reporting and quota_reporting rows), and a local filesystem's free space needs a statvfs syscall this crate cannot make under #![forbid(unsafe_code)]. The objects and bytes above are measured by listing the remote, not asked of it.
+
+Capability         Supported  Description
+-----------------  ---------  ------------------------------------------------
+range_reads        yes        Serve an arbitrary byte range without transferr...
+verified_writes    yes        Refuse to report a write as stored until the st...
+paged_listing      yes        Enumerate objects one bounded page at a time, s...
+multipart_upload   no         Split one large object across several requests,...
+empty_directories  yes        Hold a directory with no objects under it. An o...
+usage_reporting    no         Report how many bytes and objects the remote cu...
+quota_reporting    no         Report the account's storage allowance and what...
 ```
-dctl about --capabilities vault:photos/2024
+
+The same data through the object view. No password is needed, the figure is the
+*stored* size, and it is larger than the plaintext total by the encryption
+overhead — which is exactly what makes the two reconcilable rather than merely
+different:
+
+```console
+$ dctl about archive-store:
+remote            archive-store:
+provider          local
+storage_provider  local
+encrypted         false
+chain             archive-store
+objects           9
+bytes             197.0 KiB (201734 bytes)
+sizes             stored
+total_bytes       not reported — nothing in this build can measure it
+free_bytes        not reported — nothing in this build can measure it
+...
+```
+
+Find out what `vault:` really is before trusting a backup script to it —
+offline, with no password and no listing:
+
+```console
+$ dctl about --capabilities vault:photos/2024
 remote            vault:photos/2024
 provider          vault
 storage_provider  b2
@@ -249,17 +357,18 @@ usage_reporting    no         Report how many bytes and objects the remote cu...
 quota_reporting    no         Report the account's storage allowance and what...
 ```
 
-Ask for usage and quota, and be told plainly that nobody measured them. Nothing
-is printed on stdout, so a pipeline reading this command never receives a
-fabricated record:
+Ask a machine for the totals. The two `null`s carry their explanation with them,
+so a capacity script cannot mistake "not measurable" for "zero":
 
-```
-dctl about vault:
-error: reading usage and quota from a remote is not implemented in this build
-warning: No provider in this build can be asked how much it is holding —
-  `dctl_store::Backend` has no usage or quota call, which is why both appear as
-  unsupported in the capability table. `dctl about --capabilities REMOTE`
-  reports what the remote can do, offline and without credentials.
+```console
+$ dctl about archive: --json | jq '{objects, bytes, sizes, total_bytes, free_bytes}'
+{
+  "objects": 4,
+  "bytes": 200018,
+  "sizes": "plaintext",
+  "total_bytes": null,
+  "free_bytes": null
+}
 ```
 
 A typo is diagnosed as a typo, not as a missing feature, because the remote is
@@ -301,18 +410,24 @@ through the global argument block like every other. The ones that change what
 | `--quiet` | Silences the notice and the config-permission warning. The report itself is data on stdout and survives. |
 | `--color`, `--ascii` | Table styling only. |
 
-The authentication flags are accepted and never used: this command does not
-unlock a vault. The transfer, filtering and durability flags have no effect —
-nothing is listed and nothing is written.
+The authentication flags (`--password`, `--password-command`,
+`--no-ask-password`) are used when a **sealed** remote's usage has to be
+measured, and are ignored in every other case — including every
+`--capabilities` run, which never unlocks anything. The transfer, filtering and
+durability flags have no effect: the listing is always the whole remote, and
+nothing is ever written.
 
 ## Exit codes
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | A capability report was produced. Only reachable with `--capabilities`. |
+| 0 | `success` | A report was produced — capabilities alone with `--capabilities`, capabilities plus measured usage without it. |
 | 1 | `usage` | No remote given and no default configured; an empty or blank remote; a spec containing `..`; a second positional argument; `--remote` written after `about`; a config file whose remote name collides with a provider type. |
 | 2 | `uncategorised` | A stdout write failed for a reason other than a broken pipe. |
-| 7 | `fatal_error` | The usage/quota report itself (**every invocation without `--capabilities`**); an unknown remote; an unreadable, unparseable or internally inconsistent config file; a vault chain with a dangling `base` or a cycle. |
+| 5 | `temporary_error` | The provider never answered the listing. Retries were already exhausted. |
+| 7 | `fatal_error` | An unknown remote; an unreadable, unparseable or internally inconsistent config file; a vault chain with a dangling `base` or a cycle; a missing credential for a remote that had to be listed. |
+| 22 | `vault_locked` | A sealed remote would not unlock, so its usage could not be measured. `--capabilities` never reaches this. |
+| 23 | `index_error` | The vault's index could not be read. Nothing is reported as zero. |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. |
 
 Codes 0–10 mirror rclone's taxonomy; 20+ are DCTL's own. See
@@ -320,9 +435,9 @@ Codes 0–10 mirror rclone's taxonomy; 20+ are DCTL's own. See
 
 ## See also
 
-* [dctl size](dctl_size.md) — how much a remote holds, counted by listing rather
-  than asked of the provider. The honest substitute for the missing usage
-  report.
+* [dctl size](dctl_size.md) — the same measured totals, scoped to a path and
+  honouring the filter flags. `about` reports the whole remote and adds the
+  capability matrix; `size` answers "how much is under *here*".
 * [dctl config](dctl_config.md) — list, show and edit the remotes `about`
   resolves against.
 * [dctl version](dctl_version.md) — the same question about the binary rather

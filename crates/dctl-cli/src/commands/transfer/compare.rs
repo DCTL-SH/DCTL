@@ -12,16 +12,53 @@
 //! content comparison and `--size-only` downgrades it to size alone; both are
 //! the user's explicit trade of certainty against cost, and both are honoured
 //! exactly rather than approximated.
+//!
+//! ## Where the hashes `--checksum` compares come from
+//!
+//! Not from here. This file is a pure function and never reads a byte; the two
+//! hashes arrive on the entries, put there by [`super::listing`] when — and only
+//! when — the flag asked for them. A vault side carries the plaintext BLAKE3 it
+//! recorded at write time, and a local side is read and hashed. Both spell the
+//! digest the same way ([`super::checksum`]), so the comparison below is a
+//! string equality and not a negotiation.
+//!
+//! One case genuinely cannot answer, and it is refused rather than downgraded: a
+//! **plain object store** knows the provider's checksum of whatever bytes it
+//! happens to be holding, which is a different claim from "the BLAKE3 of the
+//! plaintext that was stored". Comparing the two would produce a confident wrong
+//! answer, and answering the size-and-time question instead while the user asked
+//! for content equality is exactly the misreport `PLAN.md` §6 forbids.
+//!
+//! ## When the default comparison is answered by content instead
+//!
+//! A destination that stamps its own write time cannot be compared by
+//! modification time at all — not badly, but *at all*: the number it reports is
+//! true and describes something else. That is the state of a sealed vault today,
+//! because `dctl_core::Vault::put_file` takes no source timestamp, and it made
+//! `copy` re-upload every file forever while `check` called a tree it had just
+//! written entirely different (defect D5).
+//!
+//! [`ComparePolicy::content_for_time`] is how that arrives here. It is set by
+//! [`crate::fidelity`] — never by a flag — and it swaps the timestamp question
+//! for the content question the vault can actually answer. The difference from
+//! `--checksum` is deliberate and is in the missing-hash arm: `--checksum` is a
+//! request, so a side that cannot answer it is a refusal, while this is a
+//! compensation nobody asked for, so a side that cannot answer it means the file
+//! is transferred. Sending a file that did not need sending costs bandwidth;
+//! refusing a plain `copy` because one index row predates content hashing would
+//! stop a backup dead.
 
 use std::time::Duration;
 
 use crate::cli::GlobalArgs;
 use crate::constants::{
-    DEFAULT_MODIFY_WINDOW_SECS, PATTERN_FILTER_HINT, PLAN_REASON_CHECKSUM,
-    PLAN_REASON_DESTINATION_NEWER, PLAN_REASON_EXISTS, PLAN_REASON_IDENTICAL, PLAN_REASON_MISSING,
-    PLAN_REASON_MODIFIED, PLAN_REASON_SIZE,
+    CHECKSUM_UNAVAILABLE_HINT, DEFAULT_MODIFY_WINDOW_SECS, PLAN_REASON_CHECKSUM,
+    PLAN_REASON_CONTENT_UNRECORDED, PLAN_REASON_DESTINATION_NEWER, PLAN_REASON_EXISTS,
+    PLAN_REASON_IDENTICAL, PLAN_REASON_MISSING, PLAN_REASON_MODIFIED, PLAN_REASON_SIZE,
+    PLAN_REASON_SIZE_UNRECORDED,
 };
 use crate::error::{CliError, Result};
+use crate::exit::ExitCode;
 
 use super::entry::Entry;
 use super::options::CompareFlags;
@@ -61,6 +98,18 @@ pub struct ComparePolicy {
     pub ignore_existing: bool,
     /// Never overwrite something newer at the destination (`--update`).
     pub update: bool,
+    /// Answer the default comparison by content, because a side of this transfer
+    /// stamps its own write time and so has no source timestamp to compare.
+    ///
+    /// **Not a flag, and it must never become one.** It is decided per transfer
+    /// by [`crate::fidelity`] from the configuration, and it exists only because
+    /// `dctl_core::Vault::put_file` records `now_unix()` rather than the source's
+    /// modification time. The day the core takes that parameter, this field and
+    /// everything that sets it are deleted together — see the module docs.
+    ///
+    /// Has no effect under `--size-only` or `--checksum`: both are explicit
+    /// instructions, and neither depends on a timestamp.
+    pub content_for_time: bool,
     /// Tolerance applied to every timestamp comparison.
     pub modify_window: Duration,
 }
@@ -72,6 +121,7 @@ impl Default for ComparePolicy {
             size_only: false,
             ignore_existing: false,
             update: false,
+            content_for_time: false,
             modify_window: Duration::from_secs(DEFAULT_MODIFY_WINDOW_SECS),
         }
     }
@@ -90,8 +140,25 @@ impl ComparePolicy {
             size_only: globals.size_only,
             ignore_existing: flags.ignore_existing,
             update: flags.update,
+            // Off here on purpose: nothing on the command line selects it, and
+            // the caller that knows which places this transfer touches turns it
+            // on through [`ComparePolicy::comparing_content_for_time`].
+            content_for_time: false,
             modify_window: Duration::from_secs(DEFAULT_MODIFY_WINDOW_SECS),
         }
+    }
+
+    /// Answer the default comparison by content rather than by modification
+    /// time.
+    ///
+    /// A builder rather than a parameter on [`ComparePolicy::resolve`], because
+    /// the two decisions come from different places and must not be confused: the
+    /// flags come from the user, and this comes from what the transfer's two ends
+    /// turn out to be.
+    #[must_use]
+    pub const fn comparing_content_for_time(mut self, yes: bool) -> Self {
+        self.content_for_time = yes;
+        self
     }
 }
 
@@ -128,11 +195,11 @@ pub fn decide(source: &Entry, dest: Option<&Entry>, policy: &ComparePolicy) -> R
 
     if policy.checksum {
         let (Some(ours), Some(theirs)) = (source.hash.as_deref(), dest.hash.as_deref()) else {
-            return Err(CliError::unimplemented("--checksum comparison").with_hint(
-                "Hashes for both sides come from the index and the provider, \
-                     which the command context cannot reach yet. Compare by size \
-                     and modification time instead, or add --size-only.",
-            ));
+            return Err(CliError::new(
+                ExitCode::FatalError,
+                format!("--checksum: no content hash for '{}'", source.path),
+            )
+            .with_hint(CHECKSUM_UNAVAILABLE_HINT));
         };
         return Ok(if ours == theirs {
             Action::Skip(PLAN_REASON_IDENTICAL)
@@ -141,12 +208,33 @@ pub fn decide(source: &Entry, dest: Option<&Entry>, policy: &ComparePolicy) -> R
         });
     }
 
-    if source.size != dest.size {
-        return Ok(Action::Update(PLAN_REASON_SIZE));
+    // `zip` rather than `!=` on the two options. Two absent sizes are two
+    // unknowns and must not compare equal: a vault whose index was rebuilt
+    // reports no size for any object, and `Option::eq` would call every one of
+    // them "the same size" as the local file it is being compared against —
+    // which under `--size-only` is a skip, and a backup that skipped every file
+    // is the worst outcome this comparison can produce. An unknown on either
+    // side means the sizes were never comparable, so the file is sent.
+    match source.size.zip(dest.size) {
+        Some((ours, theirs)) if ours != theirs => return Ok(Action::Update(PLAN_REASON_SIZE)),
+        Some(_) => {}
+        None => return Ok(Action::Update(PLAN_REASON_SIZE_UNRECORDED)),
     }
 
     if policy.size_only {
         return Ok(Action::Skip(PLAN_REASON_IDENTICAL));
+    }
+
+    if policy.content_for_time {
+        return Ok(match (source.hash.as_deref(), dest.hash.as_deref()) {
+            (Some(ours), Some(theirs)) if ours == theirs => Action::Skip(PLAN_REASON_IDENTICAL),
+            (Some(_), Some(_)) => Action::Update(PLAN_REASON_CHECKSUM),
+            // Nobody asked for this comparison, so a side that cannot supply a
+            // hash may not stop the run. The file is sent, which is the safe
+            // direction and is also self-healing: the write records the hash the
+            // next run will compare against.
+            _ => Action::Update(PLAN_REASON_CONTENT_UNRECORDED),
+        });
     }
 
     if source.modified_matches(dest, policy.modify_window) {
@@ -154,34 +242,6 @@ pub fn decide(source: &Entry, dest: Option<&Entry>, policy: &ComparePolicy) -> R
     } else {
         Ok(Action::Update(PLAN_REASON_MODIFIED))
     }
-}
-
-/// Refuse to run when a pattern filter was requested.
-///
-/// DCTL does not yet evaluate `--include`/`--exclude`/`--filter-from`/
-/// `--files-from`, and the honest response is to stop. Consider what the
-/// alternative does: `dctl sync src dst --exclude 'archive/**'` with the rule
-/// ignored does not merely copy too much — it sees every excluded destination
-/// file as an extra and **deletes** it. A filter that is quietly dropped is a
-/// data-loss bug wearing a convenience feature's clothes.
-///
-/// The size and depth filters are evaluated for real; see [`super::listing`].
-///
-/// # Errors
-/// Returns an unimplemented error naming the flags that were set.
-pub fn ensure_filters_are_supported(globals: &GlobalArgs) -> Result<()> {
-    let requested = !globals.include.is_empty()
-        || !globals.exclude.is_empty()
-        || !globals.filter_from.is_empty()
-        || !globals.files_from.is_empty();
-
-    if requested {
-        return Err(
-            CliError::unimplemented(crate::constants::PATTERN_FILTER_FEATURE)
-                .with_hint(PATTERN_FILTER_HINT),
-        );
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -346,6 +406,8 @@ mod tests {
     fn checksum_comparison_fails_loudly_when_a_hash_is_missing() {
         // Never silently downgrade to size-and-time: the user asked for content
         // equality, and answering a different question would be misreporting.
+        // The one side that genuinely cannot answer is a plain object store,
+        // whose provider checksum is not the plaintext BLAKE3 a vault records.
         let policy = ComparePolicy {
             checksum: true,
             ..policy()
@@ -354,44 +416,174 @@ mod tests {
         let dest = Entry::file("a", 10);
         let error = decide(&source, Some(&dest), &policy).unwrap_err();
         assert_ne!(error.code(), ExitCode::Success);
+        // The refusal names the file, so an operator knows which side to look at.
+        assert!(error.message().contains('a'), "{}", error.message());
         assert!(error.hint().is_some());
     }
 
-    #[test]
-    fn pattern_filters_are_refused_rather_than_ignored() {
-        use clap::Parser;
-
-        #[derive(Parser, Debug)]
-        struct Harness {
-            #[command(flatten)]
-            globals: GlobalArgs,
-        }
-        let parse = |args: &[&str]| {
-            Harness::parse_from(std::iter::once("dctl").chain(args.iter().copied())).globals
-        };
-
-        assert!(ensure_filters_are_supported(&parse(&[])).is_ok());
-        // Silently dropping this rule would make `sync` delete everything under
-        // `archive/` at the destination.
-        let error = ensure_filters_are_supported(&parse(&["--exclude", "archive/**"])).unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(error.hint().is_some_and(|hint| hint.contains("sync")));
-
-        assert!(ensure_filters_are_supported(&parse(&["--include", "*.jpg"])).is_err());
-        assert!(ensure_filters_are_supported(&parse(&["--files-from", "list.txt"])).is_err());
+    /// The default comparison against a side that stamps its own write time.
+    fn substituted() -> ComparePolicy {
+        policy().comparing_content_for_time(true)
     }
 
     #[test]
-    fn size_and_depth_filters_are_not_refused() {
-        use clap::Parser;
+    fn a_write_stamped_destination_is_compared_by_content_not_by_time() {
+        // Defect D5 in one assertion. The two timestamps are a day apart —
+        // because one of them is when the vault was written and the other is
+        // when the file was last edited — and the contents are identical. Under
+        // the old rule this was `modified` on every run, forever.
+        let source = hashed("a", 10, "aa").with_modified(at(1_000));
+        let dest = hashed("a", 10, "aa").with_modified(at(87_400));
+        assert_eq!(
+            decide(&source, Some(&dest), &substituted()).unwrap(),
+            Action::Skip(PLAN_REASON_IDENTICAL)
+        );
+    }
 
-        #[derive(Parser, Debug)]
+    #[test]
+    fn identical_times_do_not_excuse_different_contents() {
+        // The dangerous direction. A same-size, same-time edit is exactly what
+        // the substituted comparison has to keep catching, or the fix would have
+        // traded a useless re-upload for a missed one.
+        let source = hashed("a", 10, "aa").with_modified(at(1_000));
+        let dest = hashed("a", 10, "bb").with_modified(at(1_000));
+        assert_eq!(
+            decide(&source, Some(&dest), &substituted()).unwrap(),
+            Action::Update(PLAN_REASON_CHECKSUM)
+        );
+    }
+
+    #[test]
+    fn a_size_difference_still_answers_before_any_hash_is_consulted() {
+        // Cheap and unanswerable-by-anything-else: different sizes cannot be the
+        // same contents, so there is nothing for a hash to add.
+        let source = hashed("a", 10, "aa");
+        let dest = hashed("a", 11, "aa");
+        assert_eq!(
+            decide(&source, Some(&dest), &substituted()).unwrap(),
+            Action::Update(PLAN_REASON_SIZE)
+        );
+    }
+
+    #[test]
+    fn a_missing_hash_transfers_the_file_rather_than_stopping_the_run() {
+        // The difference from `--checksum`, and the reason the two are separate
+        // fields. Nobody asked for this comparison, so an index row with no
+        // recorded content hash — what `rebuild_index` writes — must not turn a
+        // plain `copy` into a fatal error.
+        let source = hashed("a", 10, "aa");
+        let dest = Entry::file("a", 10);
+        assert_eq!(
+            decide(&source, Some(&dest), &substituted()).unwrap(),
+            Action::Update(PLAN_REASON_CONTENT_UNRECORDED)
+        );
+        // …and the reason says which of the two happened. `modified` would send
+        // an operator looking at clocks that were never compared.
+        assert_ne!(
+            decide(&source, Some(&dest), &substituted())
+                .unwrap()
+                .reason(),
+            PLAN_REASON_MODIFIED
+        );
+    }
+
+    #[test]
+    fn the_substitution_never_overrides_a_flag_the_user_set() {
+        // `--size-only` is a request for the cheapest comparison there is, and
+        // upgrading it would spend a full read of the source on a question the
+        // user declined to ask. `--checksum` already asks this one, so it keeps
+        // its own strict missing-hash refusal rather than the lenient arm.
+        let source = hashed("a", 10, "aa");
+        let same_size = hashed("a", 10, "bb");
+        assert_eq!(
+            decide(
+                &source,
+                Some(&same_size),
+                &ComparePolicy {
+                    size_only: true,
+                    ..substituted()
+                }
+            )
+            .unwrap(),
+            Action::Skip(PLAN_REASON_IDENTICAL)
+        );
+
+        let unhashed = Entry::file("a", 10);
+        assert!(
+            decide(
+                &source,
+                Some(&unhashed),
+                &ComparePolicy {
+                    checksum: true,
+                    ..substituted()
+                }
+            )
+            .is_err(),
+            "an explicit --checksum still refuses what it cannot answer"
+        );
+    }
+
+    #[test]
+    fn ignore_existing_and_update_still_outrank_the_substitution() {
+        // The rule order in this function is the contract; a new comparison
+        // slotted in at the wrong height would silently change what two flags
+        // mean.
+        let source = hashed("a", 10, "aa").with_modified(at(1_000));
+        let dest = hashed("a", 10, "bb").with_modified(at(9_000));
+        assert_eq!(
+            decide(
+                &source,
+                Some(&dest),
+                &ComparePolicy {
+                    ignore_existing: true,
+                    ..substituted()
+                }
+            )
+            .unwrap(),
+            Action::Skip(PLAN_REASON_EXISTS)
+        );
+        assert_eq!(
+            decide(
+                &source,
+                Some(&dest),
+                &ComparePolicy {
+                    update: true,
+                    ..substituted()
+                }
+            )
+            .unwrap(),
+            Action::Skip(PLAN_REASON_DESTINATION_NEWER)
+        );
+    }
+
+    #[test]
+    fn the_substitution_is_off_unless_something_turns_it_on() {
+        // It is not a flag and has no command-line spelling, so the only way it
+        // can reach a policy is the builder — which is what keeps an ordinary
+        // filesystem transfer from paying for a hash it does not need.
+        use clap::Parser as _;
+
+        #[derive(clap::Parser, Debug)]
         struct Harness {
             #[command(flatten)]
             globals: GlobalArgs,
         }
-        let globals = Harness::parse_from(["dctl", "--min-size", "1M", "--max-depth", "2"]).globals;
-        // These are evaluated for real by the listing walk, so they must pass.
-        assert!(ensure_filters_are_supported(&globals).is_ok());
+
+        assert!(!ComparePolicy::default().content_for_time);
+        let globals = Harness::parse_from(["dctl"]).globals;
+        assert!(!ComparePolicy::resolve(&globals, &CompareFlags::default()).content_for_time);
+        assert!(policy().comparing_content_for_time(true).content_for_time);
+    }
+
+    #[test]
+    fn a_checksum_refusal_survives_one_side_having_an_answer() {
+        // Half an answer is not an answer: a vault side knowing its hash while
+        // the other side does not still cannot establish content equality.
+        let policy = ComparePolicy {
+            checksum: true,
+            ..policy()
+        };
+        assert!(decide(&hashed("a", 10, "aa"), Some(&Entry::file("a", 10)), &policy).is_err());
+        assert!(decide(&Entry::file("a", 10), Some(&hashed("a", 10, "aa")), &policy).is_err());
     }
 }

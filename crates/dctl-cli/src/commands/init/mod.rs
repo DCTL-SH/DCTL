@@ -73,6 +73,8 @@ mod report;
 use clap::Args;
 use dctl_core::Vault;
 
+use crate::audit::record::Entry as AuditEntry;
+use crate::audit::sink;
 use crate::config;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
@@ -82,6 +84,11 @@ use crate::remote::envelope::{self, Verdict};
 
 use plan::InitPlan;
 use report::InitReport;
+
+/// Stable command name. Must match `Command::name()` in `cli/mod.rs`, because it
+/// is the `op` field of the audit record this command appends and a compliance
+/// query filters on that word years later.
+const COMMAND: &str = "init";
 
 /// Verb used in the confirmation prompt when the store holds no vault.
 const CREATE_ACTION: &str = "create a vault on";
@@ -143,7 +150,7 @@ pub struct InitArgs {
 pub async fn run(ctx: &Ctx, args: &InitArgs) -> Result<()> {
     crate::session::factor::refuse_if_present(
         &ctx.globals,
-        "dctl init --key-file",
+        "dctl init",
         "Creating the vault with one factor when you asked for two would protect \
          it less than you asked for, so nothing was created.",
     )?;
@@ -182,7 +189,27 @@ pub async fn run(ctx: &Ctx, args: &InitArgs) -> Result<()> {
     ));
 
     plan.ensure_index_directory()?;
-    Vault::init(backend, &plan.index, password.expose()).await?;
+    let created = Vault::init(backend, &plan.index, password.expose())
+        .await
+        .map_err(CliError::from);
+
+    // Step 8, at the one point in this command where it can be truthful. The
+    // envelope write is the irreversible step and the only durable change `init`
+    // makes to a store, so the record goes immediately after it — and is written
+    // for a failure too, because "somebody tried to initialise over this store
+    // on the 3rd and it did not take" is precisely the kind of event an operator
+    // reads a log to find.
+    //
+    // This is also the record that gives every later one a beginning: it is
+    // index 0 of the vault's chain, so a log whose first entry is not an `init`
+    // is a log that starts mid-story.
+    ctx.audit.record(
+        &AuditEntry::new(COMMAND, sink::outcome(&created))
+            .remote(&plan.vault_name)
+            .path(&plan.base),
+    )?;
+    created?;
+
     tracing::info!(
         { fields::REMOTE } = %plan.base,
         vault = %plan.vault_name,

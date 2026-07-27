@@ -35,8 +35,15 @@ use crate::constants::{
 pub struct Entry {
     /// Logical path, identical on both sides by construction.
     pub path: String,
-    /// Size in bytes.
-    pub size: u64,
+    /// Size in bytes, when the side recorded one.
+    ///
+    /// A vault index rebuilt from object headers holds no sizes (see
+    /// [`crate::source::Entry::size`]), and a `check` is the command whose whole
+    /// job is to answer "are these the same". Absent rather than zero, so a
+    /// size comparison against an unmeasured object returns "cannot tell"
+    /// through the [`Comparison::same`] channel that already exists for it —
+    /// rather than reporting a match between a real file and a fiction.
+    pub size: Option<u64>,
     /// Last-modified time in unix seconds, when the side records one.
     pub modified_unix: Option<i64>,
     /// Content hash, when the side has one without reading the object.
@@ -46,7 +53,7 @@ pub struct Entry {
 impl Entry {
     /// An entry with only the fields every side can supply.
     #[must_use]
-    pub fn new(path: impl Into<String>, size: u64) -> Self {
+    pub fn new(path: impl Into<String>, size: Option<u64>) -> Self {
         Self {
             path: path.into(),
             size,
@@ -106,10 +113,21 @@ impl Comparison {
     #[must_use]
     pub fn same(self, source: &Entry, dest: &Entry) -> Option<bool> {
         match self {
-            Self::SizeOnly => Some(source.size == dest.size),
+            // `zip` rather than `==` on the options: two absent sizes are two
+            // unknowns, not a match. `Some(None) == Some(None)` would report a
+            // rebuilt vault as identical to any other rebuilt vault without
+            // either side having been measured.
+            Self::SizeOnly => source
+                .size
+                .zip(dest.size)
+                .map(|(left, right)| left == right),
             Self::SizeAndModTime => {
-                if source.size != dest.size {
-                    return Some(false);
+                match source.size.zip(dest.size) {
+                    Some((left, right)) if left != right => return Some(false),
+                    Some(_) => {}
+                    // One side has no size, so this mode cannot answer at all —
+                    // the same "cannot tell" a missing clock produces below.
+                    None => return None,
                 }
                 match (source.modified_unix, dest.modified_unix) {
                     (Some(left), Some(right)) => Some(left == right),
@@ -122,6 +140,26 @@ impl Comparison {
                 (Some(left), Some(right)) => Some(left.eq_ignore_ascii_case(right)),
                 _ => None,
             },
+        }
+    }
+
+    /// The comparison to run when one side stamps its own write time.
+    ///
+    /// Only the default moves. `--size-only` and `--checksum` are explicit
+    /// instructions and neither is broken by a write-time timestamp: sizes need
+    /// no clock, and a checksum comparison is already what this returns. Moving
+    /// them would mean the flag a user typed and the comparison that ran were
+    /// different things, which is the misreport the whole module guards against.
+    ///
+    /// The substitution is an *upgrade* — content equality is the stronger claim
+    /// — but it is not free, and it is not what was asked for, so the caller
+    /// announces it. See [`crate::fidelity`] for why a sealed side leaves the
+    /// default unanswerable and for the change to `dctl-core` that retires this.
+    #[must_use]
+    pub const fn content_instead_of_time(self) -> Self {
+        match self {
+            Self::SizeAndModTime => Self::Checksum,
+            other => other,
         }
     }
 
@@ -243,7 +281,7 @@ mod tests {
     }
 
     fn entry() -> Entry {
-        Entry::new("a.txt", 100)
+        Entry::new("a.txt", Some(100))
             .modified(1_700_000_000)
             .hashed("AA")
     }
@@ -265,8 +303,8 @@ mod tests {
 
     #[test]
     fn size_only_ignores_time_and_hash() {
-        let source = Entry::new("a.txt", 100).modified(1).hashed("aa");
-        let dest = Entry::new("a.txt", 100).modified(2).hashed("bb");
+        let source = Entry::new("a.txt", Some(100)).modified(1).hashed("aa");
+        let dest = Entry::new("a.txt", Some(100)).modified(2).hashed("bb");
         assert_eq!(
             classify(Some(&source), Some(&dest), Comparison::SizeOnly),
             Difference::Match
@@ -275,8 +313,8 @@ mod tests {
 
     #[test]
     fn the_default_comparison_notices_a_changed_time() {
-        let source = Entry::new("a.txt", 100).modified(1);
-        let dest = Entry::new("a.txt", 100).modified(2);
+        let source = Entry::new("a.txt", Some(100)).modified(1);
+        let dest = Entry::new("a.txt", Some(100)).modified(2);
         assert_eq!(
             classify(Some(&source), Some(&dest), Comparison::SizeAndModTime),
             Difference::Differ
@@ -288,15 +326,15 @@ mod tests {
         // A destination with no clock must not be reported as matching just
         // because its size agrees: that answers a weaker question than the one
         // the user asked.
-        let source = Entry::new("a.txt", 100).modified(1);
-        let dest = Entry::new("a.txt", 100);
+        let source = Entry::new("a.txt", Some(100)).modified(1);
+        let dest = Entry::new("a.txt", Some(100));
         assert_eq!(
             classify(Some(&source), Some(&dest), Comparison::SizeAndModTime),
             Difference::Error
         );
 
-        let source = Entry::new("a.txt", 100).hashed("aa");
-        let dest = Entry::new("a.txt", 100);
+        let source = Entry::new("a.txt", Some(100)).hashed("aa");
+        let dest = Entry::new("a.txt", Some(100));
         assert_eq!(
             classify(Some(&source), Some(&dest), Comparison::Checksum),
             Difference::Error
@@ -305,9 +343,9 @@ mod tests {
 
     #[test]
     fn checksums_compare_case_insensitively_but_still_differ_on_content() {
-        let source = Entry::new("a.txt", 100).hashed("ABCD");
-        let same = Entry::new("a.txt", 1).hashed("abcd");
-        let other = Entry::new("a.txt", 100).hashed("beef");
+        let source = Entry::new("a.txt", Some(100)).hashed("ABCD");
+        let same = Entry::new("a.txt", Some(1)).hashed("abcd");
+        let other = Entry::new("a.txt", Some(100)).hashed("beef");
         // Size is irrelevant under --checksum: the hash is the answer.
         assert_eq!(
             classify(Some(&source), Some(&same), Comparison::Checksum),
@@ -316,6 +354,26 @@ mod tests {
         assert_eq!(
             classify(Some(&source), Some(&other), Comparison::Checksum),
             Difference::Differ
+        );
+    }
+
+    #[test]
+    fn a_write_stamped_side_moves_only_the_default_comparison() {
+        // Defect D5's half of `check`. The default becomes unanswerable when one
+        // side's timestamps describe the write, so it is answered by content
+        // instead — but a flag the user typed is left exactly as typed, or the
+        // report would name a comparison that did not run.
+        assert_eq!(
+            Comparison::SizeAndModTime.content_instead_of_time(),
+            Comparison::Checksum
+        );
+        assert_eq!(
+            Comparison::SizeOnly.content_instead_of_time(),
+            Comparison::SizeOnly
+        );
+        assert_eq!(
+            Comparison::Checksum.content_instead_of_time(),
+            Comparison::Checksum
         );
     }
 

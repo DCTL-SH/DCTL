@@ -11,11 +11,19 @@
 //! ## Why this module allows dead code
 //!
 //! The enum is an *inventory of the contract*, not an inventory of what this
-//! build happens to emit. Three codes — 8, 9 and 10 — are produced by
-//! `--max-transfer`, `--error-on-no-transfer` and `--max-duration`, which are
-//! rclone's and which DCTL has not wired to its engine yet; [`ExitCode::all`]
-//! and [`ExitCode::describe`] feed `dctl help exitcodes` and the generator for
-//! `docs/EXIT_CODES.md`, neither of which is written.
+//! build happens to emit. Two codes — 8 and 10 — belong to `--max-transfer` and
+//! `--max-duration`, which are rclone's and which DCTL has not wired to its
+//! engine yet. (9 was on that list until a scrub that covered nothing needed a
+//! non-zero status to say so, and it is now produced by
+//! [`crate::commands::scrub`].)
+//!
+//! [`ExitCode::all`] and [`ExitCode::describe`] have no caller outside this
+//! file's own tests. They exist so the contract can be enumerated rather than
+//! transcribed, and the table in `docs/EXIT_CODES.md` is currently kept in step
+//! by hand. This used to say they fed a `help exitcodes` topic; no such
+//! subcommand exists, in this or any build, and a comment that names one
+//! teaches the next reader to repeat it in a user-facing hint — which is
+//! exactly how three of those got written.
 //!
 //! Deleting a variant because nothing constructs it today is how a published
 //! number silently changes meaning tomorrow: the next feature that needs "the
@@ -52,7 +60,18 @@ pub enum ExitCode {
     FatalError = 7,
     /// `--max-transfer` limit was reached.
     TransferLimitExceeded = 8,
-    /// Completed successfully, but no files were transferred.
+    /// Completed successfully, but the run did no work.
+    ///
+    /// rclone's "nothing was transferred", and DCTL keeps the number and the
+    /// slug for the transfer verbs that mean exactly that. It also carries the
+    /// read-only shape of the same statement: `dctl scrub` returns it when the
+    /// run read **no object at all**, because a scrub that verified nothing and
+    /// exited 0 was indistinguishable from one that verified a whole dataset —
+    /// which let a nightly cron stay green for years while proving nothing.
+    ///
+    /// Deliberately not an error code. Nothing failed, and treating it as a
+    /// failure would be its own misreport; it is simply not zero, which is the
+    /// only property a wrapper needs to notice that the work did not happen.
     NoFilesTransferred = 9,
     /// `--max-duration` limit was reached.
     DurationLimitExceeded = 10,
@@ -108,8 +127,10 @@ impl ExitCode {
         }
     }
 
-    /// One-line explanation, used by `dctl help exitcodes` and the docs
-    /// generator so the table in `docs/EXIT_CODES.md` cannot drift from the code.
+    /// One-line explanation of the code, and the wording `docs/EXIT_CODES.md`
+    /// carries for it. Nothing calls this outside the tests below; it is the
+    /// contract written once so the published table has a single source to be
+    /// checked against.
     #[must_use]
     pub const fn describe(self) -> &'static str {
         match self {
@@ -122,7 +143,7 @@ impl ExitCode {
             Self::PartialFailure => "Some files failed to transfer",
             Self::FatalError => "Fatal error; cannot continue",
             Self::TransferLimitExceeded => "--max-transfer limit reached",
-            Self::NoFilesTransferred => "Succeeded, but no files were transferred",
+            Self::NoFilesTransferred => "Succeeded, but the run did no work",
             Self::DurationLimitExceeded => "--max-duration limit reached",
             Self::ChecksumMismatch => "Verified write refused: checksum mismatch",
             Self::IntegrityFailure => "AEAD authentication failed on read",

@@ -24,16 +24,22 @@
 //! either behaviour applied consistently.
 
 use crate::cli::GlobalArgs;
-use crate::constants::KEY_FILE_UNSUPPORTED_REASON;
+use crate::constants::{KEY_FILE_FEATURE, KEY_FILE_UNSUPPORTED_REASON};
 use crate::error::{CliError, Result};
 
 /// Refuse the run if `--key-file` was given.
 ///
-/// `operation` names the thing being refused and is quoted back to the user, so
-/// it must contain the literal flag — the reader has to be able to map the
-/// message onto the command line they typed. `consequence` states what did
-/// *not* happen as a result, because "refused" alone leaves open whether a
-/// half-finished vault or a partial transfer was left behind.
+/// `operation` names **what the user was doing** — `dctl init`, `unlocking a
+/// vault` — and is quoted back to them so the message maps onto the command line
+/// they typed. It deliberately does *not* have to mention the flag or the gap:
+/// [`KEY_FILE_FEATURE`] supplies both, appended here, because the one call site
+/// that composed the whole string itself got it wrong and produced "dctl init is
+/// not implemented in this build" for a command that is entirely implemented.
+/// A refusal assembled in one place cannot drift in another.
+///
+/// `consequence` states what did *not* happen as a result, because "refused"
+/// alone leaves open whether a half-finished vault or a partial transfer was
+/// left behind.
 ///
 /// # Errors
 /// [`ExitCode::FatalError`] when `--key-file` is present. A configuration the
@@ -43,8 +49,10 @@ use crate::error::{CliError, Result};
 /// [`ExitCode::FatalError`]: crate::exit::ExitCode::FatalError
 pub fn refuse_if_present(globals: &GlobalArgs, operation: &str, consequence: &str) -> Result<()> {
     if globals.key_file.is_some() {
-        return Err(CliError::unimplemented(operation)
-            .with_hint(format!("{KEY_FILE_UNSUPPORTED_REASON} {consequence}")));
+        return Err(
+            CliError::unimplemented(format!("{operation}: {KEY_FILE_FEATURE}"))
+                .with_hint(format!("{KEY_FILE_UNSUPPORTED_REASON} {consequence}")),
+        );
     }
     Ok(())
 }
@@ -67,14 +75,14 @@ mod tests {
 
     #[test]
     fn a_run_without_the_flag_is_untouched() {
-        refuse_if_present(&globals(&[]), "dctl copy --key-file", "Nothing was copied.").unwrap();
+        refuse_if_present(&globals(&[]), "dctl copy", "Nothing was copied.").unwrap();
     }
 
     #[test]
     fn the_flag_is_refused_with_a_fatal_code() {
         let error = refuse_if_present(
             &globals(&["--key-file", "/dev/null"]),
-            "dctl copy --key-file",
+            "dctl copy",
             "Nothing was copied.",
         )
         .unwrap_err();
@@ -84,15 +92,35 @@ mod tests {
 
     #[test]
     fn the_refusal_names_the_flag_and_says_what_did_not_happen() {
+        // The caller supplies only what the user was doing; the flag and the
+        // missing capability come from here, so a call site that names neither
+        // still produces a message carrying both. That is not a convenience —
+        // the chokepoint in `main.rs` passed exactly `dctl init` and the refusal
+        // read "dctl init is not implemented in this build", which is false.
         let error = refuse_if_present(
             &globals(&["--key-file", "/dev/null"]),
-            "dctl copy --key-file",
+            "dctl copy",
             "Nothing was copied.",
         )
         .unwrap_err();
         assert!(
             error.message().contains("--key-file"),
-            "{}",
+            "the flag the user typed must appear: {}",
+            error.message()
+        );
+        assert!(
+            error.message().contains("dctl copy"),
+            "and so must what they were doing: {}",
+            error.message()
+        );
+        assert!(
+            error.message().contains("dctl-core"),
+            "and the layer that owes the factor parameter: {}",
+            error.message()
+        );
+        assert!(
+            !error.message().starts_with("dctl copy is not implemented"),
+            "`copy` is implemented; only the factor is missing: {}",
             error.message()
         );
 
@@ -100,6 +128,10 @@ mod tests {
         assert!(
             hint.contains(KEY_FILE_UNSUPPORTED_REASON),
             "the reason must be the shared one: {hint}"
+        );
+        assert!(
+            hint.contains("§8"),
+            "and it must name the phase that specifies the missing half: {hint}"
         );
         assert!(hint.contains("Nothing was copied."), "{hint}");
     }
@@ -111,7 +143,7 @@ mod tests {
         // factor would have worked had the path been right.
         let error = refuse_if_present(
             &globals(&["--key-file", "/nonexistent/kf.bin"]),
-            "dctl copy --key-file",
+            "dctl copy",
             "Nothing was copied.",
         )
         .unwrap_err();

@@ -52,10 +52,29 @@
 //! module path, so a caller that reaches past `build_backend` says so at the
 //! call site instead of looking like it took the ordinary route.
 
+//! A fifth module answers the question the *write* side asks. [`place`] turns a
+//! resolved remote into one of three kinds of place — sealed, filesystem, object
+//! store — because what `mkdir`, `touch` and `rcat` may do is decided by whether
+//! a place has directories, settable timestamps and a write path in this build,
+//! and all four providers answer those identically. It reads the configuration
+//! and stops, so classifying costs no credential and no password.
+//!
+//! A sixth then *acts* on that answer for the one kind that stores objects
+//! without a key. [`plain`] runs the three steps above and keeps the result — a
+//! backend plus the prefix the user named — so a transfer into an ordinary
+//! remote can `get`, `put` and `delete` through it with no password anywhere in
+//! the path. It classifies nothing itself: [`place`] owns that question, and
+//! two definitions of "is this sealed" is how a plain remote came to demand a
+//! vault password.
+
 pub mod envelope;
+pub mod place;
+pub mod plain;
 pub mod registry;
 pub mod resolve;
 pub mod spec;
 
+pub use place::Place;
+pub use plain::PlainRemote;
 pub use registry::build_backend;
 pub use spec::RemoteSpec;

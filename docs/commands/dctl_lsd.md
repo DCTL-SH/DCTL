@@ -20,6 +20,14 @@ of objects beneath it, and the directory path with a trailing `/`. rclone prints
 because it costs one addition per object on a pass it was making anyway, and
 because a size column that always reads `-1` is a column of nothing.
 
+A directory's total is `-` (and `"Size": null` in JSON) when **any** object
+beneath it has no recorded size — the state of every row straight after
+`dctl index rebuild`, which lists object names without reading their bodies. The
+absence is absorbing rather than skipped: a total that quietly omitted the
+unmeasured children would be short by an unknown amount and would still look
+complete, which is the same misreport a zero was with better manners. The object
+count is unaffected, so the row still says the directory is not empty.
+
 ### Directories do not exist
 
 An object store has no directories. `photos/2024/IMG_4417.CR3` is one key with
@@ -29,9 +37,15 @@ often enough to state plainly:
 
 * **A directory containing no objects does not appear**, because nothing implies
   it. There is no such thing as an empty directory in a vault, and `lsd` will
-  not invent one. [`dctl mkdir`](dctl_mkdir.md) works around this by writing a
-  zero-byte `.dctl-dir` marker object, which is an object like any other and is
-  what makes the prefix visible here.
+  not invent one — nor does anything else in DCTL. [`dctl mkdir`](dctl_mkdir.md)
+  does **not** write a `.dctl-dir` marker to make one visible: a marker is an
+  object like any other, so `ls`, `size`, `check`, `sync` and a restore would all
+  carry it as data, and fabricating a file to simulate a directory is a larger
+  misreport than the absence it hides. On a vault `mkdir` therefore creates
+  nothing and says so; a prefix appears here the moment an object is stored under
+  it. (A marker written by an older build or by another object-store tool is
+  still *recognised* by [`rmdir`](dctl_rmdir.md), which is why the name still
+  exists in the code.)
 * **The totals are recursive.** `photos` reports every byte under it, including
   those in `photos/2024`, which is what the question means when a human asks it.
 
@@ -72,7 +86,8 @@ inside it. `--filter-from` and `--files-from` are refused rather than ignored
 
 Under `--json` or `--format json-lines`, each directory is emitted as the same
 record shape the rest of the family uses, with `"IsDir": true`, `Size` carrying
-the recursive byte total, `ModTime` null (a directory has no modification time
+the recursive byte total (or `null` when any object beneath it has no recorded
+size), `ModTime` null (a directory has no modification time
 of its own) and `Hashes` empty (it has no content to hash). The object *count*
 is not in the JSON shape; use `Size` plus a `dctl ls … | wc -l` if you need
 both, or read the text output.

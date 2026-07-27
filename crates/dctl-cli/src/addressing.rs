@@ -13,29 +13,71 @@
 //! 1. A write through a vault remote is always sealed. No flag disables it.
 //! 2. Foreign plaintext is never written into a vault's object store. Refused.
 //! 3. A write to an ordinary location is plaintext, and that is fully supported.
-//! 4. Encryption behaviour is a function of the **remote name typed**, never of
-//!    the destination's current contents.
+//! 4. **DCTL never applies or omits encryption because of a destination's
+//!    contents.** What a command encrypts is determined solely by the remote
+//!    name typed. A destination's contents may cause DCTL to REFUSE, never to
+//!    change what it does.
 //!
-//! The fourth is the enterprise invariant and the reason this module exists. A
-//! command's encryption semantics must be fixed for as long as the command line
-//! and the configuration are unchanged — independent of whether a directory
-//! happens to hold an envelope this afternoon. There is therefore **no
-//! auto-detection anywhere**: nothing here ever promotes a plain write into a
-//! sealed one, and a destination that belongs to a vault is refused with the
-//! name of the remote that addresses it, so the operator makes the choice.
+//! ## I4, stated precisely, and why the precise form is the stronger one
+//!
+//! The outcome space for any destination is exactly `{sealed, plain, refused}`.
+//! Contents can only ever move an outcome to `refused`. They can never turn
+//! `plain` into `sealed` or `sealed` into `plain`.
+//!
+//! An earlier, looser wording said encryption behaviour "is a function of the
+//! remote name typed, never of the destination's current contents" — full stop.
+//! That is **false as written**, and it is worth saying so plainly rather than
+//! leaving a comment nobody can verify. For a location no configured remote
+//! describes, the third answer below *does* read the destination: it looks for a
+//! vault envelope and refuses if it finds one. Contents are consulted there, so
+//! the loose claim cannot hold.
+//!
+//! The precise claim covers that case and says something stronger. It does not
+//! merely assert that the decision usually ignores contents; it bounds what
+//! contents are *permitted to do* — they may stop a command, and nothing else.
+//! An operator can therefore reason about a runbook the way they need to: the
+//! command either does exactly what its remote names say, or it does nothing at
+//! all and says why. It never quietly does the other thing.
+//!
+//! This is also the reason the fallback is not auto-detection, a distinction
+//! that decides whether the design is sound. **Auto-detection changes
+//! behaviour** — it would see an envelope and seal a write the user asked to be
+//! plain, delivering something other than what was asked for on the basis of
+//! state that was never named. **This only ever stops.** A refusal cannot
+//! silently produce the wrong artefact, and it leaves the operator holding the
+//! choice, which is where the choice belongs.
+//!
+//! `crates/dctl-cli/tests/invariant_i4/` proves all of this against the shipped
+//! binary and the bytes on disk rather than restating it, because an invariant
+//! asserted only in prose is an invariant nobody has checked. Every claim in
+//! this comment has a test whose name is the claim.
 //!
 //! ## Three answers, in the order they are asked
 //!
 //! 1. **The configuration claims the destination.** A store remote declares its
 //!    location vault-only ([`crate::config::VaultNamespace`]), so the refusal can
 //!    name both views: which remote to type to store data sealed, and which one
-//!    already addresses the objects.
+//!    already addresses the objects. No filesystem contents are consulted, which
+//!    is why a configured store answers identically whether or not an envelope
+//!    is present.
 //! 2. **The filesystem holds a vault the configuration knows nothing about.** The
-//!    fallback, and only the fallback — for a location no section describes,
-//!    there is no name to offer, so the message says exactly that rather than
-//!    guessing. This is where an imported or hand-moved vault lands.
+//!    fallback, and the only place contents are read at all — for a location no
+//!    section describes, there is no name to offer, so the message says exactly
+//!    that rather than guessing. This is where an imported or hand-moved vault
+//!    lands. Its only possible outcome is a refusal naming `dctl config import`.
 //! 3. **Otherwise it is an ordinary place**, and a plaintext write is a
 //!    first-class supported operation (invariant 3).
+//!
+//! ## Spelling is not contents, and is handled before either
+//!
+//! `vault`, `./vault`, `/srv/vault`, `staging/../vault` and a symlink to it are
+//! one directory. An operator who reaches it by a different route has not asked
+//! for different encryption behaviour, so both answers above resolve the paths
+//! they compare ([`crate::platform::resolve`]) instead of comparing strings. The
+//! gap that closes was real and severe: `dctl copy ./src staging/../vault` used
+//! to miss the configured claim, fall through, miss the envelope check too — the
+//! stat fails on a path whose intermediate component does not exist — and write
+//! plaintext into a configured vault's object store, reporting success.
 //!
 //! ## Why every write path calls this
 //!
@@ -52,8 +94,35 @@ use crate::constants::PLAIN_WRITE_INTO_VAULT_HINT;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
+use crate::remote::RemoteSpec;
+
+/// Refuse a plaintext write to whatever `destination` addresses.
+///
+/// The single entry point for a caller that holds a parsed destination, which
+/// every transfer verb does. Written once here rather than as a `match` at each
+/// call site: the two arms answer the *same* question about two spellings of an
+/// address, and a call site that grew a third arm — or forgot one — would be a
+/// write path with no rule applied to it. That is not hypothetical. The check
+/// lived inside the transfer engine, `dctl rcat` reached the filesystem by
+/// another route, and plaintext streamed into a vault directory and exited 0.
+///
+/// # Errors
+/// Whatever [`refuse_plain_write_to_path`] or [`refuse_plain_write_to_remote`]
+/// raises for the arm that applies.
+pub fn refuse_plain_write(ctx: &Ctx, destination: &RemoteSpec) -> Result<()> {
+    match destination {
+        RemoteSpec::Named { remote, .. } => refuse_plain_write_to_remote(ctx, remote),
+        RemoteSpec::Local(path) => refuse_plain_write_to_path(ctx, path),
+    }
+}
 
 /// Refuse a plaintext write to a local path that belongs to a vault.
+///
+/// The only two things this can do are return `Ok` — leaving the caller's
+/// plaintext write exactly as the caller asked for it — and return an error.
+/// There is deliberately no third return that would tell a caller to seal
+/// instead: the type is how I4 is enforced, not a convention this function
+/// follows.
 ///
 /// An empty path is the destination of a direction that has no local side, and
 /// is answered without reading anything: it must not be stat'ed, and it must not
@@ -77,7 +146,15 @@ pub fn refuse_plain_write_to_path(ctx: &Ctx, destination: &Path) -> Result<()> {
     // Only now, and only for a location the configuration does not describe.
     // The filesystem cannot say which remote addresses what it found, so this
     // branch names the directory and stops — it never infers a mode.
-    if let Some(vault) = crate::session::store::enclosing_vault(destination) {
+    //
+    // Resolved first, for the same reason the configured claim is: an envelope
+    // one directory above `staging/../vault` is evidence about the destination
+    // however the operator spelled the route to it, and a `stat` of the
+    // unresolved spelling simply fails to see it.
+    let real = crate::platform::resolve::real_path(destination);
+    let looked_at = real.as_deref().unwrap_or(destination);
+
+    if let Some(vault) = crate::session::store::enclosing_vault(looked_at) {
         return Err(CliError::new(
             ExitCode::FatalError,
             format!(

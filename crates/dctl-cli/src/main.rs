@@ -35,6 +35,7 @@ mod ctx;
 mod dispatch;
 mod error;
 mod exit;
+mod fidelity;
 mod filter;
 mod logging;
 mod output;
@@ -133,6 +134,15 @@ async fn execute(cli: Cli) -> ExitCode {
     // operator cannot tell which run protected them. One chokepoint every
     // command passes through is the only arrangement that cannot be bypassed by
     // adding a new command later.
+    //
+    // What is passed is the *operation*, and only the operation: the flag and
+    // the missing capability are appended by `refuse_if_present` itself. That
+    // split exists because of what this exact line used to produce. It handed
+    // over `dctl init` as the whole subject, so the refusal read "dctl init is
+    // not implemented in this build" — a false statement about a command that is
+    // entirely implemented, shown to somebody whose only mistake was asking for
+    // a second factor. Every other call site spelled the flag out by hand and
+    // read correctly, which is why nothing noticed.
     if let Err(error) = session::factor::refuse_if_present(
         &context.globals,
         &format!("dctl {}", cli.command.name()),

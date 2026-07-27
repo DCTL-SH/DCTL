@@ -19,6 +19,28 @@
 //!   reaper is even reachable) rather than as a comment asking future readers to
 //!   be careful.
 //!
+//! ## Where the audit record goes, and why exactly one per file
+//!
+//! `PLAN.md` §6 numbers the chained audit append step 8 — *after* the durable
+//! commit — and §7 makes it mandatory. Both functions above therefore run the
+//! whole operation to a conclusion, append one record describing how it ended,
+//! and only then hand the outcome back. Two consequences are deliberate:
+//!
+//! * **The record is written for a failure too.** A log containing only
+//!   successes cannot answer "what went wrong on the 3rd?", which is most of why
+//!   anybody reads one. The `result` field carries the command's own classified
+//!   exit code, so `checksum_mismatch` and `file_not_found` stay distinguishable
+//!   years later.
+//! * **A `move` produces one record, not two.** The record is appended after the
+//!   source removal, because until the source is gone the move has not happened
+//!   — a record written between the commit and the removal would attest to a
+//!   `move` that a failure one line later turned into a `copy`.
+//!
+//! If the record cannot be written the file's outcome becomes that failure, at
+//! [`ExitCode::FatalError`], which [`is_fatal`] stops the run on. Continuing
+//! unaudited is exactly the misreporting §7 forbids, and grinding on would
+//! produce one identical error per remaining file.
+//!
 //! ## Why a trait
 //!
 //! The steps themselves belong to `dctl-core`'s transfer engine, not to the CLI.
@@ -31,6 +53,8 @@
 //! why that is stronger than performing them separately — so this order is the
 //! contract the stages report, not a claim about how many round trips happen.
 
+use crate::audit::record::Entry as AuditEntry;
+use crate::audit::sink;
 use crate::cli::VerifyMode;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
@@ -117,6 +141,28 @@ pub trait StageDriver {
     /// or commit, so pretending otherwise would put a five-stage bar on a
     /// zero-byte operation.
     async fn create_dir(&self, entry: &PlanEntry) -> Result<()>;
+
+    /// The destination this driver writes to, for the audit record's `remote`
+    /// field. Empty when there is no remote — a filesystem-to-filesystem copy.
+    ///
+    /// Asked of the driver rather than passed down from the command, because the
+    /// driver is what actually connected: a name threaded through five call
+    /// layers can be the wrong one, and an audit record naming the wrong vault is
+    /// worse than one naming none.
+    fn remote(&self) -> &str;
+
+    /// BLAKE3 of the plaintext this entry moved, lower-case hex, or empty.
+    ///
+    /// Taken rather than borrowed: the driver computed it while the bytes were in
+    /// hand and has no reason to keep them addressable afterwards. Empty is a
+    /// legitimate answer — the format allows it, and a failed transfer never
+    /// produced one — so a driver that cannot supply it is not a broken driver.
+    ///
+    /// This is the field that makes the log evidence about *content* rather than
+    /// merely about activity: "a file called `q4.xlsx` was copied at 14:32" is an
+    /// activity log, and "the file whose plaintext hashes to `d749…` was copied
+    /// at 14:32" is something a dispute can be settled with.
+    fn take_plaintext_hash(&self, entry: &PlanEntry) -> String;
 }
 
 /// Removal of something that already exists.
@@ -132,18 +178,44 @@ pub trait Reaper {
 
     /// Which side this reaper deletes from — `"source"` or `"destination"`.
     fn target(&self) -> &'static str;
+
+    /// The remote this reaper deletes from, for the audit record's `remote`
+    /// field. Empty when it deletes from the local filesystem.
+    fn remote(&self) -> &str;
 }
 
-/// Run one file through steps 1–6, reporting each stage on the display.
+/// Run one file through steps 1–6, then record it (step 8).
 ///
 /// # Errors
-/// Whatever the driver returns. A failure anywhere in 1–6 means the file is not
-/// stored, so the error propagates unchanged and the caller must not count the
-/// file as done — [`transfer_file`] only increments the "files done" counter
-/// after the commit returns.
-pub async fn transfer_file<D: StageDriver>(ctx: &Ctx, driver: &D, entry: &PlanEntry) -> Result<()> {
+/// Whatever the driver returned, or — if the operation could not be recorded —
+/// the audit failure instead, because a transfer this build cannot attest to is
+/// not a transfer it may report as done. A failure anywhere in 1–6 means the
+/// file is not stored, so the error propagates unchanged and the caller must not
+/// count the file as done: only [`run_stages`] increments the "files done"
+/// counter, and only after the commit returns.
+pub async fn transfer_file<D: StageDriver>(
+    ctx: &Ctx,
+    op: &str,
+    driver: &D,
+    entry: &PlanEntry,
+) -> Result<()> {
+    let outcome = walk(ctx, driver, entry).await;
+    record(ctx, op, driver, entry, outcome)
+}
+
+/// Steps 1–6 alone, with no audit record.
+///
+/// Private, and that is the whole point: every public entry point below appends
+/// a record, so there is no route through this module that moves a file and
+/// leaves no trace of having done it.
+async fn walk<D: StageDriver>(ctx: &Ctx, driver: &D, entry: &PlanEntry) -> Result<()> {
     let started = std::time::Instant::now();
-    let handle = ctx.progress.start_file(&entry.dest, entry.size);
+    // A bar needs a number. An entry with no recorded size draws as a bar of
+    // length zero, which is what an indeterminate bar looks like — and unlike a
+    // report, the bar is ephemeral and makes no claim anyone can act on later.
+    let handle = ctx
+        .progress
+        .start_file(&entry.dest, entry.size.unwrap_or_default());
     let outcome = run_stages(ctx, driver, entry, &handle).await;
     // The row is retired whether the file succeeded or failed: a bar left behind
     // by a failed transfer would be redrawn over the error message explaining it.
@@ -156,11 +228,51 @@ pub async fn transfer_file<D: StageDriver>(ctx: &Ctx, driver: &D, entry: &PlanEn
     // backup got slower" into a question with an answer.
     tracing::debug!(
         { fields::PATH } = entry.dest.as_str(),
-        { fields::BYTES } = entry.size,
+        { fields::BYTES } = tracing::field::debug(entry.size),
         { fields::DURATION_MS } = elapsed_ms(started),
         stored = outcome.is_ok(),
         "file finished"
     );
+    outcome
+}
+
+/// Step 8 — append the chained record, and let a failure to do so become the
+/// file's outcome.
+///
+/// The order is the promise: the operation has already run to a conclusion by
+/// the time this is called, so the record describes what happened rather than
+/// what was about to be attempted. `PLAN.md` §6 puts the append after the
+/// durable commit for exactly that reason — a record for work that then failed
+/// is a false statement in the one artefact whose entire value is being true.
+///
+/// The size is recorded whichever way it went. It describes the object the
+/// operation concerned, not a claim that those bytes landed; `result` is the
+/// field that says whether they did, and losing "what were you moving?" from
+/// every failure record would make the failures the least investigable entries
+/// in the log.
+fn record<D: StageDriver>(
+    ctx: &Ctx,
+    op: &str,
+    driver: &D,
+    entry: &PlanEntry,
+    outcome: Result<()>,
+) -> Result<()> {
+    let record = AuditEntry::new(op, sink::outcome(&outcome))
+        .path(&entry.dest)
+        // The audit record's byte field is part of the hash-chain preimage
+        // (`audit::chain`) and is a `u64` by that format's definition, so an
+        // unrecorded size is written as zero here rather than changing what the
+        // chain covers. It is the plan's figure either way — the field
+        // describes the object the operation concerned, not a measurement this
+        // run took.
+        .size(entry.size.unwrap_or_default())
+        .plaintext_hash(&driver.take_plaintext_hash(entry))
+        .remote(driver.remote());
+
+    // `?` rather than a fold into `outcome`: an unrecordable operation is a
+    // failure of the run whatever happened to the file, and it outranks a
+    // per-file error because it is the reason the run must stop.
+    ctx.audit.record(&record)?;
     outcome
 }
 
@@ -208,7 +320,7 @@ async fn run_stages<D: StageDriver>(
             // nothing before it proved they arrived intact.
             Stage::Verifying => {
                 driver.verify(entry, ctx.verify_mode()).await?;
-                ctx.stats.add_verified_bytes(entry.size);
+                ctx.stats.add_verified_bytes(entry.size.unwrap_or_default());
             }
 
             // Step 6. Until this returns, the file is not stored.
@@ -224,26 +336,38 @@ async fn run_stages<D: StageDriver>(
     Ok(())
 }
 
-/// Steps 1–7: transfer, then delete the source — in that order, always.
+/// Steps 1–7 then 8: transfer, delete the source, record it — in that order,
+/// always.
 ///
 /// This function is the whole difference between `move` and `copy`, and its
-/// shape is the guarantee. `transfer_file` returns `Ok` only after the durable
-/// index commit of step 6; the `?` means the reaper is unreachable on any other
+/// shape is the guarantee. [`walk`] returns `Ok` only after the durable index
+/// commit of step 6; the `?` means the reaper is unreachable on any other
 /// outcome. A checksum mismatch, a failed commit, a cancelled run — all of them
 /// leave the source exactly where it was.
 ///
+/// The audit record is appended **after the removal**, and describes the move as
+/// a whole. Recording between the two steps would attest to a `move` that a
+/// failure one line later turned into a `copy` — the source still there, the log
+/// saying otherwise, and nothing to tell them apart afterwards.
+///
 /// # Errors
-/// The transfer's error, unchanged, or the source deletion's. A failure to
-/// delete the source is *not* a failure of the transfer: the data is safely at
-/// the destination, and the operator needs to know which of the two happened.
+/// The transfer's error, unchanged, or the source deletion's, or the audit
+/// append's. A failure to delete the source is *not* a failure of the transfer:
+/// the data is safely at the destination, and the operator needs to know which
+/// of the two happened — which is why the record carries the classified code
+/// rather than a bare "failed".
 pub async fn move_file<D: StageDriver, R: Reaper>(
     ctx: &Ctx,
+    op: &str,
     driver: &D,
     source_reaper: &R,
     entry: &PlanEntry,
 ) -> Result<()> {
-    transfer_file(ctx, driver, entry).await?;
-    source_reaper.remove(&entry.source).await
+    let outcome = match walk(ctx, driver, entry).await {
+        Ok(()) => source_reaper.remove(&entry.source).await,
+        Err(error) => Err(error),
+    };
+    record(ctx, op, driver, entry, outcome)
 }
 
 /// Record a per-file failure without aborting the run.
@@ -271,6 +395,13 @@ pub fn record_failure(ctx: &Ctx, path: &str, error: &CliError) {
 /// unreadable file should not abandon the other 9,999,999; a locked vault, a
 /// full disk or a cancelled run makes every remaining file fail identically, and
 /// grinding through them produces ten million identical errors instead of one.
+///
+/// [`ExitCode::AuditChainBroken`] is on the list for a second reason as well as
+/// that one. A log that cannot be extended stays unextendable for every file
+/// behind this one, so the run would emit ten million copies of the same
+/// message; and every one of those files would be transferred *unrecorded*,
+/// which `PLAN.md` §7 forbids outright. Stopping is the only outcome that leaves
+/// the vault and the log describing the same run.
 #[must_use]
 pub const fn is_fatal(error: &CliError) -> bool {
     matches!(
@@ -280,6 +411,7 @@ pub const fn is_fatal(error: &CliError) -> bool {
             | ExitCode::VaultLocked
             | ExitCode::IndexError
             | ExitCode::Usage
+            | ExitCode::AuditChainBroken
     )
 }
 
@@ -290,12 +422,18 @@ mod tests {
     use crate::commands::transfer::testing::ctx;
     use std::cell::RefCell;
 
+    /// The remote the fake drivers claim to be connected to.
+    const TEST_REMOTE: &str = "archive";
+
+    /// The verb the tests drive the walk with.
+    const TEST_OP: &str = "copy";
+
     fn entry(path: &str, size: u64) -> PlanEntry {
         PlanEntry {
             action: Op::Copy,
             source: path.to_string(),
             dest: path.to_string(),
-            size,
+            size: Some(size),
             reason: "test",
         }
     }
@@ -341,7 +479,7 @@ mod tests {
         }
         async fn upload(&self, entry: &PlanEntry) -> Result<u64> {
             self.note(Stage::Uploading)?;
-            Ok(entry.size)
+            Ok(entry.size.unwrap_or_default())
         }
         async fn verify(&self, _entry: &PlanEntry, _mode: VerifyMode) -> Result<()> {
             self.note(Stage::Verifying)
@@ -351,6 +489,12 @@ mod tests {
         }
         async fn create_dir(&self, _entry: &PlanEntry) -> Result<()> {
             Ok(())
+        }
+        fn remote(&self) -> &str {
+            TEST_REMOTE
+        }
+        fn take_plaintext_hash(&self, _entry: &PlanEntry) -> String {
+            String::new()
         }
     }
 
@@ -368,13 +512,16 @@ mod tests {
         fn target(&self) -> &'static str {
             "source"
         }
+        fn remote(&self) -> &str {
+            TEST_REMOTE
+        }
     }
 
     #[tokio::test]
     async fn a_file_walks_every_stage_in_order() {
         let ctx = ctx(&[]);
         let driver = Recording::default();
-        transfer_file(&ctx, &driver, &entry("a.txt", 100))
+        transfer_file(&ctx, TEST_OP, &driver, &entry("a.txt", 100))
             .await
             .unwrap();
         assert_eq!(driver.stages(), PIPELINE_STAGES);
@@ -383,7 +530,7 @@ mod tests {
     #[tokio::test]
     async fn bytes_and_files_are_counted_only_after_the_commit() {
         let ctx = ctx(&[]);
-        transfer_file(&ctx, &Recording::default(), &entry("a.txt", 100))
+        transfer_file(&ctx, TEST_OP, &Recording::default(), &entry("a.txt", 100))
             .await
             .unwrap();
 
@@ -405,7 +552,7 @@ mod tests {
         ] {
             let ctx = ctx(&[]);
             let driver = Recording::failing_at(stage);
-            let result = transfer_file(&ctx, &driver, &entry("a.txt", 100)).await;
+            let result = transfer_file(&ctx, TEST_OP, &driver, &entry("a.txt", 100)).await;
 
             assert!(result.is_err(), "{stage:?} should have failed");
             assert_eq!(ctx.stats.snapshot().files_done, 0, "{stage:?}");
@@ -418,7 +565,7 @@ mod tests {
     async fn nothing_is_verified_before_the_verify_stage() {
         let ctx = ctx(&[]);
         let driver = Recording::failing_at(Stage::Uploading);
-        let _ = transfer_file(&ctx, &driver, &entry("a.txt", 100)).await;
+        let _ = transfer_file(&ctx, TEST_OP, &driver, &entry("a.txt", 100)).await;
         assert_eq!(
             ctx.stats.snapshot().bytes_verified,
             0,
@@ -432,7 +579,7 @@ mod tests {
         let driver = Recording::default();
         let reaper = RecordingReaper::default();
 
-        move_file(&ctx, &driver, &reaper, &entry("a.txt", 10))
+        move_file(&ctx, TEST_OP, &driver, &reaper, &entry("a.txt", 10))
             .await
             .unwrap();
 
@@ -449,7 +596,7 @@ mod tests {
             let driver = Recording::failing_at(*stage);
             let reaper = RecordingReaper::default();
 
-            let result = move_file(&ctx, &driver, &reaper, &entry("a.txt", 10)).await;
+            let result = move_file(&ctx, TEST_OP, &driver, &reaper, &entry("a.txt", 10)).await;
 
             assert!(result.is_err(), "{stage:?}");
             assert!(
@@ -485,11 +632,17 @@ mod tests {
             async fn create_dir(&self, _: &PlanEntry) -> Result<()> {
                 Ok(())
             }
+            fn remote(&self) -> &str {
+                TEST_REMOTE
+            }
+            fn take_plaintext_hash(&self, _: &PlanEntry) -> String {
+                String::new()
+            }
         }
 
         let ctx = ctx(&[]);
         let reaper = RecordingReaper::default();
-        let error = move_file(&ctx, &Mismatching, &reaper, &entry("a.txt", 10))
+        let error = move_file(&ctx, TEST_OP, &Mismatching, &reaper, &entry("a.txt", 10))
             .await
             .unwrap_err();
 
@@ -529,6 +682,108 @@ mod tests {
         assert!(is_fatal(&CliError::new(ExitCode::VaultLocked, "")));
         assert!(is_fatal(&CliError::new(ExitCode::Cancelled, "")));
         assert!(is_fatal(&CliError::unimplemented("dctl copy")));
+
+        // A log that cannot be extended stays unextendable for every file
+        // behind this one, and each of them would move unrecorded.
+        assert!(is_fatal(&CliError::new(ExitCode::AuditChainBroken, "")));
+    }
+
+    /// The records this run appended, parsed the way the reader parses them.
+    fn recorded(ctx: &Ctx) -> Vec<crate::audit::record::AuditRecord> {
+        std::fs::read_to_string(ctx.audit.path())
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_transferred_file_leaves_exactly_one_verifiable_record() {
+        let ctx = ctx(&[]);
+        transfer_file(&ctx, TEST_OP, &Recording::default(), &entry("a.txt", 100))
+            .await
+            .unwrap();
+
+        let records = recorded(&ctx);
+        assert_eq!(records.len(), 1, "one file, one record");
+        assert_eq!(records[0].op, TEST_OP);
+        assert_eq!(records[0].path, "a.txt");
+        assert_eq!(records[0].result, ExitCode::Success.slug());
+        assert_eq!(records[0].size, 100);
+        assert_eq!(records[0].remote, TEST_REMOTE);
+        crate::audit::chain::verify(&records).expect("the chain holds");
+    }
+
+    #[tokio::test]
+    async fn a_failed_transfer_is_recorded_with_its_own_classification() {
+        // A log of successes cannot answer "what went wrong on the 3rd?", and a
+        // failure recorded as a generic "error" cannot answer "what kind?".
+        let ctx = ctx(&[]);
+        let driver = Recording::failing_at(Stage::Uploading);
+        let error = transfer_file(&ctx, TEST_OP, &driver, &entry("a.txt", 100))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), ExitCode::TemporaryError);
+
+        let records = recorded(&ctx);
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].result, ExitCode::TemporaryError.slug());
+        // Nothing was stored, so nothing was hashed — an empty field rather than
+        // a digest of bytes that never landed.
+        assert_eq!(records[0].plaintext_hash, "");
+    }
+
+    #[tokio::test]
+    async fn a_move_records_once_and_only_after_the_source_is_gone() {
+        // The ordering that makes the record true. A record written between the
+        // commit and the removal would attest to a `move` that the failure one
+        // line later turned into a `copy` — the source still there, and the log
+        // saying otherwise.
+        struct Stubborn;
+        impl Reaper for Stubborn {
+            async fn remove(&self, _: &str) -> Result<()> {
+                Err(CliError::new(ExitCode::TemporaryError, "provider said no"))
+            }
+            fn target(&self) -> &'static str {
+                "source"
+            }
+            fn remote(&self) -> &str {
+                TEST_REMOTE
+            }
+        }
+
+        let ctx = ctx(&[]);
+        let error = move_file(
+            &ctx,
+            "move",
+            &Recording::default(),
+            &Stubborn,
+            &entry("a.txt", 10),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.code(), ExitCode::TemporaryError);
+
+        let records = recorded(&ctx);
+        assert_eq!(records.len(), 1, "one file, one record — never two");
+        assert_eq!(records[0].op, "move");
+        assert_eq!(
+            records[0].result,
+            ExitCode::TemporaryError.slug(),
+            "the destination commit succeeded, but the move did not"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_transfers_nothing_and_therefore_records_nothing() {
+        // Belt and braces: no transfer verb reaches this function under
+        // --dry-run, and if one ever did the record would still not be written.
+        let ctx = ctx(&["--dry-run"]);
+        transfer_file(&ctx, TEST_OP, &Recording::default(), &entry("a.txt", 1))
+            .await
+            .unwrap();
+        assert!(recorded(&ctx).is_empty());
     }
 
     #[test]

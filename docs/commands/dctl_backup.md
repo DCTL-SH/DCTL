@@ -5,9 +5,9 @@ Back up a local tree into a vault.
 ## Synopsis
 
 `dctl backup` stores a local directory (or a single file) in a vault. It is
-`copy` with two additions that only make sense for an archive: it can mark the
-run as a **snapshot**, and it runs the **name pre-flight** over everything it is
-about to store (`PLAN.md` §13.6).
+`copy` with two additions that only make sense for an archive: it runs the
+**name pre-flight** over everything it is about to store (`PLAN.md` §13.6), and
+it stores by **streaming** rather than by buffering.
 
 The second addition is the point of the command. A filename that is legal on
 this machine and illegal on the machine that will one day restore it —
@@ -29,16 +29,33 @@ that:
 * A **control character** in a name is fatal regardless. No filesystem anywhere
   accepts one, so storing it would guarantee an object nobody can ever restore.
 
+**Storing is constant-memory, and that is why `backup` is its own verb.** It
+uses the core's streaming store (`Vault::put_file_from_path`), which seals the
+source straight from disk into a temporary object and hands that to the backend's
+streaming write. No stage ever holds the whole file or the whole object, so peak
+memory is O(chunk) per file regardless of size — `PLAN.md` §16.2. There is
+therefore **no whole-file size limit** on `backup`, unlike `copy`, which moves a
+file through a buffer and refuses anything above
+`TRANSFER_WHOLE_FILE_LIMIT` (1 GiB). A backup tool that could not store the
+largest file on the disk would not be a backup tool.
+
+**One bad file does not abandon the run.** A file that cannot be read or that the
+core refuses is counted, reported by name, and skipped; the run continues and the
+recorded errors downgrade the exit code to **6** (`partial_failure`). A *fatal*
+failure — a locked vault, a cancelled run — stops the run instead, because every
+remaining file would fail identically.
+
 **`backup` is additive.** It stores what it finds; it never deletes anything from
 the vault and never removes the local source. Making a destination match a source
 — which means deleting from the destination — is [`dctl sync`](dctl_sync.md), and
 that separation is deliberate: the command you point at an archive every night
 must not be the command that can empty it.
 
-**The verified-write contract still governs every byte** (`PLAN.md` §6). When the
-engine lands, nothing is reported as stored until its bytes have been
-checksum-verified at the destination and durably committed to the index; a
-mismatch hard-aborts, commits nothing and exits **20**. `--verify` selects the
+**The verified-write contract governs every byte** (`PLAN.md` §6). Nothing is
+reported as stored until the object has been written and verified against its own
+hash, the authoritative §5 name record written, and the index entry durably
+committed — in that order, inside one core call, so there is no window in which a
+file is uploaded but uncommitted. A mismatch commits nothing and exits **20**. `--verify` selects the
 strength (`checksum`, `sample`, `strict`); it is a global flag rather than a flag
 of this command because verification strength is also a per-remote setting in
 `config.toml`, and two spellings of one setting is one too many.
@@ -58,14 +75,17 @@ stores what they point at instead, and the walk then remembers the canonical pat
 of every directory it enters — a symlink pointing at its own ancestor is the
 oldest way to make a backup tool run until the disk fills.
 
-**Filters.** `--min-size`, `--max-size`, `--max-depth` and `--files-from` are
-honoured (`--max-depth 1` means the top level only, matching rclone). Glob
-filters — `--include`, `--exclude`, `--filter-from` — are **refused** with exit 7
-rather than ignored: an `--exclude '*.iso'` that was quietly dropped would upload
-the archive the rule existed to keep out, and nobody would find out until the
-bill arrived. Crossed size bounds (`--min-size 10G --max-size 1M`) are a usage
-error for the same reason — no file can satisfy both, so the run would report a
-clean success having stored nothing.
+**Filters are all honoured, through one engine.** `--include`, `--exclude`,
+`--filter-from`, `--files-from`, `--min-size`, `--max-size` and `--max-depth` are
+evaluated by the same `crate::filter` engine `dctl copy` and the listing family
+use, so a rule means exactly the same thing to every command (`--max-depth 1` is
+the top level only, matching rclone; one `--include` makes the unmatched default
+an exclusion, also matching rclone). What is refused is a filter that will not
+*compile* — a malformed pattern, an unreadable rule file — because a run that
+proceeded with a rule the operator believes is in force is the data-loss case.
+Crossed size bounds (`--min-size 10G --max-size 1M`) are a usage error for the
+same reason: no file can satisfy both, so the run would report a clean success
+having stored nothing.
 
 **Paths.** The vault side is written `REMOTE:PATH`; the local side is an ordinary
 path. Following rclone's rule, `C:\data`, `d:/data` and `\\server\share` are
@@ -77,7 +97,8 @@ called `C`. Logical paths inside the vault are canonicalised (`/`-separated, NFC
 no `.` or `..`), so a name typed on a Mac and a name typed on Linux address the
 same object.
 
-**Snapshots.** `--snapshot` marks the run as one restorable point in time;
+**Snapshots are refused on a real run** — see *Status in this build*. `--snapshot`
+marks the run as one restorable point in time;
 `--snapshot-name` names it, and requires `--snapshot` (otherwise
 `--snapshot-name nightly` would silently do nothing). Without a name, one is
 generated as `snap-<unix seconds>` — it sorts chronologically as plain text and
@@ -90,25 +111,22 @@ differently in two of them.
 
 ### Status in this build
 
-**A real `dctl backup` run is not implemented.** Everything up to the first byte
-is: argument and snapshot validation, the tree walk, the filters DCTL can
-evaluate exactly, the name pre-flight, and the full plan in all three output
-formats. What does not exist is the verified-write engine (`PLAN.md` §6), so a
-run without `--dry-run` ends in
-`dctl backup is not implemented in this build` at exit **7**. It never prints a
-success message for work that did not happen.
+**`dctl backup` runs for real.** It walks the tree, applies the filters, runs the
+name pre-flight, prints the plan in whichever format was asked for, and then —
+unless `--dry-run` — unlocks the vault and streams every file into it.
 
-That check fires **before** the tree is walked, deliberately. Scanning four
-million files only to then report that the transfer cannot happen would waste an
-hour to tell the operator something a millisecond of argument checking already
-knew. `--dry-run` is the flag that asks for the scan, and the error's hint says
-so.
+The vault is unlocked **after** the report, so a `--dry-run` never asks for a
+password and a run refused by `--strict-names` or by a control-character name
+never asks for one either.
 
-`--snapshot` is validated and recorded in the plan document, but snapshots are
-not yet stored or selectable —
-[`dctl restore --snapshot`](dctl_restore.md) refuses rather than approximating.
-Snapshots and versioning are **Phase 4 (Hardening)** in `PLAN.md` §11; the
-verified-write engine that turns a plan into stored bytes is Phase 0/1.
+**`--snapshot` is refused on a real run** (exit **7**), and that is deliberate
+rather than an oversight. Storing the files while quietly dropping the snapshot
+name would leave an operator believing a named point in time exists; they would
+discover it does not on the day they reached for it, which is the single worst
+moment (`PLAN.md` §13.6). A `--dry-run` still plans and names the snapshot,
+because planning is not claiming. The versioned, snapshot-backed index that makes
+`--snapshot` real is **Phase 4 (Hardening)** in `PLAN.md` §11 — the same phase
+[`dctl restore --at`](dctl_restore.md) names.
 
 ```
 dctl backup LOCAL REMOTE:PATH [flags]
@@ -179,14 +197,45 @@ Back up exactly the files a manifest names — nothing else, no globbing involve
 dctl backup /srv/photos vault:photos --files-from /etc/dctl/nightly.txt --dry-run
 ```
 
-Ask for a glob and be told no, rather than being ignored:
+Exclude the scratch files, and see the rule applied rather than refused:
 
 ```
-dctl backup /srv/photos vault:photos --exclude '*.iso' --dry-run
-error: glob filtering (--include/--exclude/--filter-from) is not implemented in this build
-  hint: A filter that was silently ignored would make `sync` delete the files it
-  was written to protect, so DCTL refuses instead. Narrow the transfer with an
-  explicit SOURCE, or with --min-size/--max-size/--max-depth, which are honoured.
+dctl backup /srv/photos archive: --exclude '*.tmp' --dry-run
+Action       Size  Path
+------  ---------  -------------------------------------------------------------
+store        10 B  /srv/photos/README.md -> archive:README.md
+store         9 B  /srv/photos/notes/café.txt -> archive:notes/café.txt
+store         0 B  /srv/photos/notes/empty.txt -> archive:notes/empty.txt
+store   293.0 KiB  /srv/photos/photos/2024/a.jpg -> archive:photos/2024/a.jpg
+
+ Transferred: 0 B / 293.0 KiB, 0%, -
+       Files: 0 / 4
+      Errors: 0
+```
+
+Then run it for real. The same four files, streamed and committed:
+
+```
+dctl backup /srv/photos archive: --exclude '*.tmp'
+ Transferred: 293.0 KiB / 293.0 KiB, 100%, 31.0 KiB/s
+       Files: 4 / 4
+      Errors: 0
+     Elapsed: 9s
+```
+
+Ask for a snapshot and be told no, rather than being given a name that could
+never be restored:
+
+```
+dctl backup /srv/photos archive: --snapshot --snapshot-name nightly
+error: recording a backup as a named snapshot (--snapshot) (missing in
+  dctl-index: the index format holds one current version per path, so a snapshot
+  name would have nothing to pin) is not implemented in this build
+  hint: The index records one current version per path in this build, so a
+  snapshot name could be stored but never restored. The versioned,
+  snapshot-backed index of PLAN.md §13.5 — phase 4 (§11), listed there as
+  optional — is what makes it real. Back up without --snapshot; the files
+  themselves are stored identically.
 ```
 
 A tree with an unreadable directory in it. The walk does not stop; the problem is
@@ -220,11 +269,12 @@ means the vault root. `--snapshot-name` requires `--snapshot`.
 ## Options inherited from parent commands
 
 Every global flag is accepted on `dctl backup`, before or after the subcommand.
-The ones that change what this command does are `--dry-run` (which is what makes
-it do anything at all in this build), `--verify`/`--verify-samples` (the
-strength of the post-write verification), `--min-size`/`--max-size`/
-`--max-depth`/`--files-from` (honoured) versus `--include`/`--exclude`/
-`--filter-from` (refused), `--format`/`--json`/`--units`/`--quiet`/`-v`
+The ones that change what this command does are `--dry-run` (plan only, and no
+password prompt), `--password`/`--password-command`/`--password-file`/
+`--no-ask-password` (how the vault is unlocked), `--index` (which index the
+commit lands in), every filter flag — `--include`, `--exclude`, `--filter-from`,
+`--files-from`, `--min-size`, `--max-size`, `--max-depth`, all honoured —
+`--format`/`--json`/`--units`/`--quiet`/`-v`
 (output), and `--transfers`/`--checkers`/`--bwlimit`/`--retries`/`--max-transfer`
 (how the writes will be paced once the engine exists). See
 [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
@@ -244,18 +294,18 @@ consumer read "nothing to back up" from a run that never got as far as looking.
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | A `--dry-run` completed with no scan problems. Not reachable for a real transfer in this build. |
+| 0 | `success` | Every scanned file was stored, or a `--dry-run` completed with no scan problems. |
 | 1 | `usage` | A local path where the vault operand belongs (`C:\vault`, `/srv/out`), a missing operand, `--snapshot-name` without `--snapshot`, an invalid snapshot name, an unparseable or crossed `--min-size`/`--max-size`, a negative `--max-depth`, or a `--files-from` line containing `..`. |
 | 2 | `uncategorised` | An I/O error, other than "not found" or "permission denied", reading a `--files-from` list. |
 | 3 | `dir_not_found` | The `<LOCAL>` source does not exist. Reported before the engine check, so a typo is never mistaken for a missing feature. |
 | 4 | `file_not_found` | A `--files-from` list does not exist. |
-| 6 | `partial_failure` | The run produced a plan, but the walk recorded at least one problem: an unreadable directory, a name that is not valid UTF-8, a vanished file, or a dangling symlink. |
-| 7 | `fatal_error` | Returned by every real (non-`--dry-run`) invocation in this build (`not implemented`). Also: a glob filter was requested, a name contains a control character no filesystem accepts, or `--strict-names` was given and the pre-flight found anything. |
-| 20 | `checksum_mismatch` | A verified write refused to commit. Nothing was stored and the local source was not touched. Needs the engine described under *Status in this build*. |
+| 6 | `partial_failure` | The walk recorded a problem — an unreadable directory, a name that is not valid UTF-8, a vanished file, a dangling symlink — or a file could not be stored. The rest of the tree was still stored. |
+| 7 | `fatal_error` | `--snapshot` on a real run; a name contains a control character no filesystem accepts; `--strict-names` was given and the pre-flight found anything; the `REMOTE` operand names a vault's object store rather than the vault; or the remote is not configured. |
+| 20 | `checksum_mismatch` | A verified write refused to commit. Nothing was stored and the local source was not touched. |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. Nothing in flight was reported as complete. |
 
-In this build only **1**, **2**, **3**, **4**, **6**, **7** and **25** are
-reachable. Codes 0–10 mirror rclone's taxonomy; 20+ are DCTL's own. See
+Also reachable: **22** (`vault_locked`) when no password is available. Codes
+0–10 mirror rclone's taxonomy; 20+ are DCTL's own. See
 [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 
 ## See also

@@ -40,16 +40,18 @@
 //! reports an index discontinuity at a nameable position rather than silently
 //! accepting one of them.
 //!
-//! ## Why nothing outside the tests calls this yet
+//! ## Who calls this
 //!
-//! Wiring the writer into the transfer and removal families is a separate,
-//! deliberate step: the call has to sit *after* the durable index commit
-//! (`PLAN.md` §6 step 6) in every one of them, and a record appended before that
-//! commit would attest to a transfer that a crash could still undo. The module
-//! is complete and tested; the `dead_code` allow comes off with the commit that
-//! adds the call sites.
-
-#![allow(dead_code)]
+//! Nothing directly. Every call site goes through [`super::sink`], which owns
+//! the one handle a run has, decides where the log lives, and decides what a
+//! failure to append means for the command being recorded. Keeping that policy
+//! out of here is deliberate: this module's job is to put a record on the medium
+//! correctly, and a module that also decided exit codes would have two reasons
+//! to change.
+//!
+//! The `dead_code` allow that used to sit here is gone. It covered the period in
+//! which the writer was complete but unwired; the accessors below that only the
+//! tests use are individually justified where they are declared.
 
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -145,22 +147,30 @@ impl Writer {
     /// Worth publishing: comparing it against an anchor kept outside the log is
     /// the only way to detect that records were removed from the end, which the
     /// chain itself cannot see (see [`super::chain`]).
+    ///
+    /// No command consults it yet, and inventing a caller to satisfy the lint
+    /// would be worse than saying so: the anchor DCTL would compare it against
+    /// does not exist. The tests do use it — it is how they assert that two runs
+    /// continue one chain rather than starting two — so the accessor stays and
+    /// the allow is narrowed to the non-test build.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub fn head(&self) -> &str {
         &self.head
     }
 
     /// The index the next record will carry.
+    ///
+    /// See [`Writer::head`] for why this is annotated rather than removed.
+    #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub const fn next_index(&self) -> u64 {
         self.next_index
     }
 
-    /// Where the log is.
-    #[must_use]
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
+    // There is deliberately no `path()` accessor. The path a caller needs is
+    // [`super::sink::Sink::path`] — the value this writer was opened *from* — and
+    // a second way to ask the same question is how the two come to disagree.
 
     /// Append one entry and return the record as it was written.
     ///
@@ -354,8 +364,8 @@ impl Writer {
             format!("cannot append to {}: {why}", self.path.display()),
         )
         .with_hint(
-            "Nothing was written. Move the file aside and compare it against a \
-             mirrored copy before trusting anything in it; `dctl audit verify` \
+            "No record was appended. Move the file aside and compare it against \
+             a mirrored copy before trusting anything in it; `dctl audit verify` \
              reports the exact record where the chain fails.",
         )
     }

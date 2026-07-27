@@ -17,7 +17,7 @@ mod count;
 mod duration;
 mod parse;
 
-pub use bytes::{bytes, rate};
+pub use bytes::{bytes, bytes_or_unknown, rate};
 pub use count::count;
 pub use duration::{duration, eta};
 pub use parse::parse_size;

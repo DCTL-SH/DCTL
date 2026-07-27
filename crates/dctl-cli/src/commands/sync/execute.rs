@@ -21,6 +21,9 @@
 //! reorders the entries it was given; it never recomputes them, so the list a
 //! `--dry-run` printed is the list that gets performed.
 
+use crate::audit::record::Entry as AuditEntry;
+use crate::audit::sink;
+use crate::constants::TRANSFER_COMMAND_SYNC;
 use crate::ctx::Ctx;
 use crate::error::Result;
 
@@ -44,12 +47,12 @@ pub async fn run<D: StageDriver, R: Reaper>(
 ) -> Result<()> {
     match mode {
         DeleteMode::Before => {
-            shared::deletions(ctx, reaper, plan).await?;
-            shared::transfers(ctx, driver, plan).await
+            shared::deletions(ctx, TRANSFER_COMMAND_SYNC, reaper, plan).await?;
+            shared::transfers(ctx, TRANSFER_COMMAND_SYNC, driver, plan).await
         }
         DeleteMode::After => {
-            shared::transfers(ctx, driver, plan).await?;
-            shared::deletions(ctx, reaper, plan).await
+            shared::transfers(ctx, TRANSFER_COMMAND_SYNC, driver, plan).await?;
+            shared::deletions(ctx, TRANSFER_COMMAND_SYNC, reaper, plan).await
         }
         DeleteMode::During => interleaved(ctx, driver, reaper, plan).await,
     }
@@ -71,7 +74,8 @@ async fn interleaved<D: StageDriver, R: Reaper>(
     for entry in plan.entries.iter().filter(|entry| entry.action.is_action()) {
         match entry.action {
             Op::Copy | Op::Update => {
-                let outcome = pipeline::transfer_file(ctx, driver, entry).await;
+                let outcome =
+                    pipeline::transfer_file(ctx, TRANSFER_COMMAND_SYNC, driver, entry).await;
                 shared::perform(ctx, &entry.dest, outcome)?;
             }
             Op::CreateDir => {
@@ -81,6 +85,16 @@ async fn interleaved<D: StageDriver, R: Reaper>(
             Op::Delete => {
                 let outcome = reaper.remove(&entry.dest).await;
                 let removed = outcome.is_ok();
+                // The same record `shared::deletions` writes for the other two
+                // modes. Interleaving changes when a deletion happens, never
+                // whether it is attested — a mode that quietly stopped recording
+                // them would make `--delete-during`, the *default*, the one
+                // ordering with no evidence behind it.
+                ctx.audit.record(
+                    &AuditEntry::new(TRANSFER_COMMAND_SYNC, sink::outcome(&outcome))
+                        .path(&entry.dest)
+                        .remote(Reaper::remote(reaper)),
+                )?;
                 shared::perform(ctx, &shared::removal_subject(reaper, &entry.dest), outcome)?;
                 if removed {
                     ctx.stats.file_deleted();
@@ -123,6 +137,9 @@ mod tests {
     struct Driver<'a>(&'a Journal);
     struct Sink<'a>(&'a Journal);
 
+    /// The remote the fake driver and reaper claim to be connected to.
+    const TEST_REMOTE: &str = "archive";
+
     impl StageDriver for Driver<'_> {
         async fn read(&self, _: &PlanEntry) -> Result<()> {
             Ok(())
@@ -131,7 +148,7 @@ mod tests {
             Ok(())
         }
         async fn upload(&self, entry: &PlanEntry) -> Result<u64> {
-            Ok(entry.size)
+            Ok(entry.size.unwrap_or_default())
         }
         async fn verify(&self, _: &PlanEntry, _: VerifyMode) -> Result<()> {
             Ok(())
@@ -144,6 +161,12 @@ mod tests {
             self.0.note(format!("mkdir {}", entry.dest));
             Ok(())
         }
+        fn remote(&self) -> &str {
+            TEST_REMOTE
+        }
+        fn take_plaintext_hash(&self, _: &PlanEntry) -> String {
+            String::new()
+        }
     }
 
     impl Reaper for Sink<'_> {
@@ -153,6 +176,9 @@ mod tests {
         }
         fn target(&self) -> &'static str {
             "destination"
+        }
+        fn remote(&self) -> &str {
+            TEST_REMOTE
         }
     }
 
@@ -248,6 +274,9 @@ mod tests {
             }
             fn target(&self) -> &'static str {
                 "destination"
+            }
+            fn remote(&self) -> &str {
+                TEST_REMOTE
             }
         }
 

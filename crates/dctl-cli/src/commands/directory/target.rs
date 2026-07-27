@@ -22,11 +22,10 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::constants::{
-    DIRECTORY_MARKER_NAME, MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, REMOTE_SEPARATOR,
-};
+use crate::constants::{MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, REMOTE_SEPARATOR};
 use crate::error::{CliError, Result};
 use crate::platform::path;
+use crate::remote::RemoteSpec;
 
 /// A resolved directory-family target: a named remote plus a canonical logical
 /// path that is guaranteed non-empty.
@@ -113,14 +112,18 @@ impl Target {
         })
     }
 
-    /// The object key that represents this path as a directory.
+    /// The spec this target addresses, for the layers that resolve remotes.
     ///
-    /// A backend has no directories, so an empty directory is an empty object at
-    /// a well-known name beneath it — see
-    /// [`DIRECTORY_MARKER_NAME`](crate::constants::DIRECTORY_MARKER_NAME).
+    /// Built rather than kept from the argument, so what reaches
+    /// [`Place`](crate::remote::Place) and [`crate::session`] is the
+    /// *canonicalised* path — the same bytes that will become an index key —
+    /// and not the spelling the shell happened to hand over.
     #[must_use]
-    pub fn marker(&self) -> String {
-        format!("{}{PATH_SEPARATOR}{DIRECTORY_MARKER_NAME}", self.path)
+    pub fn spec(&self) -> RemoteSpec {
+        RemoteSpec::Named {
+            remote: self.remote.clone(),
+            path: self.path.clone(),
+        }
     }
 
     /// This target's parent, or `None` when it sits at the remote's root.
@@ -253,10 +256,17 @@ mod tests {
     }
 
     #[test]
-    fn a_marker_names_an_object_beneath_the_directory() {
-        let target = parse("vault:photos/2024").unwrap();
-        assert_eq!(target.marker(), "photos/2024/.dctl-dir");
-        assert!(target.marker().starts_with(&target.path));
+    fn the_spec_carries_the_canonical_path_rather_than_the_typed_one() {
+        // Whatever resolves the remote must see the bytes that will become an
+        // index key, or a `.`-laden spelling would address a second object.
+        let target = parse("vault:./photos//2024/").unwrap();
+        assert_eq!(
+            target.spec(),
+            RemoteSpec::Named {
+                remote: "vault".into(),
+                path: "photos/2024".into(),
+            }
+        );
     }
 
     #[test]

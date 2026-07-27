@@ -47,8 +47,9 @@ use std::time::Duration;
 use clap::Args;
 
 use crate::constants::{
-    MOUNT_DEFAULT_ATTR_TIMEOUT, MOUNT_DEFAULT_BUFFER_SIZE, MOUNT_DEFAULT_DIR_CACHE_TIME,
-    MOUNT_DEFAULT_VFS_READ_AHEAD, MOUNT_ENGINE_HINT, MOUNT_SIZE_DISABLED,
+    MOUNT_ADAPTER_FEATURE, MOUNT_DEFAULT_ATTR_TIMEOUT, MOUNT_DEFAULT_BUFFER_SIZE,
+    MOUNT_DEFAULT_DIR_CACHE_TIME, MOUNT_DEFAULT_VFS_READ_AHEAD, MOUNT_ENGINE_HINT,
+    MOUNT_SIZE_DISABLED,
 };
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
@@ -193,10 +194,16 @@ pub async fn run(ctx: &Ctx, args: &MountArgs) -> Result<()> {
         "mount validated; no filesystem adapter in this build"
     );
 
-    Err(
-        CliError::unimplemented(format!("{} {VERB}", dctl_meta::BINARY_NAME))
-            .with_hint(MOUNT_ENGINE_HINT),
-    )
+    // The message names the missing *capability* and the crate that would own
+    // it, with the command in front so a reader can map it onto what they typed.
+    // Naming only the command would be the one thing this refusal must not do:
+    // everything `dctl mount` itself is responsible for has, by this line,
+    // already run and passed.
+    Err(CliError::unimplemented(format!(
+        "{} {VERB}: {MOUNT_ADAPTER_FEATURE}",
+        dctl_meta::BINARY_NAME
+    ))
+    .with_hint(MOUNT_ENGINE_HINT))
 }
 
 /// Warn about combinations that parse but cannot do what they look like they do.
@@ -423,6 +430,19 @@ mod tests {
         assert!(
             error.message().contains("mount"),
             "message must name the command: {}",
+            error.message()
+        );
+        // …and the three things that turn a dead end into a roadmap entry. The
+        // command name alone is what this test used to check, and it would have
+        // passed on a message that told a reader nothing they could act on.
+        assert!(
+            error.message().contains(MOUNT_ADAPTER_FEATURE),
+            "the missing capability must be named: {}",
+            error.message()
+        );
+        assert!(
+            error.message().contains("dctl-mount"),
+            "and the layer that owes it: {}",
             error.message()
         );
         assert!(

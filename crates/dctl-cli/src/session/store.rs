@@ -4,15 +4,30 @@
 //! the bytes that are really there, with no configuration and no key.
 //!
 //! It is **not** the rule that decides whether a command may write here. That is
-//! [`crate::addressing`], which asks the configuration first, because a
-//! command's encryption semantics may not depend on what a destination happens
-//! to contain. This module is the *fallback* that module falls back to: for a
-//! location no configured remote describes, the envelope on disk is the only
-//! evidence there is, and refusing on it is better than writing plaintext into
-//! somebody's vault because their config lives on another machine.
+//! [`crate::addressing`], which asks the configuration first, because what a
+//! command encrypts may not depend on what a destination happens to contain.
+//! This module is the *fallback* that module falls back to: for a location no
+//! configured remote describes, the envelope on disk is the only evidence there
+//! is, and refusing on it is better than writing plaintext into somebody's vault
+//! because their config lives on another machine.
+//!
+//! ## The one thing an answer from here may cause
+//!
+//! A refusal. Nothing else. This is the only place in DCTL where a destination's
+//! contents are read before a write, so it is the only place invariant I4 could
+//! be broken, and the bound is what keeps it intact: a `Some` here can stop a
+//! command and can never re-route one. It must never grow a caller that reads it
+//! as "so seal instead" — that would be auto-detection, and would mean a user
+//! who asked for a plain write got an encrypted one because of state they never
+//! named. `Option<&Path>` rather than a mode is the shape that makes the wrong
+//! use awkward to write.
 //!
 //! Deliberately cheap and key-free: it runs before any password is requested, so
-//! it must answer without unlocking anything.
+//! it must answer without unlocking anything. It also expects an **already
+//! resolved** path — [`crate::addressing`] resolves the destination before
+//! calling, because `staging/../vault/system/envelope.bin` does not `stat` when
+//! `staging` does not exist, and evidence that a spelling can hide is evidence
+//! this module would report as absent.
 
 use std::path::Path;
 

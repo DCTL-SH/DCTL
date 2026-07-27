@@ -4,13 +4,16 @@
 //! removes the debris DCTL and the provider leave behind, all of which is
 //! invisible in a listing and all of which is billed for:
 //!
-//! * **Abandoned multipart uploads.** `PLAN.md` §6 step 3 stages every upload
-//!   through a multipart, and a crash between parts leaves one open. The parts
-//!   already stored are charged for and no listing shows them.
-//! * **Stale staging objects.** A staged upload that never reached step 4 is
+//! * **Stale staging objects.** A staged upload that never reached its commit is
 //!   left under a temporary key carrying [`CLEANUP_STAGING_MARKER`]. The
 //!   verified-write contract deliberately writes to a temporary key first, so
 //!   this litter is a *consequence* of the durability guarantee, not a bug.
+//! * **Orphaned content objects.** A sealed object stored by a write that never
+//!   reached its index commit — which is exactly what a verified write that
+//!   aborts leaves behind (`PLAN.md` §6 step 6). This is the command that cleans
+//!   up after that contract.
+//! * **Abandoned multipart uploads.** A crash between parts leaves one open. The
+//!   parts already stored are charged for and no listing shows them.
 //! * **Superseded versions.** On a versioned bucket, every overwrite and delete
 //!   keeps the previous object alive and billable.
 //!
@@ -22,72 +25,45 @@
 //! [`CLEANUP_DEFAULT_MIN_AGE`], comfortably longer than any single verified
 //! write, and lowering it risks deleting a concurrent run's staged parts.
 //!
-//! ## What runs today
+//! ## Two classes cannot be swept, and say so
 //!
-//! Argument parsing, target resolution, class selection, age validation, the
-//! destructive gate and the `--dry-run` plan. The sweep needs provider APIs the
-//! backend does not expose yet — listing in-progress multipart uploads, listing
-//! object versions — and [`Ctx`] carries no vault handle, so the command fails
-//! with a real exit code rather than reporting space it did not reclaim. When
-//! the engine lands, what was reclaimed is counted through
+//! [`dctl_store::Backend`] exposes no way to list a provider's in-progress
+//! multipart uploads and no way to list an object's versions. A sweep reporting
+//! "0 reclaimed" for a class it was never able to *look* at would be the
+//! misreport `PLAN.md` §6 forbids, so those two emit an explicit `unsupported`
+//! record naming the missing capability — and count as an error only when the
+//! user asked for them by name. See [`super::removal::reclaim`], which also
+//! explains why the orphan sweep proves the index is complete before it trusts
+//! an absence.
+//!
+//! What was reclaimed is counted through
 //! [`Stats::file_deleted`](crate::output::Stats::file_deleted) and the bytes
-//! through the existing end-of-run summary rows; this command introduces no
-//! second vocabulary for the same numbers. See [`super::removal::engine`].
+//! through the report's own summary record; this command introduces no second
+//! vocabulary for the same numbers.
 
-use clap::{Args, ValueEnum};
+use clap::Args;
 
 use crate::constants::{
     CLEANUP_DEFAULT_MIN_AGE, CLEANUP_STAGING_MARKER, REMOTE_ROOT_VALUE_NAME,
     REMOVAL_ACTION_CLEANUP, REMOVAL_LABEL_CLASSES, REMOVAL_LABEL_MIN_AGE, REMOVAL_LIST_SEPARATOR,
-    UNKNOWN_VALUE,
 };
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::output::size;
 use serde::Serialize;
 
-use super::removal::{PlanOptions, Removal, Row, Target, execute, parse_age};
+use super::removal::{Operation, PlanOptions, Removal, Row, Target, execute, parse_age};
 
 /// Stable command name. Must match `Command::name()` in `cli/mod.rs`.
 const COMMAND: &str = "cleanup";
 
-/// The engine capability this command is waiting on.
-const CAPABILITY: &str =
-    "listing a provider's in-progress multipart uploads, staged objects and versions";
-
 /// A class of reclaimable debris.
 ///
-/// Selectable individually because the three carry different risks: sweeping
-/// stale staging objects is nearly free, while pruning versions destroys the
-/// only remaining copy of an overwritten file.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, ValueEnum)]
-#[serde(rename_all = "kebab-case")]
-#[value(rename_all = "kebab-case")]
-pub enum CleanupClass {
-    /// Multipart uploads that were started and never finished.
-    Multipart,
-    /// Objects left under a temporary staging key by an interrupted write.
-    Staging,
-    /// Superseded object versions on a versioned bucket.
-    Versions,
-}
-
-impl CleanupClass {
-    /// Every class, used when `--class` was not given.
-    const ALL: &'static [Self] = &[Self::Multipart, Self::Staging, Self::Versions];
-
-    /// The name this class is written as, on the command line and in the JSON.
-    ///
-    /// Read back from clap rather than spelled a second time, so the flag value
-    /// and the serialised value cannot drift apart.
-    #[must_use]
-    pub fn slug(self) -> String {
-        self.to_possible_value().map_or_else(
-            || UNKNOWN_VALUE.to_string(),
-            |value| value.get_name().to_string(),
-        )
-    }
-}
+/// Defined in [`super::removal::reclaim`] beside the sweep that implements it,
+/// and re-exported here because this is the command whose `--class` flag parses
+/// it. Two definitions of one vocabulary is how a flag value and the thing it
+/// selects drift apart.
+pub use super::removal::Class as CleanupClass;
 
 /// `dctl cleanup REMOTE:`
 #[derive(Args, Debug)]
@@ -125,6 +101,18 @@ impl CleanupArgs {
             self.classes.clone()
         }
     }
+
+    /// Whether the user named the classes rather than taking the default set.
+    ///
+    /// Decides one thing only, and it is the exit code: a class this backend
+    /// cannot enumerate is a *failure to do what was asked* when it was asked
+    /// for by name, and merely "nothing to do there" otherwise. Without the
+    /// distinction, every default `cleanup` against a provider with no multipart
+    /// API would exit 6 for ever and operators would learn to ignore it.
+    #[must_use]
+    pub fn named(&self) -> bool {
+        !self.classes.is_empty()
+    }
 }
 
 /// The `cleanup`-specific half of the plan.
@@ -158,7 +146,9 @@ impl PlanOptions for CleanupOptions {
 /// # Errors
 /// [`crate::exit::ExitCode::Usage`] for a malformed remote or an unparseable
 /// `--min-age`; [`crate::exit::ExitCode::Cancelled`] if the user declines;
-/// otherwise the unimplemented refusal described above.
+/// whatever opening the remote reported. A class that could not be swept is
+/// reported rather than returned, and exits
+/// [`crate::exit::ExitCode::PartialFailure`] when it was asked for by name.
 pub async fn run(ctx: &Ctx, args: &CleanupArgs) -> Result<()> {
     let target = Target::parse(&args.path)?;
     let min_age = parse_age(&args.min_age)?;
@@ -174,10 +164,14 @@ pub async fn run(ctx: &Ctx, args: &CleanupArgs) -> Result<()> {
             min_age_secs: min_age.as_secs(),
             staging_marker: CLEANUP_STAGING_MARKER,
         },
-        capability: CAPABILITY,
+        operation: Operation::Cleanup {
+            classes: args.selected(),
+            min_age,
+            named: args.named(),
+        },
     };
 
-    execute(ctx, &removal)
+    execute(ctx, &removal).await
 }
 
 #[cfg(test)]
@@ -228,6 +222,7 @@ mod tests {
         // A default that swept nothing would be a command that only looked
         // like it worked.
         assert_eq!(parse(&["vault:"]).args.selected(), CleanupClass::ALL);
+        assert_eq!(CleanupClass::ALL.len(), 4);
     }
 
     #[test]
@@ -245,13 +240,10 @@ mod tests {
     }
 
     #[test]
-    fn the_flag_spelling_and_the_json_spelling_are_the_same() {
-        // The drift guard: `--class staging` and `"staging"` in the plan must
-        // stay one name, not two that happen to match today.
-        for class in CleanupClass::ALL {
-            let serialised = serde_json::to_value(class).unwrap();
-            assert_eq!(serialised, serde_json::Value::String(class.slug()));
-        }
+    fn naming_a_class_is_distinguishable_from_taking_the_default_set() {
+        // The bit that decides whether an unsweepable class is an error.
+        assert!(!parse(&["vault:"]).args.named());
+        assert!(parse(&["vault:", "--class", "staging"]).args.named());
     }
 
     #[tokio::test]
@@ -269,31 +261,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dry_run_never_reports_reclaimed_space() {
+    async fn a_sweep_of_an_unknown_remote_fails_rather_than_reclaiming_nothing() {
         // The specific lie this guards against: "reclaimed 0 bytes" from a
-        // sweep that never listed anything.
-        let error = run_with(&["vault:", "--dry-run", "--quiet"])
+        // sweep that was never able to look at anything.
+        let error = run_with(&["vault:", "--force", "--quiet", "--no-ask-password"])
             .await
             .unwrap_err();
         assert_eq!(error.code(), ExitCode::FatalError);
-    }
-
-    #[tokio::test]
-    async fn a_real_run_never_reports_reclaimed_space_either() {
-        let error = run_with(&["vault:", "--force", "--quiet"])
-            .await
-            .unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(error.hint().is_some());
-    }
-
-    #[tokio::test]
-    async fn every_output_format_is_supported() {
-        for format in [vec!["--json"], vec!["--format", "json-lines"], vec![]] {
-            let mut args = vec!["vault:", "--dry-run", "--quiet"];
-            args.extend(format.iter().copied());
-            assert!(run_with(&args).await.is_err(), "{format:?}");
-        }
+        assert!(error.message().contains("vault"), "{}", error.message());
     }
 
     #[test]

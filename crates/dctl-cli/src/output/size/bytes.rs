@@ -46,6 +46,20 @@ pub fn bytes(count: u64, units: Units) -> String {
     format!("{value:.decimals$} {suffix}")
 }
 
+/// Format a byte count that may never have been measured.
+///
+/// The one place the absence is turned into text, so that `ls`, `lsl`, `lsd`,
+/// `tree`, `size`, `scrub` and `verify` all spell it the same way and a reader
+/// moving between them does not have to learn a second vocabulary. It is
+/// [`UNKNOWN_VALUE`] — the placeholder this crate already uses for a value it
+/// could not compute — and not `0 B`, because a rebuilt vault index really does
+/// hold rows nobody has measured and rendering those as a number is the
+/// misreport `PLAN.md` §6 forbids.
+#[must_use]
+pub fn bytes_or_unknown(count: Option<u64>, units: Units) -> String {
+    count.map_or_else(|| UNKNOWN_VALUE.to_string(), |value| bytes(value, units))
+}
+
 /// Format a transfer rate, e.g. `12.4 MiB/s`.
 ///
 /// A non-finite or non-positive rate renders as [`UNKNOWN_VALUE`] rather than as

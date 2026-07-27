@@ -50,14 +50,15 @@ Two more safeguards are not refusals but noise, deliberately:
   not gated behind `-v`, because it is the last chance to notice a typo:
   `warning: this would delete 1 of the 2 files at the destination`. It never
   blocks. Emptying a tree is legitimate; being quiet about it is not.
-* **Pattern filters are a hard error, not a warning.** `--include`, `--exclude`,
-  `--filter-from` and `--files-from` are refused with exit 7 before anything is
-  listed. This matters more here than anywhere else in the tool: a silently
-  dropped `--exclude 'archive/**'` does not merely copy too much — it sees every
-  excluded destination file as an extra and **deletes** it. `--min-size`,
-  `--max-size` and `--max-depth` *are* evaluated for real, and they are applied
-  to **both** listings — a file the filter excludes is invisible on either side,
-  so it is neither transferred nor deleted. `dctl sync src dst --min-size 100`
+* **Every filter is applied to *both* listings.** `--include`, `--exclude`,
+  `--filter-from`, `--files-from`, `--min-size`, `--max-size` and `--max-depth`
+  all go through one engine, and the *same* engine on both sides. This matters
+  more here than anywhere else in the tool: a rule that reached only the source
+  would make `sync` see every excluded destination file as an extra and
+  **delete** it. Because a rule hides a file on both sides, it is neither
+  transferred nor deleted — `dctl sync src dst --exclude 'archive/**'` protects
+  `archive/` at the destination rather than emptying it. A pattern that will not
+  *compile* is a usage error before anything is listed. `dctl sync src dst --min-size 100`
   leaves a 4-byte destination file alone rather than treating it as an extra.
 
 ### The confirmation
@@ -144,34 +145,26 @@ flushed, files that differ are rewritten, and files the source does not have are
 removed from the destination. The mass-deletion warning, the confirmation, the
 guards and `--dry-run` all sit in front of that unchanged.
 
-**A `sync` involving a vault cannot run at all**, and the reason is structural
-rather than incidental. Listing a named remote is still unimplemented, and
-`sync` deliberately has no `--no-traverse` to plan around it — the destination
-listing *is* where the deletions come from. So any `REMOTE:PATH` on either side
-stops at enumeration with exit **7**, before the engine is reached and before
-anything is deleted:
+**A `sync` with a vault on one side runs too.** Both directions work: a vault is
+enumerated through `crate::source`, the same reader `dctl ls` uses, so the
+listing an operator reads before approving a deletion describes the sync that
+follows. `dctl sync archive: /srv/mirror` makes the local tree match the vault,
+removing what the vault does not hold; `dctl sync /srv/photos archive:` does the
+reverse.
 
-```
-error: listing a remote is not implemented in this build
-warning: Enumerating a remote needs an unlocked vault, which the command context
-does not yet carry. Transfers between local paths can be planned today.
-```
-
-That covers local-to-vault, vault-to-local and vault-to-vault alike. The last of
-those is refused twice over: even with listings, a direct vault-to-vault path
-needs re-encryption support that `dctl-core` does not expose, and the engine
-refuses it at connect time rather than part-way through a tree.
-
-To mirror a local tree into a vault today, use [`copy`](dctl_copy.md) with
-`--no-traverse` — accepting that it adds and updates but never removes — and
-prune the vault deliberately with [`delete`](dctl_delete.md). A `sync` that
-silently did not delete would be worse than one that refuses.
+**Remote-to-remote is still refused**, at connect time rather than part-way
+through a tree, and the message distinguishes two different waits. With a sealed
+end it needs a re-encrypting transfer `dctl-core` does not expose, and **no
+`PLAN.md` §11 phase schedules one**. With two plain ends nothing needs re-sealing
+and nothing is waiting on the core: the `dctl-cli` engine holds one backend and
+one local side, and no phase names that either. Sync down to a local path first,
+then sync that up.
 
 The refusals `copy` documents apply here unchanged, all exit **7** and all
 before anything is removed: a **plain write into a directory that holds a
 vault**, a file **above the 1 GiB whole-file limit** (the core is whole-buffer;
-streaming is `PLAN.md` §16.2), a **pattern filter**, and **`--checksum`** when
-no hashes are available. The oversized-file refusal is fatal, so under
+streaming is `PLAN.md` §16.2), and **`--checksum`** against a plain object store,
+whose provider checksum is not the plaintext hash a vault records. The oversized-file refusal is fatal, so under
 `--delete-before` the deletions have already happened when it fires, and under
 `--delete-after` none of them have.
 
@@ -258,16 +251,19 @@ one-character prefix is a drive letter on every platform, never a remote called
 $ dctl sync E:\projects\apollo F:\backup\apollo --delete-after --progress
 ```
 
-A vault on either side is refused before anything is listed, transferred or
-deleted. `sync` has no `--no-traverse` to work around it, by design:
+Mirror a vault onto local disk. The vault is listed like any other side, which is
+what makes the deletions computable at all:
 
 ```console
-$ dctl sync /srv/projects vault:projects
-error: listing a remote is not implemented in this build
-warning: Enumerating a remote needs an unlocked vault, which the command context
-does not yet carry. Transfers between local paths can be planned today.
-$ echo $?
-7
+$ dctl sync archive: /srv/mirror --force
+warning: this would delete 1 of the 1 files at the destination
+ Transferred: 293.0 KiB / 293.0 KiB, 100%, 34.8 KiB/s
+    Verified: 293.0 KiB checksum-matched
+       Files: 4 / 4
+      Checks: 5 / 5
+     Deleted: 1
+      Errors: 0
+     Elapsed: 8s
 ```
 
 The empty-source guard. This is the difference between a typo and a restore:
@@ -294,17 +290,13 @@ $ echo $?
 1
 ```
 
-A pattern filter is refused rather than dropped. Consider what the alternative
-would do to `archive/`:
+A pattern filter protects the destination rather than emptying it. The rule is
+applied to **both** listings, so `archive/` is invisible on either side and is
+neither transferred nor deleted — which is the whole reason one engine answers
+for both:
 
 ```console
 $ dctl sync /srv/src /srv/dst --exclude 'archive/**' --dry-run
-error: pattern filtering (--include/--exclude/--filter-from/--files-from) is not implemented in this build
-warning: A filter that was silently ignored would make `sync` delete the files it
-was written to protect, so DCTL refuses instead. Narrow the transfer with an
-explicit SOURCE, or with --min-size/--max-size/--max-depth, which are honoured.
-$ echo $?
-7
 ```
 
 `--no-traverse` is not a flag this command has:
@@ -373,7 +365,7 @@ the full list. The ones that matter here:
 | `--force` | Approves the destructive confirmation without prompting, **and** unlocks the empty-source guard. Conflicts with `--interactive`. |
 | `-i`, `--interactive` | Prompts before the deletions and requires typing `yes`. With no terminal, exits 1 rather than hanging. |
 | `--checksum` | Compare content hashes instead of size and time. Refuses with exit 7 today when a hash is unavailable. Conflicts with `--size-only`. |
-| `--size-only` | Compare size alone, ignoring timestamps. |
+| `--size-only` | Compare size alone, ignoring timestamps. Also the way to opt *out* of the content comparison a vault side otherwise forces — see [copy](dctl_copy.md). |
 | `--verify <MODE>` | `checksum` (default), `sample`, `strict`. Against the local-to-local destinations `sync` can reach today, all three do nothing beyond the durable write; see [copy](dctl_copy.md) for what they do to a vault. |
 | `--verify-samples <N>` | Parsed and **not consulted**: partial sampling does not exist yet. |
 | `--min-size`, `--max-size`, `--max-depth` | Honoured, and applied to **both** listings. An excluded file is neither transferred nor deleted, so these narrow the deletion set rather than widening it. |
@@ -392,9 +384,9 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 0 | `success` | The destination was made identical to the source, or a `--dry-run` completed, or it already matched. |
 | 1 | `usage` | Unparseable command line; two `--delete-*` flags; a single-file `SOURCE`; an empty source against a non-empty destination without `--force`; source and destination are the same place; `DEST` is an existing file; an unparseable or unsatisfiable size range; `--interactive` with no terminal. |
 | 3 | `dir_not_found` | `SOURCE` does not exist. A missing `DEST` is not an error. |
-| 5 | `temporary_error` | A cloud backend failed in a way worth retrying. Not reachable today — `sync` cannot address a remote at all. |
+| 5 | `temporary_error` | A cloud backend failed in a way worth retrying. `sync` addresses remotes — sealed and plain alike — so this is reachable wherever a cloud backend is actually contacted. A local-to-local sync does not produce it. |
 | 6 | `partial_failure` | The run finished with at least one failure. A failed deletion contributes to this and is **never** counted as a deletion in the summary — the "Deleted" number means files that are actually gone. |
-| 7 | `fatal_error` | A named remote had to be listed (**every vault-involving sync ends here today**); a file exceeded the whole-file limit; `DEST` is a local directory holding a vault; `--checksum` with no hashes; a pattern filter was passed; `--immutable` and the plan would replace or delete anything, which is refused before any file is touched. |
+| 7 | `fatal_error` | Both sides are remotes; a file exceeded the whole-file limit; `DEST` is a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; `--immutable` and the plan would replace or delete anything, which is refused before any file is touched. |
 | 25 | `cancelled` | The confirmation was declined, or the run was interrupted with Ctrl-C. Nothing further was deleted. |
 
 **20** (`checksum_mismatch`), **21** (`integrity_failure`), **22**

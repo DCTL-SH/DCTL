@@ -11,6 +11,7 @@
 
 use std::sync::Arc;
 
+use crate::audit::sink::Sink;
 use crate::cli::globals::{GlobalArgs, VerifyMode};
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -26,12 +27,23 @@ pub struct Ctx {
     pub stats: Arc<Stats>,
     /// The progress display.
     pub progress: Arc<Progress>,
+    /// The tamper-evident log every data-changing operation appends to
+    /// (`PLAN.md` §7).
+    ///
+    /// Resolved here with everything else ambiguous, and opened lazily by the
+    /// first record, so a read-only command leaves no evidence file behind. It
+    /// lives on the context rather than being threaded through each command for
+    /// the same reason the counters do: a million-file run must pay the open
+    /// once, and a command that had to remember to construct one is a command
+    /// that can forget.
+    pub audit: Sink,
 }
 
 impl Ctx {
     /// Build a context from parsed globals.
     #[must_use]
     pub fn new(globals: GlobalArgs) -> Self {
+        let audit = Sink::new(&globals);
         let out = Out::new(
             globals.effective_format(),
             globals.color,
@@ -56,6 +68,7 @@ impl Ctx {
             out,
             stats,
             progress,
+            audit,
         }
     }
 

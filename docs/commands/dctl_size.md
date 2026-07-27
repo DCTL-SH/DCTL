@@ -37,20 +37,63 @@ Under `--json` (or `--format json`) the shape is:
 ```json
 {
   "count": 1234,
-  "bytes": 1546188226
+  "bytes": 1546188226,
+  "measured_bytes": 1546188226,
+  "unmeasured": 0,
+  "sizes": "plaintext"
 }
 ```
 
-and under `--format json-lines` the same object on a single line. The field
-names are rclone's `size --json` shape, lower case, so a script that already
+and under `--format json-lines` the same object on a single line. `count` and
+`bytes` are rclone's `size --json` shape, lower case, so a script that already
 reads `.count` and `.bytes` keeps working. Both values are exact: rounding
 belongs in the text rendering and nowhere else, and a machine has no use for a
 rounded number and every use for a stable one.
 
+### When the total cannot be computed
+
+A vault's sizes live in its index. `dctl index rebuild` is a **list-only pass**
+by design — it recovers object names without reading their bodies — so straight
+after a disaster-recovery rebuild no row in the vault has a recorded size.
+
+`bytes` is then **`null`**, not `0`:
+
+```json
+{ "count": 1234, "bytes": null, "measured_bytes": 0, "unmeasured": 1234, "sizes": "plaintext" }
+```
+
+```text
+Total objects: 1,234
+Total size (plaintext): at least 0 B (0 bytes)
+Unmeasured objects: 1,234
+warning: some objects carry no recorded size, so this figure is a lower bound…
+```
+
+* `bytes` — the exact total, and `null` when even one object in scope has no
+  recorded size. A capacity monitor reading `.bytes` after a rebuild used to be
+  told a forty-terabyte vault held `0`, which it cannot tell from an empty one.
+  A `null` breaks that monitor's arithmetic loudly, at the moment it would
+  otherwise have reported a fiction.
+* `measured_bytes` — always a number: the sum of the objects that *did* have a
+  recorded size. When `bytes` is `null` this is the honest lower bound, and it is
+  the figure the text report prints. When `bytes` is not `null` the two are equal.
+* `unmeasured` — how many objects in scope had no recorded size, which is the
+  reason `bytes` is `null`.
+
+A genuinely empty file is **measured**: it has a recorded size of zero, and it
+does not make the total unknown. The two states are different facts and the shape
+keeps them apart.
+
+Nothing in this build fills those sizes in on a read — `cat`, `hashsum` and a
+whole `scrub` all leave the row exactly as unmeasured as they found it, despite
+what `rebuild_index`'s own documentation says. Only writing the file again
+records a size, so the remedy is to re-run the copy that produced the vault.
+
 An empty scope reports zeroes rather than nothing — `Total objects: 0` /
-`Total size: 0 B (0 bytes)`. "Zero objects" is an answer; silence is not. Unlike
-its siblings, `size` prints no "nothing matched" note, because the zeroes
-already say it.
+`Total size: 0 B (0 bytes)`. "Zero objects" is an answer; silence is not. That
+zero is a *measurement*: an empty scope really does hold nothing, which is why it
+is a number here and `null` in the unmeasured case above. Unlike its siblings,
+`size` prints no "nothing matched" note, because the zeroes already say it.
 
 ### Memory
 
@@ -174,14 +217,19 @@ compact single-line record that appends cleanly to a log:
 dctl size vault: --format json-lines >> capacity.jsonl
 ```
 
-A rule file is refused rather than silently dropped — a capacity number computed
-from ignored rules is a wrong number that looks right:
+A rule file and an exact path list both narrow what is measured, through the
+same engine `copy` and `sync` use — so a capacity figure describes exactly the
+objects a transfer under those rules would move:
 
 ```
-dctl size vault: --files-from paths.txt
-error: reading filter rules from a file is not implemented in this build
-warning: Pass the rules directly with --include/--exclude, which are honoured in full by the listing commands.
+$ dctl size archive: --files-from list.txt
+Total objects: 2
+Total size (plaintext): 18 B (18 bytes)
 ```
+
+A file that cannot be read or parsed is a usage error rather than a run with the
+rules dropped: a capacity number computed from ignored rules is a wrong number
+that looks right.
 
 A Windows path is local on every platform, so it is refused rather than measured
 as if it were a vault. `C:` is a drive letter, never a remote named `C`:

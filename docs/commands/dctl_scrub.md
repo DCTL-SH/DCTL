@@ -16,13 +16,28 @@ in full, checks it as strongly as that remote allows, and reports a health grade
 together with how much of the dataset it actually read and what the reading
 proved.
 
-The grade is three words, not two:
+The grade is four words, not two:
 
 | grade | meaning | exit |
 |-------|---------|-----:|
 | `healthy` | everything read authenticated | 0 |
 | `degraded` | damage was found and **all of it** was repaired | 0 |
 | `damaged` | damage was found that could not be repaired | 21 (or 4/5) |
+| `unverified` | **no object was read at all** | 9 |
+
+`unverified` is not a health grade and does not pretend to be one. The other
+three describe what reading found; this one says nothing was read, so there is no
+claim to make. It is reached when the prefix matches no object, when the dataset
+is empty, when the filters admit nothing, or when `--sample-percent` selected
+nothing — four causes with four different next actions, so the message names
+which one applied.
+
+It exits **9** (`no_files_transferred`, "succeeded but did no work") rather than
+0. Nothing failed, so it is not an error code; but `dctl scrub archive:` over a
+real dataset and `dctl scrub archive:typo` over nothing used to be the same
+silent exit 0, which let a nightly cron verify nothing and stay green until
+somebody needed a restore. Code 9 is the code scripts already branch on for "the
+run worked and did no work", so an existing wrapper needs no new vocabulary.
 
 `degraded` deliberately does not fail the run. The object is readable again, and
 exiting non-zero for a successful repair would train an operator to ignore the
@@ -97,16 +112,47 @@ silently covered less than was asked for would overstate its coverage.
 Stdout carries the findings and nothing else: a `Status`/`Size`/`Path` table of
 the damaged objects, with healthy ones counted rather than listed. A healthy
 scrub therefore prints **nothing** on stdout — the grade and the coverage belong
-on stderr with the rest of the commentary. `--json` emits one document with
-`target`, `health`, `verify_mode`, `sample_percent`, `seed`, `repair_enabled`,
-`assurance`, `stopped_early`, a `coverage` block (`scanned`, `skipped`, `bytes`,
+on stderr with the rest of the commentary.
+
+**Every text-mode run reports what it covered, at default verbosity**, on stderr:
+
+```text
+OK healthy: 3 objects read and checked, 25 B (authenticated) under 'archive:'
+```
+
+A scrub's product *is* its coverage, and a clean run used to print nothing at all
+on either stream unless `-v` was given — indistinguishable from a scrub that had
+found nothing to read, and from a binary that never ran. The line names the
+grade, the object count, the bytes, what the reading proved, and the target; it
+gains a clause for objects the sample skipped, for objects with no recorded size,
+and for damage. `--quiet` suppresses it, and the zero-coverage case is carried by
+the exit code and its error message instead, which print regardless.
+
+`--json` emits one document with `target`, `health`, `verify_mode`,
+`sample_percent`, `seed`, `repair_enabled`, `assurance`, `stopped_early`, a
+`coverage` block (`scanned`, `skipped`, `bytes`, `measured_bytes`, `unmeasured`,
 `healthy`, `damaged`, `repaired`) and a `findings` array. `--format json-lines`
-emits one finding per line.
+emits one finding per line. The prose summary is text-mode only: the JSON already
+carries every number in it, and a second rendering is a second thing that can
+disagree with the data.
+
+### Sizes that were never measured
 
 `coverage.bytes` and each finding's size come from the index, which is where a
 vault's plaintext sizes live. Straight after `dctl index rebuild` those sizes are
-not yet known and read as zero — the rebuild says so when it runs, and the object
-was still read back in full regardless.
+not known at all — the rebuild is a list-only pass by design.
+
+They are reported as **unknown**, not as zero. `coverage.bytes` becomes `null`,
+`coverage.unmeasured` counts the rows responsible, `coverage.measured_bytes`
+carries the honest lower bound, and a finding's `size` is `null`. In text the
+byte figure reads `-` and the summary line says so. A full, honest scrub of a
+forty-terabyte vault used to file itself as having read `"bytes": 0`, which is a
+false line in the one artefact whose entire value is being true.
+
+The objects are still read back in full and still graded, because the grade does
+not depend on knowing a length. Nothing in this build fills those sizes in on a
+read — `cat`, `hashsum` and `scrub` all leave the row as unmeasured as they found
+it. Only writing the file again records a size.
 
 ### Damage is a finding, not an exit
 
@@ -231,12 +277,13 @@ overstate its coverage.
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | Grade `healthy`: everything the run read came back intact. |
+| 0 | `success` | Grade `healthy`: everything the run read came back intact, and it read something. |
 | 1 | `usage` | Unknown flag, missing target, a local target, `--repair`, `--sample-percent` outside 1–100, a remote name shorter than two characters, or a path containing `..`. |
 | 2 | `uncategorised` | The report could not be serialised. Not reachable for these types in practice. |
 | 4 | `file_not_found` | The worst verdict was `missing`: objects are in the index but absent at the provider. |
 | 5 | `temporary_error` | The worst verdict was `unreadable`: the provider could not serve objects and the retry budget was exhausted. |
 | 7 | `fatal_error` | An unresolvable remote, an unreadable configuration, `--filter-from`/`--files-from`, or another setup failure. |
+| 9 | `no_files_transferred` | Grade `unverified`: the run completed and read no object at all. Nothing failed; nothing was proved either. |
 | 21 | `integrity_failure` | Grade `damaged`: objects failed authentication. **The data was NOT served.** |
 | 22 | `vault_locked` | A sealed target would not unlock. |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. A partly-completed scrub is never reported as a clean one. |

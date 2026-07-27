@@ -27,6 +27,14 @@ arithmetic belongs in `--json`**, where `Size` is an exact integer and always
 will be; a rounded figure quietly loses up to five per cent of a quota
 calculation.
 
+An object whose index record carries **no size at all** prints `-`, padded to the
+same width, rather than `0 B`. That is the state of every row straight after
+`dctl index rebuild`, which lists object names without reading their bodies (see
+[`dctl index`](dctl_index.md)). A zero there is a number, and a number gets
+summed; the placeholder cannot be. In `--json` the same absence is `"Size": null`.
+A file that genuinely *is* zero bytes long still prints `0 B` — the two are
+different facts and the listing keeps them apart.
+
 Paths are relative to the spec, exactly as rclone defines it: `dctl ls
 vault:photos` reports `2024/IMG_4417.CR3`, not `photos/2024/IMG_4417.CR3`.
 Re-address an entry by re-joining it to the spec that produced it. Name a
@@ -192,14 +200,24 @@ error: listing a local directory is not implemented in this build
 warning: Give a remote spec such as 'vault:photos' instead of a filesystem path.
 ```
 
-A rule file is refused rather than dropped, so a listing can never look complete
-while ignoring the rules that were meant to shape it:
+A rule file shapes the listing, in file order. It is read by the same engine
+`dctl copy` uses, so the objects `ls` shows are the objects the transfer that
+follows would take:
 
 ```
-dctl ls vault:photos --filter-from rules.txt
-error: reading filter rules from a file is not implemented in this build
-warning: Pass the rules directly with --include/--exclude, which are honoured in full by the listing commands.
+$ cat rules.txt
+- /photos/tmp/**
++ /photos/**
+- **
+$ dctl ls archive: --filter-from rules.txt
+       7 B photos/2024/c.jpg
+       7 B photos/b.jpg
 ```
+
+A file that cannot be read or parsed is a usage error naming the file and the
+line, rather than a run with the rules dropped — a listing that looks complete
+while ignoring the rules meant to shape it is what people read before deciding
+what to delete.
 
 ## Options
 

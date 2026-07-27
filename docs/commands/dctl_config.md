@@ -171,14 +171,17 @@ here reads a secret, unwraps a key or moves a byte; it needs no vault password
 at all, only the provider credentials required to read one small object.
 
 **It is a command, not a detection.** DCTL could notice an envelope during a
-`copy` and quietly start encrypting. It must not: what a command does to the
-bytes passing through it is a function of the **remote name typed**, fixed when
-the remote was defined, and never of what the destination happens to contain
-today. A tool that switched to encrypting because it found a file would have
-encryption semantics that changed under a running backup job, and no operator
-could state from a script what that script does. So the inspection is explicit
-and deliberate, and what it produces is *configuration* — after which every
-later command behaves exactly as if `dctl init` had written it.
+`copy` and quietly start encrypting. It must not: what a command encrypts is
+determined solely by the **remote name typed**, fixed when the remote was
+defined. A destination's contents may cause DCTL to *refuse* — that refusal is
+what sends you here — but never to change what it does. A tool that switched to
+encrypting because it found a file would have encryption semantics that changed
+under a running backup job, and no operator could state from a script what that
+script does. That is the difference between this command and auto-detection, and
+it is a difference in kind: auto-detection changes behaviour, a refusal only
+stops. So the inspection is explicit and deliberate, and what it produces is
+*configuration* — after which every later command behaves exactly as if
+`dctl init` had written it, and stops consulting the destination at all.
 
 `--name` is optional here and required by `dctl init`, and the asymmetry is
 deliberate. `init` creates something that did not exist, and its name is a
@@ -213,11 +216,12 @@ archive-store  local  plain   archive-store  ok
 ✓ 2 remote(s) in /home/ops/.config/dctl/config.toml verified
 ```
 
-The `Mode` column is only possible because a remote's encryption behaviour
-follows the **name**, fixed when the remote was defined, and never the
-destination's current contents. A tool that decided by inspection could tell you
-what a command *would have done* a moment ago; this one tells you what your next
-command *will* do, and is right.
+The `Mode` column is only possible because what a remote encrypts follows the
+**name**, fixed when the remote was defined. A destination's contents can
+withhold permission from a command; they cannot change what it does, so `plain`
+and `sealed` are never contingent on anything out there. A tool that decided by
+inspection could tell you what a command *would have done* a moment ago; this one
+tells you what your next command *will* do, and is right.
 
 It is the one subcommand that deliberately opens a configuration the loader
 refuses. Every other command reads through the strict door and stops at the

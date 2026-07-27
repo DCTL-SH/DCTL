@@ -68,21 +68,45 @@ a finding to anything downstream.
 `verify` mutates nothing, so `--dry-run` has nothing to suppress; it is also not
 permission to claim a verification that never ran.
 
-### Status in this build
+### The `--verify` dial in this build
 
-**`dctl verify` is not implemented in this build.** Argument parsing, target
-resolution, the verdict vocabulary, the report shape in all three output
-formats, the verdict-to-exit-code mapping and the failure wording are written
-and unit-tested; the step that reads and authenticates a stored object is not.
-`dctl_core::Vault` exposes `verify_file` for a single path but no way to
-enumerate and verify a prefix at a chosen strength, and `Ctx` does not yet carry
-an unlocked vault.
+**Every selected object is read back in full, whatever `--verify` says**, and the
+run warns when a cheaper strength was requested. The report records the strength
+that actually *ran* (`strict`), not the one that was asked for.
 
-A complete invocation therefore validates everything it can, prints its
-pre-flight commentary on stderr, and then fails with
-`dctl verify is not implemented in this build` and exit code **7**. It does not
-print a success message, and it does not print an empty report. `PLAN.md` §11
-puts `ls`/`verify`/`check` in **Phase 1 (B2 MVP)**.
+The reason is that the cheaper two cannot be performed at all with the calls that
+exist, and performing something else while reporting the requested name would be
+the misreport `PLAN.md` §6 forbids:
+
+* `checksum` would need the provider's checksum of the *stored object* compared
+  against one DCTL holds. `dctl_core::Vault` exposes no such value — the index
+  records a hash of the **plaintext**, and the object key the ciphertext lives
+  under is deliberately unreachable from the read abstraction. Since `checksum`
+  is the *default*, honouring it literally would make a bare `dctl verify
+  archive:` read nothing and then print a wall of `ok`.
+* `sample` would need a ranged authenticated read. A vault decrypts the whole
+  object and slices it, because `dctl_core` has no narrower call — so a "sample"
+  would cost more memory, read exactly as much, and prove less.
+
+The day `dctl-core` grows a ranged authenticated read and exposes a stored-object
+checksum, this becomes a real dial and the warning disappears.
+
+```console
+$ dctl verify archive:
+warning: --verify=checksum asks for a cheaper check than `dctl verify` can perform in this build: dctl-core exposes no stored-object checksum and no ranged authenticated read, so every selected object is read back in full
+warning: verifying the tree 'archive:' reads every object it contains
+Status  Size  Path
+------  ----  ----------------------
+ok       3 B  a.jpg
+ok      11 B  notes.txt
+ok       7 B  photos/2024/c.jpg
+ok       7 B  photos/b.jpg
+ok       7 B  photos/tmp/scratch.jpg
+ok       6 B  private/secret.txt
+ok      11 B  tmp/scratch.txt
+$ echo $?
+0
+```
 
 ```
 dctl verify REMOTE:PATH [flags]
@@ -90,12 +114,50 @@ dctl verify REMOTE:PATH [flags]
 
 ## Examples
 
-Verify a year of photographs at the default strength. No object bytes are read:
-DCTL asks the provider for each object's stored checksum and compares it with
-the value recorded in the index at write time.
+Verify a year of photographs. Every object under the prefix is read back,
+decrypted and authenticated against the hash recorded when it was written.
 
 ```
 dctl verify vault:photos/2024
+```
+
+Damage is loud, and the default says **how much** of the dataset is affected —
+one corrupt object out of 40,000 is a restore of one file, and 12,000 is a lost
+dataset:
+
+```console
+$ dctl verify archive:
+warning: corrupt: format: footer mismatch
+warning: corrupt: format: footer mismatch
+Status   Size  Detail                   Path
+-------  ----  -----------------------  ----------------------
+ok        3 B  -                        a.jpg
+ok       11 B  -                        notes.txt
+ok        7 B  -                        photos/2024/c.jpg
+corrupt   7 B  format: footer mismatch  photos/b.jpg
+ok        7 B  -                        photos/tmp/scratch.jpg
+corrupt   6 B  format: footer mismatch  private/secret.txt
+ok       11 B  -                        tmp/scratch.txt
+error: 2 of 7 objects failed integrity verification — the data was NOT served
+warning: Restore the affected objects from another copy, then run `dctl scrub` to check the rest of the dataset — corruption is seldom limited to one object.
+$ echo $?
+21
+```
+
+`--fail-fast` trades that number for speed, and the report says the trade was
+made so nobody reads the count as the full extent of the damage:
+
+```console
+$ dctl verify archive: --fail-fast --json | jq '{stopped_early, summary}'
+{
+  "stopped_early": true,
+  "summary": {
+    "examined": 4,
+    "verified": 3,
+    "failed": 1,
+    "bytes": 28
+  }
+}
 ```
 
 Prove that an entire bucket is not merely present but readable, then act on the
@@ -160,12 +222,12 @@ for the full list.
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | Every object examined verified. Not reachable in this build. |
+| 0 | `success` | Every object examined verified. |
 | 1 | `usage` | Unknown flag, missing target, a local target, a remote name shorter than two characters, or a path containing `..`. |
 | 2 | `uncategorised` | The report could not be serialised. Not reachable for these types in practice. |
 | 4 | `file_not_found` | The worst verdict was `missing`: objects are in the index but absent at the provider. |
 | 5 | `temporary_error` | The worst verdict was `unreadable`: the provider could not serve objects and the retry budget was exhausted. |
-| 7 | `fatal_error` | Returned by every complete invocation in this build (`not implemented`), and by configuration or setup failures. |
+| 7 | `fatal_error` | An unresolvable remote, an unreadable configuration, or a vault that would not unlock. |
 | 21 | `integrity_failure` | At least one object failed authentication. **The data was NOT served.** |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. Nothing in flight was reported as complete. |
 

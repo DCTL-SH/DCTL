@@ -19,13 +19,11 @@
 //! confirmation word). `--dry-run` is exempt — refusing to *preview* a purge
 //! would be hostile, and a preview removes nothing.
 //!
-//! ## What runs today
-//!
-//! Argument parsing, target resolution, the extra gate, the filter warning, the
-//! destructive gate and the `--dry-run` plan. The removal itself needs
-//! recursive enumeration the vault does not expose and a vault handle [`Ctx`]
-//! does not carry, so the command fails with a real exit code rather than
-//! reporting a purge that never happened. See [`super::removal::engine`].
+//! **The order it removes in.** Objects first, then the directory markers that
+//! declared them, deepest first — so an interrupted purge never leaves a
+//! directory undeclared while its contents are still there, and never leaves a
+//! parent removed with a child stranded beneath it. Re-running converges. See
+//! [`super::removal::remove`] for the full crash analysis.
 
 use clap::Args;
 
@@ -35,13 +33,10 @@ use crate::constants::{
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 
-use super::removal::{NoOptions, Removal, Target, execute};
+use super::removal::{NoOptions, Operation, Removal, Target, execute};
 
 /// Stable command name. Must match `Command::name()` in `cli/mod.rs`.
 const COMMAND: &str = "purge";
-
-/// The engine capability this command is waiting on.
-const CAPABILITY: &str = "removing a directory tree and everything beneath it";
 
 /// `dctl purge REMOTE:PATH`
 #[derive(Args, Debug)]
@@ -56,8 +51,8 @@ pub struct PurgeArgs {
 /// # Errors
 /// [`crate::exit::ExitCode::Usage`] for a malformed target, or when neither
 /// `--force` nor `--interactive` was given on a run that would remove data;
-/// [`crate::exit::ExitCode::Cancelled`] if the user declines; otherwise the
-/// unimplemented refusal described above.
+/// [`crate::exit::ExitCode::DirNotFound`] when the remote holds nothing under
+/// the path; [`crate::exit::ExitCode::Cancelled`] if the user declines.
 pub async fn run(ctx: &Ctx, args: &PurgeArgs) -> Result<()> {
     let target = Target::parse(&args.path)?;
     require_explicit_approval(ctx, &target)?;
@@ -70,10 +65,10 @@ pub async fn run(ctx: &Ctx, args: &PurgeArgs) -> Result<()> {
         // The defining behaviour: purge ignores filters, delete honours them.
         filters: None,
         options: NoOptions {},
-        capability: CAPABILITY,
+        operation: Operation::Purge,
     };
 
-    execute(ctx, &removal)
+    execute(ctx, &removal).await
 }
 
 /// Refuse a bare `dctl purge`.
@@ -162,11 +157,13 @@ mod tests {
 
     #[tokio::test]
     async fn force_and_interactive_both_open_the_gate() {
-        // Past the gate, the run still fails — on the engine, not the gate.
-        let forced = run_with(&["vault:old", "--force", "--quiet"])
+        // Past the gate, the run still fails — on the unknown remote, not the
+        // gate, which is what proves the gate let it through.
+        let forced = run_with(&["vault:old", "--force", "--quiet", "--no-ask-password"])
             .await
             .unwrap_err();
         assert_eq!(forced.code(), ExitCode::FatalError);
+        assert!(forced.message().contains("vault"), "{}", forced.message());
 
         // --interactive would prompt; only assert the gate itself is open.
         assert!(
@@ -180,11 +177,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_dry_run_needs_no_approval_because_it_removes_nothing() {
-        let error = run_with(&["vault:old", "--dry-run", "--quiet"])
+        let error = run_with(&["vault:old", "--dry-run", "--quiet", "--no-ask-password"])
             .await
             .unwrap_err();
-        // Not the usage refusal: the dry run got as far as the engine.
+        // Not the usage refusal: the dry run got past the gate and failed on
+        // the remote instead.
         assert_eq!(error.code(), ExitCode::FatalError);
+        assert!(error.message().contains("vault"), "{}", error.message());
     }
 
     #[tokio::test]
@@ -198,15 +197,6 @@ mod tests {
     async fn a_malformed_target_fails_before_the_gate() {
         let error = run_with(&["/local/path", "--force"]).await.unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
-    }
-
-    #[tokio::test]
-    async fn every_output_format_is_supported() {
-        for format in [vec!["--json"], vec!["--format", "json-lines"], vec![]] {
-            let mut args = vec!["vault:old", "--dry-run", "--quiet"];
-            args.extend(format.iter().copied());
-            assert!(run_with(&args).await.is_err(), "{format:?}");
-        }
     }
 
     #[test]

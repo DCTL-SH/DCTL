@@ -22,9 +22,10 @@ paths — `./photos/raw/a.cr3` becomes `vault:photos/2024/raw/a.cr3`. A `SOURCE`
 that names a single file is allowed and lands *inside* `DEST` under its own
 name, matching rclone: `dctl copy report.pdf vault:archive` writes
 `vault:archive/report.pdf`. When you want `DEST` to be the object's name rather
-than the directory it goes in, use [`copyto`](dctl_copyto.md). That is the
-intended addressing; the prefix after the colon is not yet applied to the stored
-key, and *What runs today* says exactly what happens instead.
+than the directory it goes in, use [`copyto`](dctl_copyto.md). A **plain** remote
+addresses exactly as written; a **vault** remote does not yet apply the prefix
+after the colon to the stored key, and *What runs today* says exactly what
+happens instead.
 
 **What "identical" means.** The decision is made once, per file, by the shared
 comparison rules — the same code `sync` uses, which is what stops the two verbs
@@ -42,6 +43,51 @@ from disagreeing about which files are current. The rules apply in this order:
 A size difference always wins over a matching timestamp. A destination whose
 timestamp cannot be read is treated as modified rather than identical — the safe
 direction, because re-transferring costs bandwidth and skipping costs data.
+
+**A vault side is compared by content instead, and the run says so.** This is
+the one place where the comparison that runs is not the one rule 4 describes,
+so it is stated rather than buried.
+
+`dctl-core`'s `put_file` takes a logical path and the plaintext and nothing else,
+so the index record it commits stamps the time of the *write* — not the
+modification time of the file it was written from. That number is true and
+describes something else, which made the default comparison unanswerable against
+a vault: `dctl copy ./src archive:` re-uploaded every file on every run, forever,
+and `dctl check ./src archive:` immediately afterwards called the tree it had
+just stored entirely different.
+
+The same index record carries the plaintext BLAKE3, so the vault can answer the
+*stronger* question for free. When either side of a transfer is a vault and no
+comparison flag was given, rule 4 becomes a content comparison and a warning on
+stderr names the side that forced it:
+
+```
+warning: 'archive:' records when each object was written, not when the source was
+modified, so this run compares contents instead of size and time — every file on
+the other side is read and hashed to do it. Pass --size-only to compare sizes
+alone.
+```
+
+Read the cost seriously: the other side has no recorded hash, so it is read end
+to end. On an incremental backup of a large tree that is close to the cost of the
+transfer being avoided. Three things switch it off, all honoured exactly as
+typed:
+
+* `--size-only` — sizes need no clock, so a vault does not disturb it. Nothing
+  is substituted and nothing is announced. It will not notice a same-size edit.
+* `--checksum` — already a content comparison, so nothing is substituted.
+* `--no-traverse` — the destination is never listed, so nothing is compared at
+  all and every source file is `missing-at-destination`.
+
+A vault index row with **no** recorded content hash — what `dctl index rebuild`
+writes, since it recovers from a list-only pass — cannot answer either question.
+That file is transferred, with the plan reason `content-not-recorded` rather than
+`modified`, and the write records the hash the next run compares against. It is
+transferred rather than refused because nobody asked for this comparison; an
+explicit `--checksum` still refuses what it cannot answer.
+
+This compensation exists only until `put_file` takes a modification time. See
+`crates/dctl-cli/src/fidelity.rs`, which is written to be deleted.
 
 **The verified-write contract.** DCTL never reports a file as stored until it
 is. What "stored" means depends on where the file is going, so both directions
@@ -114,13 +160,16 @@ into success. A *fatal* failure is different: a locked vault, an index error, a
 cancelled run or a usage error would make every remaining file fail identically,
 so the run stops rather than emitting one copy of the same error per file.
 
-**Filters.** `--max-depth`, `--min-size` and `--max-size` are evaluated for real
-by the directory walk. The pattern filters — `--include`, `--exclude`,
-`--filter-from`, `--files-from` — are **refused**, not ignored: passing any of
-them fails with exit 7 before anything is listed. The reason lives in
-[`sync`](dctl_sync.md), where a dropped `--exclude` deletes the files the rule
-was written to protect, and the family refuses uniformly rather than being safe
-in one verb and dangerous in another.
+**Filters are all honoured, through one engine.** `--include`, `--exclude`,
+`--filter-from`, `--files-from`, `--min-size`, `--max-size` and `--max-depth` are
+evaluated by `crate::filter`, the single implementation the listing family and
+`dctl backup` also use. It matters most in [`sync`](dctl_sync.md): a rule is
+applied to **both** listings, so an excluded file is invisible on both sides and
+is never seen as a destination extra and deleted. rclone's semantics are kept
+exactly — first match wins, and a single `--include` makes the unmatched default
+an exclusion. A pattern that will not *compile* is a usage error (exit **1**)
+before anything is listed, because a run that proceeded with a rule the operator
+believes is in force is the data-loss case.
 
 **Omissions are announced.** Symbolic links are never followed — a link to an
 ancestor makes a walk loop forever and a link out of the tree copies data nobody
@@ -136,58 +185,151 @@ performs. There is no second traversal that decides while it acts.
 
 ### What runs today
 
-**`copy` transfers real bytes now.** Two shapes work end to end:
+**`copy` transfers real bytes in both directions.** Five shapes work end to end:
 
 * **Filesystem to filesystem.** `dctl copy /srv/src /srv/dst` reads, writes and
   flushes every planned file, creates the directories it needs, and reports what
   it did. Nothing about it is a stub.
-* **Filesystem into a vault**, with `--no-traverse`. Each file is sealed, written
-  with the verified write above, and committed to the index. The password is
-  acquired once, before the first file, in this order: `--password` or
-  `DCTL_PASSWORD`, then `--password-command`, then `--password-file`, then a
-  terminal prompt — which `--no-ask-password` turns into exit **22** rather than
-  a job that blocks forever on an invisible prompt.
+* **Filesystem into a vault.** Each file is sealed, written with the verified
+  write above, and committed to the index.
+* **A vault out to the filesystem.** `dctl copy archive: ./export` enumerates the
+  vault through `crate::source` — the same reader `dctl ls` uses, so the two
+  agree about what is there — fetches each object, authenticates it and writes it
+  durably.
+* **Filesystem into a plain remote — including a bucket.** `dctl copy ./src
+  backup:` — where `backup` is an ordinary remote, `dctl config create backup
+  local path=/mnt/backup` — stores each file through that remote's backend,
+  under the prefix you named. `dctl copy ./src b2:mybucket` does the same thing
+  through B2's backend: the provider is behind the `Backend` trait, so the
+  transfer above it is identical. Nothing is encrypted, because you did not
+  address anything that encrypts, and **no password is involved at all**: this
+  shape works unchanged under `--no-ask-password`, which is what makes it usable
+  from a cron job that has no vault. Provider *credentials* are still required,
+  from the environment, and a missing one is named by variable.
+* **A plain remote out to the filesystem.** `dctl copy backup: ./out` fetches
+  each object as it is stored and writes it durably, again with no password.
 
-`--no-traverse` is required for the vault case only because **listing a named
-remote is still not implemented**. That refusal (exit **7**, `listing a remote
-is not implemented in this build`) fires before anything else, which has three
-consequences worth stating outright:
+**Which of the two a `REMOTE:` is comes from your configuration, never from the
+argument's shape.** A remote whose type is `vault` is sealed; everything else —
+`local`, `b2`, `s3`, `r2` — is plain. This is the same one-line rule `dctl ls`
+uses to decide what it is reading, so a remote that lists as plain also *writes*
+as plain. (It did not used to be: every `NAME:` destination was treated as a
+vault, so an ordinary remote demanded a vault password and exited **22** having
+written nothing. If you have a runbook that works around that, delete the
+workaround.)
 
-* A vault **destination** must be planned with `--no-traverse`. Every source
-  file is then planned as a `copy` with the reason `destination-not-listed`,
-  including files already stored — so a re-run re-uploads and re-commits them
-  rather than skipping them.
-* A vault **source** — the download direction — cannot be planned at all.
-  `dctl copy vault:photos ./out` stops at source enumeration with exit 7. The
-  engine implements downloads; the command cannot reach them yet.
-* **Remote to remote** stops at the same place, and is refused a second time by
-  the engine if it ever gets past it: a direct vault-to-vault path needs
-  re-encryption support that `dctl-core` does not expose. Copy down to a local
-  path first, then copy that up.
+The password is acquired once, before the first file, and only for a shape that
+needs one — in this order: `--password` or `DCTL_PASSWORD`, then
+`--password-command`, then `--password-file`, then a terminal prompt, which
+`--no-ask-password` turns into exit **22** rather than a job that blocks forever
+on an invisible prompt.
 
-**Addressing a vault is the part that is not finished.** Read this before
-pointing `copy` at a `REMOTE:PATH`, because both halves of the spec are handled
-differently from how they read:
+**`--no-traverse` is now an optimisation rather than a requirement.** A vault
+destination is listed like any other, so a re-run skips the files that are
+already stored instead of re-uploading them. Passing `--no-traverse` still means
+"do not look", and every source file is then planned as a `copy` with the reason
+`destination-not-listed`.
 
-* **The name before the colon is resolved as a directory**, relative to the
-  current working directory. `dctl copy ./src archive:` unlocks the vault in
-  `./archive`. A remote defined with `dctl config create`, and the provider
-  shorthands `b2:`, `s3:` and `r2:`, are **not** resolved on this path: they
-  become directory names too, so they fail to unlock and the run exits **22**
-  (`unlock failed: wrong password or corrupted envelope`). The only vault
-  reachable today is therefore a local one sitting directly beside you. Cloud
-  backends exist and are tested in `dctl-store`; the transfer commands cannot
-  address them yet.
-* **The path after the colon is dropped.** `dctl copy ./src archive:photos`
-  stores `a.txt` and `sub/b.txt` at the vault's root, not under `photos/`. Treat
-  a vault destination as addressing the root until this is fixed — and note that
-  the plan printed by `--dry-run` shows the *intended* spec, so it reads better
-  than what happens.
+**Remote to remote is still refused**, by the engine, at connect time, and the
+message says which of two different gaps you have hit — the capability, the
+crate that owes it, and whether any phase delivers it. If either end is sealed,
+a direct path needs a re-encrypting transfer that `dctl-core` does not expose,
+and **no `PLAN.md` §11 phase schedules one** (§8 keeps the root key wrapped
+rather than re-encrypting data, so this is not a release to wait for). If both
+ends are plain, nothing needs re-sealing and nothing is waiting on the core: the
+`dctl-cli` engine simply holds one backend and one local side, and no phase
+names remote-to-remote either. Either way: copy down to a local path first, then
+copy that up. To move a vault's *stored objects* between two stores with no
+password and no re-encryption, use `dctl replicate` instead.
 
-Neither of these loses data or reports success falsely; both put objects
-somewhere other than the spec says. `local:` is not a way round it — that prefix
-means "read the rest as a filesystem path", so it lands in the plain-write
-refusal below, which is the correct answer to it.
+### Re-running a copy
+
+Into a **vault**, a re-run skips what is already stored: the index recorded a
+plaintext BLAKE3 at write time, so `dctl-cli` compares contents instead of
+timestamps and says so on stderr.
+
+Into a **plain remote — a `local:` remote or a bucket — it does not.** Objects
+carry the time the *store* wrote them (`Backend::put` takes no modification time,
+and B2/S3/R2 assign `Last-Modified` themselves), so the default size-and-time
+comparison finds every file different and copies it again. Unlike a vault, there
+is no recorded plaintext hash to compare instead: a store holds the object and
+nothing about it, and a provider's own checksum is a SHA-1 or an ETag rather than
+the BLAKE3 of the plaintext — which is also why `--checksum` against a bucket is
+refused rather than approximated.
+
+So for a plain destination you re-copy on a schedule, use **`--size-only`**,
+which needs no clock and does skip:
+
+```console
+$ dctl copy ./src backup:            # every run
+       Files: 3 / 3
+$ dctl copy ./src backup: --size-only
+       Files: 0 / 0
+```
+
+Against a paid provider that difference is money, so it is stated here rather
+than left to be discovered on an invoice. A modification time that survives a
+plain write needs a parameter `dctl_store::Backend::put` does not have; until
+then this is the honest behaviour rather than a bug.
+
+**Writing a plain object into a bucket works.** `dctl copy ./src b2:mybucket`
+stores unencrypted objects under the prefix you named, through the same
+`Backend::put` a `local:` remote uses — the same verified write (the store must
+hold the bytes it was handed, or nothing is committed), the same key mapping the
+next listing reads, and no password anywhere on the path. There is nothing
+sealed about it: if you want the bytes encrypted, address a vault remote.
+
+Two things to know before pointing a nightly job at one:
+
+* **It has not been exercised against live B2, S3 or R2 credentials.** The code
+  path is provider-neutral and the provider `put` implementations are the ones
+  every sealed vault write to those providers already uses, but the plain-object
+  write itself has only been run against the local-filesystem backend behind the
+  same trait. Try it with `--dry-run` and a small tree first.
+* **A plain destination is not incrementally comparable by default** — see
+  "Re-running a copy" below. Objects carry the time the store wrote them, so the
+  default size-and-time comparison finds every file different on the next run
+  and re-uploads it. Use `--size-only` for a plain remote you re-copy on a
+  schedule, and remember that a provider charges for the upload either way.
+
+Reading a bucket is unchanged and needs no flags: the backend `copy` fetches
+from is the one `dctl ls` lists through.
+
+> **DATA LOSS — do not use a sub-path with a vault destination in this build.**
+>
+> `dctl copy ./src archive:photos` stores `a.txt` and `sub/b.txt` at the
+> **vault's root**, not under `photos/`. A session carries the remote but not the
+> prefix, so every sealed destination collapses onto the root.
+>
+> That is not merely misplacement. Two copies to what look like different
+> destinations collide, and the second **silently destroys the first**:
+>
+> ```
+> $ dctl copy ./tree-one archive:site-a     # Files: 1 / 1, Errors: 0, exit 0
+> $ dctl copy ./tree-two archive:site-b     # Files: 1 / 1, Errors: 0, exit 0
+> $ dctl ls archive:
+>       17 B report.txt                     # one object, not two
+> $ dctl cat archive:report.txt
+> TREE-TWO-CONTENT                          # tree-one is unrecoverable
+> ```
+>
+> Both runs reported success. Until this is fixed, treat a vault destination as
+> addressing the root only, and give each tree a distinct filename rather than a
+> distinct prefix.
+>
+> An earlier revision of this page claimed the gap "does not lose data or report
+> success falsely". Both halves were wrong, and the sentence is recorded here
+> rather than deleted because a false safety claim is the kind of thing a
+> reviewer relies on, and its removal should be visible.
+
+A **plain** destination does not have that gap — `dctl copy ./src backup:photos`
+stores `photos/a.txt` — because it must not: the destination listing is taken
+under the same prefix, so writing anywhere else would make every re-run copy the
+same files again.
+
+`local:` is not a way round any of this — that prefix means "read the rest as a
+filesystem path", so it lands in the plain-write refusal below, which is the
+correct answer to it.
 
 **Three refusals protect data rather than announce missing features**, all exit
 **7**:
@@ -219,10 +361,14 @@ refusal below, which is the correct answer to it.
   machine to a standstill. The refusal is fatal: files earlier in plan order have
   already been transferred, and the rest are not attempted. Streaming transfers
   (`PLAN.md` §16.2) delete the limit rather than raise it.
-* **`--checksum` when either side cannot supply a hash.** It fails instead of
-  silently downgrading to size-and-time. The user asked for content equality;
-  answering a different question would be exactly the misreporting the
-  durability contract forbids.
+* **`--checksum` when a side genuinely cannot supply a hash.** Most sides can: a
+  vault carries the plaintext BLAKE3 it recorded at write time, and a local file
+  is read and hashed (streamed, never buffered). What cannot answer is a **plain
+  object store**, which knows the provider's checksum of whatever bytes it holds
+  — a different claim entirely. Rather than compare two incomparable values, or
+  silently downgrade to size-and-time, the run fails and names the file. The user
+  asked for content equality; answering a different question would be exactly the
+  misreporting the durability contract forbids.
 
 * **`--immutable` when the plan contains an `update`.** An existing destination
   object being replaced is exactly what the flag forbids, so the whole run fails
@@ -268,18 +414,29 @@ $ echo $?
 0
 ```
 
-Copy a local tree into a vault. `--no-traverse` is required because the
-destination cannot be listed yet, so every source file is planned as a copy; the
-password is read once, before the first file. Here `archive` is a vault
-directory in the working directory — see *What runs today* for why that is
-currently the only kind of vault a transfer can address:
+Copy a local tree into a vault. `archive` is the sealed remote `dctl init`
+registered; the password is read once, before the first file, and every object
+is encrypted on the way:
 
 ```console
-$ dctl copy ./dailies archive: --no-traverse --password-command 'pass dctl' --progress
+$ dctl copy ./dailies archive: --password-command 'pass dctl' --progress
 ```
 
 Relative paths inside the tree are preserved — `dailies/2024-06-01/a1.mov` is
 stored as `2024-06-01/a1.mov`.
+
+Copy the same tree to an ordinary remote instead. Nothing here is encrypted and
+nothing here asks for a key, so it runs unattended with prompting switched off:
+
+```console
+$ dctl config create backup local path=/mnt/backup
+$ dctl --no-ask-password copy ./dailies backup:2024
+$ ls /mnt/backup/2024/2024-06-01/
+a1.mov
+```
+
+The two commands differ by one argument and by everything they mean, which is the
+point: what is encrypted follows the remote name typed, and nothing else.
 
 Preview first. `--dry-run` prints the plan on stdout in the active format and
 changes nothing; `-v` adds the one-line shape summary on stderr:
@@ -430,26 +587,56 @@ $ echo $?
 7
 ```
 
-A vault source cannot be enumerated yet, so the download direction stops before
-the engine is reached:
+Pull a vault back out. The source is enumerated through the same reader `dctl ls`
+uses, so a listing and a copy always agree about what is there:
+
+```
+$ dctl copy archive: ./export
+ Transferred: 293.0 KiB / 293.0 KiB, 100%, 32.5 KiB/s
+    Verified: 293.0 KiB checksum-matched
+       Files: 4 / 4
+      Checks: 4 / 4
+      Errors: 0
+     Elapsed: 9s
+$ diff -r ./src ./export && echo IDENTICAL
+IDENTICAL
+```
+
+Compare by content instead of by size and time. Every file is proven identical
+and none is re-sent:
+
+```
+$ dctl copy ./src archive: --checksum
+       Files: 0 / 0
+      Checks: 4 / 4
+     Skipped: 4 (unchanged)
+      Errors: 0
+```
+
+…and when a side genuinely cannot answer, the run says so rather than quietly
+comparing something else:
+
+```
+$ dctl copy plainbox: ./export --checksum
+error: --checksum: no content hash for 'README.md'
+  hint: A plain object store reports the provider's checksum of the bytes it
+  holds, which is not the plaintext hash a vault records, so the two cannot be
+  compared. Address the vault through its own remote, or compare by size and
+  modification time (drop --checksum, or add --size-only).
+```
+
+Exclude a tree and see the rule applied rather than refused:
+
+```console
+$ dctl copy /srv/src archive: --exclude 'cache/**'
+```
+
+A remote nobody configured is named rather than quietly read as the relative
+directory of that name:
 
 ```console
 $ dctl copy vault:photos ./restored
-error: listing a remote is not implemented in this build
-warning: Enumerating a remote needs an unlocked vault, which the command context
-does not yet carry. Transfers between local paths can be planned today.
-$ echo $?
-7
-```
-
-Pattern filters are refused rather than quietly dropped:
-
-```console
-$ dctl copy /srv/src vault:backup --exclude 'cache/**'
-error: pattern filtering (--include/--exclude/--filter-from/--files-from) is not implemented in this build
-warning: A filter that was silently ignored would make `sync` delete the files it
-was written to protect, so DCTL refuses instead. Narrow the transfer with an
-explicit SOURCE, or with --min-size/--max-size/--max-depth, which are honoured.
+error: unknown remote 'vault'
 $ echo $?
 7
 ```
@@ -522,9 +709,9 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 0 | `success` | Every planned file was transferred, or a `--dry-run` completed, or every file was already identical so there was nothing to transfer. |
 | 1 | `usage` | Unparseable command line; an empty spec or one that climbs above a remote's root with `..`; source and destination are the same place; `DEST` is an existing file rather than a directory; an unparseable or unsatisfiable `--min-size`/`--max-size`; `--immutable` together with `--no-traverse`. |
 | 3 | `dir_not_found` | `SOURCE` does not exist. A missing `DEST` is not an error — that is the ordinary first run. |
-| 5 | `temporary_error` | A cloud backend failed in a way worth retrying. Not reachable today: transfers cannot address a cloud backend yet, and a local destination does not produce it. |
+| 5 | `temporary_error` | A cloud backend failed in a way worth retrying. Reachable wherever a cloud backend is contacted: reading a plain `b2:`/`s3:`/`r2:` source, **writing plain objects into one**, or a vault whose store is one of them. A purely local transfer does not produce it. |
 | 6 | `partial_failure` | The run finished, and at least one file failed. The successful files are stored; the failures were printed on stderr as they happened. This is the code to branch on. |
-| 7 | `fatal_error` | A named remote had to be listed; a file exceeded the whole-file limit; `DEST` is a local directory holding a vault; `--checksum` with no hashes available; a pattern filter was passed; both sides are remotes; `--immutable` and the plan would replace something. Files already transferred before the refusal stay transferred; nothing further is attempted — except the `--immutable` refusal, which happens before any transfer at all. |
+| 7 | `fatal_error` | A file exceeded the whole-file limit; `DEST` is a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and the plan would replace something. Files already transferred before the refusal stay transferred; nothing further is attempted — except the `--immutable` refusal, which happens before any transfer at all. |
 | 20 | `checksum_mismatch` | The backend stored bytes other than the ones sent. Nothing was committed for that file. |
 | 21 | `integrity_failure` | `--verify sample`/`strict` read an object back and it did not authenticate, or a decrypted object did not match its recorded hash. It was written but must not be trusted. |
 | 22 | `vault_locked` | No password was available, or the envelope did not unwrap. Nothing was transferred. |

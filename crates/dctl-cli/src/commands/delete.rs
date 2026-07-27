@@ -15,13 +15,14 @@
 //! usually litter rather than information, so the flag sweeps them — but only
 //! the ones the delete itself emptied, and never the target root.
 //!
-//! ## What runs today
+//! ## What a directory means here
 //!
-//! Argument parsing, target resolution, filter validation, the destructive
-//! gate and the `--dry-run` plan all run now. The removal itself does not:
-//! [`super::removal::engine`] explains why — the vault exposes no filtered
-//! listing and [`Ctx`] carries no vault handle — and the command fails with a
-//! real exit code rather than reporting a deletion that never happened.
+//! An object store has no directories, so `--rmdirs` sweeps the zero-byte
+//! markers `dctl mkdir` writes — and only the ones *this* deletion emptied. A
+//! directory that was already empty before the run is somebody's deliberate
+//! `mkdir` and survives; a directory that existed only because a file sat in it
+//! has already ceased to exist by the time the file is gone, and is not counted
+//! as a removal because none happened. See [`super::removal::dirs`].
 
 use clap::Args;
 
@@ -30,14 +31,11 @@ use crate::ctx::Ctx;
 use crate::error::Result;
 use serde::Serialize;
 
-use super::removal::{Filters, PlanOptions, Removal, Row, Target, execute, yes_no};
+use super::removal::{Filters, Operation, PlanOptions, Removal, Row, Target, execute, yes_no};
 
 /// Stable command name. Must match `Command::name()` in `cli/mod.rs`, because
 /// it is what appears in the audit record for the operation.
 const COMMAND: &str = "delete";
-
-/// The engine capability this command is waiting on, in the user's vocabulary.
-const CAPABILITY: &str = "listing a vault so the filters can select what to remove";
 
 /// `dctl delete REMOTE:PATH`
 #[derive(Args, Debug)]
@@ -66,8 +64,11 @@ impl PlanOptions for DeleteOptions {
 /// Run `dctl delete`.
 ///
 /// # Errors
-/// Usage errors for a malformed target or filter; [`crate::exit::ExitCode::Cancelled`]
-/// if the user declines; otherwise the unimplemented refusal described above.
+/// Usage errors for a malformed target or filter;
+/// [`crate::exit::ExitCode::Cancelled`] if the user declines; whatever opening
+/// the remote reported. Individual objects that could not be removed are
+/// reported and counted rather than returned, so the run finishes and the
+/// process exits [`crate::exit::ExitCode::PartialFailure`].
 pub async fn run(ctx: &Ctx, args: &DeleteArgs) -> Result<()> {
     let removal = Removal {
         command: COMMAND,
@@ -78,10 +79,12 @@ pub async fn run(ctx: &Ctx, args: &DeleteArgs) -> Result<()> {
         options: DeleteOptions {
             rmdirs: args.rmdirs,
         },
-        capability: CAPABILITY,
+        operation: Operation::Delete {
+            rmdirs: args.rmdirs,
+        },
     };
 
-    execute(ctx, &removal)
+    execute(ctx, &removal).await
 }
 
 #[cfg(test)]
@@ -137,31 +140,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dry_run_never_reports_a_deletion() {
-        // Nothing was listed, so nothing may be claimed: the run ends in an
-        // error, not a silent, misleading success.
-        let error = run_with(&["vault:photos", "--dry-run", "--quiet"])
+    async fn an_unknown_remote_is_refused_rather_than_read_as_a_directory() {
+        // S6 in the removal direction: a bare name has no colon, so anything
+        // that re-parses one turns `vault:` into the *directory* `vault` — and
+        // deleting from a folder nobody named would exit 0 having removed the
+        // wrong files, or nothing at all.
+        let error = run_with(&["vault:photos", "--force", "--quiet", "--no-ask-password"])
             .await
             .unwrap_err();
         assert_eq!(error.code(), ExitCode::FatalError);
+        assert!(error.message().contains("vault"), "{}", error.message());
     }
 
     #[tokio::test]
-    async fn a_real_run_never_reports_a_deletion_either() {
-        let error = run_with(&["vault:photos", "--force", "--quiet"])
+    async fn a_dry_run_reaches_the_engine_rather_than_being_cancelled() {
+        // The regression this guards: `confirm_destructive` declines a dry run,
+        // and a flow that read that as a refusal made `--dry-run` exit 25.
+        let error = run_with(&["vault:photos", "--dry-run", "--quiet", "--no-ask-password"])
             .await
             .unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(error.hint().is_some(), "a refusal must explain itself");
-    }
-
-    #[tokio::test]
-    async fn every_output_format_is_supported() {
-        for format in [vec!["--json"], vec!["--format", "json-lines"], vec![]] {
-            let mut args = vec!["vault:photos", "--dry-run", "--quiet"];
-            args.extend(format.iter().copied());
-            assert!(run_with(&args).await.is_err(), "{format:?}");
-        }
+        assert_ne!(error.code(), ExitCode::Cancelled);
     }
 
     #[test]

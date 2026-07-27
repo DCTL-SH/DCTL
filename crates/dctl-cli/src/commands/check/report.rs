@@ -161,6 +161,41 @@ impl Report {
         )
     }
 
+    /// What a clean run says for itself, on stderr.
+    ///
+    /// `check` is a health gate, and a health gate that is silent when healthy
+    /// cannot be told apart from one that did nothing. Exit 0 with no output was
+    /// the same answer for "ten million objects agree" and for "the prefix
+    /// matched nothing, the filter excluded everything, and neither side was
+    /// ever read" — and the second of those is the one that gets mistaken for a
+    /// passing backup verification.
+    ///
+    /// So the count comes first and the comparison comes with it. "3 paths
+    /// compared" is the evidence that work happened; "checksum" is what the
+    /// agreement is worth, and it is not optional, because the same zero under
+    /// `size-only` is a far weaker claim about the same two trees.
+    ///
+    /// An empty comparison is called out in its own words rather than rendered
+    /// as `0 paths compared`, which reads as a result. It is not one.
+    #[must_use]
+    pub fn confirmation(&self) -> String {
+        let scope = if self.one_way {
+            ", ignoring paths only at the destination"
+        } else {
+            ""
+        };
+        if self.summary.checked == 0 {
+            return format!(
+                "nothing was compared: neither '{}' nor '{}' listed any object{scope}",
+                self.source, self.dest
+            );
+        }
+        format!(
+            "{} paths compared, all match ({}){scope}: '{}' and '{}'",
+            self.summary.checked, self.comparison, self.source, self.dest
+        )
+    }
+
     /// Render exactly the bytes stdout should receive.
     ///
     /// # Errors
@@ -303,6 +338,47 @@ mod tests {
         assert_ne!(error.code(), ExitCode::IntegrityFailure);
         assert!(error.message().contains("4 of 5"));
         assert!(error.hint().is_some());
+    }
+
+    #[test]
+    fn a_clean_run_states_what_it_compared_and_how() {
+        // Exit 0 with nothing on either stream cannot be told apart from a run
+        // that never read anything, and "the backup verified" is the wrong thing
+        // to conclude from silence.
+        let mut report = Report::new("./src", "archive:", Comparison::Checksum, false);
+        for path in ["a", "b", "c"] {
+            report.push(Record::new(path, Difference::Match));
+        }
+        let line = report.confirmation();
+        assert!(line.contains("3 paths compared"), "{line}");
+        // The strength of the claim, not just the count: the same "all match"
+        // under --size-only says far less about the same two trees.
+        assert!(line.contains(COMPARISON_CHECKSUM), "{line}");
+        assert!(
+            line.contains("./src") && line.contains("archive:"),
+            "{line}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_compared_nothing_says_so_rather_than_reporting_zero() {
+        // A typo'd prefix, a filter that excluded the dataset, an empty side:
+        // all of them exit 0, and "0 paths compared, all match" reads as a
+        // result. It is the absence of one.
+        let report = Report::new("archive:phtoos", "./photos", Comparison::Checksum, false);
+        let line = report.confirmation();
+        assert!(line.contains("nothing was compared"), "{line}");
+        assert!(line.contains("archive:phtoos"), "{line}");
+    }
+
+    #[test]
+    fn a_one_way_confirmation_admits_what_it_did_not_look_at() {
+        // Otherwise "all match" would be read as a statement about both trees,
+        // when extra files at the destination were never counted.
+        let mut report = Report::new("./src", "./dst", Comparison::SizeOnly, true);
+        report.push(Record::new("a", Difference::Match));
+        report.push(Record::new("b", Difference::MissingOnSrc));
+        assert!(report.confirmation().contains("ignoring paths only"));
     }
 
     #[test]

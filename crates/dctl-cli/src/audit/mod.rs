@@ -24,6 +24,8 @@
 //! * [`chain`] — how an entry's hash is computed, and how a chain is walked.
 //! * [`serialize`] — the on-disk encoding and its framing rules.
 //! * [`mod@write`] — the append path: open, append one entry, fsync.
+//! * [`sink`] — the run's one handle: where the log is, when it is opened, and
+//!   what a failure to write one means for the command being recorded.
 //!
 //! The format is specified normatively in `docs/AUDIT_LOG.md`, in enough detail
 //! to verify a chain with a short script and no DCTL binary. That is not
@@ -35,4 +37,5 @@ pub mod chain;
 pub mod record;
 pub mod redaction;
 pub mod serialize;
+pub mod sink;
 pub mod write;

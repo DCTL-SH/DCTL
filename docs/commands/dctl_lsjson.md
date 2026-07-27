@@ -54,7 +54,12 @@ six above and adding a seventh is a compatibility change, guarded by a test.
   that produced it.
 * **`Size`** is the exact plaintext size in bytes — an integer, never a rounded
   human string. This is where arithmetic belongs; the text listings round on
-  purpose.
+  purpose. It is **`null`** when the index recorded no size, which is the state
+  of every row straight after `dctl index rebuild` (a list-only pass that never
+  opens an object body). Null rather than `0`, for the same reason `ModTime` is
+  null rather than the epoch: a consumer summing this field must be able to tell
+  "this object is empty" from "nobody has weighed this object". A genuinely empty
+  file reports `0`.
 * **`ModTime`** is RFC 3339 in UTC, or **`null`** when the index recorded none.
   Null rather than the epoch, because "unknown" and "1970" are different answers
   and a consumer must be able to tell them apart.
@@ -185,14 +190,39 @@ Find objects whose modification time the index never recorded. `ModTime` is
 dctl lsjson vault: --format json-lines | jq -r 'select(.ModTime == null) | .Path'
 ```
 
-A rule file is refused rather than silently dropped. This is the command where
-that failure would be most expensive, so it is an error with a next step:
+A rule file and an exact path list both shape the output, through the same
+engine every other command consults. This is the command where a silently
+dropped rule would be most expensive, because its output is what a downstream
+job acts on:
 
 ```
-dctl lsjson vault:photos --filter-from rules.txt
-error: reading filter rules from a file is not implemented in this build
-warning: Pass the rules directly with --include/--exclude, which are honoured in full by the listing commands.
+$ dctl lsjson archive: --files-from list.txt
+[
+  {
+    "Path": "notes.txt",
+    "Name": "notes.txt",
+    "Size": 11,
+    "ModTime": "2026-07-26T23:30:44Z",
+    "IsDir": false,
+    "Hashes": {
+      "blake3": "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"
+    }
+  },
+  {
+    "Path": "photos/2024/c.jpg",
+    "Name": "c.jpg",
+    "Size": 7,
+    "ModTime": "2026-07-26T23:30:44Z",
+    "IsDir": false,
+    "Hashes": {
+      "blake3": "21497c77362a2bd6f316bfe397a70a83008e0f3397578fa298371b1427620f1a"
+    }
+  }
+]
 ```
+
+A file that cannot be read or parsed is a usage error naming the file and the
+line, never a run with the rules dropped.
 
 A Windows path is local on every platform — `C:` is a drive letter, never a
 remote named `C`, and `\\nas\share` is a UNC path — so it is refused rather than

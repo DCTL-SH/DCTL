@@ -74,22 +74,33 @@ fall back on. `--json` emits an array of `{algorithm, hash, path}`;
 
 `hashsum` mutates nothing, so `--dry-run` has nothing to suppress.
 
-### Status in this build
+### The digest is of the plaintext, always
 
-**`dctl hashsum` is not implemented in this build.** Argument parsing, target
-resolution, the algorithm table, the coreutils line format, digest-width
-validation and the report shape in all three formats are written and
-unit-tested; reading hashes out of a vault is not. `Ctx` does not yet carry an
-unlocked vault, and `dctl_core::Vault` exposes no way to fetch a recorded
-content hash without also fetching the object.
+This is the single most important sentence about the command. A sealed object is
+a nonce, a header, a chain of AEAD chunks and a footer; hashing *that* would
+produce a well-formed digest which matches nothing you have, and which changes
+every time the object is re-sealed even though the file has not moved a byte.
 
-A complete invocation therefore validates, prints its warning, and fails with
-`dctl hashsum is not implemented in this build` and exit code **7**. It
-deliberately does not emit an empty checksum file: an empty SUMS file passes
-`sha256sum -c` trivially, so a silent success here would be worse than a loud
-failure. `PLAN.md` §11 does not name `hashsum` in a numbered phase — the
-requirement it serves is §13.1 (format independence), and it needs the same
-index access as `ls` and `verify` in **Phase 1 (B2 MVP)**.
+What you are about to do with the answer is compare it against `sha256sum` on
+your own disk, so the digest is of the **file** — the same bytes `dctl cat`
+would write. That is what makes the round trip below work at all.
+
+### The shortcut, and what it does not prove
+
+`blake3` is the vault's own plaintext hash, recorded for every object at write
+time, so it is answered from the index with **no egress**. `sha1` and `sha256`
+are not recorded and are produced by reading and decrypting every object; the
+command warns before it starts, because the surprise otherwise arrives as a bill.
+
+A `blake3` run answered from the index reports the hash the file had when it was
+written and never touches the provider, so it cannot notice that the object has
+since rotted. That is what `dctl verify` and `dctl scrub` are for, and this
+command does not pretend otherwise.
+
+An object that fails authentication while being hashed ends the run with exit
+**21** and **nothing on stdout** — no line for it, and no line after it. A
+checksum file is a certificate, and a line computed from bytes that failed to
+authenticate would certify the corruption as though it were the file.
 
 ```
 dctl hashsum ALGO REMOTE:PATH [flags]
@@ -97,9 +108,44 @@ dctl hashsum ALGO REMOTE:PATH [flags]
 
 ## Examples
 
-Export a checksum file for an entire vault and check it with coreutils. BLAKE3
-is recorded in the index, so this is a metadata sweep with no object bytes read
-and no egress charge:
+The round trip that is the whole point of the command: hash a vault, then check
+the file against the original tree with coreutils, which has never heard of DCTL.
+
+```console
+$ dctl hashsum sha256 archive: > SUMS
+warning: sha256 is not recorded in the index, so every object under 'archive:' must be read back and decrypted to compute it
+$ cat SUMS
+ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  a.jpg
+b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9  notes.txt
+d98b239423d217ef98c1572e009f04878002197c96cd9e8c4468fe684e7b73c1  photos/2024/c.jpg
+0e91f050fec39c6abc0e4e18fe01dc1c6f42ebae81e2b2b551d61371fad2ee1c  photos/b.jpg
+5a9cb6b54ea56d52a69891af8c21afb73d3841611bbabb5d7c61312d81e6e041  photos/tmp/scratch.jpg
+2bb80d537b1da3e38bd30361aa855686bde0eacd7162fef6a25fe97bf527a25b  private/secret.txt
+f8b27fb5d0fb00293486be039ec6021c0361f5ea088d1ae54d6f64697a413174  tmp/scratch.txt
+$ cd tree && sha256sum -c ../SUMS
+a.jpg: OK
+notes.txt: OK
+photos/2024/c.jpg: OK
+photos/b.jpg: OK
+photos/tmp/scratch.jpg: OK
+private/secret.txt: OK
+tmp/scratch.txt: OK
+```
+
+A damaged object is never certified. The run stops, exit **21**, and stdout is
+empty:
+
+```console
+$ dctl hashsum sha256 archive: > SUMS
+warning: corrupt: format: footer mismatch
+error: 'photos/b.jpg' failed integrity verification — the data was NOT served
+$ echo $?; wc -c < SUMS
+21
+       0
+```
+
+Export a checksum file for an entire vault. BLAKE3 is recorded in the index, so
+this is a metadata sweep with no object bytes read and no egress charge:
 
 ```
 dctl hashsum blake3 vault: > vault-BLAKE3SUMS
@@ -176,18 +222,14 @@ the full list.
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | Every requested hash was printed. Not reachable in this build. |
+| 0 | `success` | Every requested hash was printed. |
 | 1 | `usage` | Unknown flag or algorithm, a missing argument, a local target, a remote name shorter than two characters, or a path containing `..`. |
 | 2 | `uncategorised` | The report could not be serialised. Not reachable for these types in practice. |
 | 4 | `file_not_found` | An object is recorded in the index but absent at the provider. |
 | 5 | `temporary_error` | The provider could not serve an object and the retry budget was exhausted. |
-| 7 | `fatal_error` | Returned by every complete invocation in this build (`not implemented`), and by configuration or setup failures. |
+| 7 | `fatal_error` | An unresolvable remote, an unreadable configuration, or a vault that would not unlock. |
 | 21 | `integrity_failure` | An object failed authentication while being hashed. No hash is printed for it. **The data was NOT served.** |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. A truncated checksum file is never reported as complete. |
-
-In this build only **1**, **7** and **25** are reachable — an unknown algorithm
-and a local target are both rejected before the unimplemented error. Codes 0, 4,
-5 and 21 need the engine work described under *Status in this build*.
 
 See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 

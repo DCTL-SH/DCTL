@@ -59,8 +59,10 @@ use clap::Args;
 
 use crate::commands::integrity::{Target, command_name};
 use crate::commands::listing::Filter;
+use crate::constants::WRITE_TIME_COMPARISON_NOTICE;
 use crate::ctx::Ctx;
 use crate::error::Result;
+use crate::fidelity;
 
 use difference::{Comparison, Difference, Entry, classify};
 use report::{Record, Report};
@@ -154,7 +156,7 @@ pub async fn run(ctx: &Ctx, args: &CheckArgs) -> Result<()> {
     // before a password is asked for rather than after.
     let filter = Filter::from_globals(&ctx.globals)?;
 
-    let comparison = Comparison::from_globals(&ctx.globals);
+    let comparison = resolve_comparison(ctx, &source_target, &dest_target);
     ctx.out.info(format!(
         "{command}: '{source_target}' against '{dest_target}'{}",
         if args.one_way {
@@ -239,7 +241,48 @@ pub async fn run(ctx: &Ctx, args: &CheckArgs) -> Result<()> {
     }
 
     report.emit(&ctx.out)?;
-    report.outcome().map_or(Ok(()), Err)
+    match report.outcome() {
+        Some(error) => Err(error),
+        None => {
+            // A clean run used to print nothing at all, on either stream. That
+            // makes a health gate indistinguishable from a health gate that did
+            // nothing — a typo'd prefix matching no objects, a filter that
+            // excluded the whole dataset, a side that listed empty — and all
+            // three exited 0 in silence. The confirmation goes to stderr, so
+            // `dctl check … > findings.txt` still writes only findings and
+            // stdout stays the channel where a difference would appear.
+            ctx.out.success(report.confirmation());
+            Ok(())
+        }
+    }
+}
+
+/// The comparison this run will use, after allowing for a side that cannot be
+/// compared by modification time.
+///
+/// The dial the user set is honoured wherever it still means something, and the
+/// substitution is announced wherever it does not. See
+/// [`adopt_a_content_comparison`](crate::commands::transfer::prepare) for the
+/// identical decision on the transfer side — the two commands have to reach the
+/// same answer or `check` will keep reporting differences in a tree `copy` has
+/// just declared identical, which is the whole of defect D5.
+fn resolve_comparison(ctx: &Ctx, source: &Target, dest: &Target) -> Comparison {
+    let requested = Comparison::from_globals(&ctx.globals);
+    let (source_spec, dest_spec) = (source.spec(), dest.spec());
+    let Some(side) = fidelity::comparing_by_time_is_meaningless(ctx, &source_spec, &dest_spec)
+    else {
+        return requested;
+    };
+
+    let substituted = requested.content_instead_of_time();
+    if substituted != requested {
+        // Only when it actually changed something: telling someone who typed
+        // `--size-only` that their comparison was substituted, when it was not,
+        // is a false statement about the run.
+        ctx.out
+            .warn(format!("'{side}' {WRITE_TIME_COMPARISON_NOTICE}"));
+    }
+    substituted
 }
 
 /// The verdict for one path, resolving hashes if `--checksum` needs them.

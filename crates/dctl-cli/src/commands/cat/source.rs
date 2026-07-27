@@ -34,6 +34,14 @@
 //! anybody cared about. It disappears when `dctl-core` grows a chunked reader —
 //! at which point [`Reader`] gains a third variant and nothing above it changes.
 //!
+//! Written down was not enough, though, and this is where that was fixed. A
+//! vault serves a *window* by moving the whole object, so `--count 4` against a
+//! 40 GB film is a 40 GB transfer that returns four bytes and exits 0 — a cost
+//! with nothing linking it back to the command once it appears on a bill. Above
+//! [`RANGED_READ_WHOLE_OBJECT_WARN_BYTES`](crate::constants::RANGED_READ_WHOLE_OBJECT_WARN_BYTES)
+//! [`Source::preflight`] says so on stderr, here, before any byte moves. See
+//! [`crate::source::ranged`] for why the threshold sits where it does.
+//!
 //! Buffering is *not* how the range flags are honoured. `--offset` and `--count`
 //! resolve to a window that is passed down as a window, so a plain store serves
 //! it with a genuine ranged request rather than reading and discarding.
@@ -93,8 +101,25 @@ impl Source {
 
         let source = opened.get(remote).await?;
         let size = remote_size(&spec, source.as_ref()).await?;
+        let slice = span.resolve(size);
+
+        // Said before the read rather than after it. A vault has no ranged read,
+        // so a four-byte window of a 40 GB object is a 40 GB download — and the
+        // command that causes it returns four bytes and exits 0, leaving nothing
+        // to connect the cost to the cause when it turns up on an invoice.
+        // Pre-flight is the right moment: every argument is resolved here before
+        // any byte is written, so the warning arrives while the run could still
+        // be interrupted.
+        if let Some(warning) =
+            source
+                .ranged_read()
+                .warning(size, slice.length, opened.ctx().out.units())
+        {
+            opened.ctx().out.warn(format!("{spec}: {warning}"));
+        }
+
         Ok(Self {
-            slice: span.resolve(size),
+            slice,
             spec,
             size,
             origin: Some(source),
@@ -206,7 +231,24 @@ impl Read for Reader {
 /// most alarming message this command can produce.
 async fn remote_size(spec: &ObjectSpec, source: &dyn ReadSource) -> Result<u64> {
     match source.stat(spec.path()).await? {
-        Some(entry) => Ok(entry.size),
+        // `Source::stat` promises a measured size — the sealed source pays a
+        // read rather than pass an unmeasured index row on, precisely so that
+        // `--offset` and `--tail` are resolved against a real length. The `None`
+        // arm is therefore unreachable through either implementation today, and
+        // it is still written out rather than unwrapped: every range flag is
+        // resolved against this number, so an implementation that one day
+        // forgot the promise must produce a refusal naming what is missing, not
+        // a `cat` that writes no bytes and exits 0.
+        Some(entry) => entry.size.ok_or_else(|| {
+            CliError::new(
+                ExitCode::Uncategorised,
+                format!("'{spec}' has no recorded size, so a range cannot be resolved against it"),
+            )
+            .with_hint(
+                "This should not happen: a `stat` is required to establish a \
+                 size even when the index holds none. Please report it.",
+            )
+        }),
         None => Err(
             CliError::new(ExitCode::FileNotFound, format!("'{spec}' is not there")).with_hint(
                 "Check the path with `dctl ls`. If the object was written from \

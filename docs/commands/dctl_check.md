@@ -44,6 +44,36 @@ that downgrades itself silently is worse than one that fails, because it reports
 a guarantee it did not check. In practice that is the default mode against a
 destination with no recorded modification time.
 
+### A sealed vault is compared by content, and says so
+
+There is one substitution, it goes *upwards*, and it is announced every time.
+
+A vault records the moment each object was written, not the modification time of
+the file it was written from: `dctl-core`'s `put_file` takes no such parameter.
+The number in the index is therefore true and describes something else, so the
+default size-and-modtime comparison against a vault answers a question about
+when the copy ran. Before this was fixed, `dctl check ./src archive:` reported
+every path as `differ` immediately after `dctl copy ./src archive:` had stored
+them correctly.
+
+The same index record carries the plaintext BLAKE3, so a vault can answer the
+*stronger* question for free. When either side of a `check` is a vault and no
+comparison flag was given, `check` runs the `checksum` comparison instead and
+prints a warning on stderr naming the side that forced it. The report's
+`comparison` field says `checksum`, because that is what ran.
+
+It is not free: the other side is read end to end to produce a hash. Two ways
+out, both honoured exactly as typed:
+
+* `--size-only` compares sizes alone. Sizes need no clock, so a vault does not
+  disturb it and nothing is substituted or announced.
+* `--checksum` asks for the content comparison outright, which is what would
+  happen anyway — no warning, because nothing was substituted.
+
+`dctl copy`, `move` and `sync` make the identical substitution for the identical
+reason, which is what keeps `check` and `copy` agreeing about the same two trees.
+See `docs/commands/dctl_copy.md`.
+
 `--checksum` is the exception, and deliberately so. A vault knows the plaintext
 BLAKE3 of everything it holds and answers from its index for nothing; a local
 tree or a plain object store knows no such thing. Rather than report `error` for
@@ -104,6 +134,27 @@ emits one document with `source`, `dest`, `comparison`, `proves_contents`,
 `differ`, `missing_on_src`, `missing_on_dst` and `errors` — every verdict has
 its own key, so `0` is information rather than an absent field.
 `--format json-lines` emits one difference per line and no summary.
+
+A clean run is **not silent**. Stdout stays empty — that is the contract above —
+but stderr carries one confirmation line naming how many paths were compared and
+under which comparison:
+
+```
+✓ 3 paths compared, all match (checksum): './src' and 'archive:'
+```
+
+The count and the comparison are both load-bearing. A health gate that says
+nothing when healthy cannot be told apart from one that did nothing, and exit 0
+with no output was previously the same answer for "ten million objects agree" as
+for "the prefix matched no objects, so neither side was ever read". That second
+case now says so in its own words rather than reporting a zero:
+
+```
+✓ nothing was compared: neither 'archive:phtoos' nor './photos' listed any object
+```
+
+The line goes to stderr, so `dctl check … > findings.txt` still writes findings
+only, and `--quiet` suppresses it.
 
 ### How the two sides are read
 

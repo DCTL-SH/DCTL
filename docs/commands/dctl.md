@@ -116,6 +116,99 @@ in. Local paths are kept **byte-for-byte as typed**: they are handed back to the
 operating system, which looks up exactly the bytes it was given. Canonicalising
 the vault's namespace is required; canonicalising someone else's is corruption.
 
+## Encryption is decided by the name you type
+
+A vault has **two** remote names, and they are not interchangeable:
+
+| Name | View | What a write through it does |
+|------|------|------------------------------|
+| `archive:` | sealed | encrypts, always |
+| `archive-store:` | object | holds that vault's opaque ciphertext; foreign plaintext is refused |
+
+`dctl init` and `dctl config import` register both together. Two names exist
+because DCTL must be able to replicate a vault's ciphertext from one provider to
+another **without re-encrypting it** — which is only expressible if the objects
+have an address of their own. That is what `dctl replicate archive-store:
+backup-store:` does, and it needs no password at all.
+
+Four invariants follow. They are enforced in code, and proved end-to-end against
+the shipped binary in `crates/dctl-cli/tests/invariant_i4/`.
+
+* **I1** — a write through a vault remote is always sealed. No flag disables it.
+* **I2** — foreign plaintext is never written into a vault's object store.
+* **I3** — a write to an ordinary location is plaintext, and that is a
+  first-class supported operation, not a degraded mode.
+* **I4** — **DCTL never applies or omits encryption because of a destination's
+  contents. What a command encrypts is determined solely by the remote name
+  typed. A destination's contents may cause DCTL to refuse, never to change what
+  it does.**
+
+The outcome of any command at any destination is one of three things: `sealed`,
+`plain`, or `refused`. What a destination happens to contain can only ever move
+an outcome to `refused`. It can never turn `plain` into `sealed` or `sealed`
+into `plain`.
+
+That is what makes a runbook mean something. `dctl copy ./src /srv/backup` does
+the same thing this morning, this afternoon, and after somebody else has been
+working in `/srv/backup` — or it stops and tells you why. It never quietly does
+the other thing.
+
+The same is true of how you **spell** a destination. `vault`, `./vault`,
+`/srv/vault`, `staging/../vault`, a symlink to it, and any subdirectory of it
+are one place and get one answer. Reaching a directory by a different route is
+not a request for different encryption behaviour.
+
+### The residual: a location no configured remote describes
+
+There is exactly one place where DCTL reads a destination's contents before
+writing, and it is worth stating plainly rather than burying.
+
+If you address a **bare filesystem path** that no configured remote describes,
+DCTL has nothing to reason from but the bytes it can see. It checks the path and
+its parents for a vault envelope, and if it finds one it **fails closed**:
+
+```
+$ dctl copy ./photos /mnt/restored-drive/vault
+error: refusing to write plaintext into '/mnt/restored-drive/vault': it
+       contains a vault that no configured remote describes
+warning: … Run `dctl config import` to register the vault, then write through
+       its vault remote. DCTL never switches to sealed mode on its own: what a
+       command encrypts is decided by the remote name typed.
+```
+
+This is a deliberate property, not an oversight, and the reasoning is worth
+following because it is what keeps I4 true:
+
+1. **The situation is real and common.** A vault's envelope lives on its own
+   store, so a lost `config.toml` loses only the *names* — never the data. An
+   operator restoring a drive, or mounting a colleague's disk, has a perfectly
+   good vault that this machine's configuration has never heard of.
+2. **Writing plaintext there is the worst available outcome.** It is silent, it
+   exits 0, it looks like a successful backup, and it leaves unencrypted data
+   sitting beside the ciphertext of the vault that was supposed to protect it.
+3. **The only alternative to refusing would be to seal — and that would break
+   I4.** DCTL would be encrypting because of something it found, delivering
+   something other than what the command line asked for, decided by state the
+   caller never named. That is auto-detection, and auto-detection is what makes
+   a tool's behaviour change underneath a running job.
+
+So contents are allowed to *stop* a command and nothing else. A stop cannot
+silently produce the wrong artefact, and it leaves the choice where it belongs.
+
+**No flag overrides this.** `--force` is not an override: you are being told
+DCTL cannot name the vault you are writing into, and insistence does not supply
+the name. The way forward is [`dctl config import`](dctl_config.md), which
+inspects the location, confirms the envelope, and writes the same two remotes
+`dctl init` would have — after which the answer comes from the configuration and
+stops depending on contents at all.
+
+The honest limit, stated as such: this check sees what a `stat` can see. It
+recognises a vault by its envelope, so a *partial* vault whose envelope has been
+deleted, or a store on a provider this machine cannot reach, is not recognised
+and the write proceeds as the ordinary plaintext write it was asked to be. The
+fix for that is a configuration that names the location — which is the case I4
+covers completely, and the reason `dctl init` writes one for you.
+
 ## Configuration
 
 DCTL's configuration is a TOML file holding **non-secret settings only** —
@@ -311,7 +404,7 @@ command's own page documents the flags specific to that command.
 | `--password <PASSWORD>` | `DCTL_PASSWORD` | Vault password. Prefer the alternatives: an argument is visible to every other process on the machine. |
 | `--password-command <COMMAND>` | `DCTL_PASSWORD_COMMAND` | Command whose stdout is the vault password. |
 | `--password-file <PATH>` | | File whose first line is the vault password. |
-| `--key-file <PATH>` | | Second-factor keyfile: "know" plus "have". **Refused in this build** (exit 7) — the engine cannot apply the factor, and dropping it silently would be weaker protection than you asked for. |
+| `--key-file <PATH>` | | Second-factor keyfile: "know" plus "have". **Refused in this build** (exit 7) — `dctl_core::Vault::init`/`::unlock` take no factor parameter (`PLAN.md` §8), and dropping the flag silently would be weaker protection than you asked for. |
 | `--no-ask-password` | | Never prompt; fail instead. For unattended runs. |
 
 `config`, `version`, `completion` and `about` never need an unlocked vault, and
@@ -409,7 +502,7 @@ Codes 0–10 mirror rclone's taxonomy so existing automation ports across. Codes
 | 6 | `partial_failure` | Some files failed to transfer. |
 | 7 | `fatal_error` | Fatal error; cannot continue. |
 | 8 | `transfer_limit_exceeded` | `--max-transfer` limit reached. |
-| 9 | `no_files_transferred` | Succeeded, but no files were transferred. |
+| 9 | `no_files_transferred` | Succeeded, but the run did no work. `dctl scrub` returns it when the run read no object at all. |
 | 10 | `duration_limit_exceeded` | `--max-duration` limit reached. |
 | 20 | `checksum_mismatch` | Verified write refused: checksum mismatch. Nothing was committed. |
 | 21 | `integrity_failure` | AEAD authentication failed on read. The data was **not** served. |

@@ -43,6 +43,12 @@
 //! It is not faked, and it is not capped. Returning a short read or refusing
 //! above some size would trade a documented cost for an undocumented wrong
 //! answer, and `PLAN.md` §6 is unambiguous about which of those is worse.
+//!
+//! It is, however, now *announced*. [`Source::ranged_read`] reports
+//! [`RangedRead::WholeObject`] from here, which is what lets `cat` print the
+//! cost during pre-flight for an object large enough to be worth the line — see
+//! [`crate::source::ranged`]. Being written down in this file was never going to
+//! reach the person typing `--count 4` against a 40 GB film.
 
 use std::collections::VecDeque;
 
@@ -57,7 +63,7 @@ use crate::remote::RemoteSpec;
 use crate::session::{self, Session};
 
 use super::entry::Entry;
-use super::{Assurance, Entries, Sizes, Source};
+use super::{Assurance, Entries, RangedRead, Sizes, Source};
 
 /// A vault, unlocked, presented as a readable source.
 pub struct VaultSource {
@@ -152,6 +158,14 @@ impl Source for VaultSource {
         Ok(slice(&plaintext, offset, length))
     }
 
+    fn ranged_read(&self) -> RangedRead {
+        // The cost stated in this module's documentation, made available to the
+        // caller *before* it is paid rather than only afterwards in a source
+        // file. `dctl cat b2vault:film.mkv --offset 0 --count 4` transfers the
+        // whole film; saying so here is what lets `cat` warn about it.
+        RangedRead::WholeObject
+    }
+
     async fn stat(&self, path: &str) -> Result<Option<Entry>> {
         // Answered from the local index, which is the only thing that can answer
         // it without reading the object: a vault's sizes live in its index, and
@@ -175,7 +189,7 @@ impl Source for VaultSource {
             return Ok(None);
         };
 
-        if !unmeasured(&entry) {
+        if entry.size.is_some() {
             return Ok(Some(entry));
         }
 
@@ -232,13 +246,31 @@ impl Entries for Buffered {
 
 /// Translate one index record into the provider-neutral entry.
 ///
+/// Public because it is the binary's **only** translation of a `dctl_core`
+/// record into an [`Entry`], and a second spelling of it is a second place that
+/// can forget the unmeasured case. `commands::removal::medium` had exactly such
+/// a copy, and it went on rendering `0 B` for rebuilt rows after this one
+/// stopped — which is how `dctl delete --dry-run` came to report freeing nothing
+/// while naming three real files.
+///
 /// Deliberately drops `object_key`. It is the opaque name the ciphertext is
 /// stored under, and printing it beside the plaintext path — which is what a
 /// listing does — would hand an observer exactly the mapping the metadata-
 /// privacy design exists to withhold (`PLAN.md` §2, §7). A type that cannot
 /// carry it is a type no renderer can leak it through.
-fn from_record(record: Record) -> Entry {
-    Entry::new(record.path, record.size)
+pub fn from_record(record: Record) -> Entry {
+    // The whole point of the branch: a row that was never measured must not
+    // hand its zero on as though somebody had weighed the file. See
+    // [`unmeasured`] for why the two conditions together identify the case, and
+    // [`Entry::size`](super::entry::Entry::size) for what believing the zero
+    // cost — a rebuilt vault reporting nought bytes to a capacity monitor and to
+    // a scrub's audit trail.
+    let entry = if unmeasured(&record) {
+        Entry::unmeasured(record.path)
+    } else {
+        Entry::new(record.path, record.size)
+    };
+    entry
         .with_modified(record.modified_unix)
         .with_content_hash(record.content_hash)
 }
@@ -248,8 +280,16 @@ fn from_record(record: Record) -> Entry {
 /// [`Vault::rebuild_index`](dctl_core::Vault::rebuild_index) recovers a machine
 /// from the backend alone by listing and decrypting the §5 name records. That is
 /// a **list-only pass** by design — it must not cost a full read of the dataset
-/// — so the rows it writes carry `size: 0` and an *empty* content hash, and the
-/// core's own comment says the sizes populate on first read.
+/// — so the rows it writes carry `size: 0` and an *empty* content hash.
+///
+/// The core's own comment says those sizes "populate on first read of each
+/// file". They do not, in this build: `Vault::get_file` resolves the object key,
+/// decrypts and returns, and writes nothing back to the index, so `cat`,
+/// `hashsum` and a whole `scrub` all leave the row as unmeasured as they found
+/// it — checked by running each of them against a rebuilt index. Only writing
+/// the file again records a size. That is why the absence has to survive all the
+/// way to the renderers instead of being treated as a state that will clear
+/// itself: on a restored machine it is permanent until the next backup runs.
 ///
 /// The two conditions together are what make the case identifiable. A file
 /// written through the ordinary path always has a 32-byte BLAKE3 recorded, and
@@ -259,8 +299,13 @@ fn from_record(record: Record) -> Entry {
 ///
 /// Distinguishing them matters because the alternative is silent: a caller that
 /// believed the zero would read no bytes and report success.
-fn unmeasured(entry: &Entry) -> bool {
-    entry.size == 0 && entry.content_hash.is_none()
+///
+/// Asked of the **record** rather than of the [`Entry`] built from it, because
+/// the entry no longer carries a zero to inspect: [`from_record`] is the one
+/// place that decides, and it decides from the only data that can tell the two
+/// apart.
+fn unmeasured(record: &Record) -> bool {
+    record.size == 0 && record.content_hash.is_empty()
 }
 
 /// Copy the window `[offset, offset + length)` out of `plaintext`.
@@ -396,7 +441,7 @@ mod tests {
 
         // The plaintext length, not the sealed object's — otherwise `ls` and
         // `cat | wc -c` disagree about the same file.
-        assert_eq!(entry.size, 5);
+        assert_eq!(entry.size, Some(5));
         assert_eq!(
             entry.content_hash.as_deref(),
             Some(blake3::hash(b"hello").as_bytes().as_slice()),
@@ -489,7 +534,7 @@ mod tests {
             .expect("the lookup succeeds")
             .expect("the object is there");
         assert_eq!(found.path, "photos/a.jpg");
-        assert_eq!(found.size, 5);
+        assert_eq!(found.size, Some(5));
 
         // Absent is an answer, not a failure — the caller distinguishes "not
         // there" from "could not look" by which channel it arrived on.
@@ -515,7 +560,7 @@ mod tests {
             .expect("the lookup succeeds")
             .expect("the object is there");
         assert_eq!(found.path, "a.jpg");
-        assert_eq!(found.size, 3);
+        assert_eq!(found.size, Some(3));
     }
 
     #[tokio::test]
@@ -536,8 +581,11 @@ mod tests {
         // The listing shows what the index holds, which is genuinely nothing.
         let mut cursor = fixture.source.enumerate("").await.unwrap();
         let listed = cursor.next().await.unwrap().expect("the row is there");
-        assert_eq!(listed.size, 0, "a rebuild records no size");
-        assert!(unmeasured(&listed));
+        assert_eq!(
+            listed.size, None,
+            "a rebuild records no size, and the listing says so rather than \
+             answering zero"
+        );
 
         // `stat` refuses to pass that on as a fact.
         let found = fixture
@@ -546,7 +594,7 @@ mod tests {
             .await
             .unwrap()
             .expect("the object is there");
-        assert_eq!(found.size, 11);
+        assert_eq!(found.size, Some(11));
         assert_eq!(
             found.content_hash.as_deref(),
             Some(blake3::hash(b"hello world").as_bytes().as_slice())
@@ -564,9 +612,8 @@ mod tests {
             .await
             .unwrap()
             .expect("an empty object is still an object");
-        assert_eq!(found.size, 0);
+        assert_eq!(found.size, Some(0));
         assert!(found.content_hash.is_some());
-        assert!(!unmeasured(&found));
     }
 
     #[tokio::test]

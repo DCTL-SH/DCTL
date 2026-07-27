@@ -33,8 +33,17 @@ pub struct Entry {
     path: String,
     /// Byte offset in `path` at which the root-relative portion starts.
     root_len: usize,
-    /// Plaintext size in bytes. For a directory, the total beneath it.
-    size: u64,
+    /// Plaintext size in bytes, when it is known. For a directory, the total
+    /// beneath it.
+    ///
+    /// Carried as an [`Option`] all the way to the renderers because that is the
+    /// only shape in which "never measured" survives the trip. A vault index row
+    /// written by a rebuild has no size (see
+    /// [`source::Entry::size`](crate::source::Entry::size)), and a directory
+    /// whose subtree contains one has no honest total either — a sum that
+    /// silently omitted the unmeasured children would read as a complete
+    /// figure.
+    size: Option<u64>,
     /// Last-modified time in unix seconds, when the index recorded one.
     modified_unix: Option<i64>,
     /// Hex-encoded plaintext content hash. Never present on a directory.
@@ -74,9 +83,11 @@ impl Entry {
     /// Directories are never stored — an object store has no such thing — so
     /// every one a listing shows is inferred from the paths of the objects
     /// beneath it. `size` is the total of those objects, which is the only
-    /// figure a directory can honestly report.
+    /// figure a directory can honestly report — and [`None`] when any object
+    /// beneath it had no recorded size, because a partial total presented as a
+    /// total is the same misreport a zero would have been.
     #[must_use]
-    pub fn directory(path: String, root: &str, size: u64) -> Self {
+    pub fn directory(path: String, root: &str, size: Option<u64>) -> Self {
         Self {
             root_len: relative_offset(&path, root),
             path,
@@ -106,9 +117,10 @@ impl Entry {
         path::file_name(&self.path)
     }
 
-    /// Plaintext size in bytes; for a directory, the total beneath it.
+    /// Plaintext size in bytes, if anything ever measured it; for a directory,
+    /// the total beneath it.
     #[must_use]
-    pub const fn size(&self) -> u64 {
+    pub const fn size(&self) -> Option<u64> {
         self.size
     }
 
@@ -130,18 +142,13 @@ impl Entry {
         self.is_dir
     }
 
-    /// Depth below the listing root: a file directly in the root is at 1.
-    ///
-    /// One-based rather than zero-based so that it reads the same way
-    /// `--max-depth` does, and so that `--max-depth 1` means "the top level"
-    /// exactly as it does in rclone.
-    #[must_use]
-    pub fn depth(&self) -> usize {
-        self.relative()
-            .split(PATH_SEPARATOR)
-            .filter(|part| !part.is_empty())
-            .count()
-    }
+    // There is deliberately no `depth()` here. Depth is what `--max-depth`
+    // means, and `--max-depth` is decided by one engine for every command
+    // ([`crate::filter::depth_of`], which counts components of the same
+    // root-relative path [`Entry::relative`] returns). A second counter on this
+    // type would be a second answer to "how deep is this", and the two would
+    // eventually disagree by one for exactly one shape of path — which is the
+    // kind of divergence that hides in a listing for years.
 
     /// The root-relative directory components, without the final name.
     ///
@@ -170,13 +177,39 @@ impl Entry {
 /// Tolerates a root that does not actually prefix the path by falling back to
 /// zero: an entry that is mislabelled is still better rendered whole than
 /// rendered as a slice taken from the middle of a UTF-8 sequence.
+///
+/// ## Addressing one object scopes the listing to that object's parent
+///
+/// `dctl lsjson archive:photos/a.jpg` names an object, not a subtree, so the
+/// root handed in here *is* the entry's whole path. Resolving it against itself
+/// leaves nothing — and a row that cannot name the thing it describes is worse
+/// than no row: `Path` was emitted as `""`, `ls` printed a blank path column,
+/// and `tree` printed a header with no entry beneath it. A script doing
+/// `lsjson … | jq -r '.[0].Path'` reads that empty string back and may write to
+/// it.
+///
+/// So a root that equals the path is read the way rclone reads it — as naming a
+/// file, which scopes the listing to the *directory containing* it — and the
+/// offset lands on the final component. `dctl lsjson archive:photos/a.jpg`
+/// therefore reports `"a.jpg"`, exactly as `rclone lsjson` does, and an object
+/// at the vault root keeps its whole name because there is no separator to step
+/// past.
 fn relative_offset(full: &str, root: &str) -> usize {
     let root = root.trim_end_matches(PATH_SEPARATOR);
     if root.is_empty() || !path::is_under(root, full) {
         return 0;
     }
-    // Step past the root and the separator that follows it. The root may equal
-    // the whole path, in which case there is nothing after it.
+
+    // The root names this very object. Fall back to its parent so the row can
+    // still say which object it is; `parent` returns "" at the vault root,
+    // which correctly leaves the whole name relative.
+    if root == full {
+        return relative_offset(full, path::parent(full));
+    }
+
+    // Step past the root and the separator that follows it. `is_under` has
+    // already established that the separator is there, so this offset is always
+    // a character boundary within `full`.
     let after = root.len() + PATH_SEPARATOR.len_utf8();
     if after <= full.len() {
         after
@@ -196,14 +229,15 @@ mod tests {
         assert_eq!(entry.path(), "photos/2024/a.jpg");
         assert_eq!(entry.relative(), "2024/a.jpg");
         assert_eq!(entry.name(), "a.jpg");
-        assert_eq!(entry.depth(), 2);
+        // Depth is the filter engine's to count, from exactly this string.
+        assert_eq!(crate::filter::depth_of(entry.relative()), 2);
     }
 
     #[test]
     fn a_root_less_listing_is_relative_to_the_vault() {
         let entry = Entry::from_source(listed("a/b.txt", 1, None), "");
         assert_eq!(entry.relative(), "a/b.txt");
-        assert_eq!(entry.depth(), 2);
+        assert_eq!(crate::filter::depth_of(entry.relative()), 2);
     }
 
     #[test]
@@ -215,12 +249,38 @@ mod tests {
     }
 
     #[test]
-    fn a_root_that_is_the_whole_path_leaves_nothing_relative() {
-        // `dctl ls vault:photos/a.jpg` addresses one object; slicing past the
-        // end of the string would be the obvious way to make that panic.
+    fn a_root_that_is_the_object_itself_is_relative_to_that_object_s_parent() {
+        // `dctl lsjson archive:photos/a.jpg` addresses one object, and the row
+        // for it must still be able to name it. Resolving the root against
+        // itself yields nothing at all, which is how `Path` came to be emitted
+        // as `""` — a script doing `lsjson ... | jq -r '.[0].Path'` gets an
+        // empty string and may go on to write to it. rclone answers the same
+        // argument with `"a.jpg"`, because addressing a file scopes the listing
+        // to that file's parent.
         let entry = Entry::from_source(listed("photos/a.jpg", 1, None), "photos/a.jpg");
-        assert_eq!(entry.relative(), "");
-        assert_eq!(entry.depth(), 0);
+        assert_eq!(entry.relative(), "a.jpg");
+        assert_eq!(crate::filter::depth_of(entry.relative()), 1);
+    }
+
+    #[test]
+    fn an_object_addressed_at_the_vault_root_keeps_its_whole_name() {
+        // The same case with no parent to fall back to: `dctl ls archive:a.txt`.
+        // There is no separator to step past, so the offset must stay at zero
+        // rather than run off the end of the string.
+        let entry = Entry::from_source(listed("a.txt", 1, None), "a.txt");
+        assert_eq!(entry.relative(), "a.txt");
+        assert_eq!(entry.name(), "a.txt");
+    }
+
+    #[test]
+    fn addressing_a_multibyte_object_by_its_own_name_stays_on_a_char_boundary() {
+        // Slicing past the end — or into the middle of a UTF-8 sequence — is
+        // the obvious way to make this case panic rather than merely misreport.
+        let entry = Entry::from_source(
+            listed("caf\u{e9}/re\u{301}sume\u{301}.txt", 1, None),
+            "caf\u{e9}/re\u{301}sume\u{301}.txt",
+        );
+        assert_eq!(entry.relative(), "re\u{301}sume\u{301}.txt");
     }
 
     #[test]
@@ -258,10 +318,10 @@ mod tests {
 
     #[test]
     fn a_directory_owns_its_own_last_component() {
-        let dir = Entry::directory("a/b".into(), "", 99);
+        let dir = Entry::directory("a/b".into(), "", Some(99));
         assert!(dir.is_dir());
         assert_eq!(dir.parent_components(), vec!["a", "b"]);
-        assert_eq!(dir.size(), 99);
+        assert_eq!(dir.size(), Some(99));
         assert_eq!(dir.content_hash(), None);
         assert_eq!(dir.modified_unix(), None);
     }

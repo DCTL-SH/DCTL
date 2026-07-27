@@ -17,6 +17,14 @@ dctl-store = { path = "../dctl-store" }
 dctl-meta = { path = "../dctl-meta" }
 # shared across the workspace
 blake3 = { workspace = true }
+# `dctl hashsum sha1|sha256`. The vault records only BLAKE3, so these two exist
+# purely for interoperability with software that predates it — a twenty-year
+# tool has to be able to hand its checksums to a tape catalogue. Both versions
+# come from the workspace table, which is what keeps the digest DCTL prints and
+# the digest dctl-store computes for a provider's own checksum header identical
+# by construction rather than by coincidence.
+sha1 = { workspace = true }
+sha2 = { workspace = true }
 # `crate::source` is the one read abstraction, and it is object-safe by
 # necessity — every command holds a `Box<dyn Source>` so that nothing above it
 # can tell a sealed vault from a plain store. Native `async fn` in traits does
@@ -37,6 +45,18 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 # Plaintext held in flight between pipeline stages is wiped on drop.
 zeroize = { workspace = true }
+# `Backend::put` takes an owned `bytes::Bytes` — the provider implementations
+# need a cheaply-cloneable buffer to retry a request with — so any crate that
+# stores an object has to name the type. `crate::remote::plain` is the one place
+# here that does; everything else reads through `Bytes` without spelling it.
+bytes = { workspace = true }
+# `rcat` spools a stream of unknown length to a temporary file so it can be
+# sealed with `Vault::put_file_from_path` in constant memory. Owner-only
+# permissions and removal-on-drop are the properties that matter, and both are
+# this crate's — hand-rolling either around the user's plaintext would be the
+# wrong place to save a dependency. Already a runtime dependency of dctl-core
+# and dctl-store, which spool for the same reason.
+tempfile = { workspace = true }
 # CLI-specific (pinned in this crate, like dctl-crypto pins its primitives).
 # Kept here rather than in the workspace table so the presentation layer can
 # evolve without touching every other crate's dependency surface.
