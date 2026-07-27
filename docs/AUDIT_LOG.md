@@ -518,3 +518,9 @@ a real answer. An **absent** one is exit 4 (`file_not_found`), because it far mo
 often means the reader was pointed somewhere the writer never wrote — a different
 `--index`, a different machine — than that nothing ever happened, and "0 records,
 chain intact" would be a clean bill of health for a chain nobody looked at.
+
+## See also
+
+- [Documentation index](README.md)
+- [`dctl audit` command](commands/dctl_audit.md)
+- [Security model](SECURITY.md)

@@ -93,3 +93,9 @@ related conditions cluster:
 
 \* The Kind column for `1xxx`/`2xxx`/`3xxx` is how `CoreError::kind()` classifies
 that sub-error when it surfaces through a `CoreError` wrapper variant.
+
+## See also
+
+- [Documentation index](README.md)
+- [Exit codes](EXIT_CODES.md)
+- [Crate reference](CRATES.md)
