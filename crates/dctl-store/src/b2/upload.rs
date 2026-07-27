@@ -16,7 +16,8 @@ use super::api::{
     GetUploadUrlResponse, StartLargeFileResponse, UploadFileResponse, UploadPartResponse,
 };
 use super::name::encode_file_name;
-use super::{B2Backend, constants, parse_json, reqwest_err};
+use super::retry::{self, Attempt};
+use super::{B2Backend, constants, read_json, transport_attempt};
 
 pub(super) async fn put(
     b2: &B2Backend,
@@ -50,6 +51,21 @@ pub(super) async fn put(
     })
 }
 
+/// Upload the whole object in one request, fetching the upload URL that request
+/// needs, and retrying both together.
+///
+/// The pairing is the point. B2 hands out an upload URL bound to one storage
+/// pod, and answers `503 {"code":"service_unavailable","message":"no tomes
+/// available"}` when that pod cannot take the write. Its documented remedy is to
+/// call `b2_get_upload_url` **again** and send the bytes to whatever pod comes
+/// back; replaying the same URL arrives at the same busy pod. So the retry has
+/// to enclose the URL fetch, which is why this reaches for `post_json_once`
+/// rather than the retrying `post_json` underneath it — one loop per logical
+/// operation, not two nested ones whose combined budget nobody can state.
+///
+/// This is not hypothetical tidiness: the first live restore drill against a
+/// real bucket lost five of ten files to exactly that `503`, reported
+/// `Errors: 5` and exit 6, and left the backup half stored.
 async fn upload_single(
     b2: &B2Backend,
     auth: &AuthState,
@@ -57,31 +73,37 @@ async fn upload_single(
     data: &[u8],
     sha1: &ContentHash,
 ) -> Result<()> {
-    let upload: GetUploadUrlResponse = b2
-        .post_json(
-            auth,
-            constants::EP_GET_UPLOAD_URL,
-            serde_json::json!({ "bucketId": auth.bucket_id }),
-        )
-        .await?;
-
     let sha1_hex = sha1.hex();
-    tracing::debug!(bytes = data.len(), "b2 upload (single-file)");
-    let resp = b2
-        .client
-        .post(&upload.upload_url)
-        .header(constants::H_AUTHORIZATION, &upload.authorization_token)
-        .header(constants::H_FILE_NAME, encode_file_name(key.as_str()))
-        .header(constants::H_CONTENT_TYPE, constants::CONTENT_TYPE_AUTO)
-        .header(constants::H_CONTENT_SHA1, &sha1_hex)
-        .header(constants::H_CONTENT_LENGTH, data.len().to_string())
-        .body(data.to_vec())
-        .send()
-        .await
-        .map_err(reqwest_err)?;
+    retry::run(constants::OP_UPLOAD_FILE, |_| async {
+        let upload: GetUploadUrlResponse = b2
+            .post_json_once(
+                auth,
+                constants::EP_GET_UPLOAD_URL,
+                serde_json::json!({ "bucketId": auth.bucket_id }),
+            )
+            .await?;
 
-    let info: UploadFileResponse = parse_json(resp).await?;
-    verify_sha1(&sha1_hex, &info.content_sha1)
+        tracing::debug!(bytes = data.len(), "b2 upload (single-file)");
+        let resp = b2
+            .client
+            .post(&upload.upload_url)
+            .header(constants::H_AUTHORIZATION, &upload.authorization_token)
+            .header(constants::H_FILE_NAME, encode_file_name(key.as_str()))
+            .header(constants::H_CONTENT_TYPE, constants::CONTENT_TYPE_AUTO)
+            .header(constants::H_CONTENT_SHA1, &sha1_hex)
+            .header(constants::H_CONTENT_LENGTH, data.len().to_string())
+            .body(data.to_vec())
+            .send()
+            .await
+            .map_err(transport_attempt)?;
+
+        let info: UploadFileResponse = b2.observe_expiry(read_json(resp).await).await?;
+        // A SHA-1 B2 echoes back wrong is not a busy pod: the bytes that arrived
+        // are not the bytes that were sent, and sending them again would be
+        // guessing. Reported as the mismatch it is, on the first attempt.
+        verify_sha1(&sha1_hex, &info.content_sha1).map_err(Attempt::transport)
+    })
+    .await
 }
 
 /// In-memory large-file upload (the buffered `>threshold` path reachable via [`put`]).
@@ -96,7 +118,6 @@ async fn upload_large(
 ) -> Result<()> {
     let start: StartLargeFileResponse = b2
         .post_json(
-            auth,
             constants::EP_START_LARGE_FILE,
             serde_json::json!({
                 "bucketId": auth.bucket_id,
@@ -154,7 +175,6 @@ async fn upload_parts_and_finish(
 
     let _: FinishLargeFileResponse = b2
         .post_json(
-            auth,
             constants::EP_FINISH_LARGE_FILE,
             serde_json::json!({ "fileId": file_id, "partSha1Array": part_sha1s }),
         )
@@ -212,7 +232,6 @@ async fn stream_large_from_path(
 ) -> Result<PutOutcome> {
     let start: StartLargeFileResponse = b2
         .post_json(
-            auth,
             constants::EP_START_LARGE_FILE,
             serde_json::json!({
                 "bucketId": auth.bucket_id,
@@ -293,7 +312,6 @@ async fn upload_and_finish(
 
     let _: FinishLargeFileResponse = b2
         .post_json(
-            auth,
             constants::EP_FINISH_LARGE_FILE,
             serde_json::json!({ "fileId": file_id, "partSha1Array": part_sha1s }),
         )
@@ -304,6 +322,12 @@ async fn upload_and_finish(
 
 /// Fetch a fresh upload-part URL, upload `chunk` as part `part_number` with its streamed
 /// SHA-1, confirm B2 echoed that SHA-1, and record it for the finish call.
+///
+/// Retried as one unit for the same reason [`upload_single`] is: a part URL is
+/// bound to a pod, and the remedy for a busy one is a different URL. A part is
+/// individually addressed by its number, so re-sending it is idempotent — B2
+/// keeps the last body received for that number and the finish call names the
+/// SHA-1 this function verified.
 async fn upload_one_part(
     b2: &B2Backend,
     auth: &AuthState,
@@ -312,39 +336,41 @@ async fn upload_one_part(
     chunk: &[u8],
     part_sha1s: &mut Vec<String>,
 ) -> Result<()> {
-    let part_url: GetUploadPartUrlResponse = b2
-        .post_json(
-            auth,
-            constants::EP_GET_UPLOAD_PART_URL,
-            serde_json::json!({ "fileId": file_id }),
-        )
-        .await?;
-
     let sha1_hex = ContentHash::sha1(chunk).hex();
-    let resp = b2
-        .client
-        .post(&part_url.upload_url)
-        .header(constants::H_AUTHORIZATION, &part_url.authorization_token)
-        .header(constants::H_PART_NUMBER, part_number.to_string())
-        .header(constants::H_CONTENT_SHA1, &sha1_hex)
-        .header(constants::H_CONTENT_LENGTH, chunk.len().to_string())
-        .body(chunk.to_vec())
-        .send()
-        .await
-        .map_err(reqwest_err)?;
+    retry::run(constants::OP_UPLOAD_PART, |_| async {
+        let part_url: GetUploadPartUrlResponse = b2
+            .post_json_once(
+                auth,
+                constants::EP_GET_UPLOAD_PART_URL,
+                serde_json::json!({ "fileId": file_id }),
+            )
+            .await?;
 
-    let part: UploadPartResponse = parse_json(resp).await?;
-    verify_sha1(&sha1_hex, &part.content_sha1)?;
+        let resp = b2
+            .client
+            .post(&part_url.upload_url)
+            .header(constants::H_AUTHORIZATION, &part_url.authorization_token)
+            .header(constants::H_PART_NUMBER, part_number.to_string())
+            .header(constants::H_CONTENT_SHA1, &sha1_hex)
+            .header(constants::H_CONTENT_LENGTH, chunk.len().to_string())
+            .body(chunk.to_vec())
+            .send()
+            .await
+            .map_err(transport_attempt)?;
+
+        let part: UploadPartResponse = b2.observe_expiry(read_json(resp).await).await?;
+        verify_sha1(&sha1_hex, &part.content_sha1).map_err(Attempt::transport)
+    })
+    .await?;
     part_sha1s.push(sha1_hex);
     Ok(())
 }
 
 /// Cancel an unfinished large file so nothing partial remains. Best-effort: callers
 /// invoke it on the error path and keep the original error.
-async fn cancel_large_file(b2: &B2Backend, auth: &AuthState, file_id: &str) -> Result<()> {
+async fn cancel_large_file(b2: &B2Backend, _auth: &AuthState, file_id: &str) -> Result<()> {
     let _: CancelLargeFileResponse = b2
         .post_json(
-            auth,
             constants::EP_CANCEL_LARGE_FILE,
             serde_json::json!({ "fileId": file_id }),
         )
@@ -375,7 +401,6 @@ pub(super) async fn prepare_upload(
     let auth = b2.auth().await?;
     let upload: GetUploadUrlResponse = b2
         .post_json(
-            &auth,
             constants::EP_GET_UPLOAD_URL,
             serde_json::json!({ "bucketId": auth.bucket_id }),
         )

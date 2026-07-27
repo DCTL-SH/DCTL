@@ -17,7 +17,6 @@ pub(super) async fn list_page(
     let auth = b2.auth().await?;
     let resp: ListFileNamesResponse = b2
         .post_json(
-            &auth,
             constants::EP_LIST_FILE_NAMES,
             serde_json::json!({
                 "bucketId": auth.bucket_id,
@@ -44,7 +43,6 @@ pub(super) async fn head(b2: &B2Backend, key: &ObjectKey) -> Result<ObjectMeta> 
     let auth = b2.auth().await?;
     let resp: ListFileNamesResponse = b2
         .post_json(
-            &auth,
             constants::EP_LIST_FILE_NAMES,
             serde_json::json!({
                 "bucketId": auth.bucket_id,
@@ -123,7 +121,6 @@ pub(super) async fn delete(b2: &B2Backend, key: &ObjectKey) -> Result<()> {
     loop {
         let resp: ListFileVersionsResponse = b2
             .post_json(
-                &auth,
                 constants::EP_LIST_FILE_VERSIONS,
                 serde_json::json!({
                     "bucketId": auth.bucket_id,
@@ -138,7 +135,6 @@ pub(super) async fn delete(b2: &B2Backend, key: &ObjectKey) -> Result<()> {
         for version in resp.files.iter().filter(|v| v.file_name == key.as_str()) {
             let _: DeleteFileVersionResponse = b2
                 .post_json(
-                    &auth,
                     constants::EP_DELETE_FILE_VERSION,
                     serde_json::json!({
                         "fileName": version.file_name,

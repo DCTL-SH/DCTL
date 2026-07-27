@@ -10,6 +10,17 @@ pub(super) const API_PREFIX: &str = "b2api/v2";
 /// Path segment for file downloads under the account's `downloadUrl`.
 pub(super) const DOWNLOAD_SEGMENT: &str = "file";
 
+/// Names for the two operations that are not `b2api/v2` endpoint calls, used in
+/// the log line a retry emits so every retried operation is identifiable.
+pub(super) const OP_DOWNLOAD: &str = "b2_download_file_by_name";
+pub(super) const OP_UPLOAD_FILE: &str = "b2_upload_file";
+pub(super) const OP_UPLOAD_PART: &str = "b2_upload_part";
+
+/// Name of the authorization call in a log line. Not appended to `apiUrl` —
+/// [`AUTHORIZE_URL`] is absolute — but a retried authorization has to be
+/// identifiable in the log alongside every other retried operation.
+pub(super) const EP_AUTHORIZE: &str = "b2_authorize_account";
+
 // Endpoints (appended to `{apiUrl}/{API_PREFIX}/`).
 pub(super) const EP_LIST_BUCKETS: &str = "b2_list_buckets";
 pub(super) const EP_GET_UPLOAD_URL: &str = "b2_get_upload_url";
@@ -49,3 +60,49 @@ pub(super) const LIST_PAGE_SIZE: u32 = 1000;
 pub(super) const ACTION_UPLOAD: &str = "upload";
 /// B2 upload timestamps are epoch milliseconds; divide to get seconds.
 pub(super) const MILLIS_PER_SECOND: i64 = 1000;
+
+/// The header B2 sends to name how long a client should wait before asking
+/// again. Sent with `429` and sometimes with `503`.
+pub(super) const H_RETRY_AFTER: &str = "Retry-After";
+
+// ── Retry schedule (see `super::retry`) ─────────────────────────────────────
+//
+// The numbers below bound one request's total patience. They are here rather
+// than in the retry module for the same reason every other protocol constant is
+// here: an operator asking "how long will `dctl` sit on a failing bucket?" gets
+// the whole answer from one file.
+
+/// How many attempts one B2 request gets, the first one included.
+///
+/// Five retries after the original. Enough to ride out the pod rotation behind a
+/// `503 no tomes available` — which is what B2 answers when an upload URL's
+/// storage pod is busy, and which took five of ten files out of the first live
+/// restore drill — without turning a genuinely broken bucket into a run that
+/// looks hung. With the backoff below the worst case is under sixteen seconds of
+/// waiting per request.
+pub(super) const RETRY_MAX_ATTEMPTS: u32 = 6;
+
+/// The wait before the second attempt; every later wait doubles it.
+///
+/// Half a second, because the failures this schedule is for are decided by
+/// another machine picking a different pod, not by anything healing. Retrying
+/// instantly would spend the whole budget inside the window that made the first
+/// attempt fail.
+pub(super) const RETRY_FIRST_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The longest the schedule itself will wait between two attempts.
+///
+/// Eight seconds: past this the doubling stops buying resilience and starts
+/// buying a run nobody can tell from a hang. A `Retry-After` the server actually
+/// sent is honoured beyond this — the server knows something the schedule does
+/// not — up to [`RETRY_AFTER_CAP`].
+pub(super) const RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// The longest a server-sent `Retry-After` is obeyed.
+///
+/// A minute. B2 sends `Retry-After` with a rate limit, where obeying it is the
+/// difference between being throttled and being blocked, so it wins over the
+/// schedule. It does not win unboundedly: a header of `86400` on a nightly
+/// backup would produce a process that sits silent for a day, and a failure an
+/// operator can see beats a wait they cannot.
+pub(super) const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(60);
