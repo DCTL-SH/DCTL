@@ -422,6 +422,7 @@ async fn reclaim(
         &AuditEntry::new(attribution.op, sink::outcome(&outcome))
             .path(&item.path)
             .size(item.size.unwrap_or_default())
+            .objects(1)
             .remote(attribution.remote),
     )
 }

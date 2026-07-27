@@ -38,6 +38,7 @@ use std::io::{self, Write};
 use clap::Args;
 use serde::Serialize;
 
+use crate::audit::record::{Direction as AuditDirection, Entry as AuditEntry};
 use crate::commands::pipeline::ObjectSpec;
 use crate::constants::{CAT_JSON_STREAM_HINT, STREAM_CHUNK_BYTES};
 use crate::ctx::Ctx;
@@ -48,6 +49,11 @@ use opened::Opened;
 use range::Span;
 use sink::{Flow, Sink};
 use source::Source;
+
+/// Stable command name. Matches `Command::name()` in `cli/mod.rs`, because it is
+/// the `op` field of every audit record this command appends and a compliance
+/// query filters on that word years later.
+const VERB: &str = "cat";
 
 /// Arguments to `dctl cat`.
 #[derive(Args, Debug)]
@@ -159,6 +165,22 @@ async fn stream<W: Write>(
 
         let bytes = sink.written() - before;
 
+        // The egress record, appended per object, after the bytes have gone.
+        //
+        // `cat` is the shortest route out of a vault: `dctl cat archive:q4.xlsx`
+        // decrypts an object and puts its plaintext on a pipe. Every other verb
+        // that does that is recorded, and this one being silent left the log
+        // unable to answer the question it exists for — which is why the rule in
+        // `docs/AUDIT_LOG.md` §9.1 is now "content, in either direction",
+        // rather than "anything that changes stored data".
+        //
+        // `--discard` records too, and records the same count. It reads exactly
+        // the same bytes through exactly the same path and drops them at the
+        // last step; whether the operator kept what they read is not something
+        // this process can attest to, and a log that recorded only the reads
+        // whose output was kept would be trivially evaded.
+        audit(ctx, source, bytes)?;
+
         ctx.stats.add_bytes(bytes);
         ctx.stats.file_done();
         ctx.out.info(format!(
@@ -188,6 +210,40 @@ async fn stream<W: Write>(
     }
 
     Ok(())
+}
+
+/// Append the chained record for one object this run read out.
+///
+/// Only for a **remote** object. A `dctl cat ./notes.txt` reads a file on this
+/// machine through no remote at all: nothing crossed a boundary, no vault was
+/// opened, and a record naming an empty remote would put local shell plumbing in
+/// the file an auditor reads end to end. The rule is the same one
+/// [`crate::audit::sink`] states — the boundary is an attempt on a *store*.
+///
+/// `size` and `bytes` are both the measured count, because for a read they are
+/// the same measurement: what came out is what came out. A range read records
+/// the length of the range, which is the honest answer to "how much of that
+/// object left" — `path` names the object and `--offset`/`--count` are not part
+/// of the record, so a reader sees "487 bytes of q4.xlsx left the vault" rather
+/// than a claim that the whole file did.
+///
+/// # Errors
+/// Whatever [`crate::audit::sink::Sink::record`] refused. The read has already
+/// happened by then and its bytes are already on the consumer's pipe, so the
+/// error does not undo anything — it stops the *next* object, which is the only
+/// thing left to protect.
+fn audit(ctx: &Ctx, source: &Source, bytes: u64) -> Result<()> {
+    let Some(remote) = source.spec().remote() else {
+        return Ok(());
+    };
+    ctx.audit.record(
+        &AuditEntry::new(VERB, crate::exit::ExitCode::Success)
+            .path(source.spec().path())
+            .size(bytes)
+            .moved(AuditDirection::Out, bytes)
+            .objects(1)
+            .remote(remote),
+    )
 }
 
 /// Report what a real run would read, without reading it.

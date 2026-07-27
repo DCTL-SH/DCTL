@@ -53,7 +53,7 @@
 //! why that is stronger than performing them separately — so this order is the
 //! contract the stages report, not a claim about how many round trips happen.
 
-use crate::audit::record::Entry as AuditEntry;
+use crate::audit::record::{Direction as AuditDirection, Entry as AuditEntry};
 use crate::audit::sink;
 use crate::cli::VerifyMode;
 use crate::ctx::Ctx;
@@ -151,6 +151,17 @@ pub trait StageDriver {
     /// worse than one naming none.
     fn remote(&self) -> &str;
 
+    /// Which way this driver moves bytes, for the audit record's `direction`.
+    ///
+    /// Asked of the driver for the same reason as [`StageDriver::remote`], and
+    /// for a sharper one besides: the driver is the only thing that knows which
+    /// end is the remote. `dctl copy vault:tree /out` and `dctl copy /out
+    /// vault:tree` are the same verb with the same two operands, and telling them
+    /// apart from the command line alone means re-deriving a classification the
+    /// engine already made. Getting it wrong records an egress as an ingest,
+    /// which is the exact failure this field exists to prevent.
+    fn direction(&self) -> AuditDirection;
+
     /// BLAKE3 of the plaintext this entry moved, lower-case hex, or empty.
     ///
     /// Taken rather than borrowed: the driver computed it while the bytes were in
@@ -199,16 +210,17 @@ pub async fn transfer_file<D: StageDriver>(
     driver: &D,
     entry: &PlanEntry,
 ) -> Result<()> {
-    let outcome = walk(ctx, driver, entry).await;
-    record(ctx, op, driver, entry, outcome)
+    let walked = walk(ctx, driver, entry).await;
+    let moved = walked.as_ref().copied().unwrap_or_default();
+    record(ctx, op, driver, entry, moved, walked.map(|_| ()))
 }
 
-/// Steps 1–6 alone, with no audit record.
+/// Steps 1–6 alone, with no audit record. Returns the bytes that moved.
 ///
 /// Private, and that is the whole point: every public entry point below appends
 /// a record, so there is no route through this module that moves a file and
 /// leaves no trace of having done it.
-async fn walk<D: StageDriver>(ctx: &Ctx, driver: &D, entry: &PlanEntry) -> Result<()> {
+async fn walk<D: StageDriver>(ctx: &Ctx, driver: &D, entry: &PlanEntry) -> Result<u64> {
     let started = std::time::Instant::now();
     // A bar needs a number. An entry with no recorded size draws as a bar of
     // length zero, which is what an indeterminate bar looks like — and unlike a
@@ -246,26 +258,41 @@ async fn walk<D: StageDriver>(ctx: &Ctx, driver: &D, entry: &PlanEntry) -> Resul
 /// is a false statement in the one artefact whose entire value is being true.
 ///
 /// The size is recorded whichever way it went. It describes the object the
-/// operation concerned, not a claim that those bytes landed; `result` is the
-/// field that says whether they did, and losing "what were you moving?" from
-/// every failure record would make the failures the least investigable entries
-/// in the log.
+/// operation concerned, not a claim that those bytes landed; `moved` is the
+/// claim that they did, and losing "what were you moving?" from every failure
+/// record would make the failures the least investigable entries in the log.
+///
+/// `moved` is a **measurement**, taken by [`StageDriver::upload`] as the bytes
+/// went past, and it is recorded exactly as measured whichever way the run
+/// ended. A transfer that failed before the upload stage measured nothing and
+/// records zero — never the plan's figure, which is a statement about intent. A
+/// `move` whose destination commit succeeded and whose source removal then
+/// failed records the bytes that genuinely landed, because they genuinely
+/// landed; `result` is the field that says the move did not complete.
+///
+/// The direction comes from the driver, so `dctl copy vault:tree /out` records
+/// `out` and the upload that put the tree there records `in`. Those two were
+/// indistinguishable in schema v1, which is most of why there is a schema v2.
 fn record<D: StageDriver>(
     ctx: &Ctx,
     op: &str,
     driver: &D,
     entry: &PlanEntry,
+    moved: u64,
     outcome: Result<()>,
 ) -> Result<()> {
     let record = AuditEntry::new(op, sink::outcome(&outcome))
         .path(&entry.dest)
-        // The audit record's byte field is part of the hash-chain preimage
-        // (`audit::chain`) and is a `u64` by that format's definition, so an
+        // The audit record's byte fields are part of the hash-chain preimage
+        // (`audit::chain`) and are `u64` by that format's definition, so an
         // unrecorded size is written as zero here rather than changing what the
-        // chain covers. It is the plan's figure either way — the field
-        // describes the object the operation concerned, not a measurement this
-        // run took.
+        // chain covers.
         .size(entry.size.unwrap_or_default())
+        .moved(driver.direction(), moved)
+        // One record, one object. A run-level record — `cleanup`, `index
+        // rebuild` — carries its whole count instead, so a chain of a hundred
+        // records still totals correctly however the work was divided up.
+        .objects(1)
         .plaintext_hash(&driver.take_plaintext_hash(entry))
         .remote(driver.remote());
 
@@ -285,15 +312,21 @@ fn elapsed_ms(started: std::time::Instant) -> u64 {
     started.elapsed().as_millis() as u64
 }
 
-/// The stage walk itself.
+/// The stage walk itself, returning the bytes the upload stage measured.
+///
+/// The count comes back rather than being read off the plan, because the plan is
+/// what was *intended* and the audit record has to carry what happened. They
+/// differ whenever a source changed under the run, and the log is the artefact
+/// where that difference matters.
 async fn run_stages<D: StageDriver>(
     ctx: &Ctx,
     driver: &D,
     entry: &PlanEntry,
     handle: &FileHandle,
-) -> Result<()> {
+) -> Result<u64> {
     let progress = ctx.progress.as_ref();
     let reporter = StageReporter::new(progress, handle);
+    let mut moved = 0;
 
     // Driven from [`PIPELINE_STAGES`] rather than from a hand-written sequence,
     // so the order the display shows and the order the work happens in are one
@@ -314,7 +347,10 @@ async fn run_stages<D: StageDriver>(
         match stage {
             Stage::Reading => driver.read(entry).await?,
             Stage::Encrypting => driver.encrypt(entry).await?,
-            Stage::Uploading => reporter.advance(driver.upload(entry).await?),
+            Stage::Uploading => {
+                moved = driver.upload(entry).await?;
+                reporter.advance(moved);
+            }
 
             // Step 4 is mandatory. Everything before this line moved bytes;
             // nothing before it proved they arrived intact.
@@ -333,7 +369,7 @@ async fn run_stages<D: StageDriver>(
 
     progress.set_stage(handle, Stage::Done);
     ctx.stats.file_done();
-    Ok(())
+    Ok(moved)
 }
 
 /// Steps 1–7 then 8: transfer, delete the source, record it — in that order,
@@ -363,11 +399,11 @@ pub async fn move_file<D: StageDriver, R: Reaper>(
     source_reaper: &R,
     entry: &PlanEntry,
 ) -> Result<()> {
-    let outcome = match walk(ctx, driver, entry).await {
-        Ok(()) => source_reaper.remove(&entry.source).await,
-        Err(error) => Err(error),
+    let (moved, outcome) = match walk(ctx, driver, entry).await {
+        Ok(moved) => (moved, source_reaper.remove(&entry.source).await),
+        Err(error) => (0, Err(error)),
     };
-    record(ctx, op, driver, entry, outcome)
+    record(ctx, op, driver, entry, moved, outcome)
 }
 
 /// Record a per-file failure without aborting the run.
@@ -492,6 +528,9 @@ mod tests {
         }
         fn remote(&self) -> &str {
             TEST_REMOTE
+        }
+        fn direction(&self) -> AuditDirection {
+            AuditDirection::In
         }
         fn take_plaintext_hash(&self, _entry: &PlanEntry) -> String {
             String::new()
@@ -635,6 +674,9 @@ mod tests {
             fn remote(&self) -> &str {
                 TEST_REMOTE
             }
+            fn direction(&self) -> AuditDirection {
+                AuditDirection::In
+            }
             fn take_plaintext_hash(&self, _: &PlanEntry) -> String {
                 String::new()
             }
@@ -712,6 +754,111 @@ mod tests {
         assert_eq!(records[0].result, ExitCode::Success.slug());
         assert_eq!(records[0].size, 100);
         assert_eq!(records[0].remote, TEST_REMOTE);
+        assert_eq!(records[0].direction, AuditDirection::In.slug());
+        assert_eq!(records[0].bytes, 100, "the measured count, not the plan's");
+        assert_eq!(records[0].objects, 1);
+        crate::audit::chain::verify(&records).expect("the chain holds");
+    }
+
+    #[tokio::test]
+    async fn the_recorded_byte_count_is_measured_and_not_read_off_the_plan() {
+        // The plan says 100; the driver moves 7. A record that echoed the plan
+        // would report bytes that never went anywhere, which is the same class
+        // of false statement as reporting a file stored that was not.
+        struct Short;
+        impl StageDriver for Short {
+            async fn read(&self, _: &PlanEntry) -> Result<()> {
+                Ok(())
+            }
+            async fn encrypt(&self, _: &PlanEntry) -> Result<()> {
+                Ok(())
+            }
+            async fn upload(&self, _: &PlanEntry) -> Result<u64> {
+                Ok(7)
+            }
+            async fn verify(&self, _: &PlanEntry, _: VerifyMode) -> Result<()> {
+                Ok(())
+            }
+            async fn commit(&self, _: &PlanEntry) -> Result<()> {
+                Ok(())
+            }
+            async fn create_dir(&self, _: &PlanEntry) -> Result<()> {
+                Ok(())
+            }
+            fn remote(&self) -> &str {
+                TEST_REMOTE
+            }
+            fn direction(&self) -> AuditDirection {
+                AuditDirection::Out
+            }
+            fn take_plaintext_hash(&self, _: &PlanEntry) -> String {
+                String::new()
+            }
+        }
+
+        let ctx = ctx(&[]);
+        transfer_file(&ctx, TEST_OP, &Short, &entry("a.txt", 100))
+            .await
+            .unwrap();
+
+        let records = recorded(&ctx);
+        assert_eq!(records[0].size, 100, "what the object was believed to be");
+        assert_eq!(records[0].bytes, 7, "what actually moved");
+    }
+
+    #[tokio::test]
+    async fn a_read_out_of_a_remote_is_distinguishable_from_a_write_into_it() {
+        // Finding 7: in schema v1, `dctl copy vault:tree /out` — data leaving —
+        // was recorded exactly like the upload that put it there. The direction
+        // is what tells them apart, and it comes from the driver because the
+        // driver is what knows which end is the remote.
+        struct Egress;
+        impl StageDriver for Egress {
+            async fn read(&self, _: &PlanEntry) -> Result<()> {
+                Ok(())
+            }
+            async fn encrypt(&self, _: &PlanEntry) -> Result<()> {
+                Ok(())
+            }
+            async fn upload(&self, entry: &PlanEntry) -> Result<u64> {
+                Ok(entry.size.unwrap_or_default())
+            }
+            async fn verify(&self, _: &PlanEntry, _: VerifyMode) -> Result<()> {
+                Ok(())
+            }
+            async fn commit(&self, _: &PlanEntry) -> Result<()> {
+                Ok(())
+            }
+            async fn create_dir(&self, _: &PlanEntry) -> Result<()> {
+                Ok(())
+            }
+            fn remote(&self) -> &str {
+                TEST_REMOTE
+            }
+            fn direction(&self) -> AuditDirection {
+                AuditDirection::Out
+            }
+            fn take_plaintext_hash(&self, _: &PlanEntry) -> String {
+                String::new()
+            }
+        }
+
+        let ctx = ctx(&[]);
+        transfer_file(&ctx, TEST_OP, &Recording::default(), &entry("in.txt", 40))
+            .await
+            .unwrap();
+        transfer_file(&ctx, TEST_OP, &Egress, &entry("out.txt", 195_000))
+            .await
+            .unwrap();
+
+        let records = recorded(&ctx);
+        assert_eq!(records[0].direction, "in");
+        assert_eq!(records[1].direction, "out");
+        assert_eq!(records[1].bytes, 195_000, "the egress is quantified");
+        // Same op, same remote — only the direction and the count tell them
+        // apart, which is exactly the point.
+        assert_eq!(records[0].op, records[1].op);
+        assert_eq!(records[0].remote, records[1].remote);
         crate::audit::chain::verify(&records).expect("the chain holds");
     }
 
@@ -732,6 +879,44 @@ mod tests {
         // Nothing was stored, so nothing was hashed — an empty field rather than
         // a digest of bytes that never landed.
         assert_eq!(records[0].plaintext_hash, "");
+        // And nothing was measured, so nothing is claimed to have moved. The
+        // plan's figure survives in `size`, which is what makes the failure
+        // investigable without making it a claim.
+        assert_eq!(records[0].bytes, 0);
+        assert_eq!(records[0].size, 100);
+    }
+
+    #[tokio::test]
+    async fn a_move_whose_source_survived_still_records_the_bytes_that_landed() {
+        // The destination commit succeeded, so the bytes are genuinely there;
+        // recording zero would understate an egress that happened. `result`
+        // carries the fact that the move did not complete.
+        struct Stubborn;
+        impl Reaper for Stubborn {
+            async fn remove(&self, _: &str) -> Result<()> {
+                Err(CliError::new(ExitCode::TemporaryError, "provider said no"))
+            }
+            fn target(&self) -> &'static str {
+                "source"
+            }
+            fn remote(&self) -> &str {
+                TEST_REMOTE
+            }
+        }
+
+        let ctx = ctx(&[]);
+        let _ = move_file(
+            &ctx,
+            "move",
+            &Recording::default(),
+            &Stubborn,
+            &entry("a.txt", 64),
+        )
+        .await;
+
+        let records = recorded(&ctx);
+        assert_eq!(records[0].bytes, 64);
+        assert_eq!(records[0].result, ExitCode::TemporaryError.slug());
     }
 
     #[tokio::test]

@@ -156,6 +156,19 @@ impl Archive {
         })
     }
 
+    /// The vault's name as the audit log spells it.
+    ///
+    /// The trailing separator is stripped so one remote has one spelling in the
+    /// log. A [`Session`] carries the spec as it was typed (`archive:`) while the
+    /// removal family carries the parsed name (`archive`), and a compliance query
+    /// filtering `remote == archive` must not silently exclude every restore.
+    #[must_use]
+    pub fn remote(&self) -> &str {
+        self.session
+            .remote
+            .trim_end_matches(crate::constants::REMOTE_SEPARATOR)
+    }
+
     /// Every object under the tree that was named, in path order.
     ///
     /// # Errors

@@ -145,11 +145,15 @@ pub async fn deletions<R: Reaper>(
         let outcome = reaper.remove(&entry.dest).await;
         let succeeded = outcome.is_ok();
 
-        // No size and no hash: a deletion stores nothing and hashes nothing, and
-        // the size the destination *used* to be is not a fact this run measured.
+        // No size, no hash and no direction: a deletion stores nothing, hashes
+        // nothing and moves no object bytes anywhere. The size the destination
+        // *used* to be is not a fact this run measured, and an empty `direction`
+        // is the format's spelling of "no bytes crossed a boundary" — which is
+        // the truth about a removal and must not be dressed up as an egress.
         ctx.audit.record(
             &AuditEntry::new(op, sink::outcome(&outcome))
                 .path(&entry.dest)
+                .objects(1)
                 .remote(reaper.remote()),
         )?;
 
@@ -310,6 +314,9 @@ mod tests {
         }
         fn remote(&self) -> &str {
             TEST_REMOTE
+        }
+        fn direction(&self) -> crate::audit::record::Direction {
+            crate::audit::record::Direction::In
         }
         fn take_plaintext_hash(&self, _: &PlanEntry) -> String {
             String::new()

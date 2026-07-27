@@ -57,6 +57,8 @@ use std::path::PathBuf;
 
 use clap::Args;
 
+use crate::audit::record::{Direction as AuditDirection, Entry as AuditEntry};
+use crate::audit::sink;
 use crate::constants::{
     PLAN_ACTION_OVERWRITE, PLAN_ACTION_RESTORE, PLAN_ACTION_SKIP, PLAN_REASON_EXISTS,
     POINT_IN_TIME_FEATURE, POINT_IN_TIME_HINT, PREFLIGHT_SEVERITY_BLOCKING, REMOTE_SEPARATOR,
@@ -357,6 +359,16 @@ fn build_plan(target: &Target, candidates: &[Candidate], findings: &preflight::R
 /// (`PLAN.md` §7). A *fatal* failure stops the run, on the same line
 /// [`pipeline::is_fatal`] draws for the transfer executor: a locked vault would
 /// otherwise produce one identical error per file.
+///
+/// ## Every restored file leaves a record, and it says `out`
+///
+/// `restore` is the command that takes data **out** of a vault and puts it on a
+/// disk in plaintext. Until this was wired it did so without appending a single
+/// line to the tamper-evident chain — which made "who took the data out, and
+/// when, and how much" unanswerable by the one artefact that exists to answer
+/// it. The record goes here, per object, after the fetch has concluded, and it
+/// is written for a failure too: a restore that could not read four objects is
+/// exactly the event somebody has to account for.
 async fn write_everything(
     ctx: &Ctx,
     archive: &Archive,
@@ -365,7 +377,8 @@ async fn write_everything(
 ) -> Result<()> {
     for candidate in candidates {
         if findings.blocks(&candidate.relative) {
-            // Already reported, and already visible in the plan as a skip.
+            // Already reported, and already visible in the plan as a skip. No
+            // record either: nothing was read, so no bytes left the vault.
             ctx.stats.file_skipped();
             continue;
         }
@@ -377,6 +390,33 @@ async fn write_everything(
         let outcome = archive.fetch(&candidate.object, &candidate.native).await;
         ctx.progress.set_stage(&handle, Stage::Verifying);
         ctx.progress.finish_file(handle);
+
+        // `?`, so an unrecordable object ends the run rather than letting the
+        // rest of the vault leave it unattested.
+        ctx.audit.record(
+            &AuditEntry::new(VERB, sink::outcome(&outcome))
+                // The vault path, not the local destination: the log is about
+                // what left the vault, and a local path is a fact about one
+                // machine that nobody can correlate against anything.
+                .path(&candidate.object.logical)
+                .size(candidate.object.size)
+                // `Archive::fetch` writes durably and authenticates before it
+                // returns, so a success moved exactly the object's length out;
+                // a failure moved nothing that can be attested to. An index
+                // rebuilt from the backend records no size, and this reports
+                // that absence as zero rather than inventing a figure — the plan
+                // already warns the operator that its totals understate the run.
+                .moved(
+                    AuditDirection::Out,
+                    if outcome.is_ok() {
+                        candidate.object.size
+                    } else {
+                        0
+                    },
+                )
+                .objects(1)
+                .remote(archive.remote()),
+        )?;
 
         match outcome {
             Ok(()) => {
@@ -907,6 +947,110 @@ mod tests {
             "the restored tree must hold exactly the same paths"
         );
         assert_eq!(before, after, "the two trees must be byte-identical");
+    }
+
+    /// The records one run appended, parsed the way `dctl audit verify` parses
+    /// them.
+    fn recorded(ctx: &Ctx) -> Vec<crate::audit::record::AuditRecord> {
+        std::fs::read_to_string(ctx.audit.path())
+            .unwrap_or_default()
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_backup_and_a_restore_are_both_in_the_chain_and_say_which_way() {
+        // Finding 6 and Finding 7 together, against a real vault.
+        //
+        // Before this, `backup` and `restore` appended *nothing*: 195 KiB could
+        // enter a vault and leave it again and the tamper-evident chain said
+        // neither had happened. And even for the verbs that did record, a read
+        // was indistinguishable from a write. So the assertions are: four
+        // records for four files each way, `in` on the way in, `out` on the way
+        // out, real byte counts, and a chain that verifies.
+        let vault = Vaulted::new().await;
+        let source = source_tree();
+        let out = tempfile::tempdir().unwrap();
+        let stored = snapshot_tree(source.path());
+        let total: u64 = stored.values().map(|body| body.len() as u64).sum();
+
+        let backup_ctx = vault.ctx(&[]);
+        backup::run(
+            &backup_ctx,
+            &BackupArgs {
+                source: source.path().to_path_buf(),
+                destination: "archive:".into(),
+                snapshot: false,
+                snapshot_name: None,
+                follow_symlinks: false,
+                strict_names: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let stored_records = recorded(&backup_ctx);
+        assert_eq!(stored_records.len(), 4, "one record per file stored");
+        crate::audit::chain::verify(&stored_records).expect("the backup's chain holds");
+        for record in &stored_records {
+            assert_eq!(record.op, "backup");
+            assert_eq!(record.result, ExitCode::Success.slug());
+            assert_eq!(record.direction, "in");
+            assert_eq!(record.objects, 1);
+            assert_eq!(record.remote, "archive", "one spelling per remote");
+        }
+        assert_eq!(
+            stored_records.iter().map(|r| r.bytes).sum::<u64>(),
+            total,
+            "the log accounts for every byte that entered the vault"
+        );
+
+        let restore_ctx = vault.ctx(&[]);
+        run(
+            &restore_ctx,
+            &RestoreArgs {
+                source: "archive:".into(),
+                destination: out.path().to_path_buf(),
+                snapshot: None,
+                at: None,
+                skip_unwritable: false,
+                overwrite: false,
+            },
+        )
+        .await
+        .unwrap();
+
+        let taken = recorded(&restore_ctx);
+        assert_eq!(taken.len(), 4, "one record per file restored");
+        crate::audit::chain::verify(&taken).expect("the restore's chain holds");
+        for record in &taken {
+            assert_eq!(record.op, "restore");
+            assert_eq!(
+                record.direction, "out",
+                "a restore is data leaving the vault, and the log has to say so"
+            );
+            assert_eq!(record.objects, 1);
+            assert_eq!(record.remote, "archive");
+        }
+        assert_eq!(
+            taken.iter().map(|r| r.bytes).sum::<u64>(),
+            total,
+            "the log quantifies exactly what left the vault"
+        );
+
+        // The record names the vault path, not the local destination: a local
+        // path is a fact about one machine that no later query can correlate.
+        let paths: Vec<&str> = taken.iter().map(|r| r.path.as_str()).collect();
+        assert!(paths.contains(&"README.md"), "{paths:?}");
+        assert!(
+            paths
+                .iter()
+                .all(|path| !path
+                    .contains(out.path().to_str().expect("the fixture directory is UTF-8"))),
+            "{paths:?}"
+        );
     }
 
     #[tokio::test]

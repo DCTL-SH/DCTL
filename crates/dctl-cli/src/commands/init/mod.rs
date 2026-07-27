@@ -214,6 +214,10 @@ pub async fn run(ctx: &Ctx, args: &InitArgs) -> Result<()> {
     ctx.audit.record(
         &AuditEntry::new(COMMAND, sink::outcome(&created))
             .remote(&plan.vault_name)
+            // No direction and no object count: creating an envelope moves no
+            // object bytes and stores no object. The envelope itself is key
+            // material, not data, and counting it as an object would put a
+            // phantom row in every total a compliance query sums.
             .path(&plan.base),
     )?;
     let created = created?;

@@ -171,6 +171,10 @@ pub async fn run(
             // measured is recorded as zero rather than changing what the chain
             // covers. `dctl ls` shows the same absence as `-`.
             .size(item.size.unwrap_or_default())
+            // No direction: a removal destroys bytes where they lie, it does not
+            // move them across a boundary. Dressing that up as an egress would
+            // put a deletion in the answer to "who took data out".
+            .objects(1)
             .remote(remote),
         )?;
     }

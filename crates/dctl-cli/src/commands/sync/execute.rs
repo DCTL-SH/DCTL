@@ -93,6 +93,7 @@ async fn interleaved<D: StageDriver, R: Reaper>(
                 ctx.audit.record(
                     &AuditEntry::new(TRANSFER_COMMAND_SYNC, sink::outcome(&outcome))
                         .path(&entry.dest)
+                        .objects(1)
                         .remote(Reaper::remote(reaper)),
                 )?;
                 shared::perform(ctx, &shared::removal_subject(reaper, &entry.dest), outcome)?;
@@ -163,6 +164,9 @@ mod tests {
         }
         fn remote(&self) -> &str {
             TEST_REMOTE
+        }
+        fn direction(&self) -> crate::audit::record::Direction {
+            crate::audit::record::Direction::In
         }
         fn take_plaintext_hash(&self, _: &PlanEntry) -> String {
             String::new()

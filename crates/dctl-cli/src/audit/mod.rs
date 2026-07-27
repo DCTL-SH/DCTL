@@ -26,6 +26,13 @@
 //! * [`mod@write`] — the append path: open, append one entry, fsync.
 //! * [`sink`] — the run's one handle: where the log is, when it is opened, and
 //!   what a failure to write one means for the command being recorded.
+//! * `coverage` — which commands append and which do not, checked against the
+//!   command tree so that a new verb cannot join without the decision being
+//!   made. It exists because three commands moved data and recorded nothing,
+//!   and an absence is the one defect reading the code cannot find. A test and
+//!   nothing else, like `crate::cli::mentions`, so it is compiled only under
+//!   `cargo test`; the normative statement of the same policy is
+//!   `docs/AUDIT_LOG.md` §9.1.
 //!
 //! The format is specified normatively in `docs/AUDIT_LOG.md`, in enough detail
 //! to verify a chain with a short script and no DCTL binary. That is not
@@ -34,6 +41,9 @@
 //! same twenty-year-decodability discipline governs `docs/FORMAT.md`.
 
 pub mod chain;
+// A test and nothing else; see the layout note above.
+#[cfg(test)]
+pub mod coverage;
 pub mod record;
 pub mod redaction;
 pub mod serialize;

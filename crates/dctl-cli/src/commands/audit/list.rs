@@ -20,12 +20,13 @@ use clap::Args;
 
 use crate::commands::recovery::timespec;
 use crate::constants::{
-    AUDIT_COLUMN_HASH, AUDIT_COLUMN_INDEX, AUDIT_COLUMN_OP, AUDIT_COLUMN_PATH, AUDIT_COLUMN_RESULT,
-    AUDIT_COLUMN_TIME, AUDIT_LIST_UNLIMITED,
+    AUDIT_COLUMN_BYTES, AUDIT_COLUMN_DIRECTION, AUDIT_COLUMN_HASH, AUDIT_COLUMN_INDEX,
+    AUDIT_COLUMN_OP, AUDIT_COLUMN_PATH, AUDIT_COLUMN_RESULT, AUDIT_COLUMN_TIME,
+    AUDIT_LIST_UNLIMITED,
 };
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
-use crate::output::{Align, Border, Column, Format, Table};
+use crate::output::{Align, Border, Column, Format, Table, size};
 use crate::platform::path as logical;
 
 use super::chain;
@@ -48,6 +49,12 @@ pub struct ListArgs {
     #[arg(long, value_name = "PATH")]
     pub path: Option<String>,
 
+    /// Show only records that moved bytes this way: in, out or internal.
+    ///
+    /// `--direction out` is the egress query — everything that left the remote.
+    #[arg(long, value_name = "DIRECTION")]
+    pub direction: Option<String>,
+
     /// Show only records at or after this instant.
     #[arg(long, value_name = "TIME")]
     pub since: Option<String>,
@@ -66,9 +73,22 @@ pub struct ListArgs {
 struct Window {
     op: Option<String>,
     path: Option<String>,
+    direction: Option<String>,
     since: Option<i64>,
     until: Option<i64>,
 }
+
+/// The directions `--direction` accepts, spelled as the record spells them.
+///
+/// Checked rather than passed through, because the failure mode of an unchecked
+/// value is the worst one this command has: `--direction outbound` would match no
+/// record, print nothing, exit 0, and read as **"nothing ever left the vault"**.
+/// A typo must be a usage error, not an all-clear.
+const DIRECTIONS: [&str; 3] = [
+    crate::constants::AUDIT_DIRECTION_IN,
+    crate::constants::AUDIT_DIRECTION_OUT,
+    crate::constants::AUDIT_DIRECTION_INTERNAL,
+];
 
 impl Window {
     /// Resolve the flags against a single reference instant, so `--since` and
@@ -87,9 +107,25 @@ impl Window {
             })?),
         };
 
+        let direction = match args.direction.as_deref() {
+            None => None,
+            Some(value) if DIRECTIONS.contains(&value) => Some(value.to_string()),
+            Some(value) => {
+                return Err(CliError::usage(format!(
+                    "--direction '{value}' is not one of {}",
+                    DIRECTIONS.join(", ")
+                ))
+                .with_hint(
+                    "An unrecognised direction would match no record and print \
+                     nothing, which reads as 'no data ever moved that way'.",
+                ));
+            }
+        };
+
         Ok(Self {
             op: args.op.clone(),
             path,
+            direction,
             since: args
                 .since
                 .as_deref()
@@ -116,6 +152,17 @@ impl Window {
             .path
             .as_deref()
             .is_some_and(|prefix| !logical::is_under(prefix, &record.path))
+        {
+            return false;
+        }
+        // Exact, so a v1 record — which has no direction at all — is excluded
+        // from every `--direction` query rather than silently counted as one.
+        // A log that spans an upgrade must not answer "what left the vault?"
+        // with rows that could not have said.
+        if self
+            .direction
+            .as_deref()
+            .is_some_and(|wanted| record.direction != wanted)
         {
             return false;
         }
@@ -172,6 +219,11 @@ fn emit(ctx: &Ctx, records: &[&AuditRecord]) -> Result<()> {
                 ctx.out.json(record)?;
             }
         }
+        // `Dir` and `Bytes` sit between the outcome and the path, because "which
+        // way did the data go, and how much of it" is what an auditor scans a
+        // listing for — and in schema v1 neither question had an answer at all.
+        // A v1 record renders `-` and `0`, which is the honest rendering of a
+        // record that could not state them.
         Format::Text => {
             let mut table = Table::new(vec![
                 Column::new(AUDIT_COLUMN_INDEX, Align::Right)
@@ -179,6 +231,9 @@ fn emit(ctx: &Ctx, records: &[&AuditRecord]) -> Result<()> {
                 Column::new(AUDIT_COLUMN_TIME, Align::Left),
                 Column::new(AUDIT_COLUMN_OP, Align::Left),
                 Column::new(AUDIT_COLUMN_RESULT, Align::Left),
+                Column::new(AUDIT_COLUMN_DIRECTION, Align::Left),
+                Column::new(AUDIT_COLUMN_BYTES, Align::Right)
+                    .with_style(ctx.out.palette().number()),
                 Column::new(AUDIT_COLUMN_HASH, Align::Left).with_style(ctx.out.palette().hash()),
                 Column::new(AUDIT_COLUMN_PATH, Align::Left).with_style(ctx.out.palette().path()),
             ])
@@ -190,6 +245,8 @@ fn emit(ctx: &Ctx, records: &[&AuditRecord]) -> Result<()> {
                     record.time.clone(),
                     record.op.clone(),
                     record.result.clone(),
+                    record.direction_display().to_string(),
+                    size::bytes(record.bytes, ctx.out.units()),
                     record.short_hash().to_string(),
                     record.path.clone(),
                 ]);
@@ -238,6 +295,25 @@ mod tests {
             record(1, "delete", "photos/b.jpg", "2026-07-25T10:00:00Z"),
             record(2, "copy", "docs/c.txt", "2026-07-26T10:00:00Z"),
         ]
+    }
+
+    /// A corpus spanning the schema change: one v1 record with no direction at
+    /// all, one v2 ingest, one v2 egress.
+    fn mixed_corpus() -> Vec<AuditRecord> {
+        let mut legacy = record(0, "copy", "photos/a.jpg", "2026-07-24T10:00:00Z");
+        legacy.v = None;
+
+        let mut ingest = record(1, "copy", "photos/b.jpg", "2026-07-25T10:00:00Z");
+        ingest.v = Some(crate::constants::AUDIT_RECORD_VERSION);
+        ingest.direction = crate::constants::AUDIT_DIRECTION_IN.into();
+        ingest.bytes = 40;
+
+        let mut egress = record(2, "copy", "docs/c.txt", "2026-07-26T10:00:00Z");
+        egress.v = Some(crate::constants::AUDIT_RECORD_VERSION);
+        egress.direction = crate::constants::AUDIT_DIRECTION_OUT.into();
+        egress.bytes = 199_680;
+
+        vec![legacy, ingest, egress]
     }
 
     fn window(args: &[&str]) -> Window {
@@ -309,6 +385,47 @@ mod tests {
     fn an_unparseable_filter_is_a_usage_error() {
         let error = Window::resolve(&parse(&["--since", "yesterday"]).list).unwrap_err();
         assert_eq!(error.code(), crate::exit::ExitCode::Usage);
+    }
+
+    /// Indices of the mixed corpus that survive `args`.
+    fn kept_mixed(args: &[&str]) -> Vec<u64> {
+        let selected = window(args);
+        mixed_corpus()
+            .iter()
+            .filter(|record| selected.admits(record))
+            .map(|record| record.index)
+            .collect()
+    }
+
+    #[test]
+    fn the_direction_filter_answers_the_egress_question() {
+        // The query the whole schema change exists to make possible: what left
+        // this remote, and how much of it.
+        assert_eq!(kept_mixed(&["--direction", "out"]), vec![2]);
+        assert_eq!(kept_mixed(&["--direction", "in"]), vec![1]);
+    }
+
+    #[test]
+    fn a_v1_record_is_never_counted_as_a_direction_it_could_not_state() {
+        // A log spanning the upgrade must not answer "what left the vault?"
+        // with rows written before the field existed.
+        for direction in ["in", "out", "internal"] {
+            let window = window(&["--direction", direction]);
+            assert!(
+                !window.admits(&mixed_corpus()[0]),
+                "a v1 record matched --direction {direction}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unknown_direction_is_refused_rather_than_matching_nothing() {
+        // The dangerous failure: `--direction outbound` printing nothing and
+        // exiting 0 reads as "no data ever left".
+        let error = Window::resolve(&parse(&["--direction", "outbound"]).list).unwrap_err();
+        assert_eq!(error.code(), crate::exit::ExitCode::Usage);
+        assert!(error.message().contains("outbound"), "{}", error.message());
+        assert!(error.hint().is_some_and(|hint| hint.contains("no data")));
     }
 
     #[test]

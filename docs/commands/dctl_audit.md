@@ -168,9 +168,22 @@ whole components, so `photos/2024` does not capture `photos/2024-backup`.
 
 ```
 dctl audit list --path photos/2024 --since 2026-07-25 --until 2026-07-26
-Index  Time                  Op      Result   Hash          Path
------  --------------------  ------  -------  ------------  -----------
-    2  2026-07-25T02:00:11Z  backup  success  7d3a95ec3f01  photos/2024
+Index  Time                  Op      Result   Dir  Bytes    Hash          Path
+-----  --------------------  ------  -------  ---  -------  ------------  -----------
+    2  2026-07-25T02:00:11Z  backup  success  in   4.19 GiB  7d3a95ec3f01  photos/2024
+```
+
+**Answer the egress question: what came *out* of the vault, and how much.** This
+is the query the log exists for, and before record schema v2 it could not be
+asked — a read was written exactly like the write that preceded it, with `size:
+0`. See [`../AUDIT_LOG.md`](../AUDIT_LOG.md) §2.2.
+
+```
+dctl audit list --direction out --since 30d
+Index  Time                  Op       Result   Dir  Bytes     Hash          Path
+-----  --------------------  -------  -------  ---  --------  ------------  -----------------------
+   47  2026-07-11T22:04:03Z  cat      success  out  12.4 KiB  0b91ee7715c2  finance/q4-draft.xlsx
+   91  2026-07-19T08:31:55Z  restore  success  out  4.19 GiB  3f0c88ad1d40  photos/2024/holiday.mov
 ```
 
 Show the last twenty deletions against a bucket, as JSON Lines for a log
@@ -248,6 +261,7 @@ verbs below.
       --audit-log <PATH>   Chain to read. Defaults to the log beside the configured index
       --op <OP>            Show only this operation, using `dctl`'s own command names
       --path <PATH>        Show only records touching this logical path or a path beneath it
+      --direction <DIR>    Show only records that moved bytes this way: in, out or internal
       --since <TIME>       Show only records at or after this instant
       --until <TIME>       Show only records before this instant
       --limit <N>          Show at most this many records, most recent last. 0 shows every record [default: 0]
@@ -257,7 +271,17 @@ verbs below.
 `sync`, `delete`, `backup`, `restore`, …) — a prefix match would make `--op copy`
 also select `copyto`. `--path` is canonicalised like every other path
 (`/`-separated, NFC, no `.` or `..`); a `--path` containing `..` is a usage
-error. `--since`/`--until` accept `2026-07-26`, `2026-07-26T14:30:00Z`, `2d`
+error.
+
+`--direction` takes exactly `in`, `out` or `internal`, and anything else is a
+**usage error** rather than an empty result. That is deliberate: `--direction
+outbound` matching no record, printing nothing and exiting 0 would read as *"no
+data ever left this vault"*, which is the worst false statement this command
+could make. Records written before record schema v2 carry no direction at all and
+never match — a filter that counted them as one direction or another would answer
+the egress question with rows that could not have said.
+
+`--since`/`--until` accept `2026-07-26`, `2026-07-26T14:30:00Z`, `2d`
 (two days ago), `@1753574400` (Unix seconds) or `now`, and are **always UTC**.
 Both resolve against a single reference instant, so `--since now --until now`
 cannot describe a non-empty window. A record whose own timestamp cannot be parsed
@@ -297,7 +321,7 @@ array document instead.
 | Code | Name | When |
 |-----:|------|------|
 | 0 | `success` | The chain verified. |
-| 1 | `usage` | No verb given, an unknown flag, an unparseable `--since`/`--until`, a `--path` containing `..`, or `--interactive` with no terminal to prompt on. |
+| 1 | `usage` | No verb given, an unknown flag, an unparseable `--since`/`--until`, a `--direction` outside `in`/`out`/`internal`, a `--path` containing `..`, or `--interactive` with no terminal to prompt on. |
 | 2 | `uncategorised` | An I/O error other than "not found" or "permission denied" while reading the log or writing `--output`, or a serialisation failure while encoding an export. |
 | 4 | `file_not_found` | A component of the `--output` path does not exist. |
 | 4 | `file_not_found` | **No log file at the resolved path**, including when the path came from an explicit `--audit-log`. The message names the path that was looked for. |

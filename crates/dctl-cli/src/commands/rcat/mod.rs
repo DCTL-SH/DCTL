@@ -62,7 +62,7 @@ use std::path::PathBuf;
 use clap::Args;
 use serde::Serialize;
 
-use crate::audit::record::Entry as AuditEntry;
+use crate::audit::record::{Direction as AuditDirection, Entry as AuditEntry};
 use crate::audit::sink;
 use crate::commands::directory::Target;
 use crate::commands::pipeline::{ObjectSpec, command_name};
@@ -158,10 +158,17 @@ pub async fn run(ctx: &Ctx, args: &RcatArgs) -> Result<()> {
 /// Whatever [`crate::audit::sink::Sink::record`] refused: the operation is then
 /// unrecorded and the command fails rather than reporting an unaudited write.
 fn audit(ctx: &Ctx, spec: &ObjectSpec, stored: &Result<u64>) -> Result<()> {
+    let bytes = stored.as_ref().copied().unwrap_or_default();
     ctx.audit.record(
         &AuditEntry::new(VERB, sink::outcome(stored))
             .path(spec.path())
-            .size(stored.as_ref().copied().unwrap_or_default())
+            .size(bytes)
+            // `rcat` is the one verb whose size *is* a measurement — a pipe has
+            // no length until it ends — so `size` and `bytes` agree here by
+            // construction rather than by luck. The direction is always `in`:
+            // there is no reading form of this command.
+            .moved(AuditDirection::In, bytes)
+            .objects(1)
             .remote(spec.remote().unwrap_or_default()),
     )
 }

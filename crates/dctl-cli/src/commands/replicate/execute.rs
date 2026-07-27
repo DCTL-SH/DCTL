@@ -38,7 +38,7 @@
 
 use dctl_store::{ByteRange, ContentHash, ObjectKey};
 
-use crate::audit::record::Entry as AuditEntry;
+use crate::audit::record::{Direction as AuditDirection, Entry as AuditEntry};
 use crate::cli::VerifyMode;
 use crate::commands::replicate::VERB;
 use crate::constants::{
@@ -168,6 +168,19 @@ fn record(ctx: &Ctx, done: &Replicated, destination: &Store) -> Result<()> {
         &AuditEntry::new(VERB, outcome)
             .path(&item.key)
             .size(item.size)
+            // Ciphertext into the destination store, so `in` — and the count is
+            // the object's own size, because a replication that got as far as
+            // this record moved exactly that object and nothing else. A failed
+            // one moved nothing, and says so.
+            .moved(
+                AuditDirection::In,
+                if item.action == Action::Failed {
+                    0
+                } else {
+                    item.size
+                },
+            )
+            .objects(1)
             .ciphertext_hash(&done.hash)
             // The resolved *name*, not the spec: `destination.spec` is the text
             // the operator typed, colon and all, and `remote == replica` is the

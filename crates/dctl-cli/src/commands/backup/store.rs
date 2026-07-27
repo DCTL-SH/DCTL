@@ -40,7 +40,10 @@ use std::path::Path;
 
 use dctl_core::Modified;
 
+use crate::audit::record::{Direction as AuditDirection, Entry as AuditEntry};
+use crate::audit::sink;
 use crate::commands::transfer::pipeline;
+use crate::constants::REMOTE_SEPARATOR;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::output::Stage;
@@ -147,13 +150,40 @@ impl Store {
             .await?;
         Ok(())
     }
+
+    /// The vault's name as the audit log spells it.
+    ///
+    /// The trailing [`REMOTE_SEPARATOR`] is stripped for the same reason the
+    /// transfer engine strips it: a [`Session`] carries the spec exactly as it
+    /// was typed (`archive:`), the removal family carries the parsed name
+    /// (`archive`), and two spellings of one remote is a log a compliance query
+    /// cannot filter — `remote == archive` would silently exclude every backup.
+    fn remote(&self) -> &str {
+        self.session.remote.trim_end_matches(REMOTE_SEPARATOR)
+    }
 }
 
 /// Store every scanned file, reporting each one as it lands.
 ///
+/// ## Every stored file leaves a record
+///
+/// `backup` moves data **into** a vault and, until this was wired, moved it
+/// there without appending a single line to the tamper-evident chain: 195 KiB
+/// could enter a vault and the log would say nothing at all. That is the one
+/// thing an audit log may not do, and it is the reason the record is appended
+/// here — per file, after the core's durable commit returns, exactly where
+/// `PLAN.md` §6 step 8 puts it and exactly where the transfer pipeline puts its
+/// own.
+///
+/// A failure is recorded too, with the command's own classified code and zero
+/// bytes moved, because "which four files did last night's backup fail to
+/// store?" is a question only the log can answer the next morning.
+///
 /// # Errors
 /// Only a fatal failure — the per-file kind is counted and skipped. See the
-/// module documentation.
+/// module documentation. An operation that could not be *audited* is fatal by
+/// construction: the log is unwritable for every file behind it too, and
+/// continuing would store four million files unrecorded.
 pub async fn everything(ctx: &Ctx, store: &Store, files: &[ScannedFile]) -> Result<()> {
     for file in files {
         let logical = store.logical_path(&file.logical);
@@ -163,6 +193,25 @@ pub async fn everything(ctx: &Ctx, store: &Store, files: &[ScannedFile]) -> Resu
         let outcome = store.store_one(&logical, &file.native).await;
         ctx.progress.set_stage(&handle, Stage::Committing);
         ctx.progress.finish_file(handle);
+
+        // `?`, so an unrecordable file ends the run rather than letting the rest
+        // of the tree enter the vault unattested.
+        ctx.audit.record(
+            &AuditEntry::new(super::VERB, sink::outcome(&outcome))
+                .path(&logical)
+                .size(file.size)
+                // The scanned length is the measurement here: the core streams
+                // the file straight from disk and reports success only after the
+                // whole of it is sealed, verified and committed, so a successful
+                // store moved exactly this many bytes. A failure moved none that
+                // anything can attest to.
+                .moved(
+                    AuditDirection::In,
+                    if outcome.is_ok() { file.size } else { 0 },
+                )
+                .objects(1)
+                .remote(store.remote()),
+        )?;
 
         match outcome {
             Ok(()) => {

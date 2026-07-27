@@ -193,12 +193,16 @@ mod tests {
 
     fn record() -> AuditRecord {
         AuditRecord {
+            v: Some(crate::constants::AUDIT_RECORD_VERSION),
             index: 0,
             time: "2026-07-26T14:30:00Z".into(),
             op: "copy".into(),
             result: "success".into(),
+            direction: crate::constants::AUDIT_DIRECTION_IN.into(),
             path: "photos/2024/a.jpg".into(),
             size: 1024,
+            bytes: 1024,
+            objects: 1,
             plaintext_hash: "aa".repeat(32),
             ciphertext_hash: "bb".repeat(32),
             remote: "vault".into(),

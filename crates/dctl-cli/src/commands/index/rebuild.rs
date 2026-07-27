@@ -141,8 +141,16 @@ pub async fn run(ctx: &Ctx, args: &RebuildArgs) -> Result<()> {
     // two: an index that could not be rebuilt is the state in which a listing
     // and the backend disagree, and knowing when that started is the difference
     // between a diagnosis and a guess.
-    ctx.audit
-        .record(&AuditEntry::new(VERB, sink::outcome(&rebuilt)).remote(&remote))?;
+    //
+    // The object count is the whole rebuild's, not one per row: a rebuild is a
+    // single event over a whole vault, and splitting it into a record per object
+    // would bury the one line that matters under a million that do not. Zero
+    // when the rebuild failed, because a failed rebuild counted nothing.
+    ctx.audit.record(
+        &AuditEntry::new(VERB, sink::outcome(&rebuilt))
+            .objects(rebuilt.as_ref().copied().unwrap_or_default() as u64)
+            .remote(&remote),
+    )?;
     let files = rebuilt?;
 
     tracing::info!(

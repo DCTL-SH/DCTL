@@ -47,6 +47,8 @@ pub mod timestamp;
 use clap::Args;
 use serde::Serialize;
 
+use crate::audit::record::Entry as AuditEntry;
+use crate::audit::sink;
 use crate::commands::directory::{self, Plan, PlanOptions, Row, Target};
 use crate::constants::{
     DIRECTORY_ACTION_TOUCH, DIRECTORY_LABEL_CREATE, DIRECTORY_LABEL_OBJECT, DIRECTORY_LABEL_PLACE,
@@ -196,7 +198,25 @@ pub async fn run(ctx: &Ctx, args: &TouchArgs) -> Result<()> {
             create: !args.no_create,
         },
     )
-    .await?;
+    .await;
+
+    // Recorded before the error is raised, and recorded whichever way it went.
+    // `touch` changes stored data — it creates objects and re-stamps them — and
+    // until this was wired it did so leaving no line in the tamper-evident
+    // chain. A modification time is what `sync` decides from, so an unrecorded
+    // re-stamp is an unrecorded decision not to re-upload 40 GB.
+    //
+    // No direction and no byte count: `touch` moves no object content anywhere.
+    // An empty `direction` is the format's spelling of exactly that, and
+    // dressing a metadata change up as an ingest would put it in the answer to
+    // "what entered the vault", where it does not belong.
+    ctx.audit.record(
+        &AuditEntry::new(VERB, sink::outcome(&outcome))
+            .path(&target.path)
+            .objects(1)
+            .remote(&target.remote),
+    )?;
+    let outcome = outcome?;
 
     directory::emit(ctx, &Plan::done(VERB, &target, &options, outcome))?;
     ctx.out

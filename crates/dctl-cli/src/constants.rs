@@ -2502,6 +2502,40 @@ pub const AUDIT_CHAIN_GENESIS_PREV: &str =
 /// here, so a gap is itself evidence rather than a formatting quirk.
 pub const AUDIT_CHAIN_FIRST_INDEX: u64 = 0;
 
+/// Record-schema version this build **writes** (`docs/AUDIT_LOG.md` §2).
+///
+/// Version 1 recorded that an operation happened; it could not say which way the
+/// bytes went, and it recorded the object's declared size rather than what
+/// actually moved. "Who took data out of the vault" is the question an audit log
+/// exists to answer, and v1 could not answer it. Version 2 adds `direction`,
+/// `bytes` and `objects` — see [`AUDIT_RECORD_VERSION_LEGACY`] for how the two
+/// coexist in one chain.
+pub const AUDIT_RECORD_VERSION: u32 = 2;
+
+/// The version a record with **no** `v` field is read as.
+///
+/// A hash-chained log cannot be rewritten in place: every record already written
+/// stays exactly as it is, or the chain it anchors stops verifying. So the
+/// version is per *record*, not per file, and its absence is the v1 spelling —
+/// v1 predates the field. A reader therefore picks the canonical form from the
+/// record in front of it and every historical record keeps verifying forever.
+pub const AUDIT_RECORD_VERSION_LEGACY: u32 = 1;
+
+/// `direction` for bytes that went **into** the remote the record names.
+///
+/// The three directions are a closed vocabulary, spelled once, because a
+/// compliance query filters on them years later and a log in which one command
+/// wrote `in` and another `upload` is a log nobody can query.
+pub const AUDIT_DIRECTION_IN: &str = "in";
+
+/// `direction` for bytes that came **out** of the remote the record names — the
+/// egress question the log exists to answer. See [`AUDIT_DIRECTION_IN`].
+pub const AUDIT_DIRECTION_OUT: &str = "out";
+
+/// `direction` for bytes that never crossed the boundary: both ends are the same
+/// remote, or neither end is one. See [`AUDIT_DIRECTION_IN`].
+pub const AUDIT_DIRECTION_INTERNAL: &str = "internal";
+
 /// Separator between the fields of the canonical byte string a record's hash is
 /// computed over.
 ///
@@ -2530,6 +2564,18 @@ pub const AUDIT_COLUMN_RESULT: &str = "Result";
 pub const AUDIT_COLUMN_PATH: &str = "Path";
 /// See [`AUDIT_COLUMN_INDEX`].
 pub const AUDIT_COLUMN_HASH: &str = "Hash";
+/// See [`AUDIT_COLUMN_INDEX`]. Shown between `Result` and `Path`, because "which
+/// way did the bytes go" is the column an auditor scans for.
+pub const AUDIT_COLUMN_DIRECTION: &str = "Dir";
+/// See [`AUDIT_COLUMN_INDEX`]. The measured count, never the planned one.
+pub const AUDIT_COLUMN_BYTES: &str = "Bytes";
+
+/// What the text listing shows in `Dir` for a record that moved no object bytes.
+///
+/// A dash rather than an empty cell: a blank column reads as missing data, and
+/// "this operation moved nothing" is a fact, not an absence. The same dash stands
+/// in for a v1 record, which could not state a direction at all.
+pub const AUDIT_DIRECTION_NONE_DISPLAY: &str = "-";
 
 /// Row limit meaning "every record". Zero rather than a sentinel maximum, so
 /// `--limit 0` reads as "no limit" exactly the way `--max-size 0` does.

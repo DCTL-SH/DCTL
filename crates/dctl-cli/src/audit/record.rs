@@ -38,18 +38,84 @@
 //! perfectly ordinary record, and a reader that refused it could not verify a
 //! real log. The chain-bearing fields — `index`, `prev`, `hash` — are *not*
 //! optional: a record without them is not a record, and the reader says so.
+//!
+//! ## Version 2: which way did the bytes go, and how many were there
+//!
+//! A v1 record said an operation happened. It could not say whether data went
+//! **into** the vault or came **out** of it, and its `size` was the object's
+//! declared size rather than a measurement — so `dctl copy vault:tree /out`,
+//! which is data leaving, recorded `size: 0` and was indistinguishable from the
+//! upload that put it there. For a tool sold on an audit story, "who took data
+//! out" is the question the log exists to answer, and v1 could not answer it.
+//!
+//! Version 2 adds three fields — [`AuditRecord::direction`],
+//! [`AuditRecord::bytes`] and [`AuditRecord::objects`] — and one that says which
+//! schema a record is written in, [`AuditRecord::version`]. The rule for reading
+//! old records is stated normatively in `docs/AUDIT_LOG.md` §2.1 and implemented
+//! in [`crate::audit::chain::canonical`]: **the version travels with the record,
+//! never with the file**, because a hash-chained log cannot be rewritten in place
+//! — rewriting one record breaks every link after it. A v1 record therefore stays
+//! byte-for-byte as it was written and keeps verifying under the v1 rule forever.
+//!
+//! [`Entry::moved`] is the reason `bytes` cannot be recorded without a direction:
+//! there is no setter for one without the other, so an operation that moves bytes
+//! and forgets to say which way will not compile.
 
 use serde::{Deserialize, Serialize};
 
 use crate::commands::touch::timestamp::Timestamp;
-use crate::constants::{AUDIT_HASH_DISPLAY_LEN, HASH_HEX_LEN_BLAKE3};
+use crate::constants::{
+    AUDIT_DIRECTION_IN, AUDIT_DIRECTION_INTERNAL, AUDIT_DIRECTION_NONE_DISPLAY,
+    AUDIT_DIRECTION_OUT, AUDIT_HASH_DISPLAY_LEN, AUDIT_RECORD_VERSION, AUDIT_RECORD_VERSION_LEGACY,
+    HASH_HEX_LEN_BLAKE3,
+};
 use crate::exit::ExitCode;
 
 use super::redaction;
 
+/// Which way object bytes crossed the boundary of the remote a record names.
+///
+/// A closed enum rather than a string, because the whole point of the field is
+/// that a compliance query can filter on it in ten years: a log in which one
+/// command wrote `out` and another wrote `download` answers nothing. The absence
+/// of a variant for "no bytes" is deliberate — see [`Entry::moved`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    /// Bytes entered the remote: an upload, a `backup`, an `rcat`, the
+    /// destination side of a `replicate`.
+    In,
+    /// Bytes left it: a download, a `restore`, a `cat`. **This is the direction
+    /// the log exists to record.**
+    Out,
+    /// Bytes never crossed the boundary — both ends are the same remote, or
+    /// neither end is one (a filesystem-to-filesystem copy).
+    Internal,
+}
+
+impl Direction {
+    /// The stable slug written to the record and matched by a query.
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::In => AUDIT_DIRECTION_IN,
+            Self::Out => AUDIT_DIRECTION_OUT,
+            Self::Internal => AUDIT_DIRECTION_INTERNAL,
+        }
+    }
+}
+
 /// One append-only audit entry, as it appears on disk.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 pub struct AuditRecord {
+    /// Which record schema this entry is written in.
+    ///
+    /// Spelled `v` on disk — it is on every line of a file people read with
+    /// `grep`, and the shortest name that cannot be mistaken for anything else is
+    /// the right one there. **Absent means 1**, because v1 predates the field;
+    /// [`version`](AuditRecord::version) resolves that so no reader has to
+    /// remember it.
+    #[serde(rename = "v", default, skip_serializing_if = "Option::is_none")]
+    pub v: Option<u32>,
     /// Position in the chain, dense and ascending from
     /// [`crate::constants::AUDIT_CHAIN_FIRST_INDEX`].
     pub index: u64,
@@ -59,12 +125,33 @@ pub struct AuditRecord {
     pub op: String,
     /// How it ended: the slug from [`crate::exit::ExitCode`].
     pub result: String,
+    /// Which way the bytes went: `in`, `out`, `internal`, or empty when the
+    /// operation moved no object bytes at all.
+    #[serde(default)]
+    pub direction: String,
     /// Logical vault path the operation touched.
     #[serde(default)]
     pub path: String,
-    /// Plaintext size in bytes.
+    /// Plaintext size in bytes of the object the operation *concerned*.
+    ///
+    /// Not a claim that these bytes moved — [`bytes`](AuditRecord::bytes) is that
+    /// claim. Keeping both is what lets a failure record still answer "what were
+    /// you moving?" while answering "nothing landed" at the same time.
     #[serde(default)]
     pub size: u64,
+    /// Object bytes this operation actually moved, measured rather than planned.
+    ///
+    /// Zero on a failure, because nothing was proven to have landed; zero for an
+    /// operation that moves no bytes at all, such as a delete.
+    #[serde(default)]
+    pub bytes: u64,
+    /// How many objects this record accounts for.
+    ///
+    /// One for a per-file record. A run-level record — `cleanup`, `index
+    /// rebuild`, a `scrub` — carries the whole count, so a chain of a hundred
+    /// records still totals correctly.
+    #[serde(default)]
+    pub objects: u64,
     /// BLAKE3 of the plaintext, hex.
     #[serde(default)]
     pub plaintext_hash: String,
@@ -81,6 +168,30 @@ pub struct AuditRecord {
 }
 
 impl AuditRecord {
+    /// The schema this record is written in, with the absent-means-v1 rule
+    /// applied.
+    ///
+    /// One function so the rule has one implementation. A reader that inlined
+    /// `unwrap_or(1)` in three places is three chances for one of them to become
+    /// `unwrap_or(2)` and start hashing every historical record the wrong way.
+    #[must_use]
+    pub const fn version(&self) -> u32 {
+        match self.v {
+            Some(version) => version,
+            None => AUDIT_RECORD_VERSION_LEGACY,
+        }
+    }
+
+    /// Whether this build knows how to compute this record's hash.
+    ///
+    /// A record from a *future* schema is not a forgery and must not be reported
+    /// as one: this build simply cannot attest to it. See
+    /// [`crate::audit::chain::BreakKind::UnsupportedVersion`].
+    #[must_use]
+    pub const fn is_supported_version(&self) -> bool {
+        self.version() >= AUDIT_RECORD_VERSION_LEGACY && self.version() <= AUDIT_RECORD_VERSION
+    }
+
     /// The leading characters of the stored hash, for a listing.
     ///
     /// A prefix, never the whole value: a listing has not verified anything, and
@@ -93,6 +204,19 @@ impl AuditRecord {
             .nth(AUDIT_HASH_DISPLAY_LEN)
             .map_or(self.hash.len(), |(index, _)| index);
         &self.hash[..end]
+    }
+
+    /// What a listing shows in the direction column.
+    ///
+    /// A dash for "no bytes moved" and for every v1 record, which could not state
+    /// one. An empty cell would read as missing data.
+    #[must_use]
+    pub fn direction_display(&self) -> &str {
+        if self.direction.is_empty() {
+            AUDIT_DIRECTION_NONE_DISPLAY
+        } else {
+            &self.direction
+        }
     }
 }
 
@@ -111,8 +235,11 @@ pub struct Entry {
     time: String,
     op: String,
     result: String,
+    direction: String,
     path: String,
     size: u64,
+    bytes: u64,
+    objects: u64,
     plaintext_hash: String,
     ciphertext_hash: String,
     remote: String,
@@ -143,8 +270,11 @@ impl Entry {
             time: redaction::field(&time.to_rfc3339()),
             op: redaction::field(op),
             result: redaction::field(outcome.slug()),
+            direction: String::new(),
             path: String::new(),
             size: 0,
+            bytes: 0,
+            objects: 0,
             plaintext_hash: String::new(),
             ciphertext_hash: String::new(),
             remote: String::new(),
@@ -158,10 +288,42 @@ impl Entry {
         self
     }
 
-    /// Plaintext size in bytes.
+    /// Plaintext size in bytes of the object the operation concerned.
+    ///
+    /// Deliberately **not** a claim that the bytes moved: that is
+    /// [`Entry::moved`]. A failed transfer records the size it was attempting and
+    /// zero bytes moved, which is what makes a failure record investigable.
     #[must_use]
     pub const fn size(mut self, bytes: u64) -> Self {
         self.size = bytes;
+        self
+    }
+
+    /// Object bytes that actually moved, and which way they went.
+    ///
+    /// **One setter for both, on purpose.** A byte count with no direction is the
+    /// v1 defect this schema exists to close — a read that looks exactly like a
+    /// write — so there is no way to record one without the other, and an
+    /// operation that moves bytes and forgets to say which way will not compile.
+    ///
+    /// Call it with the *measured* count, after the operation concluded. A
+    /// failure records nothing moved, because nothing was proven to have landed.
+    #[must_use]
+    pub fn moved(mut self, direction: Direction, bytes: u64) -> Self {
+        self.direction = redaction::field(direction.slug());
+        self.bytes = bytes;
+        self
+    }
+
+    /// How many objects this record accounts for.
+    ///
+    /// One for a per-file record; the whole count for a run-level one. Set
+    /// explicitly rather than defaulted to 1, because a record that accounts for
+    /// no object at all — `dctl init`, a `cleanup` that found nothing — is a real
+    /// record and must not claim to have touched one.
+    #[must_use]
+    pub const fn objects(mut self, count: u64) -> Self {
+        self.objects = count;
         self
     }
 
@@ -208,6 +370,12 @@ impl Entry {
         &self.result
     }
 
+    /// The direction slug, or empty when the operation moved no object bytes.
+    #[must_use]
+    pub fn direction_field(&self) -> &str {
+        &self.direction
+    }
+
     /// The logical path, or empty when the operation touched none.
     #[must_use]
     pub fn path_field(&self) -> &str {
@@ -218,6 +386,18 @@ impl Entry {
     #[must_use]
     pub const fn size_field(&self) -> u64 {
         self.size
+    }
+
+    /// Object bytes that actually moved.
+    #[must_use]
+    pub const fn bytes_field(&self) -> u64 {
+        self.bytes
+    }
+
+    /// How many objects this record accounts for.
+    #[must_use]
+    pub const fn objects_field(&self) -> u64 {
+        self.objects
     }
 
     /// Plaintext hash, or empty when there was no plaintext.
@@ -259,12 +439,16 @@ mod tests {
 
     fn record() -> AuditRecord {
         AuditRecord {
+            v: Some(AUDIT_RECORD_VERSION),
             index: 0,
             time: "2026-07-26T14:30:00Z".into(),
             op: "copy".into(),
             result: "success".into(),
+            direction: AUDIT_DIRECTION_IN.into(),
             path: "photos/2024/a.jpg".into(),
             size: 1024,
+            bytes: 1024,
+            objects: 1,
             plaintext_hash: "aa".repeat(32),
             ciphertext_hash: "bb".repeat(32),
             remote: "vault".into(),
@@ -317,6 +501,49 @@ mod tests {
     }
 
     #[test]
+    fn a_record_with_no_version_field_is_read_as_v1() {
+        // The whole migration rule, in one assertion. Every record ever written
+        // by a v1 build lacks the field, and reading it as anything else would
+        // hash it the wrong way and report the customer's evidence as forged.
+        let json = r#"{"index":0,"time":"t","op":"copy","result":"success",
+                       "prev":"00","hash":"11"}"#;
+        let legacy: AuditRecord = serde_json::from_str(json).unwrap();
+        assert_eq!(legacy.v, None);
+        assert_eq!(legacy.version(), AUDIT_RECORD_VERSION_LEGACY);
+        assert!(legacy.is_supported_version());
+
+        // And a v1 record round-trips without acquiring one: re-serialising a
+        // record must never change the bytes its hash covers.
+        assert!(!serde_json::to_string(&legacy).unwrap().contains("\"v\""));
+    }
+
+    #[test]
+    fn a_version_this_build_does_not_know_is_reported_rather_than_guessed() {
+        let mut future = record();
+        future.v = Some(AUDIT_RECORD_VERSION + 1);
+        assert!(!future.is_supported_version());
+
+        // Zero is not "absent": a reader that treated it as v1 would let a
+        // forger choose which canonical form a record is measured against.
+        let mut zero = record();
+        zero.v = Some(0);
+        assert!(!zero.is_supported_version());
+    }
+
+    #[test]
+    fn a_direction_column_never_renders_an_empty_cell() {
+        // "This operation moved no bytes" is a fact. A blank cell reads as
+        // missing data, which is a different and much worse claim.
+        let mut moved = record();
+        assert_eq!(moved.direction_display(), AUDIT_DIRECTION_IN);
+        moved.direction = String::new();
+        assert_eq!(
+            moved.direction_display(),
+            crate::constants::AUDIT_DIRECTION_NONE_DISPLAY
+        );
+    }
+
+    #[test]
     fn a_record_round_trips_through_json() {
         let mut sealed = record();
         sealed.hash = "cd".repeat(32);
@@ -354,6 +581,9 @@ mod tests {
         let entry = Entry::at("copy", ExitCode::Success, Timestamp::parse("@0").unwrap());
         assert_eq!(entry.path_field(), "");
         assert_eq!(entry.size_field(), 0);
+        assert_eq!(entry.direction_field(), "");
+        assert_eq!(entry.bytes_field(), 0);
+        assert_eq!(entry.objects_field(), 0);
         assert_eq!(entry.plaintext_hash_field(), "");
         assert_eq!(entry.ciphertext_hash_field(), "");
         assert_eq!(entry.remote_field(), "");
@@ -361,14 +591,59 @@ mod tests {
         let filled = entry
             .path("photos/a.jpg")
             .size(1024)
+            .moved(Direction::Out, 1024)
+            .objects(1)
             .plaintext_hash(&"aa".repeat(32))
             .ciphertext_hash(&"bb".repeat(32))
             .remote("vault");
         assert_eq!(filled.path_field(), "photos/a.jpg");
         assert_eq!(filled.size_field(), 1024);
+        assert_eq!(filled.direction_field(), AUDIT_DIRECTION_OUT);
+        assert_eq!(filled.bytes_field(), 1024);
+        assert_eq!(filled.objects_field(), 1);
         assert_eq!(filled.plaintext_hash_field(), "aa".repeat(32));
         assert_eq!(filled.ciphertext_hash_field(), "bb".repeat(32));
         assert_eq!(filled.remote_field(), "vault");
+    }
+
+    #[test]
+    fn bytes_cannot_be_recorded_without_saying_which_way_they_went() {
+        // The v1 defect, closed at the type level: there is no setter for a byte
+        // count on its own, so `moved` is the only route to a non-zero `bytes`
+        // and it takes the direction in the same call. A read that looked like a
+        // write is what made the log unable to answer "who took data out".
+        let entry = Entry::at("copy", ExitCode::Success, Timestamp::parse("@0").unwrap());
+        assert_eq!(entry.bytes_field(), 0);
+        assert_eq!(entry.direction_field(), "");
+
+        for (direction, slug) in [
+            (Direction::In, AUDIT_DIRECTION_IN),
+            (Direction::Out, AUDIT_DIRECTION_OUT),
+            (
+                Direction::Internal,
+                crate::constants::AUDIT_DIRECTION_INTERNAL,
+            ),
+        ] {
+            let moved = entry.clone().moved(direction, 7);
+            assert_eq!(moved.bytes_field(), 7);
+            assert_eq!(moved.direction_field(), slug);
+            assert_eq!(direction.slug(), slug);
+        }
+    }
+
+    #[test]
+    fn the_three_direction_slugs_are_distinct_and_stable() {
+        // A compliance query filters on these years later; two spellings of one
+        // direction, or a collision between two, is a log nobody can query.
+        let slugs: Vec<&str> = [Direction::In, Direction::Out, Direction::Internal]
+            .into_iter()
+            .map(Direction::slug)
+            .collect();
+        let mut unique = slugs.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), slugs.len());
+        assert!(slugs.iter().all(|slug| !slug.is_empty()));
     }
 
     #[test]

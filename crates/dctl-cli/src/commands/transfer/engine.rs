@@ -136,6 +136,7 @@ use dctl_store::ContentHash;
 use zeroize::Zeroizing;
 
 use crate::addressing;
+use crate::audit::record::Direction as AuditDirection;
 use crate::cli::VerifyMode;
 use crate::commands::pipeline::command_name;
 use crate::constants::{
@@ -819,6 +820,26 @@ impl StageDriver for Engine {
             (Some(session), _) => session.remote.trim_end_matches(REMOTE_SEPARATOR),
             (None, Some(plain)) => plain.name(),
             (None, None) => "",
+        }
+    }
+
+    /// Which way this engine moves bytes across the boundary of the remote it
+    /// named, in the audit log's vocabulary.
+    ///
+    /// One `match`, exhaustive over [`Direction`], so a transfer direction added
+    /// later has to state its answer here rather than inheriting whichever arm a
+    /// wildcard happened to fall into. Recording an egress as an ingest is the
+    /// single defect schema v2 exists to close, and it must not be reintroduced
+    /// by a `_ =>`.
+    ///
+    /// `LocalOnly` is `internal` rather than empty: bytes really did move, they
+    /// simply never crossed a remote's boundary. Empty means "no bytes", and a
+    /// filesystem-to-filesystem copy of forty gigabytes is not that.
+    fn direction(&self) -> AuditDirection {
+        match self.direction {
+            Direction::Upload | Direction::PlainUpload => AuditDirection::In,
+            Direction::Download | Direction::PlainDownload => AuditDirection::Out,
+            Direction::LocalOnly => AuditDirection::Internal,
         }
     }
 
@@ -1798,6 +1819,44 @@ mod tests {
             std::fs::read(out.path().join("b.txt")).unwrap(),
             b"from the remote"
         );
+    }
+
+    #[tokio::test]
+    async fn a_real_engine_reports_the_direction_the_audit_log_records() {
+        // The pipeline's own tests drive a *fake* driver, so they prove the
+        // record carries whatever direction it was handed and nothing about
+        // whether the engine hands over the right one. This asserts the mapping
+        // on a connected engine, both ways, against the same plain remote —
+        // because "an egress recorded as an ingest" is the exact failure schema
+        // v2 exists to prevent, and it would be invisible everywhere else.
+        let store = tempfile::tempdir().unwrap();
+        std::fs::write(store.path().join("b.txt"), b"from the remote").unwrap();
+        let local = tempfile::tempdir().unwrap();
+        std::fs::write(local.path().join("a.txt"), b"to the remote").unwrap();
+        let (_config_dir, ctx) = plain_ctx(store.path());
+
+        let remote = RemoteSpec::parse("backup:").unwrap();
+        let disk = RemoteSpec::parse(local.path().to_str().unwrap()).unwrap();
+
+        let out = Engine::connect(&ctx, "copy", &remote, &disk).await.unwrap();
+        assert_eq!(out.direction, Direction::PlainDownload);
+        assert_eq!(
+            StageDriver::direction(&out),
+            AuditDirection::Out,
+            "reading a remote onto a disk is data leaving it"
+        );
+
+        let into = Engine::connect(&ctx, "copy", &disk, &remote).await.unwrap();
+        assert_eq!(into.direction, Direction::PlainUpload);
+        assert_eq!(StageDriver::direction(&into), AuditDirection::In);
+
+        // And a transfer with no remote at all is `internal`, never empty:
+        // forty gigabytes moved between two directories is not "no bytes".
+        let elsewhere = tempfile::tempdir().unwrap();
+        let other = RemoteSpec::parse(elsewhere.path().to_str().unwrap()).unwrap();
+        let within = Engine::connect(&ctx, "copy", &disk, &other).await.unwrap();
+        assert_eq!(within.direction, Direction::LocalOnly);
+        assert_eq!(StageDriver::direction(&within), AuditDirection::Internal);
     }
 
     #[tokio::test]
