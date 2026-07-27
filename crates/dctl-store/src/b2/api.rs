@@ -108,6 +108,17 @@ pub(crate) struct FileItem {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ListFileVersionsResponse {
     pub files: Vec<VersionItem>,
+    /// Where the next page starts, or `None` at the end of the listing.
+    ///
+    /// **Both continuation fields are required together.** B2 keys a version
+    /// listing by `(fileName, fileId)`, because one name has many versions, so
+    /// resuming from `nextFileName` alone restarts at that name's *newest*
+    /// version and loops forever over the first page. These two fields not
+    /// existing on this struct at all is what made `delete` stop after one page
+    /// and report success with the older versions still alive.
+    pub next_file_name: Option<String>,
+    /// See [`ListFileVersionsResponse::next_file_name`].
+    pub next_file_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -122,4 +133,63 @@ pub(crate) struct DeleteFileVersionResponse {
     #[allow(dead_code)]
     #[serde(rename = "fileId")]
     pub file_id: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A `b2_list_file_versions` reply with more to come, trimmed to the fields
+    /// this crate reads. Both continuation tokens are present, because B2 keys a
+    /// version listing by `(fileName, fileId)`.
+    const CONTINUED: &str = r#"{
+      "files": [
+        {"fileName": "probe/v.txt", "fileId": "4_z50a_f100a", "action": "upload"},
+        {"fileName": "probe/v.txt", "fileId": "4_z50a_f100b", "action": "upload"}
+      ],
+      "nextFileName": "probe/v.txt",
+      "nextFileId": "4_z50a_f100c"
+    }"#;
+
+    /// The same reply at the end of the listing.
+    const FINAL: &str = r#"{
+      "files": [{"fileName": "probe/v.txt", "fileId": "4_z50a_f100z", "action": "upload"}],
+      "nextFileName": null,
+      "nextFileId": null
+    }"#;
+
+    #[test]
+    fn a_version_listing_carries_both_continuation_tokens() {
+        // The defect this pins was an *absence*: neither field existed on this
+        // struct, so `delete` issued one request, deleted the first thousand
+        // versions and returned `Ok`. `dctl deletefile` then exited 0 over an
+        // object that `dctl ls` still listed and `dctl cat` still read back —
+        // and because B2 returns versions newest-first, the survivors were the
+        // *oldest* copies, which is the original content.
+        //
+        // Both tokens together, or neither: resuming from `nextFileName` alone
+        // restarts at that name's newest version, which never terminates.
+        let more: ListFileVersionsResponse =
+            serde_json::from_str(CONTINUED).expect("a continued page parses");
+        assert_eq!(more.files.len(), 2);
+        assert_eq!(more.next_file_name.as_deref(), Some("probe/v.txt"));
+        assert_eq!(more.next_file_id.as_deref(), Some("4_z50a_f100c"));
+
+        let last: ListFileVersionsResponse =
+            serde_json::from_str(FINAL).expect("a final page parses");
+        assert_eq!(last.next_file_name, None);
+        assert_eq!(last.next_file_id, None);
+    }
+
+    #[test]
+    fn a_reply_with_no_continuation_keys_at_all_is_the_end_of_the_listing() {
+        // An older or stricter server may omit the keys rather than send null.
+        // Reading that as "there is more" would loop; reading it as an error
+        // would refuse a perfectly good reply.
+        let body = r#"{"files": []}"#;
+        let page: ListFileVersionsResponse =
+            serde_json::from_str(body).expect("an unadorned page parses");
+        assert!(page.files.is_empty());
+        assert_eq!(page.next_file_name, None);
+    }
 }

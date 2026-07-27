@@ -12,10 +12,29 @@
 //! native large-file (multipart) API, then `get_to_path` streams it back for a
 //! byte-identical compare.
 //!
-//! LIVE VERIFICATION STATUS: pending the user's B2 credentials. These tests have NOT
-//! yet been run against a live bucket — the user must first rotate the DCTL001 B2 key
-//! and export it via the `DCTL_B2_*` env vars, then run with `--ignored`. They never
-//! run in CI (no creds → skipped; and `#[ignore]` keeps them out of the default run).
+//! LIVE VERIFICATION STATUS: **run**, on 2026-07-27, against bucket DCTL001. All
+//! three pass. They still never run in CI (no creds → skipped; `#[ignore]` keeps
+//! them out of the default run), so this line is the only record that they have
+//! been exercised — re-run them after any change under `b2/` and update the date.
+//!
+//! ## What these three still do not cover
+//!
+//! Stated because the header used to say "pending" long after it was stale, and
+//! a stale status line is worse than none: a reader takes "these tests pass" for
+//! "this backend is exercised".
+//!
+//! * **Version pagination on delete.** `delete` must remove *every* version of a
+//!   name, and it used to issue one `b2_list_file_versions` and stop — so a name
+//!   with more than a thousand versions was reported deleted while its oldest
+//!   copies stayed alive and readable. Verified manually on 2026-07-27: 1 005
+//!   versions of one key uploaded through the raw API, then
+//!   `dctl deletefile b2:…` → **0 versions remaining**, gone from `dctl ls`,
+//!   `dctl cat` exit 4. Not automated here because building the pile takes seven
+//!   minutes of round trips; the wire-format half is unit-tested in
+//!   `b2::api::tests`.
+//! * **Retry and re-authentication.** There is none to test (see the b2 probe
+//!   findings F10 and F13).
+//! * **Source modification time.** Not stored, so nothing round-trips it.
 
 use bytes::Bytes;
 use dctl_store::b2::{B2Backend, B2Credentials};
