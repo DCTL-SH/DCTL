@@ -105,6 +105,7 @@
 
 pub mod attr;
 pub mod config;
+pub mod detached;
 pub mod errno;
 pub mod fs;
 pub mod handle;

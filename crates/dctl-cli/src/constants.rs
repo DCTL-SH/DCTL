@@ -3516,6 +3516,47 @@ pub const MOUNT_READDIR_BATCH: usize = 512;
 /// for the ordinary case by four orders of magnitude.
 pub const MOUNT_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Longest a mount waits to see its own detach actually take effect.
+///
+/// `fuser`'s unmount is not always synchronous. With `auto_unmount` — which is
+/// requested whenever the ACL is wider than the owner — it closes a socket and
+/// returns success, leaving a `fusermount3` child to do the work, so the
+/// mountpoint can still be attached for a moment after the call returns. A mount
+/// that reported "unmounted" at that moment would be reporting somebody else's
+/// unfinished work as its own (`PLAN.md` §6), which is what
+/// [`mount::detached`](crate::mount::detached) now stops it doing.
+///
+/// Two seconds, matching [`MOUNT_SHUTDOWN_GRACE`], and for the same reason: it is
+/// four orders of magnitude more than the ordinary case needs, and the wait has
+/// to be bounded because a `dctl mount` that would not exit is worse than one
+/// that exits having said plainly that the mountpoint is still attached.
+pub const MOUNT_DETACH_GRACE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// `ENOTCONN`, the one errno that means a mountpoint is still attached to a
+/// filesystem whose server has gone.
+///
+/// Spelled here rather than at the comparison because the whole meaning of
+/// [`mount::detached`](crate::mount::detached) rests on this value, and a reader
+/// should not have to look it up. Not taken from `libc`, which is not a
+/// dependency of this crate: the number is fixed by each platform's ABI and
+/// differs between Linux and the BSDs, macOS included.
+#[cfg(target_os = "linux")]
+pub const MOUNT_ENOTCONN: i32 = 107;
+/// The same, under the BSD numbering macOS inherited.
+#[cfg(not(target_os = "linux"))]
+pub const MOUNT_ENOTCONN: i32 = 57;
+
+/// What to tell an operator whose mountpoint is still attached after the mount
+/// ended.
+///
+/// Names the command that fixes it, because the failure is recoverable in one
+/// step and a message that only reported the problem would leave the reader to
+/// search for that step while a directory on their machine is unusable.
+pub const MOUNT_STALE_HINT: &str = "The filesystem is gone but the kernel still has the mountpoint \
+     attached, so every process that touches it will fail with 'Transport \
+     endpoint is not connected'. Run `fusermount3 -u <mountpoint>` on Linux, or \
+     `umount <mountpoint>` on macOS, to release it.";
+
 /// How often the shutdown wait re-checks whether the filesystem thread has ended.
 ///
 /// Ten milliseconds: below human perception, and cheap enough that the poll costs

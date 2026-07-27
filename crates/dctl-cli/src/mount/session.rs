@@ -13,9 +13,16 @@
 //! * A signal unmounts and then waits for the session to end.
 //! * A future dropped mid-mount — which is what happens when `main`'s own Ctrl-C
 //!   race fires first — unmounts from [`Mounted`]'s `Drop`.
-//! * The kernel is additionally told `auto_unmount` where it is available, so
-//!   even a process killed with `SIGKILL` — which runs no code at all — leaves
-//!   the mountpoint usable.
+//! * The kernel is additionally told `auto_unmount` **where the ACL allows it**,
+//!   so a process killed with `SIGKILL` — which runs no code at all — still
+//!   leaves the mountpoint usable. This is the one gap in the list, and it is
+//!   worth stating plainly rather than leaving to be discovered: at the default
+//!   `SessionACL::Owner` the option is not requested, and `SIGKILL` therefore
+//!   *does* leave a stale mountpoint. Measured on Linux 6.12 — default flags,
+//!   `SIGKILL`: the entry stays in `/proc/mounts` and every access fails with
+//!   `ENOTCONN`; the same test with `--allow-root`: the mountpoint comes free.
+//!   Every signal a process can actually handle is covered; `SIGKILL` is covered
+//!   only when the user has already widened access for their own reasons.
 //!
 //! ## Why the session runs on a thread of its own
 //!
@@ -51,7 +58,8 @@ use std::time::Instant;
 use fuser::{Config, MountOption, Session, SessionUnmounter};
 
 use crate::constants::{
-    MOUNT_FS_NAME, MOUNT_FS_SUBTYPE, MOUNT_SHUTDOWN_GRACE, MOUNT_SHUTDOWN_POLL,
+    MOUNT_DETACH_GRACE, MOUNT_FS_NAME, MOUNT_FS_SUBTYPE, MOUNT_SHUTDOWN_GRACE, MOUNT_SHUTDOWN_POLL,
+    MOUNT_STALE_HINT,
 };
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -76,6 +84,13 @@ pub struct Mounted {
     /// signal path and `Drop` can both reach it.
     unmounter: SessionUnmounter,
     mountpoint: PathBuf,
+    /// The device the mountpoint reported *before* the filesystem was attached.
+    ///
+    /// The only thing that distinguishes an attached mountpoint from a free one
+    /// while the filesystem is still being served — see [`super::detached`] for
+    /// why an errno cannot do it. [`None`] if the mountpoint could not be read at
+    /// the time, which weakens the check rather than failing the mount.
+    bare_device: Option<u64>,
     /// Whether the mount has already been detached, so `Drop` does not try again
     /// and log a spurious failure.
     detached: bool,
@@ -99,6 +114,12 @@ pub fn mount(
 ) -> Result<Mounted> {
     let filesystem = VaultFs::new(source, config.clone(), mountpoint, runtime);
     let session_config = session_config(&config);
+
+    // Taken before `Session::new`, because after it the mountpoint reports the
+    // filesystem's device and the original is unrecoverable. This one number is
+    // what lets the unmount be confirmed rather than assumed; a failure to read
+    // it is not worth refusing a mount over, and is carried as `None`.
+    let bare_device = super::detached::device_of(mountpoint).ok();
 
     // `Session::new` performs the mount syscall *and* the kernel handshake, both
     // of which block. It runs here rather than on the session thread so that a
@@ -125,6 +146,7 @@ pub fn mount(
             session: Some(session),
             unmounter,
             mountpoint: mountpoint.to_path_buf(),
+            bare_device,
             detached: false,
         }),
         Err(error) => {
@@ -164,7 +186,25 @@ impl Mounted {
         // an unmount that has not happened yet is a message that can be wrong.
         self.detach();
 
+        // The order here is load-bearing and was got wrong once already.
+        //
+        // `unmount` reports that a detach was *requested*; on the `auto_unmount`
+        // path it is a socket close handed to a `fusermount3` child and returns
+        // success before that child has done anything. So the claim has to be
+        // checked — but a mount that is still *live* answers `stat` perfectly
+        // well, and `ENOTCONN` only appears once the connection is torn down.
+        // Checking before the session thread ended therefore read a healthy mount
+        // as a detached one, which is the false success the check exists to stop.
+        //
+        // `settle` runs on every branch for that reason, not just on the signal
+        // path: it is what makes the answer below mean anything. It is a no-op
+        // where the session has already ended, because `wait_for_session` has
+        // taken the handle.
+        self.settle().await;
+        let detached = self.confirm_detached().await;
+
         match stopped {
+            Ended::Session(Ok(())) if !detached => Err(self.still_attached()),
             Ended::Session(Ok(())) => {
                 tracing::info!(
                     { fields::OP } = "mount",
@@ -181,19 +221,21 @@ impl Mounted {
                     self.mountpoint.display()
                 ),
             )
-            .with_hint(
+            // The same rule as everywhere else in this function: the hint states
+            // the mountpoint's condition, so it has to be the observed one. It
+            // read "The mount has been detached" unconditionally, which is a
+            // claim about the world made without looking at it — and the case
+            // this branch handles, the kernel connection breaking, is not the
+            // case in which a detach is most likely to have worked.
+            .with_hint(if detached {
                 "The mount has been detached. This is the connection to the kernel \
-                 failing rather than the vault: re-running the command re-attaches it.",
-            )),
-            Ended::Signal => {
-                // Wait for the loop to notice the unmount, so that `destroy` runs
-                // and the cached listings are dropped before the process exits.
-                self.settle().await;
-                Err(CliError::new(
-                    ExitCode::Cancelled,
-                    format!("unmounted '{}' on request", self.mountpoint.display()),
-                ))
-            }
+                 failing rather than the vault: re-running the command re-attaches it."
+            } else {
+                MOUNT_STALE_HINT
+            })),
+            // `settle` above has already waited for the loop to notice the
+            // unmount, so `destroy` has run and the cached listings are gone.
+            Ended::Signal => Err(signal_outcome(&self.mountpoint, detached)),
         }
     }
 
@@ -234,6 +276,46 @@ impl Mounted {
                 "could not detach the filesystem: {error}"
             );
         }
+    }
+
+    /// Wait, briefly, for the mountpoint to actually come free.
+    ///
+    /// Bounded by [`MOUNT_DETACH_GRACE`]. Returns whether it did — the answer
+    /// every message below is conditioned on, so that "unmounted" is a thing this
+    /// process observed rather than a thing it asked for.
+    ///
+    /// Called after [`Mounted::settle`], so that a mountpoint still answering
+    /// with the filesystem's device is one nothing is going to come and free.
+    async fn confirm_detached(&self) -> bool {
+        let deadline = Instant::now().checked_add(MOUNT_DETACH_GRACE);
+        loop {
+            if super::detached::is_detached(&self.mountpoint, self.bare_device) {
+                return true;
+            }
+            // `checked_add` returning `None` means the clock cannot represent the
+            // deadline, which is not a reason to spin forever.
+            if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
+                return false;
+            }
+            tokio::time::sleep(MOUNT_SHUTDOWN_POLL).await;
+        }
+    }
+
+    /// The refusal for a mountpoint this process could not free.
+    fn still_attached(&self) -> CliError {
+        tracing::warn!(
+            { fields::OP } = "mount",
+            mountpoint = %self.mountpoint.display(),
+            "the filesystem ended but the mountpoint is still attached"
+        );
+        CliError::new(
+            ExitCode::Uncategorised,
+            format!(
+                "the filesystem serving '{}' ended, but the mountpoint is still attached",
+                self.mountpoint.display()
+            ),
+        )
+        .with_hint(MOUNT_STALE_HINT)
     }
 
     /// Wait, briefly, for the session loop to end after an unmount.
@@ -279,6 +361,39 @@ impl Drop for Mounted {
     }
 }
 
+/// What to report when a signal ended the mount.
+///
+/// A free function taking the observation rather than a method reading the world,
+/// because the thing worth pinning is the *decision*: a signalled mount that
+/// could not be detached must not be described as having been unmounted. That is
+/// `PLAN.md` §6 applied to the one message an operator reads before walking away
+/// from the terminal, and it was wrong until the detach was checked.
+///
+/// Cancelled either way — the operator did stop it, and
+/// [`ExitCode::Cancelled`]'s meaning does not change because the cleanup was
+/// incomplete — but the message and the hint do.
+fn signal_outcome(mountpoint: &Path, detached: bool) -> CliError {
+    if detached {
+        return CliError::new(
+            ExitCode::Cancelled,
+            format!("unmounted '{}' on request", mountpoint.display()),
+        );
+    }
+    tracing::warn!(
+        { fields::OP } = "mount",
+        mountpoint = %mountpoint.display(),
+        "stopped on request, but the mountpoint is still attached"
+    );
+    CliError::new(
+        ExitCode::Cancelled,
+        format!(
+            "stopped serving '{}' on request, but the mountpoint is still attached",
+            mountpoint.display()
+        ),
+    )
+    .with_hint(MOUNT_STALE_HINT)
+}
+
 /// How a mount ended.
 enum Ended {
     /// The session loop returned, with whatever it returned.
@@ -322,10 +437,19 @@ fn session_config(config: &MountConfig) -> Config {
     }
 
     // `auto_unmount` asks the kernel to detach the filesystem when this process
-    // goes away, which covers the one case no code can: `SIGKILL`. It needs an
-    // ACL wider than the owner, because it is `fusermount` that performs the
-    // detach — so it is requested only when the user has already widened access,
-    // and its absence otherwise costs nothing that `Drop` does not cover.
+    // goes away, which covers the one case no code can: `SIGKILL`. It is
+    // requested only when the user has already widened access.
+    //
+    // Its absence is **not** free, and the comment here used to say it was: it
+    // claimed `Drop` covered the remainder, but `Drop` is exactly what `SIGKILL`
+    // does not run. Measured on this server, default flags, `SIGKILL`: the
+    // mountpoint is left attached with no server behind it and has to be cleared
+    // by hand. Requesting the option unconditionally is the obvious answer and is
+    // deliberately not taken here without measuring it — `auto_unmount` is only
+    // implemented via the setuid `fusermount3` helper, so switching it on for
+    // every mount would route every mount through that helper and keep one alive
+    // for the life of the mount. That is a trade worth making on purpose rather
+    // than as a side effect of a docs fix.
     if config.acl != fuser::SessionACL::Owner {
         options.push(MountOption::AutoUnmount);
     }
@@ -506,8 +630,11 @@ mod tests {
 
     #[test]
     fn auto_unmount_is_requested_only_where_the_kernel_can_honour_it() {
-        // It is `fusermount` that performs the detach, and it needs an ACL wider
-        // than the owner. Requesting it anyway makes the mount itself fail.
+        // Pinning the *current* behaviour, and what it costs: at the default ACL
+        // the option is absent, and a `SIGKILL` therefore leaves a stale
+        // mountpoint — verified on Linux 6.12 against a real mount, not inferred.
+        // See the reasoning at the option itself for why this is not simply
+        // switched on for everyone.
         assert!(!has(
             &session_config(&config()).mount_options,
             &MountOption::AutoUnmount
@@ -560,6 +687,61 @@ mod tests {
         assert_eq!(error.code(), ExitCode::FatalError);
         assert!(error.message().contains("/mnt/vault"));
         assert!(error.hint().is_some());
+    }
+
+    #[test]
+    fn a_signalled_mount_that_detached_says_so() {
+        // The ordinary Ctrl-C: the mountpoint really is free, and saying so is
+        // what lets an operator walk away.
+        let outcome = signal_outcome(Path::new("/mnt/vault"), true);
+        assert_eq!(outcome.code(), ExitCode::Cancelled);
+        assert!(
+            outcome.message().contains("unmounted"),
+            "a completed unmount must be reported as one: {}",
+            outcome.message()
+        );
+        assert!(
+            outcome.hint().is_none(),
+            "nothing to advise when the mountpoint came free"
+        );
+    }
+
+    #[test]
+    fn a_signalled_mount_that_did_not_detach_must_not_claim_it_unmounted() {
+        // The regression this module exists for, measured on Linux 6.12: SIGTERM
+        // to a mount started with --allow-other or --allow-root left the
+        // mountpoint attached and dead, and the command printed
+        // "unmounted '<path>' on request" and exited 25 anyway. An operator who
+        // reads that walks away from a directory that fails every access with
+        // ENOTCONN. `PLAN.md` §6: work that did not happen is not reported as
+        // having happened.
+        let outcome = signal_outcome(Path::new("/mnt/vault"), false);
+        assert_eq!(
+            outcome.code(),
+            ExitCode::Cancelled,
+            "the operator did stop it; only the cleanup is incomplete"
+        );
+        assert!(
+            !outcome.message().contains("unmounted"),
+            "an unmount that did not happen was reported as done: {}",
+            outcome.message()
+        );
+        assert!(
+            outcome.message().contains("still attached"),
+            "the operator has to be told the mountpoint is unusable: {}",
+            outcome.message()
+        );
+        assert!(
+            outcome.message().contains("/mnt/vault"),
+            "the refusal must name the mountpoint: {}",
+            outcome.message()
+        );
+        assert!(
+            outcome
+                .hint()
+                .is_some_and(|hint| hint.contains("fusermount3 -u")),
+            "a recoverable failure must name the one command that recovers it"
+        );
     }
 
     #[test]
