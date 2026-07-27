@@ -11,13 +11,17 @@
 //! `kem_id=1` object by rewriting a small `DGS1` object at `g/<hex file_id>` — never
 //! re-uploading the (multi-GB) payload.
 //!
-//! DEFERRED (additive, not needed for the core round-trip):
-// TODO(task-16-followup): imported/external (non-root-derived) keypairs (the `k/*`
-// reserved store).
+//! §14 shared-object discovery: every share (`put_file_shared` inline recipients,
+//! `share_add_recipients` sidecar grants) ALSO writes a `DGD1` at
+//! `d/<hex recipient_key_id>/<hex file_id>`, and `share_remove_recipient` deletes it, so a
+//! recipient can [`Vault::discover_shared`] — enumerate the objects shared to it — without
+//! the owner's `n/*` name keys. Imported (`k/*`, §13) identities participate in the identity
+//! set alongside the root-derived one (see [`super::imported`]).
 
 use bytes::Bytes;
 use dctl_crypto::constants::{
-    DRK1_LEN, FILE_ID_LEN, KEM_ID_HYBRID, KEY_ID_LEN, MAX_GRANT_COUNT, OBJECT_HEAD_LEN,
+    DRK1_LEN, FILE_ID_LEN, KEM_ID_HYBRID, KEM_SUITE_X25519_MLKEM768, KEY_ID_LEN, MAX_GRANT_COUNT,
+    OBJECT_HEAD_LEN,
 };
 use dctl_crypto::object::{self, Metadata};
 use dctl_crypto::{kem, path};
@@ -87,6 +91,10 @@ impl Vault {
         }
         let mut file_id = [0u8; 16];
         file_id.copy_from_slice(&obj[52..68]);
+        // Capture the fixed 68-byte head now (before `obj` is moved into the put) — the §14
+        // DGD1 discovery records bind it via `head_hash` and the §12.2 `wrapped_dw`.
+        let mut head_bytes = [0u8; OBJECT_HEAD_LEN];
+        head_bytes.copy_from_slice(&obj[0..OBJECT_HEAD_LEN]);
         let object_key = format!("{}{}", layout::OBJECT_KEY_PREFIX, hex::encode(file_id));
         tracing::debug!(object = %object_key, object_bytes = obj.len(), "sealed shared object");
 
@@ -124,6 +132,26 @@ impl Vault {
         };
         self.index.put(&record)?;
         tracing::info!(object = %record.object_key, "shared file stored and index committed");
+
+        // §14 discovery records: write one DGD1 per EXPLICIT (non-owner) recipient at
+        // `d/<recipient_key_id>/<file_id>` so each can ENUMERATE this object. The owner
+        // discovers via its own `n/*` name records, so it is skipped. `set` still holds the
+        // effective recipient set (owner first, then deduped `recipients`).
+        let content_hash = to_hash32(&ContentHash::blake3(data).bytes)?;
+        let disc = kem::DiscoveryInfo {
+            obj_suite: KEM_SUITE_X25519_MLKEM768,
+            file_id,
+            size: data.len() as u64,
+            content_hash,
+            path: path.clone(),
+            ext: Vec::new(),
+        };
+        for r in &set {
+            if r.key_id() == self.identity_key_id {
+                continue; // owner enumerates via n/*, no DGD1 needed
+            }
+            self.write_discovery_record(r, &head_bytes, &disc).await?;
+        }
 
         // Overwrite GC: the new mapping is durable, so delete the superseded object.
         self.gc_superseded_object(previous, &object_key).await;
@@ -181,18 +209,9 @@ impl Vault {
             Err(e) => return Err(e.into()),
         };
 
-        // Recover KW: this vault must be an authorized reader (inline, else an existing grant).
-        let kw = if let Some(kw) =
-            kem::sidecar::recover_kw_from_block(&self.identity, &head_bytes, &block)?
-        {
-            kw
-        } else if let Some(grant) = grants.iter().find(|g| g.key_id() == self.identity_key_id) {
-            kem::sidecar::recover_kw_as_recipient(grant, &self.identity, &head_bytes)?
-        } else {
-            return Err(CoreError::Crypto(dctl_crypto::CryptoError::Format(
-                "cannot share: this vault is not a recipient of the object".into(),
-            )));
-        };
+        // Recover KW: this vault must be an authorized reader via ANY identity it holds
+        // (root-derived or an imported §13 identity), inline first then an existing grant.
+        let kw = self.recover_kw_for_share(&head_bytes, &block, &grants)?;
 
         // Dedup set: inline recipients ∪ this vault's own identity ∪ existing sidecar grants.
         let mut present: Vec<[u8; KEY_ID_LEN]> = kem::sidecar::inline_key_ids(&block)?;
@@ -201,6 +220,8 @@ impl Vault {
             present.push(g.key_id());
         }
 
+        // Count the recipients we actually add a grant for (discovery is written for ALL
+        // requested recipients below, so we only need the count to decide on a sidecar rewrite).
         let mut added = 0usize;
         for r in recipients {
             let id = r.key_id();
@@ -211,28 +232,45 @@ impl Vault {
             grants.push(kem::sidecar::seal_kw_to_recipient(&kw, r, &head_bytes)?);
             added += 1;
         }
-        if added == 0 {
-            tracing::debug!("share_add_recipients: nothing new to grant");
-            return Ok(());
-        }
         if grants.len() > MAX_GRANT_COUNT as usize {
             return Err(CoreError::Crypto(dctl_crypto::CryptoError::Format(
                 "grant_count would exceed 4096".into(),
             )));
         }
 
-        // Bump grant_gen (monotonic; higher wins on rewrite races) and verified-write.
-        let grant_gen = prev_gen.checked_add(1).ok_or_else(|| {
-            CoreError::Crypto(dctl_crypto::CryptoError::Format(
-                "grant_gen overflow".into(),
-            ))
-        })?;
-        let sidecar = kem::sidecar::serialize(&file_id, &head_bytes, grant_gen, &grants)?;
-        let expected = ContentHash::blake3(&sidecar);
-        self.backend
-            .put(&sidecar_key, Bytes::from(sidecar), &expected)
+        // Rewrite the grant sidecar ONLY when we actually added a grant — a call that merely
+        // (re)writes discovery records (self-heal path below) must NOT bump grant_gen or
+        // rewrite `g/<file_id>` needlessly.
+        if added > 0 {
+            // Bump grant_gen (monotonic; higher wins on rewrite races) and verified-write.
+            let grant_gen = prev_gen.checked_add(1).ok_or_else(|| {
+                CoreError::Crypto(dctl_crypto::CryptoError::Format(
+                    "grant_gen overflow".into(),
+                ))
+            })?;
+            let sidecar = kem::sidecar::serialize(&file_id, &head_bytes, grant_gen, &grants)?;
+            let expected = ContentHash::blake3(&sidecar);
+            self.backend
+                .put(&sidecar_key, Bytes::from(sidecar), &expected)
+                .await?;
+            tracing::info!(added, grant_gen, "grant sidecar written");
+        }
+
+        // §14: ensure EVERY requested (non-owner) recipient has a discovery record — not only
+        // the newly-granted ones. Verified-write is idempotent (re-writing an existing DGD1 is
+        // harmless), so this makes share_add SELF-HEALING: if an earlier call persisted the
+        // grant sidecar but then failed mid-DGD1-phase (transient error), a retry re-emits the
+        // missing `d/<kid>/<fid>` even though `newly_added` is now empty. Writing only for the
+        // newly-granted set would permanently lose §14 enumeration for those recipients.
+        let disc = self
+            .discovery_info_for_share(&path, &file_id, &head_bytes, &object_key, &kw)
             .await?;
-        tracing::info!(added, grant_gen, "grant sidecar written");
+        for r in recipients {
+            if r.key_id() == self.identity_key_id {
+                continue; // the owner enumerates via its own name records, not DGD1
+            }
+            self.write_discovery_record(r, &head_bytes, &disc).await?;
+        }
         Ok(())
     }
 
@@ -300,10 +338,21 @@ impl Vault {
         self.backend
             .put(&sidecar_key, Bytes::from(sidecar), &expected)
             .await?;
+
+        // §14: delete this recipient's discovery record so it no longer ENUMERATES the
+        // object (same §11 captured-copy caveat — a record already fetched is not recalled).
+        // `delete` is idempotent, so a missing DGD1 (e.g. never written) is a no-op.
+        let disc_key = ObjectKey::new(format!(
+            "{}{}/{}",
+            layout::DISCOVERY_KEY_PREFIX,
+            hex::encode(key_id),
+            hex::encode(file_id)
+        ));
+        self.backend.delete(&disc_key).await?;
         tracing::info!(
             grant_gen,
             remaining = grants.len(),
-            "grant removed from sidecar"
+            "grant removed from sidecar and discovery record deleted"
         );
         Ok(())
     }
@@ -425,10 +474,225 @@ impl Vault {
         }
         Ok(public)
     }
+
+    /// Enumerate the objects shared to THIS vault via §14 discovery records — the recipient
+    /// counterpart to the owner's `n/*` name records (which a recipient cannot read). For
+    /// EACH identity in the set (root-derived, then every imported §13 identity), LIST
+    /// `d/<hex key_id>/*`, fetch the object head, and open each `DGD1`. A record that does
+    /// not open (unknown version/suite/schema, tamper, a missing/renamed object, or not
+    /// addressed to a held identity) is **skipped** — never fails the whole enumeration
+    /// (§8 one-way door). Discovery grants no read access on its own; use
+    /// [`get_shared`](Vault::get_shared) with a returned `file_id` to actually read content.
+    #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
+    pub async fn discover_shared(&self) -> Result<Vec<SharedObject>> {
+        let key_ids = self.identity_key_ids();
+        let mut out = Vec::new();
+        for kid in &key_ids {
+            let prefix = format!("{}{}/", layout::DISCOVERY_KEY_PREFIX, hex::encode(kid));
+            let mut cursor: Option<String> = None;
+            loop {
+                let page = self.backend.list_page(&prefix, cursor).await?;
+                for item in &page.items {
+                    // `Ok(None)` ⇒ unreadable/mismatched/stale record: skip it (§8).
+                    if let Some(so) = self.open_discovery_item(item.key.as_str(), kid).await? {
+                        out.push(so);
+                    }
+                }
+                match page.next_cursor {
+                    Some(next) => cursor = Some(next),
+                    None => break,
+                }
+            }
+        }
+        tracing::info!(count = out.len(), "discovered shared objects");
+        Ok(out)
+    }
+
+    /// Open one `d/<hex key_id>/<hex file_id>` record for the identity `key_id`. Returns
+    /// `Ok(None)` to SKIP (malformed key, missing/renamed object, a `DGD1` that does not
+    /// open); `Err` only for a transient store failure that should abort the enumeration.
+    async fn open_discovery_item(
+        &self,
+        key: &str,
+        key_id: &[u8; KEY_ID_LEN],
+    ) -> Result<Option<SharedObject>> {
+        let Some(file_id) = parse_discovery_file_id(key, key_id) else {
+            return Ok(None);
+        };
+        let record = match self.backend.get(&ObjectKey::new(key.to_string())).await {
+            Ok(b) => b,
+            Err(StoreError::NotFound(_)) => return Ok(None),
+            Err(e) => return Err(e.into()),
+        };
+        // Fetch the object head (68 bytes, one Range request) for DW recovery + binding.
+        let object_key = ObjectKey::new(format!(
+            "{}{}",
+            layout::OBJECT_KEY_PREFIX,
+            hex::encode(file_id)
+        ));
+        let head = match self
+            .backend
+            .get_range(&object_key, ByteRange::new(0, Some(OBJECT_HEAD_LEN as u64)))
+            .await
+        {
+            Ok(b) => b,
+            Err(StoreError::NotFound(_)) => return Ok(None), // stale DGD1: object gone
+            Err(e) => return Err(e.into()),
+        };
+        if head.len() < OBJECT_HEAD_LEN {
+            return Ok(None);
+        }
+        let mut head_bytes = [0u8; OBJECT_HEAD_LEN];
+        head_bytes.copy_from_slice(&head[0..OBJECT_HEAD_LEN]);
+        // Find the matching identity and open (both synchronous — no borrow across await).
+        let Some(identity) = self.all_identities().find(|k| &k.key_id == key_id) else {
+            return Ok(None);
+        };
+        match kem::open_dgd1(record.as_ref(), identity, Some(&head_bytes)) {
+            Ok(disc) => Ok(Some(SharedObject {
+                path: disc.path,
+                file_id: disc.file_id,
+                size: disc.size,
+                content_hash: disc.content_hash,
+            })),
+            Err(_) => Ok(None), // unknown version/suite/schema, tamper, wrong recipient
+        }
+    }
+
+    /// Recover the object `KW` for a share operation, trying EACH identity (root-derived,
+    /// then every imported §13 identity): inline `kem_wrap` sub-record first, then an
+    /// existing sidecar grant. Errors if no held identity can recover it (this vault is not
+    /// an authorized reader of the object). Synchronous — no await, no borrow held across one.
+    fn recover_kw_for_share(
+        &self,
+        head_bytes: &[u8; OBJECT_HEAD_LEN],
+        block: &[u8],
+        grants: &[kem::sidecar::GrantRecord],
+    ) -> Result<zeroize::Zeroizing<[u8; dctl_crypto::constants::KEY_LEN]>> {
+        for id in self.all_identities() {
+            if let Some(kw) = kem::sidecar::recover_kw_from_block(id, head_bytes, block)? {
+                return Ok(kw);
+            }
+        }
+        for id in self.all_identities() {
+            if let Some(grant) = grants.iter().find(|g| g.key_id() == id.key_id) {
+                return Ok(kem::sidecar::recover_kw_as_recipient(
+                    grant, id, head_bytes,
+                )?);
+            }
+        }
+        Err(CoreError::Crypto(dctl_crypto::CryptoError::Format(
+            "cannot share: this vault is not a recipient of the object".into(),
+        )))
+    }
+
+    /// Build the §14 [`kem::DiscoveryInfo`] for a `share_add_recipients` grant. `size` comes
+    /// from the object head; `content_hash` from the local index record if present, else by
+    /// decrypting the object's own metadata (a buffered fallback for a rebuilt/foreign index).
+    async fn discovery_info_for_share(
+        &self,
+        path: &str,
+        file_id: &[u8; FILE_ID_LEN],
+        head_bytes: &[u8; OBJECT_HEAD_LEN],
+        object_key: &str,
+        kw: &[u8; dctl_crypto::constants::KEY_LEN],
+    ) -> Result<kem::DiscoveryInfo> {
+        let size = object::parse_head(head_bytes)?.plaintext_len;
+        let content_hash = match self.index.get(path)? {
+            Some(rec) if rec.content_hash.len() == 32 => to_hash32(&rec.content_hash)?,
+            _ => self.object_content_hash(object_key, kw).await?,
+        };
+        Ok(kem::DiscoveryInfo {
+            obj_suite: KEM_SUITE_X25519_MLKEM768,
+            file_id: *file_id,
+            size,
+            content_hash,
+            path: path.to_string(),
+            ext: Vec::new(),
+        })
+    }
+
+    /// Decrypt just enough of the object to read its §4 `content_blake3` (via the already-
+    /// recovered `KW`). Buffered fallback used only when the local index lacks the hash.
+    async fn object_content_hash(
+        &self,
+        object_key: &str,
+        kw: &[u8; dctl_crypto::constants::KEY_LEN],
+    ) -> Result<[u8; 32]> {
+        let object = self
+            .backend
+            .get(&ObjectKey::new(object_key.to_string()))
+            .await?;
+        let opened = object::open_with_kw(kw, object.as_ref())?;
+        let meta = opened
+            .metadata
+            .ok_or_else(|| CoreError::Integrity("shared object missing metadata".into()))?;
+        Ok(meta.content_blake3)
+    }
+
+    /// Seal + verified-write one §14 `DGD1` discovery record for `recipient` at
+    /// `d/<recipient_key_id>/<file_id>` (`file_id` taken from `disc`).
+    async fn write_discovery_record(
+        &self,
+        recipient: &kem::Drk1Public,
+        head_bytes: &[u8; OBJECT_HEAD_LEN],
+        disc: &kem::DiscoveryInfo,
+    ) -> Result<()> {
+        let record = kem::seal_dgd1(recipient, head_bytes, disc)?;
+        let key = format!(
+            "{}{}/{}",
+            layout::DISCOVERY_KEY_PREFIX,
+            hex::encode(recipient.key_id()),
+            hex::encode(disc.file_id)
+        );
+        let expected = ContentHash::blake3(&record);
+        self.backend
+            .put(&ObjectKey::new(key), Bytes::from(record), &expected)
+            .await?;
+        tracing::debug!(
+            recipient = %hex::encode(recipient.key_id()),
+            "wrote DGD1 discovery record"
+        );
+        Ok(())
+    }
+}
+
+/// A shared object this vault can discover (§14), returned by
+/// [`Vault::discover_shared`]. Enough to read the object with
+/// [`get_shared`](Vault::get_shared) and to show the recipient its authoritative path.
+#[derive(Clone, Debug)]
+pub struct SharedObject {
+    /// Authoritative NFC UTF-8 path (§5), re-validated on open.
+    pub path: String,
+    /// The DSF1 object id — pass to [`get_shared`](Vault::get_shared) to read the content.
+    pub file_id: [u8; FILE_ID_LEN],
+    /// Object plaintext size (§4 `size`; not confidential).
+    pub size: u64,
+    /// BLAKE3-256 of the object plaintext (§4 `content_blake3`).
+    pub content_hash: [u8; 32],
 }
 
 /// A malformed or non-self-certifying `DRR1` registry entry — treated as an integrity
 /// failure of the fetched object.
 fn registry_err(msg: &str) -> CoreError {
     CoreError::Integrity(msg.to_string())
+}
+
+/// Convert a hash byte-slice into a fixed `[u8; 32]`, erroring (never panicking) if it is
+/// not exactly 32 bytes — BLAKE3-256 always is, so this only guards a corrupt index row.
+fn to_hash32(bytes: &[u8]) -> Result<[u8; 32]> {
+    bytes
+        .try_into()
+        .map_err(|_| CoreError::Integrity("content hash not 32 bytes".into()))
+}
+
+/// Parse a `d/<hex key_id>/<hex file_id>` discovery key, returning the `file_id` iff the key
+/// is well-formed AND its `key_id` component equals `key_id` (the identity we listed under).
+fn parse_discovery_file_id(key: &str, key_id: &[u8; KEY_ID_LEN]) -> Option<[u8; FILE_ID_LEN]> {
+    let rest = key.strip_prefix(layout::DISCOVERY_KEY_PREFIX)?;
+    let (kid_hex, fid_hex) = rest.split_once('/')?;
+    if hex::decode(kid_hex).ok()? != key_id[..] {
+        return None;
+    }
+    hex::decode(fid_hex).ok()?.try_into().ok()
 }

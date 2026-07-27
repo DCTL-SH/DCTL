@@ -142,3 +142,29 @@ async fn b2_stream_from_path_round_trip() {
 
     eprintln!("b2_stream_from_path_round_trip: OK");
 }
+
+#[tokio::test]
+#[ignore = "requires live B2 credentials via DCTL_B2_* env vars"]
+async fn b2_prepare_upload_ticket_shape() {
+    let Some((key_id, app_key, bucket)) = creds_from_env() else {
+        eprintln!("skipping b2_prepare_upload_ticket_shape: DCTL_B2_* not set");
+        return;
+    };
+
+    let b2 = B2Backend::new(B2Credentials::new(key_id, app_key), bucket).unwrap();
+    let key = ObjectKey::new(format!("dctl-test/ticket-{}.bin", std::process::id()));
+
+    // A delegated ticket is a live b2_get_upload_url + the exact POST the client replays.
+    let ticket = b2.prepare_upload(&key, 4096, None).await.unwrap();
+    assert_eq!(ticket.method, "POST");
+    assert!(ticket.url.contains("b2_upload_file"), "url: {}", ticket.url);
+    assert_eq!(ticket.expires_unix, None); // token-scoped, not signed-expiry
+    assert!(ticket.headers.iter().any(|(k, _)| k == "Authorization"));
+    assert!(
+        ticket
+            .headers
+            .contains(&("X-Bz-Content-Sha1".to_string(), "do_not_verify".to_string()))
+    );
+
+    eprintln!("b2_prepare_upload_ticket_shape: OK");
+}

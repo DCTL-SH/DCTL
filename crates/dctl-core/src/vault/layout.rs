@@ -26,3 +26,16 @@ pub(super) const RECIP_KEY_PREFIX: &str = "r/";
 /// bytes are self-binding: a reader verifies `file_id` and `head_hash` against THIS object
 /// before honoring any grant, so a sidecar attached to the wrong object is rejected.
 pub(super) const GRANT_KEY_PREFIX: &str = "g/";
+
+/// Prefix for the §13 imported-key store: `k/` ‖ hex(key_id). Each entry is a root-sealed
+/// `DIK1` container holding one imported (non-root-derived) recipient keypair, so the vault
+/// can also decrypt objects sealed to that external identity (multi-identity, §12.4). The
+/// private material is offline-restorable from the vault root alone; an entry whose
+/// `version`/`hybrid_suite` is unknown is skipped, never the vault (one-way door, §8).
+pub(super) const IMPORTED_KEY_PREFIX: &str = "k/";
+
+/// Prefix for §14 shared-object discovery records: `d/` ‖ hex(recipient_key_id) ‖ `/` ‖
+/// hex(file_id). Each entry is a `DGD1` sealed to the recipient so it can ENUMERATE the
+/// objects shared to it (the owner's `n/*` name records are keyed to name keys the recipient
+/// lacks). It grants no read access — it wraps only a pointer key, never the object KW/DEK.
+pub(super) const DISCOVERY_KEY_PREFIX: &str = "d/";

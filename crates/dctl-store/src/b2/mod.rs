@@ -20,7 +20,7 @@ use bytes::Bytes;
 use serde::de::DeserializeOwned;
 use tokio::sync::Mutex;
 
-use crate::backend::Backend;
+use crate::backend::{Backend, UploadTicket};
 use crate::checksum::ContentHash;
 use crate::error::{Result, StoreError};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
@@ -210,5 +210,14 @@ impl Backend for B2Backend {
 
     async fn list_page(&self, prefix: &str, cursor: Option<String>) -> Result<Page> {
         listing::list_page(self, prefix, cursor).await
+    }
+
+    async fn prepare_upload(
+        &self,
+        key: &ObjectKey,
+        content_len: u64,
+        content_sha256: Option<&[u8; 32]>,
+    ) -> Result<UploadTicket> {
+        upload::prepare_upload(self, key, content_len, content_sha256).await
     }
 }

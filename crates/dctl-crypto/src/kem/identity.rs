@@ -110,6 +110,27 @@ impl RecipientKeypair {
     pub fn dk(&self) -> &MlKemDecapKey {
         &self.dk
     }
+
+    /// Construct a keypair from raw private material `(x_sk, dk)`, **recomputing** the
+    /// public identity (`x_pk = X25519(x_sk, 9)`, `ek` from `dk`) and `key_id` (§12.3) from
+    /// it. So a returned keypair is always self-consistent — its `public`/`key_id` describe
+    /// exactly the identity these private keys can decrypt for. Used by the §13 `DIK1`
+    /// imported-key store (`parse_dik1` / `generate_external`), which holds non-root-derived
+    /// keypairs the vault also decrypts to.
+    #[must_use]
+    pub(crate) fn from_private(x_sk: StaticSecret, dk: MlKemDecapKey) -> Self {
+        let x_pk = PublicKey::from(&x_sk).to_bytes();
+        let mut ek = [0u8; MLKEM768_EK_LEN];
+        ek.copy_from_slice(dk.encapsulation_key().as_bytes().as_slice());
+        let public = Drk1Public { x_pk, ek };
+        let key_id = public.key_id();
+        Self {
+            public,
+            key_id,
+            x_sk,
+            dk,
+        }
+    }
 }
 
 /// Derive the recipient keypair for identity `idx` from the vault `root` (§12.4).

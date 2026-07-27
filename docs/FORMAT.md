@@ -376,10 +376,12 @@ implementation that also provides X25519 + ML-KEM-768 + SHAKE256.
 
 **Backend key namespaces (FROZEN):** `o/<hex file_id>` object (§3) · `n/<hex path-hash>`
 name record (§5) · `r/<hex key_id>` public recipient registry `DRR1` (§12.3 — public-key
-bytes only, no secrets) · `g/<hex file_id>` grant sidecar `DGS1` (§12.6) · `k/*`
-**reserved-deferred** imported-key store (unknown → **ignore** until a future version
-pins it) · the fixed envelope object key (§2). A backend object under an unrecognized
-namespace prefix is **ignored**. New namespaces get new prefixes; these never change.
+bytes only, no secrets) · `g/<hex file_id>` grant sidecar `DGS1` (§12.6) · `k/<hex key_id>`
+imported-key store `DIK1` (§13 — root-sealed private key material) ·
+`d/<hex recipient_key_id>/<hex file_id>` shared-object discovery record `DGD1` (§14 —
+sealed to the recipient) · the fixed envelope object key (§2). A backend object under an
+unrecognized namespace prefix is **ignored**. New namespaces get new prefixes; these never
+change.
 
 **Unknown-value handling (a frozen one-way door — decided now):**
 
@@ -395,6 +397,8 @@ namespace prefix is **ignored**. New namespaces get new prefixes; these never ch
 | structurally invalid slot (`slot_len` mismatch / out of bounds) | **reject** the envelope, never skip |
 | metadata **schema_version** | **skip metadata**, still serve payload |
 | metadata **ext TLV** type | **ignore** the TLV |
+| unknown `DIK1` **version** / **hybrid_suite** (a `k/*` entry, §13) | **skip that entry**, never the vault |
+| unknown `DGD1` **version** / **hybrid_suite** (a `d/*` record, §14) | **skip that record**, never other objects |
 
 New ids get new numbers; the above rules never change.
 
@@ -712,10 +716,11 @@ invariant are untouched, and the identity rotates only when the root does (§11)
 **Basic sharing needs no imported keys:** a share recipient reads with **their own**
 vault's root-derived private key; the writer needs only their `DRK1`. Write-only backup is
 read by the restore operator's own root-derived identity. **Imported/external keypairs**
-(e.g. a hardware token, or a keypair predating this vault) are **DEFERRED** — no bytes
-now; a future version may pin a root-sealed `"k/" ‖ hex(key_id)` store. Until then a
-`"k/*"` object is **unknown → ignored** (§8), and launch supports only root-derived
-identities.
+(e.g. a key generated elsewhere, or a shared team key) are held in the root-sealed
+`"k/" ‖ hex(key_id)` imported-key store **`DIK1` (§13)**, so a vault can also decrypt
+objects sealed to those identities (multi-identity — the identity set is the root-derived
+`idx=0` plus every valid `DIK1`). A `"k/*"` object whose `DIK1` `version`/`hybrid_suite` is
+unknown is **rejected as an entry** (one-way door, §8), never affecting the vault.
 
 ### 12.5 Multi-recipient (FROZEN)
 
@@ -842,10 +847,14 @@ distinct (distinct ephemerals/encapsulations), so no `(key, nonce)` pair ever re
 **Unknown-handling (consistent with §8):** `kw_version` / `hybrid_suite` route through the
 **one-way "reject unknown `kem_id`/algo"** door — an unsupported value ⇒ **reject the
 object** ("unsupported KEM suite"), never attempt-and-fail. `kw_flags` unknown bit,
-non-zero `reserved`, or any structural mismatch (§12.2) ⇒ **reject**. A `"k/*"` object is
-**ignored** until a future version pins it. Registry additions to §8 namespaces:
-`r/<hex key_id>` = public recipient registry (`DRR1`, no secrets); `g/<hex file_id>` =
-grant sidecar (`DGS1`); `k/*` = reserved-deferred imported-key store.
+non-zero `reserved`, or any structural mismatch (§12.2) ⇒ **reject**. A `"k/*"` (`DIK1`,
+§13) entry or a `"d/*"` (`DGD1`, §14) record whose `version`/`hybrid_suite` is unknown is
+**rejected as that entry/record** (one-way door), never affecting the vault or other
+objects. Registry additions to §8 namespaces: `r/<hex key_id>` = public recipient registry
+(`DRR1`, no secrets); `g/<hex file_id>` = grant sidecar (`DGS1`); `k/<hex key_id>` =
+imported-key store (`DIK1`, §13, root-sealed private keys);
+`d/<hex recipient_key_id>/<hex file_id>` = shared-object discovery record (`DGD1`, §14,
+sealed to the recipient).
 
 **C-reference-decoder scope — DECISION:** the minimal, frozen-forever C99 reference
 decoder covers **only `kem_id=0`** (symmetric owner path: Argon2id + XChaCha20-Poly1305 +
@@ -866,7 +875,71 @@ root-derived recipient identity** among the recipients of every `kem_id=1` objec
 owner can always re-derive keys via a portable §2 slot and recover the object (with a
 standard ML-KEM-768 implementation).
 
-### 12.9 Cross-device & freeze gate
+### 12.9 Delegated-upload ticket (transient capability; NOT a stored format)
+
+A **Backend** capability (the §9-rule-3 `prepare_upload`) that hands a constrained client a
+short-lived authorization to upload **one** object key **directly to the backend**, so a
+mobile/background client (e.g. iOS `URLSession` background upload) transfers ciphertext
+without routing the bytes through a DCTL server. **Transient — no magic, no on-disk bytes,
+no `version`/`hybrid_suite`; it is never persisted** and rides the app's ordinary IPC/JSON
+transport. It changes **no** §2/§3/§12 byte layout.
+
+**Seal-then-delegate (security property, NORMATIVE).** The client seals the whole `DSF1`
+object **locally first** (§3; `kem_id=0` root-wrapped, or `kem_id=1` §12 recipient-hybrid).
+The `DEK`, the per-object `KW`, and all plaintext are generated and consumed entirely
+client-side; the finished object is already ciphertext before any ticket is requested. The
+ticket delegates **only TRANSPORT** — the single HTTP request that writes those bytes to a
+backend key. **The presigner/issuer never sees plaintext, the `DEK`, or `KW`.** It signs a
+URL/headers with **backend** credentials (S3/R2 secret key, or a B2 account/app-key auth),
+so a fully compromised presigner can authorize only *where* ciphertext is written — it can
+never read any object's contents. This is the strongest form of the "server moves bytes,
+never keys" separation.
+
+**`UploadTicket` wire contract** (transient; a field contract, not a byte layout):
+
+| Field | Type | Meaning |
+|---|---|---|
+| `method` | ASCII | `"PUT"` for S3/R2 (SigV4 presigned PUT); `"POST"` for B2 (`b2_get_upload_url`) |
+| `url` | UTF-8 | absolute URL the client sends the request to, verbatim, including any query string |
+| `headers` | ordered list of (name, value) | headers the client **MUST** send **verbatim and in the given order**; it MUST NOT add, drop, reorder, or re-case a signed header, or the backend rejects the write |
+| `expires_unix` | optional `i64` | absolute expiry (present for SigV4; **absent for B2**, whose token is scope- not time-bounded) |
+
+**S3 / R2 — SigV4 presigned PUT (query-auth).** `method = "PUT"`; `url` carries the SigV4
+query parameters `X-Amz-Algorithm=AWS4-HMAC-SHA256`, `X-Amz-Credential`, `X-Amz-Date`,
+`X-Amz-Expires` (seconds, `1 ≤ e ≤ 604800`), `X-Amz-SignedHeaders`, and `X-Amz-Signature`;
+the path key is `o/<hex file_id>` (§3). `headers` lists exactly the `X-Amz-SignedHeaders`
+the client must reproduce (at minimum `host`, implied by `url`). `expires_unix =
+X-Amz-Date + X-Amz-Expires`. **Content-hash binding (choice, trade-off noted):** the issuer
+MAY bind the exact body by signing `x-amz-content-sha256 = <hex SHA-256 of the sealed
+ciphertext>` as a signed header — pinning the upload to the exact bytes (tamper-evident at
+write) — **or** sign `x-amz-content-sha256 = UNSIGNED-PAYLOAD`, which does not bind the body
+(simpler for a streaming background upload, but the signature then attests only the key, not
+the bytes). Both are acceptable because DCTL objects are self-verifying on open (below);
+binding is preferred whenever the client can precompute the ciphertext hash.
+
+**B2 — `b2_get_upload_url` result (token-scoped).** The issuer calls `b2_get_upload_url` and
+returns `method = "POST"`, `url =` the returned `uploadUrl`, and `headers` (ordered,
+verbatim): `Authorization: <authorizationToken>` · `X-Bz-File-Name: <percent-encoded
+o/<hex file_id>>` · `Content-Type: b2/x-auto` (or `application/octet-stream`) ·
+`Content-Length: <ciphertext length>` · `X-Bz-Content-Sha1: <hex SHA-1 of the sealed
+ciphertext>` (the literal `do_not_verify` is permitted but discouraged — it drops B2's own
+write check). **No time expiry:** a B2 upload URL + token is a bearer capability scoped to
+one bucket/upload endpoint with **no `expires_unix`**; it stays usable until B2 retires it
+or an upload fails (one in-flight upload per URL — a client needing parallelism requests
+multiple tickets). Treat the token as short-lived by policy even without a hard timestamp.
+
+**Verified-write caveat (NORMATIVE).** A delegated PUT/POST goes straight to the backend, so
+DCTL cannot run its usual whole-file **server-side** verify — there is no server in the byte
+path. Responsibility shifts to the **client**, which MUST send the exact sealed bytes and
+check the HTTP result (2xx + `ETag`/`fileId`). The **owner SHOULD** perform a follow-up
+`HEAD` (size/`ETag`) or `GET`+verify to confirm the object landed intact and complete.
+Regardless, the object is **self-verifying on any later open**: `DSF1` per-chunk Poly1305
+tags with head-bound AAD (§3), the optional BLAKE3 footer, and the §4 `content_blake3` all
+fail closed against a truncated/corrupted/substituted body, so a bad delegated upload can
+never be silently opened as valid — it simply fails to open. A missed follow-up check is
+therefore a **durability/availability** risk, never a confidentiality/integrity one.
+
+### 12.10 Cross-device & freeze gate
 
 All new bytes are little-endian and fixed-width; only public-standard primitives are used
 (RFC 7748 X25519, FIPS 203 ML-KEM-768 via the deterministic `KeyGen_internal`/
@@ -888,3 +961,193 @@ encoder-generated byte-exact KAT vectors covering, at minimum, one **1-recipient
 key_id)` derivation; and deterministic ML-KEM-768 `KeyGen_internal(d,z)` /
 `Encaps_internal(ek,m)` / `Decaps_internal(dk,ct)` and X25519 vectors. The format is frozen
 only once these pass.
+
+---
+
+## 13. Imported-key store `DIK1` (`k/<hex key_id>`) — FROZEN
+
+Activates the reserved `k/*` namespace (§8/§12.8). Besides its root-derived identity (§12.4,
+`idx=0`), a vault MAY hold one or more **imported** external recipient keypairs — a key
+generated elsewhere, or a shared team key — so it can also decrypt objects sealed to those
+identities (multi-identity). Each imported keypair is one `DIK1` container at backend key
+`"k/" ‖ hex(key_id)`. **This adds no §2/§3/§12 byte change and no new primitive:** the
+private material is sealed with the pinned §1 `SUBKEY` + XChaCha20-Poly1305, exactly like
+every other DCTL wrap, and is offline-restorable from the vault root alone.
+
+```
+Off    Size  Field  (cleartext header)
+0      4     magic          "DIK1" (0x44 0x49 0x4B 0x31)
+4      1     version        0x01
+5      1     hybrid_suite   0x01 = X25519 + ML-KEM-768 (unknown ⇒ reject THIS entry, §8)
+6      2     reserved       0x0000 — MUST be 0 (reject the entry if nonzero)
+8      32    key_id         §12.3 key_id recomputed from the imported PUBLIC keys; MUST
+                            equal the "k/…" path component and the body recompute (below)
+
+── sealed body: XChaCha20-Poly1305(k_wrap, plaintext); k_wrap root-derived (below) ──
+40     24    nonce          fresh CSPRNG per write (24-byte XChaCha20 nonce)
+64     3648  ct             AEAD ciphertext of the 3648-byte sealed plaintext below
+3712   16    tag            Poly1305 tag
+```
+`DIK1` total = `40 + 24 + 3648 + 16` = **3728** bytes.
+
+**Sealed plaintext (3648 bytes; visible only after the root-key AEAD opens):**
+```
+Off    Size  Field
+0      32    x_sk    imported static X25519 secret (RFC 7748; StaticSecret clamps on use)
+32     2400  dk      imported ML-KEM-768 decapsulation key (FIPS 203 canonical bytes)
+2432   32    x_pk    matching static X25519 public (RFC 7748 LE u-coordinate)
+2464   1184  ek      matching ML-KEM-768 encapsulation key (FIPS 203 canonical bytes)
+```
+
+**Root-derived wrapping key (parallel to §12.4 — this is the `k/*` wrapping key):**
+```
+k_wrap = SUBKEY(root, "dctl-ik-wrap-v1"(15) ‖ key_id(32))     (32B; pinned §1 SUBKEY)
+```
+Folding `key_id` (as §12.4 folds `idx`) makes `k_wrap` **entry-specific**, so distinct
+imported keys never share a wrapping key and a fresh 24-byte nonce per write can never form
+a repeated `(key, nonce)` pair. `k_wrap` is a pure function of the vault `root`, so an
+imported key is recoverable offline through any portable §2 slot — like everything else.
+
+**Sealed-body AEAD:** `nonce(24) ‖ ct(3648) ‖ tag(16) = XChaCha20-Poly1305(k_wrap, nonce,
+plaintext, AAD)`, where
+`AAD = "dctl-ik-v1::"(12) ‖ magic(4) ‖ hybrid_suite(1) ‖ key_id(32)` (49 bytes). The AAD
+binds the body to its `magic`, suite, and `key_id`, so a body cannot be lifted into a
+container claiming a different identity (the tag fails).
+
+**Load semantics (one-way door — §8).** On unlock the vault MAY list `k/*` and, for each:
+1. Parse the cleartext header; if `magic ≠ "DIK1"`, or `version`/`hybrid_suite`
+   unsupported, or `reserved ≠ 0` ⇒ **reject THIS entry** (skip it), **never the vault**.
+2. Derive `k_wrap = SUBKEY(root, "dctl-ik-wrap-v1" ‖ header.key_id)` and AEAD-open the body
+   (AAD above); an AEAD failure ⇒ reject the entry (the tag is the sole accept gate).
+3. **Self-consistency (MANDATORY):** recompute
+   `key_id′ = BLAKE3-256("dctl-recip-id-v1\x00" ‖ DRK1(x_pk, ek))` (§12.3) from the body's
+   **public** keys and require `key_id′ == header.key_id == the "k/…" path component`; else
+   reject the entry. A writer SHOULD additionally verify `x_pk == X25519(x_sk, 9)` and that
+   `ek` matches `dk`'s embedded encapsulation key (FIPS 203) before importing.
+4. Add `{key_id, x_sk, dk, x_pk, ek}` to the vault's **identity set**. §12.5
+   `open_as_recipient` tries every identity in the set (root-derived `idx=0` plus each valid
+   `DIK1`) when opening a `kem_id=1` object, so the vault opens objects sealed to any
+   identity it holds.
+
+**Trust / sender-auth caveat (inherited from §12.7).** An imported key is trusted only
+because the owner chose to import it (out-of-band provenance). `kem_id=1` still provides
+**no origin authentication** in v1 — a key that a third party also holds (a shared team key)
+can seal objects the vault will accept, and the vault cannot tell **who** sealed them. Like
+all §12 asymmetric material, `DIK1` is **out of the minimal C reference decoder's scope**
+(§6/§12.8, `kem_id=0` only). `DSF1`/`DKE1`/`DGS1`/`DRR1` bytes are unchanged.
+
+---
+
+## 14. Shared-object discovery `DGD1` (`d/<hex recipient_key_id>/<hex file_id>`) — FROZEN
+
+Adds the new `d/*` namespace (§8/§12.8). A recipient can **decrypt** a shared object once it
+knows the `file_id` (its inline `kem_wrap` sub-record §12.2, or a `DGS1` grant §12.6), but
+it cannot **enumerate** which objects are shared to it: name records (`n/*`, §5) are keyed to
+the **owner's** name keys, which a recipient does not hold. A per-recipient **discovery
+record** solves enumeration — consistent with the shared-backend model that `r/*` and `g/*`
+already assume (the recipient reads the owner's backend). The owner writes one `DGD1` per
+(recipient, object) at `"d/" ‖ hex(recipient_key_id) ‖ "/" ‖ hex(file_id)`; the recipient
+lists `d/<its key_id>/*` to learn the set of `file_id`s shared to it, then opens each.
+**No §3/§12.2/§12.6 byte change and no new primitive** — the record is sealed with the same
+§12 hybrid machinery as a §12.2 grant.
+
+```
+Off    Size  Field  (cleartext header)
+0      4     magic             "DGD1" (0x44 0x47 0x44 0x31)
+4      1     version           0x01
+5      1     hybrid_suite      0x01 (unknown ⇒ reject THIS record, §8)
+6      2     reserved          0x0000 — MUST be 0
+8      32    recipient_key_id  §12.3 key_id this record is sealed to; MUST equal the
+                               "d/<recipient_key_id>/…" path component
+40     16    file_id           MUST equal the DSF1 file_id and the ".../<file_id>" component
+56     32    head_hash         BLAKE3-256 of the DSF1 fixed 68-byte head (binds the exact
+                               object head, like §12.6 DGS1)
+
+── wrapped_dw: ONE §12.2 recipient sub-record (rec_len = 1234) sealing DW to recipient ──
+88     1234  wrapped_dw        byte-identical §12.2 sub-record, bound to the object's
+                               fixed_head(68) and recipient_key_id (§12.1); wraps the fresh
+                               per-record 32-byte discovery key DW (the discovery analogue
+                               of the object KW, §12.5)
+
+── sealed_body: XChaCha20-Poly1305(DW, disc_plaintext) ──
+1322   24    nonce             fresh CSPRNG per write
+1346   D     ct                AEAD ciphertext of the disc_plaintext below
+1346+D 16    tag               Poly1305 tag
+```
+`DGD1` total = `1362 + D` bytes, where `D = 62 + path_len + ext_len`.
+
+**Discovery plaintext (`disc_plaintext`; visible only to the recipient after `DW` opens):**
+```
+Off    Size  Field
+0      1     disc_schema     0x01 (unknown ⇒ skip parsing this record, cf. §4 schema_version)
+1      1     obj_suite       object hybrid_suite echo (0x01) — cross-check
+2      16    file_id         MUST equal header.file_id and the fetched object
+18     8     size            u64 — object plaintext size (== head.plaintext_len / §4 size)
+26     32    content_hash    BLAKE3-256 of object plaintext (== §4 content_blake3)
+58     2     path_len        u16 — authoritative NFC UTF-8 path length (§5); ≥ 1
+60     P     path            authoritative NFC UTF-8 path (§5 rules; reader RE-validates)
+60+P   2     ext_len         u16 — trailing extension region length (forward growth)
+62+P   E     ext             TLVs [type u8][len u16][value]; unknown types ignored
+```
+`disc_plaintext` = `62 + P + E` bytes. Its AEAD binds the whole header:
+`AAD = "dctl-disc-v1::"(14) ‖ dgd1_header(88)` (folds `magic`, `version`, `hybrid_suite`,
+`recipient_key_id`, `file_id`, `head_hash`).
+
+**Seal (owner).** Generate `DW` = 32 fresh CSPRNG bytes. `wrapped_dw` = the §12.2 encaps of
+`DW` to the recipient's `DRK1` bound to the object's `fixed_head(68)` — the **identical**
+call used for a §12.6 grant, so `wrapped_dw` IS a `rec_len = 1234` sub-record.
+`sealed_body = XChaCha20-Poly1305(DW, disc_plaintext, AAD)`. Zeroize `DW`. Because the §12.2
+sub-record already folds `fixed_head(68)` (which contains `file_id` and `kem_id`) and the
+recipient `key_id` into both its combiner `info` and its `wrapped_kw` AAD (§12.1/§12.8), and
+the body AAD folds the whole `DGD1` header, the seal binds **recipient_key_id + file_id +
+the object head** at the crypto layer — only that recipient recovers `DW`, hence the
+path/size/hash.
+
+**Read (recipient).** List `d/<own key_id>/*` → the `file_id` set. For each record:
+1. Verify `magic`/`version`/`hybrid_suite`/`reserved`; `recipient_key_id == own key_id ==
+   path component`; `file_id == path component`; and the `wrapped_dw` sub-record `key_id`
+   (bytes `[4..36]`, validated per §12.2) `== recipient_key_id`. Any mismatch ⇒ reject THIS
+   record.
+2. Fetch the object head `o/<hex file_id>` (68 bytes, one Range request); verify
+   `head_hash == BLAKE3-256(head)` and `head.file_id == header.file_id`, else reject
+   (anti-transplant — the record cannot be moved to another object).
+3. Decapsulate `DW` from `wrapped_dw` using the object's `fixed_head(68)` and the
+   recipient's private key (§12.1 decaps; the AEAD tag is the sole accept gate). A key that
+   is not this recipient's ⇒ tag fails.
+4. Open `sealed_body` under `DW` (AAD = `"dctl-disc-v1::" ‖ header(88)`); verify
+   `body.file_id == header.file_id`; RE-validate `path` per §5 before any filesystem use.
+
+**Anti-tamper / anti-transplant.** The seal binds the **recipient** (only that `key_id`
+recovers `DW`) and the **object** (the sub-record folds the object head; `head_hash` +
+`file_id` give fast structural binding, both re-checked against the fetched object). So a
+record cannot be transplanted to another recipient (wrong `key_id` ⇒ no `DW`) or another
+object (wrong head ⇒ `head_hash`/decap/`file_id` mismatch). A hostile backend that merely
+stores `DGD1`s cannot read **paths** or **content hashes** — both stay encrypted under `DW` —
+but it does learn an **accepted metadata surface**: the storage key
+`d/<recipient_key_id>/<file_id>` exposes the recipient↔object **sharing-graph edge** in
+cleartext, so a `LIST` reveals which `key_id` may discover which `file_id`, each recipient's
+object count, and co-recipient sets. This is the **same class** already exposed by the
+cleartext `key_id`s in inline §12.2 sub-records and `DGS1` sidecars — `DGD1` adds no new leak
+class, only elevates the edge to `LIST`-visible metadata. The `size` in `disc_plaintext` is
+likewise **not** confidential from the backend: it equals the cleartext `plaintext_len` of the
+DSF1 fixed head (§3), which a backend can `Range`-fetch from `o/<file_id>` directly — it is
+carried under `DW` purely for enumeration convenience, not as a confidentiality guarantee.
+
+**Discovery grants no read access by itself.** `DGD1` wraps only `DW` — a pointer/index key
+— never the object `KW`/`DEK`. A recipient still needs a valid inline sub-record (§12.2) or
+`DGS1` grant (§12.6) to recover the object `KW` and read content, so a discovery record is
+purely an enumeration aid.
+
+**Lifecycle.** The owner writes `d/<key_id>/<file_id>` **during share**, alongside the
+`DGS1` grant (§12.6), and **DELETES it on revoke**. Same §11 **captured-copy caveat**: a
+recipient that already fetched a `DGD1` retains the path/size it revealed (as it retains any
+downloaded copy) — deletion stops *future* discovery, not past. **Rollback note (as
+§12.6):** `DGD1` carries no generation counter — it is a single per-(recipient, object)
+pointer, rewritten/deleted wholesale rather than an appended grant list — so a replayed old
+record only re-lists an object whose *actual* read access is still gated by the object's
+`kem_wrap`/`DGS1` (revoking those is what removes access). Freshness otherwise relies on the
+owner's delete-on-revoke plus a backend conditional-PUT / object-lock recommendation, and a
+non-owner cannot cryptographically verify a discovery record's freshness (flagged, benign).
+
+Like all §12 asymmetric material, `DGD1` is **out of the minimal C reference decoder's
+scope** (§6/§12.8, `kem_id=0` only). `DSF1`/`DKE1`/`DGS1`/`DRR1` bytes are unchanged.

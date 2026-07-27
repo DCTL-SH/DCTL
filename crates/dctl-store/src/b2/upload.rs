@@ -5,6 +5,7 @@ use std::path::Path;
 
 use bytes::Bytes;
 
+use crate::backend::UploadTicket;
 use crate::checksum::{ContentHash, Hasher};
 use crate::error::{Result, StoreError};
 use crate::model::{ObjectKey, PutOutcome};
@@ -349,4 +350,126 @@ async fn cancel_large_file(b2: &B2Backend, auth: &AuthState, file_id: &str) -> R
         )
         .await?;
     Ok(())
+}
+
+// ---- delegated (token-scoped) upload -----------------------------------------
+
+/// Issue a delegated upload ticket for `key` — the B2 implementation of
+/// [`Backend::prepare_upload`](crate::backend::Backend::prepare_upload).
+///
+/// Authorizes (cached) and fetches a fresh `b2_get_upload_url`, then hands back the exact
+/// `POST` the client must replay. B2 uploads are token-scoped, so `expires_unix` is `None`
+/// (the ticket lives as long as the returned upload-auth token).
+///
+/// **SHA-1 note.** B2 verifies uploads by **SHA-1**, but `content_sha256` (when supplied)
+/// is a SHA-256 — the two are not interconvertible, so we cannot present a matching
+/// `X-Bz-Content-Sha1` here. We send the B2 sentinel `do_not_verify`; the sealed object's
+/// integrity is instead checked when it is later **opened** (DSF1 verification), not at PUT
+/// time. We deliberately do not attempt any conversion.
+pub(super) async fn prepare_upload(
+    b2: &B2Backend,
+    key: &ObjectKey,
+    content_len: u64,
+    _content_sha256: Option<&[u8; 32]>,
+) -> Result<UploadTicket> {
+    let auth = b2.auth().await?;
+    let upload: GetUploadUrlResponse = b2
+        .post_json(
+            &auth,
+            constants::EP_GET_UPLOAD_URL,
+            serde_json::json!({ "bucketId": auth.bucket_id }),
+        )
+        .await?;
+    Ok(build_b2_ticket(
+        upload.upload_url,
+        upload.authorization_token,
+        key,
+        content_len,
+    ))
+}
+
+/// Pure assembly of the B2 upload ticket from a fetched `upload_url` + `auth_token`. Split
+/// from the network fetch so the header/URL shape is unit-testable without a live
+/// `b2_get_upload_url`.
+fn build_b2_ticket(
+    upload_url: String,
+    auth_token: String,
+    key: &ObjectKey,
+    content_len: u64,
+) -> UploadTicket {
+    UploadTicket {
+        method: "POST".to_string(),
+        url: upload_url,
+        headers: vec![
+            (constants::H_AUTHORIZATION.to_string(), auth_token),
+            (
+                constants::H_FILE_NAME.to_string(),
+                encode_file_name(key.as_str()),
+            ),
+            (
+                constants::H_CONTENT_TYPE.to_string(),
+                constants::CONTENT_TYPE_AUTO.to_string(),
+            ),
+            // SHA-256 ≠ B2's SHA-1: cannot verify at PUT, so sentinel + verify-on-open.
+            (
+                constants::H_CONTENT_SHA1.to_string(),
+                "do_not_verify".to_string(),
+            ),
+            (
+                constants::H_CONTENT_LENGTH.to_string(),
+                content_len.to_string(),
+            ),
+        ],
+        expires_unix: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Offline B2 ticket assembly: correct method, verbatim URL, token-scoped (no signed
+    /// expiry), url-encoded file name, `b2/x-auto`, the `do_not_verify` SHA-1 sentinel, and
+    /// the declared length — all without a live `b2_get_upload_url`.
+    #[test]
+    fn b2_ticket_assembly() {
+        let key = ObjectKey::new("photos/2020/a b.jpg");
+        let ticket = build_b2_ticket(
+            "https://pod-000.backblaze.com/b2api/v2/b2_upload_file/abc123".to_string(),
+            "UPLOAD_AUTH_TOKEN".to_string(),
+            &key,
+            4096,
+        );
+
+        assert_eq!(ticket.method, "POST");
+        assert_eq!(
+            ticket.url,
+            "https://pod-000.backblaze.com/b2api/v2/b2_upload_file/abc123"
+        );
+        assert_eq!(ticket.expires_unix, None);
+        assert!(
+            ticket
+                .headers
+                .contains(&("Authorization".to_string(), "UPLOAD_AUTH_TOKEN".to_string()))
+        );
+        assert!(ticket.headers.contains(&(
+            "X-Bz-File-Name".to_string(),
+            "photos/2020/a%20b.jpg".to_string()
+        )));
+        assert!(
+            ticket
+                .headers
+                .contains(&("Content-Type".to_string(), "b2/x-auto".to_string()))
+        );
+        assert!(
+            ticket
+                .headers
+                .contains(&("X-Bz-Content-Sha1".to_string(), "do_not_verify".to_string()))
+        );
+        assert!(
+            ticket
+                .headers
+                .contains(&("Content-Length".to_string(), "4096".to_string()))
+        );
+    }
 }

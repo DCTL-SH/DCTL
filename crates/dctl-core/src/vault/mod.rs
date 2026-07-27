@@ -1,6 +1,7 @@
 //! The vault: unlock state + composed file operations.
 
 mod get;
+mod imported;
 mod layout;
 mod list;
 mod put;
@@ -37,6 +38,12 @@ pub struct Vault {
     identity: kem::RecipientKeypair,
     /// Cached stable key-id of `identity` (§12.3) — the recipient-matching handle.
     identity_key_id: [u8; constants::KEY_ID_LEN],
+    /// IMPORTED (non-root-derived) recipient keypairs loaded from the §13 `k/*` store on
+    /// unlock. Together with the root-derived `identity` (§12.4, `idx=0`) these form the
+    /// vault's **identity set**: an object sealed to ANY held identity opens (§12.5/§13).
+    /// Each is offline-restorable from the vault root (its `DIK1` is root-sealed), so this
+    /// set is a pure function of `{root, the k/* objects}` — no extra local secret state.
+    imported: Vec<kem::RecipientKeypair>,
 }
 
 impl Vault {
@@ -135,7 +142,11 @@ impl Vault {
         let root_key = recovered.ok_or(CoreError::Unlock)?;
         tracing::info!(backend = backend.name(), "vault unlocked");
 
-        Self::assemble(backend, &root_key, env.vault_id, index_path)
+        let mut vault = Self::assemble(backend, &root_key, env.vault_id, index_path)?;
+        // Load the §13 imported-key store into the identity set. An unreadable/unknown
+        // entry is skipped (one-way door, §8) — it never fails the unlock.
+        vault.imported = vault.load_imported_identities().await?;
+        Ok(vault)
     }
 
     /// Common construction: derive sub-keys/name-keys and open the local index.
@@ -166,7 +177,25 @@ impl Vault {
             chunk_size: constants::DEFAULT_CHUNK_SIZE,
             identity,
             identity_key_id,
+            // Imported identities are loaded from the backend `k/*` store by `unlock`
+            // (an async LIST/GET pass); a freshly `init`ed vault starts with none.
+            imported: Vec::new(),
         })
+    }
+
+    /// Every recipient identity this vault holds (§12.5/§13): the root-derived `idx=0`
+    /// identity **first**, then each valid imported `DIK1` in load order. The
+    /// recipient-open paths try these in order and the first success wins.
+    pub(super) fn all_identities(&self) -> impl Iterator<Item = &kem::RecipientKeypair> {
+        std::iter::once(&self.identity).chain(self.imported.iter())
+    }
+
+    /// The stable key-ids of every identity in the vault's identity set (root-derived first,
+    /// then each imported `DIK1`). Lets a host/test confirm which identities an unlocked
+    /// vault holds (e.g. that an `import_keypair` survived a re-`unlock`).
+    #[must_use]
+    pub fn identity_key_ids(&self) -> Vec<[u8; constants::KEY_ID_LEN]> {
+        self.all_identities().map(|k| k.key_id).collect()
     }
 
     /// The vault's own root-derived recipient **public** identity (§12.4). A writer seals

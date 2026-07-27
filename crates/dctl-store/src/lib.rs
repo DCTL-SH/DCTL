@@ -21,7 +21,7 @@ pub mod s3;
 mod streaming;
 mod tls;
 
-pub use backend::Backend;
+pub use backend::{Backend, UploadTicket};
 pub use checksum::{ContentHash, HashAlgo, Hasher};
 pub use error::{Result, StoreError};
 pub use local::LocalFs;

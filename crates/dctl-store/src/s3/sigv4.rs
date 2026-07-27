@@ -29,6 +29,54 @@ fn signing_key(secret: &str, date: &str, region: &str, service: &str) -> [u8; 32
     hmac(&k_service, b"aws4_request")
 }
 
+/// The SigV4 credential scope: `<yyyymmdd>/<region>/<service>/aws4_request`, where the
+/// date is the leading `YYYYMMDD` of `amz_date`.
+pub(crate) fn credential_scope(amz_date: &str, region: &str, service: &str) -> String {
+    format!("{}/{region}/{service}/aws4_request", &amz_date[0..8])
+}
+
+/// Lowercase-and-trim `headers`, sort by name, and return
+/// `(signed_headers, canonical_headers)`: the `;`-joined signed-header name list and the
+/// `name:value\n` canonical-headers block. Shared by both the header-signed request and
+/// the query-string presigned request, which canonicalize headers identically.
+pub(crate) fn canonicalize_headers(headers: &[(String, String)]) -> (String, String) {
+    let mut hs: Vec<(String, String)> = headers
+        .iter()
+        .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string()))
+        .collect();
+    hs.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let signed_headers = hs
+        .iter()
+        .map(|(k, _)| k.clone())
+        .collect::<Vec<_>>()
+        .join(";");
+    let canonical_headers: String = hs.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
+    (signed_headers, canonical_headers)
+}
+
+/// The signing crux shared by the header-based [`authorization`] and the query-string
+/// presign (delegated upload): given the fully-assembled `canonical_request`, derive the
+/// lowercase-hex signature (string-to-sign → signing key → HMAC-SHA256).
+///
+/// Reads **no clock** — `amz_date` is supplied by the caller. That is what makes
+/// presigning deterministic and unit-testable offline.
+pub(crate) fn sign_canonical_request(
+    canonical_request: &str,
+    secret_key: &str,
+    region: &str,
+    service: &str,
+    amz_date: &str,
+) -> String {
+    let scope = credential_scope(amz_date, region, service);
+    let string_to_sign = format!(
+        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
+        sha256_hex(canonical_request.as_bytes())
+    );
+    let key = signing_key(secret_key, &amz_date[0..8], region, service);
+    hex::encode(hmac(&key, string_to_sign.as_bytes()))
+}
+
 /// Compute the `Authorization` header value for a request.
 ///
 /// `headers` must include every header to be signed (host, x-amz-date,
@@ -46,32 +94,14 @@ pub(crate) fn authorization(
     service: &str,
     amz_date: &str,
 ) -> String {
-    let date = &amz_date[0..8];
-
-    let mut hs: Vec<(String, String)> = headers
-        .iter()
-        .map(|(k, v)| (k.to_ascii_lowercase(), v.trim().to_string()))
-        .collect();
-    hs.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let signed_headers = hs
-        .iter()
-        .map(|(k, _)| k.clone())
-        .collect::<Vec<_>>()
-        .join(";");
-    let canonical_headers: String = hs.iter().map(|(k, v)| format!("{k}:{v}\n")).collect();
+    let (signed_headers, canonical_headers) = canonicalize_headers(headers);
     let canonical_request = format!(
         "{method}\n{canonical_uri}\n{canonical_query}\n{canonical_headers}\n{signed_headers}\n{payload_sha256}"
     );
 
-    let scope = format!("{date}/{region}/{service}/aws4_request");
-    let string_to_sign = format!(
-        "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}",
-        sha256_hex(canonical_request.as_bytes())
-    );
-
-    let key = signing_key(secret_key, date, region, service);
-    let signature = hex::encode(hmac(&key, string_to_sign.as_bytes()));
+    let scope = credential_scope(amz_date, region, service);
+    let signature =
+        sign_canonical_request(&canonical_request, secret_key, region, service, amz_date);
 
     format!(
         "AWS4-HMAC-SHA256 Credential={access_key}/{scope}, SignedHeaders={signed_headers}, Signature={signature}"

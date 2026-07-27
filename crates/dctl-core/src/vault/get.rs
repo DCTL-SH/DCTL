@@ -267,11 +267,14 @@ impl Vault {
         kem_wrap_block: &[u8],
         file_id: &[u8; FILE_ID_LEN],
     ) -> Result<Zeroizing<[u8; KEY_LEN]>> {
-        // Inline recipient first.
-        if let Some(kw) =
-            kem::sidecar::recover_kw_from_block(&self.identity, head_bytes, kem_wrap_block)?
-        {
-            return Ok(kw);
+        // Inline recipient first — try EACH identity in the set (root-derived, then every
+        // imported §13 `DIK1`); the first successful KW recovery wins (§12.5/§13). A
+        // structurally-invalid block surfaces as an error on the first attempt and
+        // propagates (reject, never silently continue).
+        for id in self.all_identities() {
+            if let Some(kw) = kem::sidecar::recover_kw_from_block(id, head_bytes, kem_wrap_block)? {
+                return Ok(kw);
+            }
         }
         // Sidecar fallback: g/<file_id>. An absent sidecar ⇒ not a recipient.
         let sidecar_key = ObjectKey::new(format!(
@@ -291,16 +294,76 @@ impl Vault {
             Err(e) => return Err(e.into()),
         };
         let parsed = kem::sidecar::parse(bytes.as_ref(), file_id, head_bytes)?;
-        let grant = parsed
-            .grants
-            .iter()
-            .find(|g| g.key_id() == self.identity_key_id)
-            .ok_or_else(not_a_recipient)?;
-        Ok(kem::sidecar::recover_kw_as_recipient(
-            grant,
-            &self.identity,
-            head_bytes,
-        )?)
+        // Try EACH identity against the sidecar grants (order-independent, §12.2).
+        for id in self.all_identities() {
+            if let Some(grant) = parsed.grants.iter().find(|g| g.key_id() == id.key_id) {
+                return Ok(kem::sidecar::recover_kw_as_recipient(
+                    grant, id, head_bytes,
+                )?);
+            }
+        }
+        Err(not_a_recipient())
+    }
+
+    /// Fetch and decrypt a **discovered** shared object by its `file_id` (§14 companion to
+    /// [`discover_shared`](Vault::discover_shared)) — the recipient path when the owner's
+    /// `n/*` name record is not this vault's to read. Fetches `o/<hex file_id>`, recovers
+    /// `KW` via the identity set (inline recipient, then the §12.6 sidecar — first success
+    /// wins), decodes, and verifies the plaintext against the object's own DEK-authenticated
+    /// `content_blake3`. Buffers the plaintext (see [`get_shared_to_path`](Vault::get_shared_to_path)
+    /// for constant-memory reads).
+    #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
+    pub async fn get_shared(&self, file_id: &[u8; FILE_ID_LEN]) -> Result<Zeroizing<Vec<u8>>> {
+        let object_key = format!("{}{}", layout::OBJECT_KEY_PREFIX, hex::encode(file_id));
+        let object = self.backend.get(&ObjectKey::new(object_key)).await?;
+        let head = object::parse_head(&object)?;
+        if head.kem_id != KEM_ID_HYBRID {
+            return Err(not_a_shared_object());
+        }
+        let kw = self.recover_object_kw(&object).await?;
+        let opened = object::open_with_kw(&kw, &object)?;
+        if let Some(meta) = &opened.metadata {
+            let got = ContentHash::blake3(opened.plaintext.as_slice());
+            if got.bytes[..] != meta.content_blake3[..] {
+                return Err(CoreError::Integrity(format!(
+                    "shared object {}",
+                    hex::encode(file_id)
+                )));
+            }
+        }
+        Ok(opened.plaintext)
+    }
+
+    /// Like [`get_shared`](Vault::get_shared) but decrypts straight to the local file `dest`
+    /// atomically (temp sibling → fsync → rename), so a discovered shared object can be
+    /// materialized without holding its whole plaintext in a `Vec`. Recovers `KW` on the
+    /// runtime, then decodes + writes off it (only `KW`, a per-object secret, crosses into
+    /// the blocking task — never a recipient private key). The plaintext is checked against
+    /// the object's own `content_blake3`; any failure leaves no `dest` file.
+    #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
+    pub async fn get_shared_to_path(&self, file_id: &[u8; FILE_ID_LEN], dest: &Path) -> Result<()> {
+        let object_key = format!("{}{}", layout::OBJECT_KEY_PREFIX, hex::encode(file_id));
+        let object = self.backend.get(&ObjectKey::new(object_key)).await?;
+        let head = object::parse_head(&object)?;
+        if head.kem_id != KEM_ID_HYBRID {
+            return Err(not_a_shared_object());
+        }
+        let kw = self.recover_object_kw(&object).await?;
+        let dest = dest.to_path_buf();
+        let err_path = hex::encode(file_id);
+        let err_task = |e: tokio::task::JoinError| {
+            CoreError::Store(StoreError::Backend(format!(
+                "streaming read task failed: {e}"
+            )))
+        };
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let opened = object::open_with_kw(&kw, object.as_ref())?;
+            let expected = opened.metadata.as_ref().map(|m| &m.content_blake3);
+            write_plaintext_atomic(opened.plaintext.as_slice(), expected, &dest, &err_path)
+        })
+        .await
+        .map_err(err_task)??;
+        Ok(())
     }
 }
 
@@ -310,6 +373,14 @@ impl Vault {
 fn not_a_recipient() -> CoreError {
     CoreError::Crypto(dctl_crypto::CryptoError::Format(
         "not a recipient: no inline sub-record and no sidecar grant for this identity".into(),
+    ))
+}
+
+/// `get_shared`/`get_shared_to_path` was asked for a `file_id` whose object is not a
+/// `kem_id=1` (shared) object — only hybrid objects carry the recipient wraps these read.
+fn not_a_shared_object() -> CoreError {
+    CoreError::Crypto(dctl_crypto::CryptoError::Format(
+        "get_shared: object is not a kem_id=1 shared object".into(),
     ))
 }
 

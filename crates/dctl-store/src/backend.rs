@@ -4,8 +4,29 @@ use async_trait::async_trait;
 use bytes::Bytes;
 
 use crate::checksum::ContentHash;
-use crate::error::Result;
+use crate::error::{Result, StoreError};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
+
+/// A delegated (presigned) authorization to upload exactly ONE object key.
+///
+/// The bytes uploaded are an already-sealed DSF1 object; this delegates only
+/// **transport** — the issuer hands a client (e.g. an iOS `URLSession` background
+/// upload) the exact request it must replay, and never sees plaintext / DEK / KW.
+///
+/// Not `Debug`: `url` (S3/R2) embeds a SigV4 signature and `headers` (B2) carry a
+/// short-lived upload-auth token — short-lived transport credentials that must not be
+/// logged, mirroring [`S3Config`](crate::s3::S3Config) / `B2Credentials`.
+pub struct UploadTicket {
+    /// HTTP method the client must use: `"PUT"` for S3/R2, `"POST"` for B2.
+    pub method: String,
+    /// The presigned URL (S3/R2) or the B2 `uploadUrl`.
+    pub url: String,
+    /// Headers the client MUST send verbatim (order preserved).
+    pub headers: Vec<(String, String)>,
+    /// SigV4 absolute expiry as a unix timestamp (S3/R2); `None` when the ticket is
+    /// scoped by an opaque token's own lifetime instead (B2).
+    pub expires_unix: Option<u64>,
+}
 
 /// A storage backend: moves opaque objects to/from a provider.
 ///
@@ -77,4 +98,29 @@ pub trait Backend: Send + Sync {
     /// One page of a prefix listing. Pass the previous page's `next_cursor` to
     /// continue; `None` starts from the beginning. Keeps memory constant.
     async fn list_page(&self, prefix: &str, cursor: Option<String>) -> Result<Page>;
+
+    /// Issue a delegated authorization for a client to upload the single object `key`
+    /// **directly** to the backend (see [`UploadTicket`]).
+    ///
+    /// `content_len` is the exact byte length the client will send. `content_sha256`,
+    /// when supplied, is the SHA-256 of those (already-sealed) bytes; backends that can
+    /// bind it into the authorization do so (S3/R2 sign it), tightening the delegation to
+    /// exactly those bytes. The bytes are opaque ciphertext — issuing a ticket never
+    /// exposes plaintext or key material.
+    ///
+    /// The **provided default** returns a clear error: most backends (e.g.
+    /// [`LocalFs`](crate::local::LocalFs)) have no notion of delegated upload. Backends
+    /// that support it (S3, R2, B2) override this.
+    async fn prepare_upload(
+        &self,
+        key: &ObjectKey,
+        content_len: u64,
+        content_sha256: Option<&[u8; 32]>,
+    ) -> Result<UploadTicket> {
+        let _ = (key, content_len, content_sha256);
+        Err(StoreError::Backend(format!(
+            "delegated upload unsupported by this backend: {}",
+            self.name()
+        )))
+    }
 }

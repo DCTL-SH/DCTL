@@ -444,6 +444,14 @@ fn only_object_bytes(store: &std::path::Path) -> Vec<u8> {
     std::fs::read(only_object_path(store)).unwrap()
 }
 
+/// The 16-byte `file_id` of the single stored content object, decoded from its
+/// `o/<hex file_id>` backend key (the object filename under the `o/` prefix).
+fn only_object_file_id(store: &std::path::Path) -> [u8; 16] {
+    let p = only_object_path(store);
+    let name = p.file_name().unwrap().to_str().unwrap();
+    hex::decode(name).unwrap().try_into().unwrap()
+}
+
 #[tokio::test]
 async fn shared_put_roundtrips_and_head_is_kem1() {
     let e = env();
@@ -767,13 +775,21 @@ async fn sidecar_add_grants_read_then_remove_revokes() {
 }
 
 /// A `Backend` wrapper that injects a **transient** fault (`StoreError::Backend`, the
-/// class B2/S3 map every non-404 to — 5xx, timeout, throttling) on `get` of any grant
-/// sidecar key (`g/…`) while its toggle is armed, delegating every other call unchanged.
-/// It never fabricates a `NotFound`, so it models "the sidecar read failed transiently",
-/// never "the sidecar is absent" — the exact distinction the fix turns on.
+/// class B2/S3 map every non-404 to — 5xx, timeout, throttling) on selected operations
+/// while the matching toggle is armed, delegating every other call unchanged. It never
+/// fabricates a `NotFound`, so each fault models "the read/write failed transiently",
+/// never "the object is absent" — the exact distinction the fixes turn on. The three
+/// toggles are independent:
+/// - `fail_grant_get`: fault `get` of any grant sidecar (`g/…`).
+/// - `fail_imported_get`: fault `get` of any §13 imported-key object (`k/…`) — the per-entry
+///   DIK1 read `load_imported_identities` does on unlock.
+/// - `fail_discovery_put`: fault `put` of any §14 discovery record (`d/…`) — the DGD1 write
+///   `share_add_recipients` does AFTER the grant-sidecar (`g/…`) put has already succeeded.
 struct FaultyGrantGet {
     inner: Arc<dyn Backend>,
     fail_grant_get: AtomicBool,
+    fail_imported_get: AtomicBool,
+    fail_discovery_put: AtomicBool,
 }
 
 impl FaultyGrantGet {
@@ -781,6 +797,8 @@ impl FaultyGrantGet {
         Self {
             inner,
             fail_grant_get: AtomicBool::new(false),
+            fail_imported_get: AtomicBool::new(false),
+            fail_discovery_put: AtomicBool::new(false),
         }
     }
     fn arm(&self) {
@@ -788,6 +806,22 @@ impl FaultyGrantGet {
     }
     fn disarm(&self) {
         self.fail_grant_get.store(false, Ordering::SeqCst);
+    }
+    /// Arm a TRANSIENT fault on `get` of any §13 imported-key object (`k/…`), modeling a
+    /// 5xx/timeout on the per-entry DIK1 read — never a fabricated NotFound.
+    fn arm_imported(&self) {
+        self.fail_imported_get.store(true, Ordering::SeqCst);
+    }
+    fn disarm_imported(&self) {
+        self.fail_imported_get.store(false, Ordering::SeqCst);
+    }
+    /// Arm a TRANSIENT fault on `put` of any §14 discovery record (`d/…`), modeling a
+    /// mid-DGD1-phase 5xx that strikes only AFTER the grant sidecar (`g/…`) put succeeded.
+    fn arm_discovery_put(&self) {
+        self.fail_discovery_put.store(true, Ordering::SeqCst);
+    }
+    fn disarm_discovery_put(&self) {
+        self.fail_discovery_put.store(false, Ordering::SeqCst);
     }
 }
 
@@ -803,6 +837,11 @@ impl Backend for FaultyGrantGet {
         data: Bytes,
         expected: &ContentHash,
     ) -> dctl_store::Result<PutOutcome> {
+        if self.fail_discovery_put.load(Ordering::SeqCst) && key.as_str().starts_with("d/") {
+            return Err(StoreError::Backend(
+                "injected transient 503 on discovery-record PUT".into(),
+            ));
+        }
         self.inner.put(key, data, expected).await
     }
 
@@ -810,6 +849,11 @@ impl Backend for FaultyGrantGet {
         if self.fail_grant_get.load(Ordering::SeqCst) && key.as_str().starts_with("g/") {
             return Err(StoreError::Backend(
                 "injected transient 503 on grant-sidecar GET".into(),
+            ));
+        }
+        if self.fail_imported_get.load(Ordering::SeqCst) && key.as_str().starts_with("k/") {
+            return Err(StoreError::Backend(
+                "injected transient 503 on imported-key GET".into(),
             ));
         }
         self.inner.get(key).await
@@ -1071,5 +1115,244 @@ async fn share_add_on_missing_or_non_recipient_errors() {
             .await
             .is_err(),
         "kem_id=0 objects carry no grants"
+    );
+}
+
+// ── §13 imported-key store + §14 shared-object discovery (end-to-end, LocalFs) ──
+
+#[tokio::test]
+async fn import_keypair_round_trips_across_reunlock() {
+    // A fresh vault holds only its root-derived identity; an imported keypair persists in the
+    // `k/*` store and reloads into the identity set on the next unlock (multi-identity).
+    let store = TempDir::new().unwrap();
+    let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(store.path()));
+    let idx1 = TempDir::new().unwrap();
+    let p1 = idx1.path().join("a.redb");
+
+    let key_id = {
+        let o = Vault::init(backend.clone(), &p1, "pw").await.unwrap();
+        assert_eq!(
+            o.identity_key_ids().len(),
+            1,
+            "fresh vault: root identity only"
+        );
+        let kid = o.import_keypair().await.unwrap();
+        // import_keypair(&self) writes k/*; the in-memory set refreshes on the next unlock.
+        assert_eq!(o.identity_key_ids().len(), 1);
+        kid
+    };
+
+    // Re-unlock with a FRESH index: the k/* store is listed + reloaded.
+    let idx2 = TempDir::new().unwrap();
+    let p2 = idx2.path().join("b.redb");
+    let o2 = Vault::unlock(backend.clone(), &p2, "pw").await.unwrap();
+    let ids = o2.identity_key_ids();
+    assert_eq!(ids.len(), 2, "root + imported after reload");
+    assert!(
+        ids.contains(&key_id),
+        "the imported identity reloaded on unlock"
+    );
+}
+
+#[tokio::test]
+async fn imported_identity_discovers_reads_and_revokes_shared_object() {
+    use dctl_crypto::kem;
+
+    // One shared backend; owner O is the only vault (a second vault can't share the fixed
+    // envelope key). An IMPORTED external identity `ext` plays recipient "B": O seals to
+    // ext's public key AND imports ext's private key, so after a re-unlock reloads the k/*
+    // store, O-as-ext discovers and reads the shared object via the multi-identity path.
+    let store = TempDir::new().unwrap();
+    let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(store.path()));
+    let idx1 = TempDir::new().unwrap();
+    let p1 = idx1.path().join("v1.redb");
+
+    let ext = kem::generate_external();
+    let ext_key_id = ext.key_id;
+
+    let data = pseudo_random(200_003);
+    {
+        let o = Vault::init(backend.clone(), &p1, "pw").await.unwrap();
+        // Import ext's private material (from-material variant), then share the object to
+        // ext via the grant sidecar (owner-only object first → sidecar grant writes a DGD1).
+        let returned = o.import_keypair_material(&ext).await.unwrap();
+        assert_eq!(returned, ext_key_id);
+
+        o.put_file_shared("docs/report.txt", &data, &[])
+            .await
+            .unwrap();
+        o.share_add_recipients("docs/report.txt", std::slice::from_ref(&ext.public))
+            .await
+            .unwrap();
+    }
+
+    // Re-unlock with a FRESH index → forces reload of k/* and name-record resolution.
+    let idx2 = TempDir::new().unwrap();
+    let p2 = idx2.path().join("v2.redb");
+    let o2 = Vault::unlock(backend.clone(), &p2, "pw").await.unwrap();
+    assert!(
+        o2.identity_key_ids().contains(&ext_key_id),
+        "imported identity must reload after restart"
+    );
+
+    // discover_shared enumerates the object under ext's key_id with the correct path/size.
+    let discovered = o2.discover_shared().await.unwrap();
+    let found = discovered
+        .iter()
+        .find(|s| s.path == "docs/report.txt")
+        .expect("ext discovers the shared object");
+    assert_eq!(found.size, data.len() as u64, "discovered size matches");
+
+    // get_shared returns the EXACT bytes (fetch o/<file_id> + multi-identity open).
+    let got = o2.get_shared(&found.file_id).await.unwrap();
+    assert_eq!(
+        got.as_slice(),
+        data.as_slice(),
+        "get_shared returns exact bytes"
+    );
+
+    // get_shared_to_path materializes the same bytes atomically.
+    let out_dir = TempDir::new().unwrap();
+    let dest = out_dir.path().join("out.bin");
+    o2.get_shared_to_path(&found.file_id, &dest).await.unwrap();
+    assert_eq!(std::fs::read(&dest).unwrap(), data);
+
+    // Revoke ext: removes the sidecar grant AND deletes the DGD1 discovery record.
+    o2.share_remove_recipient("docs/report.txt", &ext_key_id)
+        .await
+        .unwrap();
+    let after = o2.discover_shared().await.unwrap();
+    assert!(
+        !after.iter().any(|s| s.path == "docs/report.txt"),
+        "after revoke, ext no longer discovers the object"
+    );
+}
+
+#[tokio::test]
+async fn unlock_transient_imported_key_get_error_fails_not_silently_drops_identity() {
+    // [Fix / HIGH] `load_imported_identities` must PROPAGATE a transient error on the per-entry
+    // GET of a `k/<key_id>` DIK1 — never swallow it as "skip". Swallowing would silently drop a
+    // legitimate imported identity so the identity set shrinks on a network blip, and a later
+    // open of a genuinely-owned object would return a false, PERMANENT "not a recipient". Only
+    // `StoreError::NotFound` (a TOCTOU delete between LIST and GET) is a valid skip.
+    //
+    // Fails against the old `Err(e) => { warn; continue }` code: there, the armed unlock would
+    // SUCCEED with the imported identity silently missing, so `unwrap_err()` below would panic.
+    let (o, faulty, _store, idx) = faulty_vault("pw").await;
+    let idx_path = idx.path().join("v.redb");
+
+    // Import an external keypair → a `k/<kid>` DIK1 now exists on the backend.
+    let kid = o.import_keypair().await.unwrap();
+    drop(o); // release the local index so the SAME backend + index can be re-unlocked
+
+    // Re-unlock with the transient `k/*` GET fault ARMED: unlock MUST fail — not succeed with
+    // the imported identity silently dropped.
+    faulty.arm_imported();
+    let backend: Arc<dyn Backend> = faulty.clone();
+    let err = match Vault::unlock(backend, &idx_path, "pw").await {
+        Ok(_) => panic!("armed transient k/* GET must fail unlock, not drop the identity"),
+        Err(e) => e,
+    };
+    assert!(
+        matches!(err, CoreError::Store(_)),
+        "a transient k/* GET must surface as a Store error, got {err:?}"
+    );
+    assert_eq!(
+        err.kind(),
+        ErrorKind::Transient,
+        "a transient backend fault on the DIK1 read must classify as retryable"
+    );
+
+    // Disarm and re-unlock: it now succeeds AND the imported identity is restored — proving the
+    // identity was genuinely present all along (the armed unlock did not drop it, it aborted).
+    faulty.disarm_imported();
+    let backend: Arc<dyn Backend> = faulty.clone();
+    let o2 = Vault::unlock(backend, &idx_path, "pw").await.unwrap();
+    assert!(
+        o2.identity_key_ids().contains(&kid),
+        "after the fault clears, the imported identity reloads into the set"
+    );
+}
+
+#[tokio::test]
+async fn share_add_self_heals_missing_discovery_record_on_retry() {
+    use dctl_crypto::kem;
+
+    // [Fix / MEDIUM] `share_add_recipients` must write the §14 `d/<kid>/<file_id>` DGD1 for
+    // EVERY requested (non-owner) recipient (idempotent verified-write) and must NOT early-return
+    // when nothing NEW is granted — so a retry after a mid-DGD1-phase transient failure SELF-HEALS
+    // the missing discovery record. An imported identity `ext` stands in for recipient "B" on the
+    // single faulty backend (so `discover_shared` on this vault enumerates as B), exactly like
+    // `imported_identity_discovers_reads_and_revokes_shared_object`.
+    //
+    // Fails against the old code: on the retry `ext` is already in the sidecar (added=0), the old
+    // path early-returned on empty `newly_added`, so the DGD1 was never (re)written and the final
+    // `discover_shared` would not list the object.
+    let (o, faulty, store, idx) = faulty_vault("pw").await;
+    let idx_path = idx.path().join("v.redb");
+
+    let ext = kem::generate_external();
+    let ext_kid = ext.key_id;
+    assert_eq!(o.import_keypair_material(&ext).await.unwrap(), ext_kid);
+
+    // Owner-only object: no inline recipients → no sidecar and no DGD1 exist yet.
+    let data = b"payload shared to B via the grant sidecar, never re-uploaded";
+    o.put_file_shared("clip", data, &[]).await.unwrap();
+    drop(o); // release the index; re-unlock loads `ext` into the in-memory identity set
+
+    // Re-unlock so the vault holds `ext` (root + imported) and can discover as B.
+    let backend: Arc<dyn Backend> = faulty.clone();
+    let o2 = Vault::unlock(backend, &idx_path, "pw").await.unwrap();
+    assert!(o2.identity_key_ids().contains(&ext_kid));
+
+    // Arm the DGD1 (`d/*`) PUT fault and grant `ext`: the grant sidecar (`g/*`) PUT succeeds but
+    // the discovery-record (`d/*`) PUT fails → `share_add_recipients` returns a transient Store
+    // error with the grant persisted but the discovery record missing.
+    faulty.arm_discovery_put();
+    let err = o2
+        .share_add_recipients("clip", std::slice::from_ref(&ext.public))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, CoreError::Store(_)),
+        "the failed DGD1 PUT must surface as a Store error, got {err:?}"
+    );
+    assert_eq!(err.kind(), ErrorKind::Transient);
+
+    // Grant PRESENT, discovery ABSENT. The sidecar was written (a `g/*` object exists), yet the
+    // object is NOT yet discoverable by `ext`.
+    assert!(
+        !only_sidecar_bytes(store.path()).is_empty(),
+        "the grant sidecar was written before the DGD1 PUT failed"
+    );
+    let before = o2.discover_shared().await.unwrap();
+    assert!(
+        !before.iter().any(|s| s.path == "clip"),
+        "the discovery record was never written — ext does not discover the object yet"
+    );
+    // Grant-present cross-check: the object is readable by `file_id` despite the missing DGD1.
+    let file_id = only_object_file_id(store.path());
+    assert_eq!(
+        o2.get_shared(&file_id).await.unwrap().as_slice(),
+        data,
+        "grant present ⇒ the object reads via file_id even with no discovery record"
+    );
+
+    // Retry the SAME add with the fault cleared. Nothing NEW is granted (`ext` is already in the
+    // sidecar → added=0), which is exactly the condition the old early-return skipped. The fixed
+    // code still (idempotently) writes the DGD1, so the discovery record self-heals.
+    faulty.disarm_discovery_put();
+    o2.share_add_recipients("clip", std::slice::from_ref(&ext.public))
+        .await
+        .unwrap();
+    let after = o2.discover_shared().await.unwrap();
+    let found = after
+        .iter()
+        .find(|s| s.path == "clip")
+        .expect("after the retry, ext discovers the self-healed object");
+    assert_eq!(found.size, data.len() as u64, "discovered size matches");
+    assert_eq!(
+        found.file_id, file_id,
+        "discovery points at the same object"
     );
 }

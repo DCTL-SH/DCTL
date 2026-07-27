@@ -204,6 +204,24 @@ async fn listing_filters_by_prefix_and_paginates_by_cursor() {
 }
 
 #[tokio::test]
+async fn prepare_upload_is_unsupported() {
+    // LocalFs keeps the trait default: there is no notion of a delegated direct upload to
+    // a local directory, so it must surface a clear backend error rather than a ticket.
+    let dir = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+    // `UploadTicket` is intentionally non-Debug (it carries bearer transport creds), so
+    // match by reference rather than `unwrap_err()`.
+    let result = fs.prepare_upload(&ObjectKey::new("x.bin"), 10, None).await;
+    assert!(matches!(&result, Err(StoreError::Backend(_))));
+    if let Err(err) = result {
+        assert!(
+            err.to_string().contains("delegated upload unsupported"),
+            "unexpected error: {err}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn rejects_path_traversal_keys() {
     let dir = TempDir::new().unwrap();
     let fs = LocalFs::new(dir.path());

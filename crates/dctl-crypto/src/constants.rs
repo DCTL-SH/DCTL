@@ -116,7 +116,7 @@ pub const MAX_PATH_BYTES: usize = 4096;
 // ── §12 Asymmetric recipients & post-quantum KEM (`kem_id=1`) — FROZEN ──
 //
 // Hybrid X25519 + ML-KEM-768. Every ASCII label below is pinned VERBATIM with its
-// exact byte length (§12.9); the `const _` length assertions lock those lengths at
+// exact byte length (§12.10); the `const _` length assertions lock those lengths at
 // compile time so a stray edit can never silently change a frozen domain string.
 
 /// Hybrid suite selector (`hybrid_suite` byte): X25519 + ML-KEM-768 (§12.1).
@@ -209,7 +209,58 @@ pub const GRANT_SIDECAR_HEADER_LEN: usize = 4 + 1 + 1 + 2 + FILE_ID_LEN + HEAD_H
 /// Max grants carried in one sidecar (`0 ≤ G ≤ 4096`, §12.6).
 pub const MAX_GRANT_COUNT: u16 = 4096;
 
-// Compile-time locks on the FROZEN label byte-lengths (§12.9).
+// ── §13 imported-key store `DIK1` (`k/<hex key_id>`) — FROZEN ──
+//
+// A root-sealed container holding one IMPORTED (non-root-derived) recipient keypair, so a
+// vault can also decrypt objects sealed to that external identity (multi-identity, §12.4).
+// The private material is wrapped with the pinned §1 `SUBKEY` + XChaCha20-Poly1305 — no new
+// primitive — and is offline-restorable from the vault root alone.
+
+/// Imported-key store container magic ("DCTL Imported Key v1").
+pub const IMPORTED_KEY_MAGIC: [u8; 4] = *b"DIK1";
+/// `DIK1` version byte.
+pub const IMPORTED_KEY_VERSION: u8 = 0x01;
+/// `DIK1` cleartext header length: magic(4)+ver(1)+suite(1)+reserved(2)+key_id(32) = 40.
+pub const DIK1_HEADER_LEN: usize = 4 + 1 + 1 + 2 + KEY_ID_LEN;
+/// `DIK1` sealed plaintext length: x_sk(32)+dk(2400)+x_pk(32)+ek(1184) = 3648.
+pub const DIK1_PLAINTEXT_LEN: usize =
+    X25519_SK_LEN + MLKEM768_DK_LEN + X25519_PK_LEN + MLKEM768_EK_LEN;
+/// Whole `DIK1` container length: header(40)+nonce(24)+ct(3648)+tag(16) = 3728.
+pub const DIK1_LEN: usize = DIK1_HEADER_LEN + NONCE_LEN + DIK1_PLAINTEXT_LEN + TAG_LEN;
+/// Root-derived imported-key wrapping-key label (15 bytes): `k_wrap = SUBKEY(root,
+/// IK_WRAP_LABEL ‖ key_id)` — folding `key_id` makes `k_wrap` entry-specific (§13).
+pub const IK_WRAP_LABEL: &[u8] = b"dctl-ik-wrap-v1";
+/// `DIK1` sealed-body AAD domain prefix (12 bytes): `AAD = IK_AAD_PREFIX ‖ magic(4) ‖
+/// hybrid_suite(1) ‖ key_id(32)` = 49 bytes (§13).
+pub const IK_AAD_PREFIX: &[u8] = b"dctl-ik-v1::";
+
+// ── §14 shared-object discovery `DGD1` (`d/<hex recipient_key_id>/<hex file_id>`) — FROZEN ──
+//
+// A per-(recipient, object) enumeration pointer sealed to the recipient: it wraps a fresh
+// 32-byte discovery key `DW` (via one §12.2 sub-record, bound to the object head) and, under
+// `DW`, an AEAD-sealed `disc_plaintext` carrying the object's authoritative path/size/hash.
+// It grants NO read access by itself — `DW` never wraps the object `KW`/`DEK`.
+
+/// Shared-object discovery container magic ("DCTL Discovery v1").
+pub const DISCOVERY_MAGIC: [u8; 4] = *b"DGD1";
+/// `DGD1` version byte.
+pub const DISCOVERY_VERSION: u8 = 0x01;
+/// `DGD1` cleartext header length: magic(4)+ver(1)+suite(1)+reserved(2)+recipient_key_id(32)
+/// +file_id(16)+head_hash(32) = 88.
+pub const DGD1_HEADER_LEN: usize = 4 + 1 + 1 + 2 + KEY_ID_LEN + FILE_ID_LEN + HEAD_HASH_LEN;
+/// Object offset at which the `DGD1` sealed body (`nonce(24)‖ct(D)‖tag(16)`) begins:
+/// header(88) + one §12.2 sub-record (`wrapped_dw`, [`RECIP_SUBRECORD_LEN`]) = 1322.
+pub const DGD1_BODY_OFFSET: usize = DGD1_HEADER_LEN + RECIP_SUBRECORD_LEN;
+/// `DGD1` sealed-body AAD domain prefix (14 bytes): `AAD = DISC_AAD_PREFIX ‖ dgd1_header(88)`.
+pub const DISC_AAD_PREFIX: &[u8] = b"dctl-disc-v1::";
+/// Discovery-plaintext schema version.
+pub const DISC_SCHEMA_V1: u8 = 0x01;
+/// Minimum `disc_plaintext` length (all fixed fields, zero-length path/ext regions):
+/// schema(1)+obj_suite(1)+file_id(16)+size(8)+content_hash(32)+path_len(2)+ext_len(2) = 62.
+/// (`path_len` MUST be ≥ 1 for a real record; the fixed floor is 62.)
+pub const DISC_MIN_PLAINTEXT_LEN: usize = 62;
+
+// Compile-time locks on the FROZEN label byte-lengths (§12.10).
 const _: () = assert!(RECIP_ID_LABEL.len() == 17);
 const _: () = assert!(RECIP_SEED_LABEL.len() == 18);
 const _: () = assert!(RECIP_X25519_LABEL.len() == 20);
@@ -224,6 +275,17 @@ const _: () = assert!(WRAPPED_KW_LEN == 72);
 const _: () = assert!(FILE_ID_LEN == 16);
 const _: () = assert!(HEAD_HASH_LEN == 32);
 const _: () = assert!(GRANT_SIDECAR_HEADER_LEN == 66);
+// §13 DIK1 imported-key store frozen sizes/labels.
+const _: () = assert!(IK_WRAP_LABEL.len() == 15);
+const _: () = assert!(IK_AAD_PREFIX.len() == 12);
+const _: () = assert!(DIK1_HEADER_LEN == 40);
+const _: () = assert!(DIK1_PLAINTEXT_LEN == 3648);
+const _: () = assert!(DIK1_LEN == 3728);
+// §14 DGD1 shared-object discovery frozen sizes/labels.
+const _: () = assert!(DISC_AAD_PREFIX.len() == 14);
+const _: () = assert!(DGD1_HEADER_LEN == 88);
+const _: () = assert!(DGD1_BODY_OFFSET == 1322);
+const _: () = assert!(DISC_MIN_PLAINTEXT_LEN == 62);
 // `kem_ct_len ≤ 65535` ⇒ 53 recipients max for suite 1.
 const _: () =
     assert!(KEM_WRAP_HEADER_LEN + RECIP_SUBRECORD_LEN * (MAX_RECIP_COUNT as usize) <= 65535);

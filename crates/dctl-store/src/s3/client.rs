@@ -6,6 +6,7 @@ use std::path::Path;
 use bytes::Bytes;
 use reqwest::{Method, StatusCode};
 
+use crate::backend::UploadTicket;
 use crate::checksum::{ContentHash, Hasher};
 use crate::error::{Result, StoreError};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
@@ -27,6 +28,9 @@ const S3_MIN_PART_SIZE: u64 = 5 * 1024 * 1024;
 const S3_MAX_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
 /// Objects returned per listing page.
 const LIST_PAGE_SIZE: u32 = 1000;
+/// Lifetime of a delegated (presigned) upload authorization: 15 minutes. Long enough for
+/// a client to start a background upload, short enough to bound the delegation.
+const PRESIGN_TTL_SECS: u64 = 15 * 60;
 
 pub(crate) struct S3Client {
     http: reqwest::Client,
@@ -586,6 +590,36 @@ impl S3Client {
             next_cursor: listing.next_token,
         })
     }
+
+    /// Issue a delegated (presigned) PUT authorization for `key` — the S3/R2
+    /// implementation of [`Backend::prepare_upload`](crate::backend::Backend::prepare_upload).
+    ///
+    /// Builds a SigV4 **presigned PUT URL** valid for [`PRESIGN_TTL_SECS`]. The wall clock
+    /// is read here (via [`now_unix`]); the pure builder [`presign_put`] takes the
+    /// timestamp as a parameter so the signature math stays offline-testable. `content_len`
+    /// is not part of the S3 signature (only `host`, plus `x-amz-content-sha256` when a
+    /// hash is bound), so the client is free to send it as an ordinary header.
+    pub(crate) fn prepare_upload(
+        &self,
+        key: &ObjectKey,
+        content_len: u64,
+        content_sha256: Option<&[u8; 32]>,
+    ) -> Result<UploadTicket> {
+        let _ = content_len;
+        let (url, headers, expires_unix) = presign_put(
+            &self.config,
+            key.as_str(),
+            content_sha256,
+            now_unix(),
+            PRESIGN_TTL_SECS,
+        );
+        Ok(UploadTicket {
+            method: "PUT".to_string(),
+            url,
+            headers,
+            expires_unix: Some(expires_unix),
+        })
+    }
 }
 
 // ---- helpers -----------------------------------------------------------------
@@ -666,4 +700,207 @@ fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
     let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
     (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
+// ---- presigned (delegated) upload --------------------------------------------
+
+/// Assemble a SigV4 presigned **PUT** for `key`: the full URL (query includes
+/// `X-Amz-Signature`), the headers the client must send verbatim, and the absolute
+/// expiry (`now_unix + ttl_secs`).
+///
+/// Pure and deterministic in `now_unix` — the caller injects the wall clock so the
+/// signature math is unit-testable offline. When `content_sha256` is `Some`, its lowercase
+/// hex is bound into the signature (adding `x-amz-content-sha256` to the signed headers and
+/// returning it as a client header); otherwise the payload is signed as `UNSIGNED-PAYLOAD`
+/// and no content header is required.
+fn presign_put(
+    cfg: &S3Config,
+    key: &str,
+    content_sha256: Option<&[u8; 32]>,
+    now_unix: i64,
+    ttl_secs: u64,
+) -> (String, Vec<(String, String)>, u64) {
+    let host = host_of(&cfg.endpoint);
+    let canonical_uri = format!("/{}/{}", cfg.bucket, uri_encode(key, false));
+    let amz_date = amz_datetime(now_unix);
+
+    // Bind the content hash only when supplied; else UNSIGNED-PAYLOAD. When bound, the
+    // same header is both signed and handed back for the client to send verbatim.
+    let (payload_hash, extra_signed, client_headers) = match content_sha256 {
+        Some(h) => {
+            let hex = hex::encode(h);
+            let hdr = ("x-amz-content-sha256".to_string(), hex.clone());
+            (hex, vec![hdr.clone()], vec![hdr])
+        }
+        None => ("UNSIGNED-PAYLOAD".to_string(), Vec::new(), Vec::new()),
+    };
+
+    let query = presign_query_string(
+        "PUT",
+        &host,
+        &canonical_uri,
+        &extra_signed,
+        &payload_hash,
+        &cfg.access_key,
+        &cfg.secret_key,
+        &cfg.region,
+        S3_SERVICE,
+        &amz_date,
+        ttl_secs,
+    );
+    let url = format!(
+        "{}{}?{}",
+        cfg.endpoint.trim_end_matches('/'),
+        canonical_uri,
+        query
+    );
+    let expires_unix = (now_unix.max(0) as u64).saturating_add(ttl_secs);
+    (url, client_headers, expires_unix)
+}
+
+/// The query-string variant of [`sigv4::authorization`]: build the canonical query for a
+/// SigV4 presigned request and append `X-Amz-Signature`. Reuses the exact canonical-query
+/// encoding of the buffered path ([`canonical_query`] / [`uri_encode`]) and the shared
+/// signing crux ([`sigv4::sign_canonical_request`]), so header-signed and presigned
+/// requests share one implementation of the SigV4 math.
+///
+/// `host` is the value of the mandatory signed `host` header; `extra_signed_headers` are
+/// additional headers bound into the signature (added to both the canonical headers and
+/// `X-Amz-SignedHeaders`). `payload_hash` is `"UNSIGNED-PAYLOAD"` or lowercase hex.
+#[allow(clippy::too_many_arguments)]
+fn presign_query_string(
+    method: &str,
+    host: &str,
+    canonical_uri: &str,
+    extra_signed_headers: &[(String, String)],
+    payload_hash: &str,
+    access_key: &str,
+    secret_key: &str,
+    region: &str,
+    service: &str,
+    amz_date: &str,
+    expires_secs: u64,
+) -> String {
+    let credential = format!(
+        "{access_key}/{}",
+        sigv4::credential_scope(amz_date, region, service)
+    );
+
+    let mut headers: Vec<(String, String)> = vec![("host".to_string(), host.to_string())];
+    headers.extend(extra_signed_headers.iter().cloned());
+    let (signed_headers, canonical_headers) = sigv4::canonicalize_headers(&headers);
+
+    // The presign query params, minus the signature itself. `canonical_query` URI-encodes
+    // and sorts them (so `/` in the credential → `%2F`, `;` in signed-headers → `%3B`),
+    // exactly matching the canonical query that goes into the signature below.
+    let params: Vec<(&str, String)> = vec![
+        ("X-Amz-Algorithm", "AWS4-HMAC-SHA256".to_string()),
+        ("X-Amz-Credential", credential),
+        ("X-Amz-Date", amz_date.to_string()),
+        ("X-Amz-Expires", expires_secs.to_string()),
+        ("X-Amz-SignedHeaders", signed_headers.clone()),
+    ];
+    let cq = canonical_query(&params);
+
+    let canonical_request = format!(
+        "{method}\n{canonical_uri}\n{cq}\n{canonical_headers}\n{signed_headers}\n{payload_hash}"
+    );
+    let signature =
+        sigv4::sign_canonical_request(&canonical_request, secret_key, region, service, amz_date);
+    format!("{cq}&X-Amz-Signature={signature}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // AWS's published DUMMY credentials for SigV4 examples — never real secrets.
+    const AWS_EXAMPLE_ACCESS: &str = "AKIAIOSFODNN7EXAMPLE";
+    const AWS_EXAMPLE_SECRET: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    /// Unix seconds for `20130524T000000Z`, the AWS presigned-example timestamp.
+    const AWS_EXAMPLE_UNIX: i64 = 1_369_353_600;
+
+    /// **Offline SigV4 presign KAT.** Reproduces AWS's published presigned-URL example
+    /// (S3, GET `/test.txt`, virtual-hosted host, `UNSIGNED-PAYLOAD`, 24 h expiry) — see
+    /// <https://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-query-string-auth.html>.
+    ///
+    /// Fully deterministic (pinned timestamp, no clock, no network): asserting the exact
+    /// query — canonical params **and** the `X-Amz-Signature` AWS publishes — proves the
+    /// canonical-request assembly + signing-key derivation + HMAC math are correct.
+    #[test]
+    fn presign_matches_aws_documented_vector() {
+        let query = presign_query_string(
+            "GET",
+            "examplebucket.s3.amazonaws.com",
+            "/test.txt",
+            &[],
+            "UNSIGNED-PAYLOAD",
+            AWS_EXAMPLE_ACCESS,
+            AWS_EXAMPLE_SECRET,
+            "us-east-1",
+            "s3",
+            "20130524T000000Z",
+            86_400,
+        );
+        assert_eq!(
+            query,
+            "X-Amz-Algorithm=AWS4-HMAC-SHA256\
+             &X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request\
+             &X-Amz-Date=20130524T000000Z\
+             &X-Amz-Expires=86400\
+             &X-Amz-SignedHeaders=host\
+             &X-Amz-Signature=aeeed9bbccd4d02ee5c0109b86d86835f995330da4c265957d157751f604d404"
+        );
+    }
+
+    fn example_config() -> S3Config {
+        S3Config::new(
+            "https://s3.us-east-1.amazonaws.com",
+            "us-east-1",
+            "examplebucket",
+            AWS_EXAMPLE_ACCESS,
+            AWS_EXAMPLE_SECRET,
+        )
+    }
+
+    /// Path-style PUT presign: URL, query params, and expiry assemble as expected, and an
+    /// unbound payload hands the client no content header.
+    #[test]
+    fn presign_put_assembles_url_params_and_expiry() {
+        let cfg = example_config();
+        let (url, headers, expires) =
+            presign_put(&cfg, "path/to obj.bin", None, AWS_EXAMPLE_UNIX, 900);
+
+        assert!(
+            url.starts_with("https://s3.us-east-1.amazonaws.com/examplebucket/path/to%20obj.bin?"),
+            "unexpected url: {url}"
+        );
+        assert!(url.contains("X-Amz-Algorithm=AWS4-HMAC-SHA256"));
+        assert!(url.contains(
+            "X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20130524%2Fus-east-1%2Fs3%2Faws4_request"
+        ));
+        assert!(url.contains("X-Amz-Date=20130524T000000Z"));
+        assert!(url.contains("X-Amz-Expires=900"));
+        assert!(url.contains("X-Amz-SignedHeaders=host"));
+        assert!(url.contains("&X-Amz-Signature="));
+        // UNSIGNED-PAYLOAD → nothing extra for the client to send.
+        assert!(headers.is_empty());
+        assert_eq!(expires, AWS_EXAMPLE_UNIX as u64 + 900);
+    }
+
+    /// Binding a content SHA-256 adds `x-amz-content-sha256` to the signed headers (its
+    /// `;` separator URL-encodes to `%3B`) and returns it for the client to send verbatim.
+    #[test]
+    fn presign_put_binds_content_sha256_when_given() {
+        let cfg = example_config();
+        let hash = [0x11u8; 32];
+        let hex = "11".repeat(32);
+        let (url, headers, _) = presign_put(&cfg, "k", Some(&hash), AWS_EXAMPLE_UNIX, 900);
+
+        assert_eq!(headers, vec![("x-amz-content-sha256".to_string(), hex)]);
+        assert!(
+            url.contains("X-Amz-SignedHeaders=host%3Bx-amz-content-sha256"),
+            "unexpected url: {url}"
+        );
+    }
 }
