@@ -61,7 +61,8 @@ use std::path::PathBuf;
 use crate::config::{self, Config, RemoteDef};
 use crate::constants::{PLACE_FILESYSTEM, PLACE_OBJECT_STORE, PLACE_SEALED};
 use crate::ctx::Ctx;
-use crate::error::Result;
+use crate::error::{CliError, Result};
+use crate::exit::ExitCode;
 use crate::remote::registry::Target;
 use crate::remote::resolve;
 use crate::remote::spec::RemoteSpec;
@@ -128,6 +129,85 @@ impl Place {
             other => Ok(Self::ObjectStore {
                 provider: other.provider_type(),
             }),
+        }
+    }
+
+    /// Refuse a remote whose filesystem root is not there.
+    ///
+    /// ## The failure this closes
+    ///
+    /// `dctl-store`'s directory walk treats `ENOENT` on the root as the end of
+    /// the walk — correct for a directory that vanished *during* one, wrong for
+    /// a root that was never there. So every read of an unmounted volume came
+    /// back as an ordinary empty answer:
+    ///
+    /// ```text
+    /// $ dctl ls backups:            (nothing on either stream)      exit 0
+    /// $ dctl size backups:          Total objects: 0                exit 0
+    /// $ dctl about backups:         objects 0 / bytes 0 B           exit 0
+    /// $ dctl purge backups:2019 --force
+    ///                               OK removed: 0 object(s), 0 B    exit 0
+    /// ```
+    ///
+    /// Every one of those is a **conclusion somebody acts on**. A retention job
+    /// running `dctl purge archive:2019 --force && record_purged 2019` marks
+    /// 2019 reclaimed while the data is untouched; a monitor running
+    /// `dctl size backup:` sees zero and pages someone to say the backup was
+    /// wiped. `crate::commands::about::usage` states the rule this enforces —
+    /// *"a failure is never reported as a zero: 'the backup is empty' is a
+    /// conclusion people act on"* — and it was that module, among others, that
+    /// broke it.
+    ///
+    /// ## Both spellings of the same path
+    ///
+    /// The check is on [`Place`] rather than on [`RemoteSpec`], so
+    /// `dctl ls /srv/backups` and `dctl ls backups:` give the same answer about
+    /// the same directory. They did not: the earlier guard tested
+    /// `RemoteSpec::Local` alone, which is one spelling out of two, and the
+    /// named one is what an operator configures precisely because they intend to
+    /// use it every day.
+    ///
+    /// ## The root, and not the prefix
+    ///
+    /// Only [`Place::Filesystem`] has a tree to check, and only its **root** is
+    /// checked. A remote's path component is a scope inside it, and a scope that
+    /// matches nothing on a *mounted* volume is a real answer — "there is
+    /// nothing under 2019" — which must stay an answer rather than becoming an
+    /// error. The dangerous case is fully covered by the root, because an
+    /// unmounted volume is the whole remote being unreadable rather than one
+    /// prefix inside it.
+    ///
+    /// A vault and an object store are not checked: neither has a filesystem
+    /// root, and an empty listing from either is a real answer.
+    ///
+    /// `metadata` rather than `symlink_metadata`, matching every walker in the
+    /// tree: the root is the one path the operator configured, and
+    /// `/data -> /mnt/disk/data` is an ordinary layout.
+    ///
+    /// # Errors
+    /// [`ExitCode::DirNotFound`] when the root is absent — the same code every
+    /// transfer verb already gives the same path — and [`ExitCode::Usage`] when
+    /// it is a file rather than a directory.
+    pub fn require_readable_tree(&self) -> Result<()> {
+        let Self::Filesystem { root, .. } = self else {
+            return Ok(());
+        };
+        match std::fs::metadata(root) {
+            Ok(metadata) if metadata.is_dir() => Ok(()),
+            Ok(_) => Err(
+                CliError::usage(format!("'{}' is not a directory", root.display())).with_hint(
+                    "A listing walks a tree. Name the directory that holds this file, \
+                     or use `dctl cat` to read the file itself.",
+                ),
+            ),
+            Err(error) => Err(CliError::new(
+                ExitCode::DirNotFound,
+                format!("'{}' does not exist: {error}", root.display()),
+            )
+            .with_hint(
+                "Nothing was read, so this is not an empty tree. Check the path, \
+                 and check that the volume holding it is mounted.",
+            )),
         }
     }
 

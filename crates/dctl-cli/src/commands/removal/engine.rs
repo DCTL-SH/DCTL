@@ -44,6 +44,7 @@ use crate::commands::listing::Filter;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
+use crate::remote::{Place, RemoteSpec};
 
 use super::flow::Removal;
 use super::medium::Medium;
@@ -53,6 +54,25 @@ use super::report::Report;
 use super::selection::{self, Selection};
 use super::{reclaim, remove};
 
+/// Refuse a target whose filesystem root is not there.
+///
+/// One implementation, on [`Place`], shared with the listing family and `about`
+/// — see [`Place::require_readable_tree`] for the full account of the failure.
+///
+/// A removal target is always `REMOTE:PATH` (a local path is rejected at parse
+/// time), so there is no bare-path arm here. A remote that will not classify is
+/// left to [`Medium::open`], which gives a better diagnosis of the same typo.
+fn require_readable_tree(ctx: &Ctx, target: &super::target::Target) -> Result<()> {
+    let spec = RemoteSpec::Named {
+        remote: target.remote.clone(),
+        path: target.path.clone(),
+    };
+    match Place::of(ctx, &spec) {
+        Ok(place) => place.require_readable_tree(),
+        Err(_) => Ok(()),
+    }
+}
+
 /// Perform one removal, from an opened store to a closed report.
 ///
 /// # Errors
@@ -60,6 +80,18 @@ use super::{reclaim, remove};
 /// remove an individual object is *not* one of these — it is recorded, counted
 /// and reported, and the run continues.
 pub async fn run<O: PlanOptions>(ctx: &Ctx, removal: &Removal<O>, filter: &Filter) -> Result<()> {
+    // Before the store is opened, and before a single object is selected.
+    //
+    // A removal over an unmounted volume used to enumerate nothing, remove
+    // nothing, and report `OK removed: 0 object(s), 0 B` at exit 0 — which is
+    // the same output as a genuinely empty tree. The scenario is a retention job
+    // running `dctl purge archive:2019 --force && record_purged 2019`: the
+    // archive volume did not mount, the command reports success, 2019 is marked
+    // reclaimed, and the data is still there. Of the six verbs this is worst for
+    // `purge`, because `purge` is the one a script trusts to have destroyed
+    // something.
+    require_readable_tree(ctx, &removal.target)?;
+
     let medium = Medium::open(ctx, &removal.target).await?;
     let selection = selection::select(&medium, &removal.target, &removal.operation, filter).await?;
 

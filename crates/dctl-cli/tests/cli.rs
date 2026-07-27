@@ -2690,3 +2690,145 @@ fn a_second_local_copy_skips_every_file_and_only_a_touched_one_moves() {
     assert_eq!(sandbox.read("backup/b.txt"), b"second, edited");
     assert_eq!(sandbox.read("backup/a.txt"), b"first");
 }
+
+// ── 14. reports that must reach a default-verbosity reader ───────────────────
+
+#[test]
+fn an_empty_checksum_manifest_says_so_at_the_default_verbosity() {
+    // An empty SUMS file passes `sha256sum -c` trivially, so the sentence that
+    // stops a person mistaking an empty manifest for a verified one is the whole
+    // safety of this command. It used to be an `Out::info`, suppressed below
+    // `-v`, so a default run printed nothing on either stream and exited 0.
+    let sandbox = Sandbox::new();
+    let store = sandbox.dir("store");
+    sandbox.write(
+        "dctl.toml",
+        format!(
+            "[remotes.plain]\ntype = \"local\"\npath = {:?}\n",
+            store.to_string_lossy()
+        )
+        .as_bytes(),
+    );
+
+    let assert = sandbox
+        .dctl()
+        .args(["hashsum", "blake3", "plain:"])
+        .assert()
+        .success();
+    let output = assert.get_output();
+
+    assert!(
+        output.stdout.is_empty(),
+        "an empty manifest has no lines: {:?}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("checksum file is empty"),
+        "a default run must say the manifest is empty, on stderr: {stderr:?}"
+    );
+
+    // And it stays out of the file `sha256sum -c` would read.
+    assert!(!stderr.is_empty() && output.stdout.is_empty());
+}
+
+#[test]
+fn a_listing_of_an_unmounted_named_remote_refuses_rather_than_reporting_empty() {
+    // The unmounted-volume scenario, on the spelling an operator actually
+    // configures. `dctl ls backups:` used to print nothing on either stream and
+    // exit 0 — the same answer as an empty tree, and what a retention job acts
+    // on — while `dctl ls /the/same/path` exited 3.
+    let sandbox = Sandbox::new();
+    let absent = sandbox.path("not-mounted");
+    sandbox.write(
+        "dctl.toml",
+        format!(
+            "[remotes.backups]\ntype = \"local\"\npath = {:?}\n",
+            absent.to_string_lossy()
+        )
+        .as_bytes(),
+    );
+
+    for target in ["backups:", "backups:2019"] {
+        let assert = sandbox
+            .dctl()
+            .args(["ls", target])
+            .assert()
+            // 3 = dir_not_found, the same code every transfer verb
+            // already gives this path (docs/EXIT_CODES.md).
+            .code(3);
+        let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+        assert!(
+            stderr.contains("mounted"),
+            "{target}: the operator has to be told what to check: {stderr:?}"
+        );
+    }
+
+    // The same directory, once it exists, lists as empty — which is a real
+    // answer and must stay one.
+    std::fs::create_dir_all(&absent).expect("create the volume");
+    sandbox
+        .dctl()
+        .args(["ls", "backups:"])
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn no_command_reports_zero_for_a_volume_that_is_not_mounted() {
+    // The scenario, and the reason this is a table rather than one assertion:
+    //
+    //     dctl purge archive:2019 --force && record_purged 2019
+    //
+    // The archive volume did not mount. Every one of these commands used to
+    // enumerate nothing, do nothing, and exit **0** — `OK removed: 0 object(s)`,
+    // `Total objects: 0`, `objects 0 / bytes 0 B` — so 2019 was marked reclaimed
+    // while the data sat untouched, and a monitor reading `dctl size backup:`
+    // would page somebody to say the backup had been wiped.
+    //
+    // Every row here is a command whose output a script acts on.
+    let sandbox = Sandbox::new();
+    let absent = sandbox.path("not-mounted");
+    sandbox.write(
+        "dctl.toml",
+        format!(
+            "[remotes.archive]\ntype = \"local\"\npath = {:?}\n",
+            absent.to_string_lossy()
+        )
+        .as_bytes(),
+    );
+
+    let commands: &[&[&str]] = &[
+        &["ls", "archive:"],
+        &["lsl", "archive:"],
+        &["lsd", "archive:"],
+        &["lsjson", "archive:"],
+        &["tree", "archive:"],
+        &["size", "archive:"],
+        &["about", "archive:"],
+        &["hashsum", "blake3", "archive:"],
+        &["delete", "archive:2019"],
+        &["deletefile", "archive:2019/a.bin"],
+        &["purge", "archive:2019", "--force"],
+        &["rmdirs", "archive:"],
+    ];
+
+    for argv in commands {
+        let assert = sandbox.dctl().args(*argv).assert();
+        let output = assert.get_output();
+        let code = output.status.code();
+        assert_ne!(
+            code,
+            Some(0),
+            "{argv:?} reported success over an unmounted volume;              stdout={:?} stderr={:?}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("mounted"),
+            "{argv:?} must tell the operator what to check: {:?}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}

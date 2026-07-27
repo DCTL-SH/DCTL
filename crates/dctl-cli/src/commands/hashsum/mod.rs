@@ -74,6 +74,7 @@ use crate::commands::listing::Filter;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
+use crate::remote::Place;
 
 use algo::Algorithm;
 use report::Report;
@@ -133,6 +134,14 @@ pub async fn run(ctx: &Ctx, args: &HashsumArgs) -> Result<()> {
     // Compiled before the remote opens, so a malformed `--include` fails before
     // a password is asked for.
     let filter = Filter::from_globals(&ctx.globals)?;
+
+    // An unmounted volume must not become an empty manifest. The warning below
+    // is honest about a remote that really holds nothing; it would be a false
+    // statement about one nobody has mounted, and an empty checksum file passes
+    // `sha256sum -c` trivially. See `Place::require_readable_tree`.
+    if let Ok(place) = Place::of(ctx, &target.spec()) {
+        place.require_readable_tree()?;
+    }
     let source = crate::source::open(ctx, &target.spec()).await?;
 
     // `hashsum` mutates nothing, so --dry-run has nothing to suppress — and is
@@ -189,15 +198,34 @@ pub async fn run(ctx: &Ctx, args: &HashsumArgs) -> Result<()> {
 /// "Nothing is there" and "nothing survived your filters" produce the same empty
 /// checksum file and call for completely different actions, and a run that could
 /// not tell them apart would be this command's least trustworthy corner.
+///
+/// ## A warning, not a note
+///
+/// This used to go out through [`Out::info`](crate::output::Out::info), which is
+/// suppressed below `-v`. At the default verbosity the whole run was therefore:
+///
+/// ```text
+/// $ dctl hashsum blake3 archive:
+/// (nothing on stdout, nothing on stderr, exit 0)
+/// ```
+///
+/// — and an **empty SUMS file passes `sha256sum -c` trivially**. So the one
+/// sentence that stops a person mistaking an empty manifest for a verified one
+/// was the one sentence they never saw, which is the exact opposite of what the
+/// paragraph above says this notice is for. A warning is always shown unless
+/// `--quiet`, and `--quiet` is somebody choosing silence rather than being handed
+/// it.
 fn empty_notice(ctx: &Ctx, target: &Target, filter: &Filter) {
     if filter.is_restricting() {
-        ctx.out.info(format!(
+        ctx.out.warn(format!(
             "no objects under '{target}' matched the active filters, so the checksum \
-             file is empty"
+             file is empty — an empty checksum file verifies successfully against \
+             nothing"
         ));
     } else {
-        ctx.out.info(format!(
-            "no objects under '{target}', so the checksum file is empty"
+        ctx.out.warn(format!(
+            "no objects under '{target}', so the checksum file is empty — an empty \
+             checksum file verifies successfully against nothing"
         ));
     }
 }

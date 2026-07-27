@@ -69,14 +69,40 @@ pub struct Usage {
 
 /// Measure `spec` by enumerating it.
 ///
+/// ## The path is part of the question
+///
+/// The prefix comes from the spec, not from a hard-coded root. It used to be
+/// `enumerate("")` — the whole remote — while the report's header row echoed back
+/// the path the operator had typed:
+///
+/// ```text
+/// $ dctl size  archive:2024      Total objects: 1     2 B
+/// $ dctl about archive:2024      remote  archive:2024
+///                                objects 3
+///                                bytes   6 B          <- the whole vault
+/// ```
+///
+/// A capacity check on `b2:bucket/2024` reported the whole bucket's forty
+/// terabytes under the label `2024`, and the module note above says exactly what
+/// happens next: a figure in a capacity report gets believed and then gets used
+/// to decide whether a backup fits. It applies to a wrong non-zero figure as
+/// surely as to a wrong zero.
+///
 /// # Errors
 /// [`ExitCode::VaultLocked`](crate::exit::ExitCode::VaultLocked) when a sealed
 /// remote will not unlock, and whatever the index or the provider reported while
 /// listing. A failure is never reported as a zero: "the backup is empty" is a
 /// conclusion people act on.
 pub async fn measure(ctx: &Ctx, spec: &RemoteSpec) -> Result<Usage> {
+    // Before anything is enumerated. The doc comment above promises a failure is
+    // never reported as a zero, and an unmounted volume was the case where it
+    // was: the walk treats `ENOENT` on the root as the end of the walk, so
+    // `dctl about backups:` answered `objects 0 / bytes 0 B` and exited 0 for a
+    // volume nobody had mounted. That is the exact figure this module's own note
+    // says gets believed and then gets used to decide whether a backup fits.
+    readable_tree(ctx, spec)?;
     let source = source::open(ctx, spec).await?;
-    let mut entries = source.enumerate("").await?;
+    let mut entries = source.enumerate(prefix_of(spec)).await?;
 
     let mut usage = Usage {
         objects: 0,
@@ -108,6 +134,39 @@ pub async fn measure(ctx: &Ctx, spec: &RemoteSpec) -> Result<Usage> {
     }
 
     Ok(usage)
+}
+
+/// Refuse a spec whose filesystem root is not there.
+///
+/// One implementation, on [`Place`], shared with the listing family and the
+/// removal family — see [`Place::require_readable_tree`] for the account. A
+/// remote that will not classify is left to [`crate::source::open`], which gives
+/// a better diagnosis of the same typo.
+fn readable_tree(ctx: &Ctx, spec: &RemoteSpec) -> Result<()> {
+    match spec {
+        RemoteSpec::Local(path) => crate::remote::Place::Filesystem {
+            root: path.clone(),
+            path: String::new(),
+        }
+        .require_readable_tree(),
+        RemoteSpec::Named { .. } => match crate::remote::Place::of(ctx, spec) {
+            Ok(place) => place.require_readable_tree(),
+            Err(_) => Ok(()),
+        },
+    }
+}
+
+/// The prefix a spec asks about — its path component, or the whole remote.
+///
+/// A bare local path carries its whole self as the root (`crate::remote::Place`
+/// resolves `/srv/data` to `root: /srv/data, path: ""`), so there is nothing left
+/// to scope by and the empty prefix is correct for it. A named remote's path is
+/// the scope the operator typed.
+fn prefix_of(spec: &RemoteSpec) -> &str {
+    match spec {
+        RemoteSpec::Local(_) => "",
+        RemoteSpec::Named { path, .. } => path.as_str(),
+    }
 }
 
 #[cfg(test)]
@@ -145,6 +204,57 @@ mod tests {
         // A plain store's numbers are the provider's own, so there is nothing to
         // reconcile and the label says so.
         assert_eq!(usage.sizes, Sizes::Stored);
+    }
+
+    #[tokio::test]
+    async fn a_path_narrows_the_measurement_to_the_path() {
+        // The defect: `enumerate("")` measured the whole remote while the report
+        // printed back the path the operator typed. A capacity check on
+        // `b2:bucket/2024` answered with the whole bucket's forty terabytes,
+        // labelled `2024`, and a figure in a capacity report gets acted on.
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        // The remote's root is a subdirectory, so the fixture's own config file
+        // does not become a third object inside the thing being measured.
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("2024")).expect("a subdirectory");
+        std::fs::write(root.join("2024/a.bin"), b"12").expect("a fixture file");
+        std::fs::write(root.join("elsewhere.bin"), vec![0u8; 4096]).expect("a fixture file");
+
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.store]\ntype = \"local\"\npath = {:?}\n",
+                root.to_string_lossy()
+            ),
+        )
+        .expect("a fixture configuration");
+        let context = ctx(&["--config", &config.to_string_lossy()]);
+
+        let scoped = measure(
+            &context,
+            &RemoteSpec::Named {
+                remote: "store".into(),
+                path: "2024".into(),
+            },
+        )
+        .await
+        .expect("a scoped remote can be measured");
+        assert_eq!(scoped.objects, 1, "only what is under the path");
+        assert_eq!(scoped.bytes, Some(2));
+
+        // And the whole remote still measures the whole remote.
+        let whole = measure(
+            &context,
+            &RemoteSpec::Named {
+                remote: "store".into(),
+                path: String::new(),
+            },
+        )
+        .await
+        .expect("the whole remote can be measured");
+        assert_eq!(whole.objects, 2);
+        assert_eq!(whole.bytes, Some(4098));
     }
 
     #[tokio::test]

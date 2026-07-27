@@ -30,11 +30,10 @@ use async_trait::async_trait;
 
 use crate::constants::LIST_PAGE_SIZE;
 use crate::ctx::Ctx;
-use crate::error::{CliError, Result};
-use crate::exit::ExitCode;
+use crate::error::Result;
 #[cfg(test)]
 use crate::platform::path;
-use crate::remote::RemoteSpec;
+use crate::remote::{Place, RemoteSpec};
 use crate::source::{self, Entries};
 
 use super::entry::Entry;
@@ -236,56 +235,35 @@ impl Pages for Pager {
 /// [`ExitCode::FatalError`]: crate::exit::ExitCode::FatalError
 /// [`ExitCode::VaultLocked`]: crate::exit::ExitCode::VaultLocked
 pub async fn open(ctx: &Ctx, target: &Target) -> Result<Box<dyn Pages>> {
-    require_readable_tree(target)?;
+    require_readable_tree(ctx, target)?;
     let source = source::open(ctx, &target.spec()).await?;
     let entries = source.enumerate(target.prefix()).await?;
     Ok(Box::new(Streamed::new(source, entries, target.prefix())))
 }
 
-/// Refuse a local target that is not a tree, before anything is enumerated.
+/// Refuse a target whose filesystem tree is not there, before anything is
+/// enumerated.
 ///
-/// The doc comment above says "never an empty listing", and for a local path it
-/// was not true. `dctl-store`'s directory walk treats `ENOENT` on the root as the
-/// end of the walk — correct for a directory that vanished *during* one, wrong
-/// for a root that was never there — so `dctl ls /srv/backups` on a machine where
-/// the volume is not mounted printed nothing on either stream and exited **0**.
-/// That is the same answer as an empty directory and indistinguishable from "the
-/// backups are gone", and the listing family is the family people check with.
-/// Every transfer verb already refuses the same path with
-/// [`ExitCode::DirNotFound`].
+/// The rule, and the account of the failure it closes, live on
+/// [`Place::require_readable_tree`] — one implementation, because `about` and the
+/// removal family need exactly the same guard and a second copy of it would be a
+/// second chance to get "unmounted volume" wrong.
 ///
-/// A file gets its own refusal rather than the walk's raw
-/// `io error: Not a directory (os error 20)` at exit 2, "uncategorised": the
-/// command knows exactly what the mistake was and can say it.
-///
-/// Only local targets are checked. A remote prefix does not exist as a thing —
-/// in a vault a path exists exactly while an object is stored under it, which is
-/// the same stance `dctl mkdir` and `dctl rmdir` take — so an empty listing there
-/// is a real answer rather than an unread one.
-///
-/// `metadata` rather than `symlink_metadata`, matching every other walker: the
-/// root is the one path the operator typed, and `/data -> /mnt/disk/data` is an
-/// ordinary layout.
-fn require_readable_tree(target: &Target) -> Result<()> {
-    let RemoteSpec::Local(path) = target.spec() else {
-        return Ok(());
-    };
-    match std::fs::metadata(&path) {
-        Ok(metadata) if metadata.is_dir() => Ok(()),
-        Ok(_) => Err(
-            CliError::usage(format!("'{}' is not a directory", path.display())).with_hint(
-                "A listing walks a tree. Name the directory that holds this file, or \
-             use `dctl cat` to read the file itself.",
-            ),
-        ),
-        Err(error) => Err(CliError::new(
-            ExitCode::DirNotFound,
-            format!("'{}' does not exist: {error}", path.display()),
-        )
-        .with_hint(
-            "Nothing was read, so this is not an empty tree. Check the path, and \
-             check that the volume holding it is mounted.",
-        )),
+/// A remote that will not classify is not diagnosed here:
+/// [`crate::source::open`] is about to give a better account of the same typo,
+/// and two refusals for one mistake is one too many.
+fn require_readable_tree(ctx: &Ctx, target: &Target) -> Result<()> {
+    match target.spec() {
+        // A bare path is its own root, with no configuration to consult.
+        RemoteSpec::Local(path) => Place::Filesystem {
+            root: path,
+            path: String::new(),
+        }
+        .require_readable_tree(),
+        RemoteSpec::Named { .. } => match Place::of(ctx, &target.spec()) {
+            Ok(place) => place.require_readable_tree(),
+            Err(_) => Ok(()),
+        },
     }
 }
 
@@ -461,6 +439,90 @@ mod tests {
         let target = Target::parse(Some(&root.path().to_string_lossy()), None).unwrap();
         let mut pages = open(&ctx(&[]), &target).await.expect("a directory lists");
         assert_eq!(drain(pages.as_mut()).await, vec!["a.txt", "sub/b.txt"]);
+    }
+
+    #[tokio::test]
+    async fn an_unmounted_volume_is_refused_however_the_operator_spelled_it() {
+        // The scenario, and the reason the earlier guard was not enough: a
+        // configured remote and a bare path naming *the same absent directory*
+        // gave two different answers. The named spelling — the one an operator
+        // sets up precisely so they can use it every day — printed nothing on
+        // either stream and exited 0, which is the same answer as "the backups
+        // are gone" and is what a retention script acts on.
+        let dir = tempfile::TempDir::new().unwrap();
+        let absent = dir.path().join("not-mounted");
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.backups]\ntype = \"local\"\npath = {:?}\n",
+                absent.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let context = ctx(&["--config", &config.to_string_lossy()]);
+        for spelling in ["backups:", "backups:2019"] {
+            let target = Target::parse(Some(spelling), None).unwrap();
+            let error = open(&context, &target)
+                .await
+                .err()
+                .unwrap_or_else(|| panic!("{spelling} must not list an absent volume"));
+            assert_eq!(error.code(), ExitCode::DirNotFound, "{spelling}");
+            assert!(
+                error.hint().is_some_and(|hint| hint.contains("mounted")),
+                "{spelling}: the hint must name the cause an operator can act on"
+            );
+        }
+
+        // And the bare spelling of the very same directory agrees, which is the
+        // property that was missing.
+        let bare = Target::parse(Some(&absent.to_string_lossy()), None).unwrap();
+        assert_eq!(
+            open(&context, &bare).await.err().map(|e| e.code()),
+            Some(ExitCode::DirNotFound)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_prefix_that_matches_nothing_on_a_mounted_remote_is_an_answer() {
+        // The line the guard draws, and why it is at the root. An **empty
+        // listing from a mounted volume is a real answer**: the operator asked
+        // what is under `2019` and the truthful reply is "nothing". An empty
+        // listing from a volume that is not mounted is not an answer at all,
+        // and that is the one this refuses.
+        //
+        // The guard therefore checks the remote's root and never
+        // `<root>/<prefix>`, so a prefix naming nothing stays a query rather
+        // than becoming an error.
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("2020")).unwrap();
+        std::fs::write(root.join("2020/a.bin"), b"x").unwrap();
+
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.store]\ntype = \"local\"\npath = {:?}\n",
+                root.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let context = ctx(&["--config", &config.to_string_lossy()]);
+
+        let present = Target::parse(Some("store:2020"), None).unwrap();
+        let mut pages = open(&context, &present)
+            .await
+            .expect("a real subtree lists");
+        assert_eq!(drain(pages.as_mut()).await, vec!["2020/a.bin"]);
+
+        let absent = Target::parse(Some("store:2019"), None).unwrap();
+        let mut pages = open(&context, &absent)
+            .await
+            .expect("a prefix that matches nothing is a query, not a missing volume");
+        assert!(drain(pages.as_mut()).await.is_empty());
     }
 
     #[tokio::test]
