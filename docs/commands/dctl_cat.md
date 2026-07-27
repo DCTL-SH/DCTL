@@ -133,46 +133,47 @@ refusal; that has not been true for some time.
 
 ### What a windowed read of a sealed object costs
 
-**A vault has no ranged read.** `dctl-core` exposes `get_file`, which decrypts
-and authenticates a whole object, and nothing narrower. So a vault serves a byte
-window by fetching and decrypting the *entire* object and slicing the result:
+**A window costs the window.** A vault serves `--offset`/`--count` by computing
+the chunks that cover the requested bytes and issuing one ranged request for
+exactly those (`docs/FORMAT.md` §3, "Random-access"). Cost is O(window) in memory
+and in egress, not O(object):
 
 ```
-dctl cat b2vault:film.mkv --offset 0 --count 4
+dctl cat b2vault:film.mkv --offset 20G --count 4
 ```
 
-returns four bytes and transfers the whole film. Cost is O(object) in memory and
-in egress, not O(window). On a metered backend the whole object is what gets
-billed, and repeating the read costs the same again.
+returns four bytes and transfers one chunk — a megabyte at the default chunk
+size — plus a small bounded header read the first time that object is touched.
+Seeking somewhere else in the same run costs one more request and no header read.
 
-This is not faked and it is not capped. Returning a short read, or refusing above
-some size, would trade a known cost for an unknown wrong answer.
+Measured on a sealed 96 MiB object, a ten-byte window costs about **1.6 MiB of
+peak resident memory above the unlock baseline**; reading the same object whole
+costs **+97 MiB**. Against a 512 MiB object the window costs **the same ~1 MiB**
+while the whole-object read costs **over 700 MiB** and takes twenty times as
+long. That is the property that matters: the window's cost is set by the chunk
+size, not by the file. (The baseline is around 140 MiB and is almost entirely
+Argon2id's working memory during unlock, not the read.)
 
-**Above 64 MiB the cost is announced before it is paid.** When the object is at
-least that large and the window is smaller than the object, `cat` writes a
-warning to stderr during pre-flight — before any byte is transferred, while the
-run can still be interrupted:
+**What a window authenticates.** Every returned byte carries its chunk's own
+Poly1305 tag, over additional data that binds the object's authenticated header
+and the chunk's index — so bytes from another object, another position, or a
+truncated object are all rejected rather than returned. The two *whole-object*
+checks are different: the trailing BLAKE3 footer and the object's recorded
+plaintext hash each cover the entire file, and no partial read can compute
+either. `cat --offset` therefore does not check them, and does not pretend to.
+[`dctl verify`](dctl_verify.md) and `dctl scrub` stream the object end to end and
+remain the commands that make the whole-object statement.
 
-```
-warning: b2vault:film.mkv: reading 4 B of a 3.7 GiB object will transfer all
-3.7 GiB of it (3.7 GiB more than requested): a sealed vault has no ranged read,
-so the window is served by fetching and decrypting the whole object. On a
-metered backend the whole object is what gets billed, and repeating the read
-costs the same again.
-```
+**Reading the object whole is a different call.** `dctl cat archive:film.mkv`
+with no range flags, and `--offset 0` with no `--count`, both take the
+whole-object path, which decrypts every chunk and re-hashes the result against
+the object's own recorded hash. That is the stronger guarantee, and it needs room
+for the file.
 
-The threshold is deliberately well above the objects people window into casually,
-so an ordinary `--head` on a document or a log never warns — a warning that fires
-on routine work is one an operator learns to skip. It is silenced by `--quiet`
-like any other warning, and it never appears for a plain object store, which
-serves a genuine ranged request and spends nothing extra. Asking for the whole
-object does not warn either: the cost is real, but it is exactly what was asked
-for.
-
-The limit disappears when `dctl-core` grows a chunked reader — `PLAN.md` §11
-**Phase 2 (Streaming mount)**, the same work that backs
-[`mount`](dctl_mount.md). At that point the vault serves windows natively and the
-warning stops firing on its own, with no call site changing.
+Earlier releases had no ranged read at all: a vault served a window by fetching
+and decrypting the entire object, so `--count 4` against a 3.7 GiB film was a
+3.7 GiB transfer. `cat` warned about that on stderr above 64 MiB. Both the cost
+and the warning are gone.
 
 ```
 dctl cat REMOTE:PATH... [flags]

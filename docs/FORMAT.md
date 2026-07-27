@@ -41,7 +41,7 @@ unlock secret (password / mnemonic / Shamir set / device key)
         │  KEK = Argon2id(NFC(secret) [‖ H(factor)], salt, params)   (or platform key)
         ▼
    envelope: N slots, each AEAD-wraps the SAME 32-byte root key
-        ▼  root key (random once, never changes)
+        ▼  root key (random once, never changes)  ── N ≥ 2 as written by v1: §2.1
         │  SUBKEY(root, info)   (see "HKDF construction" below)
         ├─ index-key       "index-key-v1"      (SQLCipher row key; path→record)
         ├─ name-hash-key   "name-hash-key-v1"  (BLAKE3-keyed → public name-record key)
@@ -65,6 +65,13 @@ states its own `salt`.)
 The name path-hash and the name-value AEAD use **separate** sub-keys so that publishing
 the `n/*` keys (which are public backend object names) never exposes any value-
 encryption key material (§5).
+
+**The root key never changes, and that is what makes the slot list useful.** Every
+object's DEK is wrapped to it, so it cannot be rotated without rewriting the whole
+dataset — and does not need to be, because the *ways in* rotate independently. Changing
+a password rewrites one slot (§2.2); the other slots, and therefore every other way to
+recover the same root key, are untouched. A recovery phrase issued when the vault was
+created keeps working after any number of password changes.
 
 ---
 
@@ -120,7 +127,9 @@ Off       Size  Field
   **constant time**; only on match does it attempt `unwrap_root`. `commit` is a one-way
   HKDF image of the KEK, so it reveals nothing about the KEK and does not lower the
   offline Argon2id work factor. It is present for **every** slot type (for device slots
-  it commits the platform KEK).
+  it commits the platform KEK). A reader MUST NOT treat a commitment match as proof of
+  anything but "this KEK is the one this slot was written under": it is a fast reject,
+  and the AEAD tag over `wrapped_root` is still the authority.
 - **Slot structural bounds (MANDATORY, checked before any crypto):** a reader MUST
   verify `slot_len == 57 + salt_len + aux_len + wrap_len` and that the whole slot lies
   within the envelope; a slot that fails this is **rejected, not silently skipped**. For
@@ -129,12 +138,24 @@ Off       Size  Field
 - **KEK derivation** (passphrase/mnemonic secrets are **NFC-normalized, UTF-8** first,
   so the same secret typed on any OS yields identical bytes):
   - `type=1` password: `Argon2id(NFC(password) ‖ BLAKE3(factor)?, salt, params)`.
-  - `type=2` mnemonic: `Argon2id(BIP39_seed(mnemonic), salt, params)`.
+  - `type=2` mnemonic: `Argon2id(BIP39_seed(mnemonic), salt, params)`, where
+    `BIP39_seed` is **BIP-39 exactly as published, with an EMPTY passphrase**:
+    `PBKDF2-HMAC-SHA512(P = NFKD(mnemonic sentence), S = "mnemonic", c = 2048,
+    dkLen = 64)`. The 64-byte seed — not the 32 bytes of entropy, and not the word
+    indices — is the Argon2id input. Pinned to the byte because a clean-room decoder
+    that used the entropy, a non-empty passphrase, or a different iteration count
+    would derive a plausible-looking key that opens nothing.
+    The mnemonic sentence is the words separated by single U+0020 spaces; BIP-39
+    derives the seed from the canonical word list entries, so line breaks, repeated
+    spaces and a trailing newline in a transcribed phrase are immaterial.
   - `type=0` device: `kdf_id=0`; KEK comes from the platform key store (Secure
     Enclave / TPM / OS keychain) — **no Argon2 runs**, so mobile unlocks cheaply.
   - `type=3` shamir: **RESERVED** — the sharing scheme is not yet specified; writers
     MUST NOT emit it and readers treat it as an unknown skippable slot until a future
     version pins the field, share encoding, interpolation, and aux layout.
+  - A **v1 writer emits neither `type=0` nor `type=3`.** It writes exactly one `type=1`
+    and one `type=2` slot; §2.1 gives their bytes. Both reserved types are specified
+    here for readers, which must skip them, not for writers.
 - **KDF-parameter ceilings (MANDATORY, enforced BEFORE running Argon2id** — the
   envelope is on untrusted storage, and params are read pre-authentication):
   `8 ≤ m_cost ≤ 1 048 576` (≤ 1 GiB), `1 ≤ t_cost ≤ 16`, `1 ≤ p_lanes ≤ 8`. A slot
@@ -151,10 +172,101 @@ Off       Size  Field
 - **Portability invariant (CRITICAL):** every vault MUST keep **≥1 portable slot**
   (password `type=1` or mnemonic `type=2`) that the reader can actually satisfy with a
   currently-supported `wrap_algo`/`kdf_id`. Device slots are additive per-device
-  conveniences and MUST NEVER be the only slot. Hosts create a portable slot at `init`
-  and refuse to remove the last one. Portable slots live in the **shared-backend**
+  conveniences and MUST NEVER be the only slot. A v1 host creates **two** portable
+  slots at `init` — password and mnemonic (§2.1) — and refuses to remove the last one.
+  Two rather than one is the point: a single portable slot satisfies the letter of this
+  invariant while leaving a forgotten password as permanent, total data loss, with the
+  ciphertext intact and unreadable. Portable slots live in the **shared-backend**
   envelope so every device can read them.
 - Written atomically (tmp + fsync + rename).
+
+### 2.1 What a v1 writer emits at `init` (NORMATIVE)
+
+The layout above is the general form; this is the exact envelope DCTL v1 creates, and it
+is what a restore in twenty years will be handed. **Two slots — both `kdf_id=1` Argon2id
+and `wrap_algo=1` XChaCha20-Poly1305 — wrapping the same root key:**
+
+```
+Off  Size  Field                Value written by v1
+0    4     magic                "DKE1"
+4    1     version              0x01
+5    16    vault_id             16 CSPRNG bytes
+21   2     slot_count           2                      (0x02 0x00)
+23   145   slots[0] password    table below
+168  145   slots[1] mnemonic    table below
+                                total envelope = 313 bytes
+```
+
+Each slot is **145 bytes**, because `slot_len = 57 + salt_len(16) + aux_len(0) +
+wrap_len(72)`:
+
+| field       | slots[0] password      | slots[1] mnemonic             |
+|-------------|------------------------|-------------------------------|
+| `slot_len`  | 145                    | 145                           |
+| `slot_type` | 1                      | 2                             |
+| `flags`     | 0                      | 0                             |
+| `kdf_id`    | 1 (Argon2id)           | 1 (Argon2id)                  |
+| `wrap_algo` | 1 (XChaCha20-Poly1305) | 1 (XChaCha20-Poly1305)        |
+| `m_cost`    | 131072 (128 MiB)       | 131072                        |
+| `t_cost`    | 3                      | 3                             |
+| `p_lanes`   | 4                      | 4                             |
+| `commit`    | 32 bytes               | 32 bytes                      |
+| `salt_len`  | 16                     | 16                            |
+| `salt`      | 16 CSPRNG bytes        | 16 **different** CSPRNG bytes |
+| `aux_len`   | 0                      | 0                             |
+| `wrap_len`  | 72                     | 72                            |
+
+What a decoder should take from this:
+
+- **Order is written but carries no meaning.** The password slot is emitted first, the
+  mnemonic slot second. A reader MUST try every slot it can satisfy rather than assume a
+  position; §2.2 preserves order across a rotation only so that a byte-level diff of two
+  envelopes stays legible to a human.
+- **The two salts are drawn independently.** Sharing one would tie both KEKs to a single
+  random value and make the pair no stronger than its weaker half — the exact property
+  the second slot exists to provide.
+- **`aux` is empty for both.** No `type=1`/`type=2` slot written by v1 carries `aux`.
+- **The mnemonic is 24 English BIP-39 words** encoding 256 bits of CSPRNG entropy,
+  matched to the 32-byte root key it protects so the recovery path is not the cheaper
+  thing to attack. It is shown to the operator exactly once, when the vault is created,
+  and is stored **nowhere**: it cannot be reproduced from the envelope, the vault, or
+  the host. An envelope therefore does not reveal the phrase's length or language — the
+  values here describe the writer, not a requirement on a reader.
+- **`m/t/p` are read back from the slot**, never assumed. They are policy defaults, not
+  frozen identifiers; a later build may raise them for new vaults, and a slot written
+  today keeps the values in the table and must keep unlocking forever.
+
+### 2.2 Rotating one way in (NORMATIVE)
+
+Because the root key never changes, replacing a secret rewrites **one slot** and leaves
+every other byte of the slot list untouched:
+
+1. Recover the root key through any slot (§2 *Unlock*).
+2. Derive a new KEK from the new secret with a **fresh salt** and the writer's current
+   cost parameters.
+3. Re-serialize the envelope with the replacement slot in the position of the first slot
+   of that `slot_type`. Every other slot — **including slot types this writer does not
+   understand** — is carried through byte-identical. `vault_id` is unchanged: it is
+   bound into every slot's wrap AAD, so a new one would invalidate the slots being
+   preserved.
+4. Write atomically (tmp + fsync + rename), as a single object replacement, so a failure
+   leaves the previous envelope intact rather than a partial one.
+
+A password change removes **every** pre-existing `type=1` slot and installs exactly one,
+so the old password stops working immediately. It does not touch `type=2`, so a recovery
+phrase issued at `init` still opens the vault afterwards, and after any number of
+subsequent password changes. This procedure is the operational meaning of "several
+independent unwrap paths": creating them is easy, and *keeping* them is a property of
+this step.
+
+**A rotation binds the envelope, not the root key.** Any copy of the *previous* envelope
+— a replica of the object store, a snapshot, a backup taken before the change — still
+carries the old slot and is still opened by the old secret, because the root key it
+wraps did not change and cannot. Retiring a compromised password therefore means
+rotating it **and** replacing every stored copy of the envelope; retiring a compromised
+*root key* is not possible at all and would mean re-encrypting the dataset. This is the
+cost of an immutable root, and it is the same cost that buys rename-stable objects and a
+recovery phrase that never expires.
 
 ---
 

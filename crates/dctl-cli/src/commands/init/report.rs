@@ -13,6 +13,16 @@
 //! outcome, and a recoverable one (`dctl config import`) — so collapsing them
 //! into a single "ok" would have the report claim work that did not happen,
 //! which is the one thing `PLAN.md` §6 forbids outright.
+//!
+//! ## What is deliberately absent
+//!
+//! The recovery phrase. [`InitReport::recovery_phrase_issued`] is a boolean and
+//! will stay one: `dctl init --json | tee provisioning.log` is an ordinary thing
+//! to run, and a phrase in a log file is a compromised vault — permanently,
+//! because unlike a password it cannot be rotated away. The words go to stderr
+//! once, from [`super::phrase`]; this field is how a script confirms they were
+//! produced without ever being able to hold them. A test below asserts the
+//! absence rather than trusting the struct definition to stay this shape.
 
 use serde::Serialize;
 
@@ -45,6 +55,12 @@ pub struct InitReport {
     pub password_source: Option<Source>,
     /// Whether this run was forbidden from changing anything.
     pub dry_run: bool,
+    /// Whether a recovery phrase was generated and shown.
+    ///
+    /// Never the phrase itself — see the module documentation. A `false` here on
+    /// a run that reports `created: true` would mean a vault with one way in,
+    /// which is the state this whole feature exists to make impossible.
+    pub recovery_phrase_issued: bool,
 }
 
 impl InitReport {
@@ -56,6 +72,7 @@ impl InitReport {
         registered: bool,
         password_source: Option<Source>,
         dry_run: bool,
+        recovery_phrase_issued: bool,
     ) -> Self {
         Self {
             vault_remote: plan.vault_name.clone(),
@@ -66,6 +83,7 @@ impl InitReport {
             registered,
             password_source,
             dry_run,
+            recovery_phrase_issued,
         }
     }
 
@@ -91,6 +109,10 @@ impl InitReport {
             (
                 constants::INIT_FIELD_REGISTERED,
                 self.registered.to_string(),
+            ),
+            (
+                constants::INIT_FIELD_RECOVERY_PHRASE_ISSUED,
+                self.recovery_phrase_issued.to_string(),
             ),
         ];
         if let Some(source) = self.password_source {
@@ -162,7 +184,7 @@ mod tests {
     fn a_dry_run_never_claims_a_vault_was_created_or_registered() {
         // The two fields a script trusts. A dry run must set neither.
         let ctx = ctx(&["--dry-run", "--index", "/tmp/x.redb"]);
-        let report = InitReport::new(&plan(&ctx), false, false, None, true);
+        let report = InitReport::new(&plan(&ctx), false, false, None, true, false);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["created"], false);
         assert_eq!(json["registered"], false);
@@ -175,7 +197,7 @@ mod tests {
         // envelope is on the store and the configuration is not written. One
         // combined field would have to lie in one direction or the other.
         let ctx = ctx(&["--index", "/tmp/x.redb"]);
-        let report = InitReport::new(&plan(&ctx), true, false, Some(Source::Prompt), false);
+        let report = InitReport::new(&plan(&ctx), true, false, Some(Source::Prompt), false, true);
         let json = serde_json::to_value(&report).unwrap();
         assert_eq!(json["created"], true);
         assert_eq!(json["registered"], false);
@@ -184,7 +206,7 @@ mod tests {
     #[test]
     fn a_completed_run_names_both_remotes_and_no_password() {
         let ctx = ctx(&["--index", "/tmp/x.redb"]);
-        let report = InitReport::new(&plan(&ctx), true, true, Some(Source::Prompt), false);
+        let report = InitReport::new(&plan(&ctx), true, true, Some(Source::Prompt), false, true);
         let encoded = serde_json::to_string(&report).unwrap();
         assert!(
             encoded.contains("\"vault_remote\":\"archive\""),
@@ -200,9 +222,49 @@ mod tests {
     }
 
     #[test]
+    fn the_recovery_phrase_is_reported_as_issued_and_never_carried() {
+        // The report is what `--json` writes to stdout, and stdout is what ends
+        // up in `| tee provisioning.log`. A phrase there is a compromised vault
+        // that stays compromised, because changing the password does not revoke
+        // it. Asserted on the encoded document rather than on the struct, so a
+        // field added later with a plausible name is caught too.
+        let ctx = ctx(&["--index", "/tmp/x.redb"]);
+        let report = InitReport::new(&plan(&ctx), true, true, Some(Source::Flag), false, true);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["recovery_phrase_issued"], true);
+
+        let object = json.as_object().expect("a JSON object");
+        for (field, value) in object {
+            let rendered = value.to_string();
+            assert!(
+                !rendered.split_whitespace().count().eq(&24),
+                "'{field}' looks like a 24-word phrase: {rendered}"
+            );
+        }
+        // And the only phrase-shaped field is the boolean.
+        let phrase_fields: Vec<&String> = object
+            .keys()
+            .filter(|key| key.contains("phrase") || key.contains("mnemonic"))
+            .collect();
+        assert_eq!(phrase_fields, ["recovery_phrase_issued"]);
+        assert!(json["recovery_phrase_issued"].is_boolean());
+    }
+
+    #[test]
+    fn a_dry_run_reports_no_phrase_because_it_created_no_vault() {
+        // The pairing that matters: `created` and `recovery_phrase_issued` are
+        // true together or false together, because a vault is never created
+        // without a second key and a phrase is never issued without a vault.
+        let ctx = ctx(&["--dry-run", "--index", "/tmp/x.redb"]);
+        let report = InitReport::new(&plan(&ctx), false, false, None, true, false);
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["created"], json["recovery_phrase_issued"]);
+    }
+
+    #[test]
     fn the_password_source_is_omitted_when_none_was_read() {
         let ctx = ctx(&["--index", "/tmp/x.redb"]);
-        let report = InitReport::new(&plan(&ctx), false, false, None, true);
+        let report = InitReport::new(&plan(&ctx), false, false, None, true, false);
         let json = serde_json::to_value(&report).unwrap();
         assert!(json.get("password_source").is_none());
     }
@@ -212,7 +274,7 @@ mod tests {
         // The porting promise: a user moving a script from --format text to
         // --format json must not have to learn a second vocabulary.
         let ctx = ctx(&["--index", "/tmp/x.redb"]);
-        let report = InitReport::new(&plan(&ctx), true, true, Some(Source::Flag), false);
+        let report = InitReport::new(&plan(&ctx), true, true, Some(Source::Flag), false, true);
         let json = serde_json::to_value(&report).unwrap();
         for (label, _) in report.rows() {
             assert!(
@@ -225,7 +287,7 @@ mod tests {
     #[test]
     fn the_text_rendering_carries_every_resolved_value() {
         let ctx = ctx(&["--index", "/tmp/x.redb"]);
-        let report = InitReport::new(&plan(&ctx), true, true, None, false);
+        let report = InitReport::new(&plan(&ctx), true, true, None, false, true);
         let rendered: Vec<String> = report.rows().into_iter().map(|(_, v)| v).collect();
         assert!(rendered.contains(&"archive".to_string()));
         assert!(rendered.contains(&"archive-store".to_string()));
@@ -240,7 +302,7 @@ mod tests {
         // wired up rather than one that merely looks wrong.
         for format in ["text", "json", "json-lines"] {
             let ctx = ctx(&["--format", format, "--index", "/tmp/x.redb"]);
-            let report = InitReport::new(&plan(&ctx), true, true, Some(Source::File), false);
+            let report = InitReport::new(&plan(&ctx), true, true, Some(Source::File), false, true);
             assert!(report.emit(&ctx).is_ok(), "{format} failed");
         }
     }

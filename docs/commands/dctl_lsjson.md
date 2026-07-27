@@ -86,10 +86,13 @@ accepting `10G`, `1.5MiB` or `off`; a one-based `--max-depth` counted from the
 listing root; entries in ascending lexicographic path order, never repeated; one
 page of 1000 entries in memory regardless of vault size.
 
-**`--filter-from` and `--files-from` are refused rather than ignored** (exit 7),
-and this is the command where that matters most. A machine listing that silently
-dropped its rule file would look complete, and its output is what a script then
-uses to decide what to delete.
+**`--filter-from` and `--files-from` are honoured**, by the same rule engine
+`dctl copy` uses, so the records this command emits are the objects a transfer
+over the same scope would take. A rule file that cannot be read or parsed is a
+**usage error** (exit 1) naming the file and the line — never a run with the rules
+dropped, and this is the command where that matters most: a machine listing that
+silently dropped its rule file would look complete, and its output is what a
+script then uses to decide what to delete.
 
 ### Empty results, and the one thing this command must never print
 
@@ -116,18 +119,17 @@ exit code.
 
 ### Status in this build
 
-**`dctl lsjson` cannot read a vault in this build.** The record shape, the
-streamed framings, the filters and the ordering contract are implemented and
-unit-tested; the index read is not, because the runtime context does not yet
-carry an unlocked vault handle. A complete invocation fails with
+**`dctl lsjson` reads a vault, and reads a local directory.** The record
+shape, the streamed framings, the filters and the ordering contract are
+implemented, and so is the index read this page once said was missing:
+`dctl lsjson vault:` lists stored objects and `dctl lsjson ./src` walks the
+filesystem. Earlier revisions quoted an exit-7 `reading the object index is not
+implemented` error that no build now produces.
 
-```
-error: vault:photos: reading the object index is not implemented in this build
-warning: The listing pipeline is complete; what is missing is the vault handle, which Ctx does not carry yet. See PLAN.md §11.
-```
-
-and exit code **7** — never with `[]`. `PLAN.md` §11 delivers the index in
-**Phase 1 (B2 MVP)**.
+The one gap left is shared with the rest of the listing family: a **local path
+that does not exist** produces `[]` and exit **0** rather than exit 3
+(`dir_not_found`). See [dctl ls](dctl_ls.md) for why that matters before a script
+branches on it.
 
 ```
 dctl lsjson [REMOTE:PATH] [flags]
@@ -135,9 +137,8 @@ dctl lsjson [REMOTE:PATH] [flags]
 
 ## Examples
 
-The output below is what the renderer produces. In this build every complete
-invocation stops at the index read described under *Status in this build* and
-prints the exit-7 error instead.
+The output below is what the renderer produces, and every one of them runs in
+this build.
 
 List a subtree as an indented array. No `--json` is needed — `lsjson` emits JSON
 whatever the global format is:
@@ -225,14 +226,26 @@ A file that cannot be read or parsed is a usage error naming the file and the
 line, never a run with the rules dropped.
 
 A Windows path is local on every platform — `C:` is a drive letter, never a
-remote named `C`, and `\\nas\share` is a UNC path — so it is refused rather than
-producing a listing of the wrong thing:
+remote named `C`, and `\\nas\share` is a UNC path — so it is walked as a
+directory rather than resolved against the configured remotes. A remote named
+`C` would instead fail with `unknown remote 'C'` and exit 7:
 
 ```
 dctl lsjson C:\Users\mx\Pictures
-error: listing a local directory is not implemented in this build
-warning: Give a remote spec such as 'vault:photos' instead of a filesystem path.
+[
+  {
+    "Path": "IMG_0001.JPG",
+    "Name": "IMG_0001.JPG",
+    "Size": 2202009,
+    "ModTime": "2024-01-02T09:15:00Z",
+    "IsDir": false,
+    "Hashes": {}
+  }
+]
 ```
+
+On a machine where that path does not exist the output is `[]` and the exit code
+is **0**, not 3 — see *Status in this build*.
 
 ## Options
 
@@ -253,7 +266,7 @@ is a shorthand for `--format json` and is redundant here. Colour is never
 applied to these records — escape sequences inside a JSON string break every
 downstream parser, so `--color always` still produces clean JSON. The filters
 `--include` / `--exclude` / `--min-size` / `--max-size` / `--max-depth` shape
-what is listed (`--filter-from` and `--files-from` are refused), `--units` has
+what is listed, as do `--filter-from` and `--files-from`; `--units` has
 no effect because nothing in the shape is rounded, and `-v` decides whether the
 "nothing matched" note appears on stderr. See
 [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.

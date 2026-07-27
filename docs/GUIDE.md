@@ -265,10 +265,12 @@ dctl cat vault:film.mkv --progress | ffplay -
 dctl cat vault:notes/café.txt --head 200        # first 200 bytes
 ```
 
-Range flags (`--head`, `--tail`, `--offset`, `--count`) are honoured. Note a
-cost caveat: a vault has no ranged read yet, so a byte window over a **sealed**
-object fetches and decrypts the whole object, then slices — `O(object)` egress,
-not `O(window)`. The write half of the pipe family is
+Range flags (`--head`, `--tail`, `--offset`, `--count`) are honoured, and they
+cost what they ask for on a **sealed** object too: a window is served by fetching
+only the chunks covering it — `O(window)` egress and memory, not `O(object)`.
+Each returned byte is authenticated by its own chunk tag; the whole-object hash
+covers bytes a window never reads, so [`dctl verify`](commands/dctl_verify.md)
+remains the command that checks it. The write half of the pipe family is
 [`dctl rcat`](commands/dctl_rcat.md).
 
 ---

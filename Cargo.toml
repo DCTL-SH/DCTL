@@ -21,6 +21,8 @@ repository = "local"
 
 # Single source of truth for shared dependency versions across the workspace.
 [workspace.dependencies]
+# Secure-memory crate: the one audited home for unsafe FFI (mlock / anti-debug).
+dctl-secmem = { path = "crates/dctl-secmem" }
 thiserror = "2"
 blake3 = "1"
 sha1 = "0.10"

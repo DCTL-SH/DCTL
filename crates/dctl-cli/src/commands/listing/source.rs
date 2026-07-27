@@ -351,7 +351,10 @@ mod tests {
             use std::sync::Arc;
             let backend: std::sync::Arc<dyn dctl_store::Backend> =
                 Arc::new(dctl_store::LocalFs::new(&store));
-            let vault = dctl_core::Vault::init(backend, &index, "pw").await.unwrap();
+            let vault = dctl_core::Vault::init(backend, &index, "pw")
+                .await
+                .unwrap()
+                .vault;
             vault.put_file("a.txt", b"hello").await.unwrap();
         }
 
@@ -465,7 +468,7 @@ mod tests {
 
         {
             let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(&store));
-            let vault = Vault::init(backend, &index, "pw").await.unwrap();
+            let vault = Vault::init(backend, &index, "pw").await.unwrap().vault;
             vault.put_file("photos/a.jpg", b"aaa").await.unwrap();
             vault.put_file("notes.txt", b"n").await.unwrap();
         }

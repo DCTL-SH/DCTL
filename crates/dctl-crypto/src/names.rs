@@ -7,7 +7,7 @@
 //! binds the record to its own key and the vault. Rename is a single O(1) rewrite; the
 //! content object is never touched.
 
-use zeroize::Zeroizing;
+use dctl_secmem::LockedSecret;
 
 use crate::aead;
 use crate::constants::{
@@ -20,9 +20,13 @@ use crate::keys::derive_subkey;
 const VALUE_FIXED_PREFIX: usize = 16 + 8 + 2;
 
 /// The two name-layer sub-keys derived from the vault root.
+///
+/// Both are session-long-lived raw-byte secrets, so they live in
+/// [`LockedSecret`]: `mlock`-pinned out of swap/crash-dumps and zeroized on drop
+/// (see `dctl-secmem`). They never leave this struct as owned copies.
 pub struct NameKeys {
-    hash_key: Zeroizing<[u8; KEY_LEN]>,
-    value_key: Zeroizing<[u8; KEY_LEN]>,
+    hash_key: LockedSecret,
+    value_key: LockedSecret,
 }
 
 /// A decoded name record: the authoritative mapping for one path.
@@ -34,19 +38,40 @@ pub struct NameRecord {
 }
 
 impl NameKeys {
-    /// Derive the name-hash / name-value sub-keys from the vault root.
+    /// Derive the name-hash / name-value sub-keys from the vault root, moving each
+    /// into an `mlock`-pinned [`LockedSecret`]. The transient `Zeroizing<[u8; KEY_LEN]>`
+    /// produced by [`derive_subkey`] is wiped when it drops at the end of this call.
     pub fn derive(root: &[u8; KEY_LEN]) -> Result<Self> {
+        let hash_key = derive_subkey(root, INFO_NAME_HASH)?;
+        let value_key = derive_subkey(root, INFO_NAME_VALUE)?;
         Ok(Self {
-            hash_key: derive_subkey(root, INFO_NAME_HASH)?,
-            value_key: derive_subkey(root, INFO_NAME_VALUE)?,
+            hash_key: LockedSecret::from_slice(hash_key.as_slice()),
+            value_key: LockedSecret::from_slice(value_key.as_slice()),
         })
+    }
+
+    /// The name-hash sub-key as a fixed array. The locked buffer is always `KEY_LEN`
+    /// bytes by construction (`derive` copies a `[u8; KEY_LEN]`); the fallback is
+    /// unreachable and present only to keep this infallible without `unwrap`/`expect`/
+    /// `panic`, since [`Self::record_key`] cannot return an error.
+    fn hash_key(&self) -> &[u8; KEY_LEN] {
+        <&[u8; KEY_LEN]>::try_from(self.hash_key.as_slice()).unwrap_or(&[0u8; KEY_LEN])
+    }
+
+    /// The name-value sub-key as a fixed array. Fallible only to satisfy the crate's
+    /// no-panic rule; the length invariant holds by construction (`derive`).
+    fn value_key(&self) -> Result<&[u8; KEY_LEN]> {
+        self.value_key
+            .as_slice()
+            .try_into()
+            .map_err(|_| CryptoError::Format("name value-key length invariant".into()))
     }
 
     /// Public backend object key for `nfc_path`:
     /// `"n/" ‖ hex(BLAKE3_keyed(name-hash-key, NFC(path)))`.
     #[must_use]
     pub fn record_key(&self, nfc_path: &str) -> String {
-        let h = blake3::keyed_hash(&self.hash_key, nfc_path.as_bytes());
+        let h = blake3::keyed_hash(self.hash_key(), nfc_path.as_bytes());
         format!("{NAME_KEY_PREFIX}{}", hex::encode(h.as_bytes()))
     }
 
@@ -70,7 +95,7 @@ impl NameKeys {
         pt.extend_from_slice(&path_len.to_le_bytes());
         pt.extend_from_slice(nfc_path.as_bytes());
         let aad = name_aad(vault_id, key.as_bytes());
-        let value = aead::encrypt(&self.value_key, &pt, &aad)?;
+        let value = aead::encrypt(self.value_key()?, &pt, &aad)?;
         Ok((key, value))
     }
 
@@ -84,7 +109,7 @@ impl NameKeys {
         value: &[u8],
     ) -> Result<NameRecord> {
         let aad = name_aad(vault_id, record_key.as_bytes());
-        let pt = aead::decrypt(&self.value_key, value, &aad)?;
+        let pt = aead::decrypt(self.value_key()?, value, &aad)?;
         if pt.len() < VALUE_FIXED_PREFIX {
             return Err(CryptoError::Format("name record too short".into()));
         }

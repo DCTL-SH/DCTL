@@ -171,9 +171,12 @@ describe the same file with the same name. The two ordered streams are then
 merged, one entry held per side, so comparing two ten-million-object trees costs
 two entries of memory rather than a map of one of them (`PLAN.md` §16.2).
 
-The `--filter-from` and `--files-from` rule files are **refused** rather than
-ignored: rule-file semantics are not implemented, and silently comparing more
-than was asked for is worse than saying so. `--include`, `--exclude`,
+The `--filter-from` and `--files-from` rule files are **honoured**, by the same
+engine `dctl copy` uses, so the scope `check` reports on is the scope a transfer
+would take. A rule file that cannot be read or parsed is a **usage error**
+(exit 1) naming the file and the line rather than a run with the rules dropped —
+silently comparing more than was asked for is worse than saying so.
+`--include`, `--exclude`,
 `--min-size`, `--max-size` and `--max-depth` are applied, identically to both
 sides — filtering only the source would report every excluded file as
 `missing-on-src`, a finding manufactured by the filter rather than by the data.
@@ -255,9 +258,10 @@ command's only mutation, while still performing the comparison and printing the
 report), and the output flags `--format`/`--json`/`--quiet`/`-v`. See
 [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
 
-Two are **refused** rather than honoured: `--filter-from` and `--files-from`
-name rule files whose semantics are not implemented, and a comparison that
-silently covered more than was asked for would be worse than one that stops.
+`--filter-from` and `--files-from` are **honoured** and applied to both sides; a
+rule file that cannot be read or parsed stops the run as a usage error (exit 1)
+naming the file and the line, because a comparison that silently covered more
+than was asked for would be worse than one that stops.
 `--checkers` is accepted and has no effect here — the merge walks both sides in
 lockstep and holds one entry per side, so there is nothing to run in parallel
 without buying back the memory the streaming walk exists to avoid.

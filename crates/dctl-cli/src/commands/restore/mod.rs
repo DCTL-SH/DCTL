@@ -718,9 +718,15 @@ mod tests {
 
             let index_path = index.path().join("index.redb");
             let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(store.path()));
-            dctl_core::Vault::init(backend, &index_path, FIXTURE_PASSWORD)
-                .await
-                .expect("a fresh vault initialises");
+            // Created for its envelope and its index, then dropped. The
+            // recovery phrase `init` returns goes with it: this fixture is
+            // about restoring files, and `tests/recovery.rs` in `dctl-core` is
+            // where the phrase itself is exercised.
+            drop(
+                dctl_core::Vault::init(backend, &index_path, FIXTURE_PASSWORD)
+                    .await
+                    .expect("a fresh vault initialises"),
+            );
 
             let mut config = Config::default();
             config.insert(

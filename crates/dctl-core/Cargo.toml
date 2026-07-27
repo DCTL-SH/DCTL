@@ -10,6 +10,7 @@ description = "DCTL core — the vault composing crypto, storage, and index into
 dctl-crypto = { path = "../dctl-crypto" }
 dctl-store = { path = "../dctl-store" }
 dctl-index = { path = "../dctl-index" }
+dctl-secmem = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }

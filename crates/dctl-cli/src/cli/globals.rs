@@ -135,6 +135,45 @@ pub struct GlobalArgs {
     )]
     pub password_file: Option<PathBuf>,
 
+    /// Unlock with the BIP-39 recovery phrase issued at 'dctl init' instead of
+    /// the password. Prefer --recovery-phrase-file or the environment.
+    ///
+    /// Global rather than a flag on one command, and that is the whole point of
+    /// the recovery story: a phrase has to be able to run `ls`, `cat`, `copy`
+    /// and `restore`, because "prove the phrase works" is not what somebody who
+    /// has lost their password needs — getting their data back is. A
+    /// `vault recover` verb that only reported success would be a demonstration,
+    /// not a recovery.
+    ///
+    /// Carries the same warning as `--password`: an argument is visible to every
+    /// other process on the machine, and this one cannot be rotated by changing
+    /// the password.
+    #[arg(
+        long,
+        global = true,
+        value_name = "PHRASE",
+        env = "DCTL_RECOVERY_PHRASE",
+        hide_env_values = true,
+        help_heading = "Authentication"
+    )]
+    pub recovery_phrase: Option<String>,
+
+    /// File holding the vault's recovery phrase. Line breaks are ignored.
+    ///
+    /// The transcription case, and why this is not `--password-file`'s
+    /// first-line rule: 24 words come off a sheet of paper, and somebody typing
+    /// them into a file will break the lines where the paper breaks them.
+    /// Reading only the first line would reject a correct phrase, which is the
+    /// cruellest possible failure at the moment it is used — so the whole file
+    /// is read and BIP-39's own whitespace rules apply.
+    #[arg(
+        long,
+        global = true,
+        value_name = "PATH",
+        help_heading = "Authentication"
+    )]
+    pub recovery_phrase_file: Option<PathBuf>,
+
     /// Second-factor keyfile (PLAN.md §8): 'know' plus 'have'. REFUSED in this
     /// build — the engine derives the key from the password alone, so a run
     /// that passes this fails rather than silently using one factor.
@@ -486,6 +525,39 @@ impl GlobalArgs {
         self.dump.contains(&target)
     }
 
+    /// Whether this run was told to unlock with the recovery phrase.
+    ///
+    /// Answers "was a phrase *offered*", not "is one usable": a
+    /// `--recovery-phrase-file` naming a missing file is still an instruction to
+    /// use the recovery path, and must fail as one rather than falling back to
+    /// the password. Silently reverting to a password after a phrase source
+    /// failed would make a restore drill pass while proving nothing.
+    #[must_use]
+    pub const fn wants_recovery_phrase(&self) -> bool {
+        self.recovery_phrase.is_some() || self.recovery_phrase_file.is_some()
+    }
+
+    /// Whether *any* password source was named on this run.
+    ///
+    /// Answers only "was a source given", never "is it usable" — the file may
+    /// not exist, the command may fail, the value may be too short. Reading a
+    /// password stays the job of [`crate::session::password`] and
+    /// [`crate::commands::init::password`], and this must never grow into a
+    /// second implementation of their fallback chains.
+    ///
+    /// It exists so a command can fail *early* when it can see that a password
+    /// it will need later cannot possibly arrive: `dctl vault recover` asks for
+    /// the recovery phrase before it asks for a new password, and discovering
+    /// only afterwards that `--no-ask-password` forbids the prompt wastes the
+    /// operator's most expensive step. Because the predicate is strictly less
+    /// permissive than the acquirers — it can only be true when one of the
+    /// three fields is set — a disagreement degrades to the old behaviour (the
+    /// run continues and fails later), never to a refused valid run.
+    #[must_use]
+    pub const fn has_password_source(&self) -> bool {
+        self.password.is_some() || self.password_command.is_some() || self.password_file.is_some()
+    }
+
     /// Whether any dump target is active — used to decide whether to install
     /// the (non-free) protocol tracing layer at all.
     ///
@@ -561,6 +633,31 @@ mod tests {
         assert!(g.dumping(DumpTarget::Retries));
         assert!(!g.dumping(DumpTarget::Bodies));
         assert!(!parse(&[]).any_dump());
+    }
+
+    #[test]
+    fn a_recovery_phrase_source_is_recognised_from_either_flag() {
+        assert!(!parse(&[]).wants_recovery_phrase());
+        assert!(parse(&["--recovery-phrase", "abandon abandon"]).wants_recovery_phrase());
+        assert!(parse(&["--recovery-phrase-file", "/tmp/p"]).wants_recovery_phrase());
+        // A password alongside it does not cancel the request: the phrase is
+        // what was asked for, and a stale DCTL_PASSWORD in the shell must not
+        // quietly turn a recovery run back into an ordinary one.
+        assert!(
+            parse(&["--recovery-phrase", "abandon", "--password", "hunter2"])
+                .wants_recovery_phrase()
+        );
+    }
+
+    #[test]
+    fn a_password_source_is_recognised_from_any_of_the_three_flags() {
+        assert!(!parse(&[]).has_password_source());
+        assert!(parse(&["--password", "hunter2"]).has_password_source());
+        assert!(parse(&["--password-command", "true"]).has_password_source());
+        assert!(parse(&["--password-file", "/tmp/pw"]).has_password_source());
+        // A source that will certainly fail is still a source: this answers
+        // "was one named", and whether it works is the acquirer's question.
+        assert!(parse(&["--password-file", "/nonexistent"]).has_password_source());
     }
 
     #[test]

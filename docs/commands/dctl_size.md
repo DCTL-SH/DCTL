@@ -118,7 +118,9 @@ this command is that the number matches:
 * `--min-size` / `--max-size` accept `10G`, `1.5MiB` or `off`, and apply to
   objects.
 * `--max-depth N` counts from the listing root, one-based; `-1` is unlimited.
-* `--filter-from` and `--files-from` are **refused, not ignored** (exit 7). A
+* `--filter-from` and `--files-from` are **honoured**, by the same rule engine
+  `dctl copy` uses. A rule file that cannot be read or parsed is a **usage error**
+  (exit 1) naming the file and the line, never a run with the rules dropped: a
   total computed from silently-dropped rules is a wrong number that looks right,
   and capacity decisions get made on these numbers.
 
@@ -156,18 +158,22 @@ output nor the exit code.
 
 ### Status in this build
 
-**`dctl size` cannot read a vault in this build.** Spec parsing, the filters,
-the streaming accumulation and both output shapes are implemented and
-unit-tested; the index read is not, because the runtime context does not yet
-carry an unlocked vault handle. A complete invocation fails with
+**`dctl size` reads a vault, and reads a local directory.** Spec parsing, the
+filters, the streaming accumulation and both output shapes are
+implemented, and so is the index read this page once said was missing:
+`dctl size vault:` totals the stored objects and `dctl size ./src` totals a
+local tree. Earlier revisions quoted an exit-7 `reading the object index is not
+implemented` error that no build now produces.
 
-```
-error: b2prod:bucket/media: reading the object index is not implemented in this build
-warning: The listing pipeline is complete; what is missing is the vault handle, which Ctx does not carry yet. See PLAN.md §11.
-```
+The one gap left is shared with the rest of the listing family: a **local path
+that does not exist** produces a zero total and exit **0** rather than exit 3
+(`dir_not_found`). See [dctl ls](dctl_ls.md) for why that matters before a script
+branches on it.
 
-and exit code **7** — never with a zero total. `PLAN.md` §11 delivers the index
-in **Phase 1 (B2 MVP)**.
+`size` is the sharpest case in the family, because it is the one whose empty
+answer is a **number**. `dctl size ./nope` prints `Total objects: 0` and exits 0,
+and unlike the other five it prints no `-v` note at all — nothing on any stream
+distinguishes "this path holds nothing" from "this path is not there".
 
 ```
 dctl size [REMOTE:PATH] [flags]
@@ -175,9 +181,8 @@ dctl size [REMOTE:PATH] [flags]
 
 ## Examples
 
-The reports below are what the renderer produces. In this build every complete
-invocation stops at the index read described under *Status in this build* and
-prints the exit-7 error instead.
+The reports below are what the renderer produces, and every one of them runs in
+this build.
 
 Measure a whole vault:
 
@@ -231,14 +236,19 @@ A file that cannot be read or parsed is a usage error rather than a run with the
 rules dropped: a capacity number computed from ignored rules is a wrong number
 that looks right.
 
-A Windows path is local on every platform, so it is refused rather than measured
-as if it were a vault. `C:` is a drive letter, never a remote named `C`:
+A Windows path is local on every platform, so it is measured as a directory
+rather than resolved against the configured remotes. `C:` is a drive letter,
+never a remote named `C`, which would instead fail with `unknown remote 'C'` and
+exit 7:
 
 ```
 dctl size C:\Users\mx\Pictures
-error: listing a local directory is not implemented in this build
-warning: Give a remote spec such as 'vault:photos' instead of a filesystem path.
+Total objects: 1
+Total size (stored): 2.10 MiB (2202009 bytes)
 ```
+
+On a machine where that path does not exist this prints `Total objects: 0` and
+exits **0** — with no note on any stream. See *Status in this build*.
 
 ## Options
 
@@ -254,8 +264,8 @@ The positional argument is `[REMOTE:PATH]`, optional, falling back to
 ## Options inherited from parent commands
 
 Every global flag is accepted. The relevant ones are the filters
-`--include` / `--exclude` / `--min-size` / `--max-size` / `--max-depth`
-(`--filter-from` and `--files-from` are refused), `--units` (the rounded figure
+`--include` / `--exclude` / `--min-size` / `--max-size` / `--max-depth` /
+`--filter-from` / `--files-from`, `--units` (the rounded figure
 only), `--format` / `--json` (which replace the two text lines with the
 `{"count","bytes"}` object), `--quiet`, and `--config` / `--index` / the
 `--password*` group. See [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full

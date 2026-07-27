@@ -54,10 +54,10 @@ dctl move   render.mov vault:films            → vault:films/render.mov
 dctl moveto render.mov vault:films/final.mov  → vault:films/final.mov
 ```
 
-Those arrows describe the intended addressing. A vault destination is not
-reachable from `moveto` at all today, for the reason given under *What runs
-today*, and when it is the prefix inside the remote still needs applying — see
-[copyto](dctl_copyto.md#what-runs-today).
+Those arrows describe the addressing that runs: a vault destination is reachable
+and the whole path after the colon is applied, so the second line stores
+`films/final.mov`. Both halves of that sentence used to say the opposite — see
+*What runs today*.
 
 **For a directory source the two coincide**, exactly as in `copyto`: a tree moved
 under an exact name is a tree whose destination root is that name, and the
@@ -115,28 +115,37 @@ copy    1.91 MiB  big.mov -> final.mov
 under its new name, flushed to stable storage, and only then removed from the
 source. A run that fails anywhere before that leaves the source where it was.
 
-**Promoting into a vault does not work yet, and fails safely.** The upload
-itself is finished — [`copyto`](dctl_copyto.md) uses it — but `moveto` opens a
-second vault session for its reaper, and the index database allows a single
-writer, so the run stops at connect time with exit **23** (`index_error`):
+**Promoting into a vault works end to end.** `dctl moveto ./render.mov
+archive:films/2024/final.mov` seals and commits the object at the full path it was
+given, and only then removes the local file:
 
+```console
+$ dctl moveto ./render.mov archive:films/2024/final.mov
+ Transferred: 11 B / 11 B, 100%
+    Verified: 11 B checksum-matched
+       Files: 1 / 1
+$ ls render.mov
+ls: render.mov: No such file or directory
+$ dctl ls archive:
+      11 B films/2024/final.mov
 ```
-error: index database error: Database already open. Cannot acquire lock.
-warning: The index is a rebuildable cache: `dctl index rebuild` rescans object
-headers.
-```
 
-That happens **before the file is transferred and before the source is
-touched**, which is exactly the outcome the ordering guarantee is meant to
-produce when something goes wrong. Until it is fixed, promote in two steps:
-`dctl copyto` the artefact up, confirm it with [`verify`](dctl_verify.md), then
-remove the original deliberately.
+An earlier revision of this page said the reaper opened a second vault session,
+hit the index's single-writer lock and stopped at connect time with exit **23** —
+and recommended promoting in two steps instead. That defect is fixed; the
+two-step workaround is no longer needed.
 
-**Moving *out of* a vault cannot be planned.** Listing a named remote is still
-unimplemented, so a `REMOTE:PATH` source stops at enumeration with exit **7**
-before the engine is reached. Remote-to-remote stops there too, and would be
-refused again by the engine: a direct vault-to-vault path needs re-encryption
-support `dctl-core` does not expose.
+**Moving *out of* a vault works.** `dctl moveto archive:site-b/report.txt
+./out2.txt` writes the plaintext locally and then removes the vault object, in
+that order — the ordering guarantee applies to a vault source exactly as it does
+to a local one. An earlier revision of this page said a `REMOTE:PATH` source
+"cannot be planned" and stopped at exit **7**; that was true and stopped being
+true without the page changing.
+
+**Remote-to-remote is still refused**, and this one is real: a direct
+vault-to-vault path needs the re-encrypting transfer `dctl-core` does not expose,
+and a plain-to-plain path needs an engine holding two backends at once. Neither
+is scheduled by `PLAN.md` §11.
 
 The family's refusals apply unchanged, all exit **7** and all before anything is
 deleted: a **plain write into a directory that holds a vault**, a file **above
@@ -306,7 +315,7 @@ the full list. The ones that change what this command does:
 | `--immutable` | **Honoured at plan time** for the destination: an existing `DEST` makes the entry an `update`, which fails the run with exit **7** before anything moves. It does **not** protect the source — deleting it is what `moveto` means. Refused with `--no-traverse` (exit **1**). |
 | `--format`, `--json` | Render the plan as a table, one JSON document, or one JSON Lines record per action. |
 | `--min-size`, `--max-size` | Honoured. If they exclude the single named file, that is a usage error rather than a silent no-op. |
-| `--include`, `--exclude`, `--filter-from`, `--files-from` | **Refused** with exit 7, not ignored. |
+| `--include`, `--exclude`, `--filter-from`, `--files-from` | **Honoured.** A file excluded by a rule is not moved and not deleted. A rule file that cannot be read or parsed is a usage error (exit **1**) naming the file and the line, never a run with the rules dropped. |
 | `--transfers`, `--bwlimit`, `--retries` | Parsed and **not consulted**. |
 | `-P`, `--progress` | A per-file bar showing the real pipeline stage; a row at `verify` has been written but is not yet counted as stored, and its source is still in place. |
 

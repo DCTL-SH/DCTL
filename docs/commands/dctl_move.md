@@ -300,7 +300,7 @@ the full list. The ones that change what this command does:
 | `--immutable` | **Honoured at plan time** for the destination: any `update` fails the run with exit **7** before anything moves, naming the paths. It does **not** protect the source — deleting it is what `move` means. Refused with `--no-traverse` (exit **1**). |
 | `--format`, `--json` | Render the plan as a table, one JSON document, or one JSON Lines record per action. |
 | `--min-size`, `--max-size`, `--max-depth` | Honoured by the walk. A file excluded by a filter is not moved and not deleted. |
-| `--include`, `--exclude`, `--filter-from`, `--files-from` | **Refused** with exit 7, not ignored. |
+| `--include`, `--exclude`, `--filter-from`, `--files-from` | **Honoured.** A file excluded by a rule is not moved and not deleted. A rule file that cannot be read or parsed is a usage error (exit **1**) naming the file and the line, never a run with the rules dropped. |
 | `--transfers`, `--bwlimit`, `--retries` | Parsed and **not consulted**. Files move one at a time, unshaped and unretried. |
 | `-P`, `--progress` | Per-file bars showing the real pipeline stage; a row at `verify` has been written but is not yet counted as stored, and its source is still in place. |
 

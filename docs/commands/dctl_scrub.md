@@ -105,9 +105,12 @@ platform; remote names must be at least two characters, which is what makes the
 drive-letter rule unambiguous.
 
 `--include`, `--exclude`, `--min-size`, `--max-size` and `--max-depth` narrow
-what is read. `--filter-from` and `--files-from` are **refused** rather than
-ignored, because their rule-file semantics are not implemented and a scrub that
-silently covered less than was asked for would overstate its coverage.
+what is read, and so do `--filter-from` and `--files-from`, which are
+**honoured** by the same rule engine `dctl copy` uses. A rule file that cannot be
+read or parsed stops the run as a usage error (exit 1) naming the file and the
+line, rather than being dropped: a scrub that silently covered less than was
+asked for would overstate its coverage, which is the one thing a health report
+must never do.
 
 Stdout carries the findings and nothing else: a `Status`/`Size`/`Path` table of
 the damaged objects, with healthy ones counted rather than listed. A healthy
@@ -269,9 +272,10 @@ weaker check. `--dry-run` has nothing to suppress, because a scrub with
 pace the read-back: it is sequential, which is what keeps memory at one object's
 chunk regardless of dataset size.
 
-`--filter-from` and `--files-from` are **refused**: their rule-file semantics are
-not implemented, and a scrub that silently covered less than was asked for would
-overstate its coverage.
+`--filter-from` and `--files-from` are **honoured**, and a rule file that cannot
+be read or parsed stops the run as a usage error (exit 1) naming the file and the
+line — never dropped, because a scrub that silently covered less than was asked
+for would overstate its coverage.
 
 ## Exit codes
 

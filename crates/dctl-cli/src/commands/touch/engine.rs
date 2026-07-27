@@ -116,8 +116,8 @@ pub struct Request<'a> {
 /// # Errors
 /// [`ExitCode::Usage`](crate::exit::ExitCode::Usage) when `--immutable` forbids
 /// modifying what is already there, or when the target names a directory on a
-/// filesystem; [`ExitCode::FatalError`](crate::exit::ExitCode::FatalError) for a
-/// refused write path, a refused re-stamp, or an addressing refusal;
+/// filesystem; [`ExitCode::FatalError`](crate::exit::ExitCode::FatalError) for
+/// an object store, a refused re-stamp, or an addressing refusal;
 /// [`ExitCode::VaultLocked`](crate::exit::ExitCode::VaultLocked) when a vault
 /// will not unlock; and whatever the operating system or the provider reported.
 pub async fn apply(ctx: &Ctx, place: &Place, request: Request<'_>) -> Result<Outcome> {

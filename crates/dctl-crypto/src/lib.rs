@@ -16,6 +16,14 @@
 // Professional error handling: library code never panics on bad input — it
 // returns a typed `Result`. Enforced, with one audited exception (see `rng`).
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+// …but a test asserts, and an assertion that cannot panic is not an assertion.
+// The ban above is about *shipped* behaviour: a caller handed bad input gets a
+// typed error, never a process that dies. Under `cfg(test)` the panic IS the
+// report, so `unwrap` on a fixture is the clearest way to say "this setup must
+// succeed or the test means nothing". Same allowance, same wording, as
+// `dctl-core` and `dctl-store` — it applies only to code that is never compiled
+// into the library.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod aead;
 pub mod constants;

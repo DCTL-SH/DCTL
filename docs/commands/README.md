@@ -99,6 +99,7 @@ every filter — a partial replica is not a vault.
 
 | Command | Description |
 |---------|-------------|
+| [dctl vault](dctl_vault.md) | Operate on a vault's key material: recover one with its recovery phrase. |
 | [dctl audit](dctl_audit.md) | Inspect and verify the tamper-evident audit log. |
 | [dctl backup](dctl_backup.md) | Back up a local tree into a vault. |
 | [dctl restore](dctl_restore.md) | Restore a vault, or part of one, to a local tree. |

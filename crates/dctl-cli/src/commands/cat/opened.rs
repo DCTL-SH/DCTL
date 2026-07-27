@@ -44,17 +44,6 @@ impl<'a> Opened<'a> {
         }
     }
 
-    /// The context this cache is bound to.
-    ///
-    /// Exposed so that pre-flight can reach the output sink without being handed
-    /// a second borrow of the same context: an argument is resolved through this
-    /// cache, and whether that argument's read is worth warning about is decided
-    /// in the same place and from the same `Ctx`.
-    #[must_use]
-    pub const fn ctx(&self) -> &'a Ctx {
-        self.ctx
-    }
-
     /// The source for `remote`, opening it if this is the first argument to name
     /// it.
     ///

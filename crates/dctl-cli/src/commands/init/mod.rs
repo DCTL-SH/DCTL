@@ -67,6 +67,7 @@
 // divergence creates vaults that can never be reopened, so the agreement is
 // asserted rather than assumed.
 pub mod password;
+pub mod phrase;
 mod plan;
 mod report;
 
@@ -155,6 +156,8 @@ pub async fn run(ctx: &Ctx, args: &InitArgs) -> Result<()> {
          it less than you asked for, so nothing was created.",
     )?;
 
+    refuse_a_chosen_phrase(ctx)?;
+
     let plan = InitPlan::resolve(ctx, args)?;
     let mut configured = config::load_or_default(&plan.config_path)?;
     plan.preflight(ctx, &configured)?;
@@ -167,7 +170,7 @@ pub async fn run(ctx: &Ctx, args: &InitArgs) -> Result<()> {
             "register remotes",
             &format!("{}, {}", plan.vault_name, plan.store_name),
         );
-        return InitReport::new(&plan, false, false, None, true).emit(ctx);
+        return InitReport::new(&plan, false, false, None, true, false).emit(ctx);
     }
 
     let backend = crate::remote::build_backend(&plan.base)?;
@@ -208,7 +211,16 @@ pub async fn run(ctx: &Ctx, args: &InitArgs) -> Result<()> {
             .remote(&plan.vault_name)
             .path(&plan.base),
     )?;
-    created?;
+    let created = created?;
+
+    // Before anything that can fail again. The vault exists from the line above,
+    // and the recovery phrase exists only in `created` — once this function
+    // returns, by any path, nothing anywhere can produce those words again. A
+    // configuration write that failed *after* the phrase was shown leaves a
+    // recoverable vault; one that failed before would leave a vault with a
+    // second key nobody has ever seen, which is the same as having none.
+    phrase::show(ctx, &plan.vault_name, &created.recovery_phrase);
+    drop(created);
 
     tracing::info!(
         { fields::REMOTE } = %plan.base,
@@ -222,12 +234,46 @@ pub async fn run(ctx: &Ctx, args: &InitArgs) -> Result<()> {
     register(&plan, &mut configured, ctx.globals.force)
         .map_err(|error| unregistered(&plan, &error))?;
 
-    InitReport::new(&plan, true, true, Some(password.source()), false).emit(ctx)?;
+    InitReport::new(&plan, true, true, Some(password.source()), false, true).emit(ctx)?;
     ctx.out.success(format!(
         "created vault '{}' on '{}'; its objects are addressable as '{}'",
         plan.vault_name, plan.base, plan.store_name
     ));
     Ok(())
+}
+
+/// Refuse `--recovery-phrase` on a command that generates one.
+///
+/// The trap this closes is specific and expensive. `--recovery-phrase` is a
+/// global, so it parses here; somebody who has read that a phrase opens a vault
+/// will reasonably try `dctl init --recovery-phrase "…"` expecting either to
+/// choose their phrase or to re-create a vault from one. Neither is what would
+/// happen. The flag would be ignored, `init` would generate a *different* phrase
+/// and — with `--force` on an occupied store — a brand new root key, orphaning
+/// everything already stored while the operator believed they were restoring it.
+///
+/// A phrase is generated rather than chosen on purpose: it is 256 bits of
+/// CSPRNG output, and a phrase a human picked is not. So this cannot be
+/// "supported later" by wiring the flag through; the refusal is the permanent
+/// answer, and it names the command that does what the user was reaching for.
+///
+/// # Errors
+/// [`ExitCode::Usage`] when either recovery-phrase flag is present.
+fn refuse_a_chosen_phrase(ctx: &Ctx) -> Result<()> {
+    if !ctx.globals.wants_recovery_phrase() {
+        return Ok(());
+    }
+    Err(CliError::usage(
+        "a new vault's recovery phrase is generated, not chosen: --recovery-phrase \
+         has no meaning for `dctl init`",
+    )
+    .with_hint(
+        "Nothing was created. The phrase is 256 bits of random entropy, printed \
+         once when the vault is made — a phrase a person picked would be the \
+         weakest way into the vault. To open a vault that already exists using \
+         its phrase, run `dctl vault recover REMOTE:`; to address an existing \
+         vault from this machine, run `dctl config import`.",
+    ))
 }
 
 /// Put both entries in the configuration and write it, in one save.

@@ -13,38 +13,39 @@
 //! bounded read: memory is one buffer, and `--offset 40G` on a film costs one
 //! syscall.
 //!
-//! A **remote** object is measured with [`Source::stat`] and read with
-//! [`Source::read`] or [`Source::read_range`] on the binary's one read
+//! A **remote** object is measured with [`ReadSource::stat`] and read with
+//! [`ReadSource::read`] or [`ReadSource::read_range`] on the binary's one read
 //! abstraction, which is what makes `dctl cat archive:film.mkv` and
 //! `dctl cat archive-store:<key>` both work without this file knowing which is
-//! which.
+//! which. (Spelled `ReadSource` throughout this module's documentation because
+//! the local [`Source`] is this file's own pre-flighted argument, and an
+//! unqualified `Source` here would link to that.)
 //!
 //! ## What a remote read costs, stated plainly
 //!
-//! [`Source::read`] hands back bytes, not a reader, so the requested window is
-//! held in memory while it is written. For a plain object store that is a
-//! choice this file makes; for a sealed vault it is not, because
-//! [`Vault::get_file`](dctl_core::Vault::get_file) is the only read `dctl-core`
-//! exposes and it decrypts whole objects. So `dctl cat archive:film.mkv` needs
-//! room for the film, and `dctl cat archive:film.mkv --head 1M` needs room for a
-//! megabyte.
+//! [`ReadSource::read`] and [`ReadSource::read_range`] hand back bytes, not a
+//! reader, so the requested window is held in memory while it is written. That is the whole
+//! cost now: `dctl cat archive:film.mkv --head 1M` needs room for a megabyte,
+//! whichever kind of remote it names.
 //!
-//! That is a real limit and it is written down rather than discovered: the
-//! alternative is a command that works in every test and dies on the one file
-//! anybody cared about. It disappears when `dctl-core` grows a chunked reader —
-//! at which point [`Reader`] gains a third variant and nothing above it changes.
+//! It used to be much worse against a sealed vault, and this is where the
+//! difference showed. `dctl-core` exposed only a whole-object read, so a vault
+//! served `--count 4` against a 40 GB film by moving 40 GB — a transfer that
+//! returned four bytes, exited 0, and appeared on a bill with nothing linking it
+//! back to the command. This file warned about it at pre-flight because that was
+//! the only honest thing available. It no longer needs to: a vault computes the
+//! chunks covering a window and fetches exactly those (`docs/FORMAT.md` §3), so
+//! both sources are O(window) and the warning is gone rather than dormant.
 //!
-//! Written down was not enough, though, and this is where that was fixed. A
-//! vault serves a *window* by moving the whole object, so `--count 4` against a
-//! 40 GB film is a 40 GB transfer that returns four bytes and exits 0 — a cost
-//! with nothing linking it back to the command once it appears on a bill. Above
-//! [`RANGED_READ_WHOLE_OBJECT_WARN_BYTES`](crate::constants::RANGED_READ_WHOLE_OBJECT_WARN_BYTES)
-//! [`Source::preflight`] says so on stderr, here, before any byte moves. See
-//! [`crate::source::ranged`] for why the threshold sits where it does.
+//! `dctl cat archive:film.mkv` with no range flags still needs room for the film,
+//! because that asks for the film. [`Reader`] gains a streaming variant the day
+//! stdout is written chunk-by-chunk instead of from a buffer; nothing above it
+//! changes when it does.
 //!
 //! Buffering is *not* how the range flags are honoured. `--offset` and `--count`
-//! resolve to a window that is passed down as a window, so a plain store serves
-//! it with a genuine ranged request rather than reading and discarding.
+//! resolve to a window that is passed down as a window, so both a plain store and
+//! a vault serve it with a genuine ranged request rather than reading and
+//! discarding.
 
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
@@ -103,21 +104,13 @@ impl Source {
         let size = remote_size(&spec, source.as_ref()).await?;
         let slice = span.resolve(size);
 
-        // Said before the read rather than after it. A vault has no ranged read,
-        // so a four-byte window of a 40 GB object is a 40 GB download — and the
-        // command that causes it returns four bytes and exits 0, leaving nothing
-        // to connect the cost to the cause when it turns up on an invoice.
-        // Pre-flight is the right moment: every argument is resolved here before
-        // any byte is written, so the warning arrives while the run could still
-        // be interrupted.
-        if let Some(warning) =
-            source
-                .ranged_read()
-                .warning(size, slice.length, opened.ctx().out.units())
-        {
-            opened.ctx().out.warn(format!("{spec}: {warning}"));
-        }
-
+        // There used to be a warning here, because a vault served a byte window
+        // by moving the whole object and `--count 4` against a 40 GB film was a
+        // 40 GB transfer nothing tied back to the command. Both sources now serve
+        // a genuine window — see `crate::source::vault` — so the announcement has
+        // nothing left to announce, and a warning that fires on a cost that is no
+        // longer paid is worse than none: it is the one an operator learns to
+        // filter out before the run that mattered.
         Ok(Self {
             slice,
             spec,
@@ -148,10 +141,14 @@ impl Source {
         };
 
         // Whole-object and windowed reads are genuinely different calls, not one
-        // with default arguments. A vault serves a window by decrypting the
-        // whole object and copying the slice out, so asking for the whole object
-        // when that is what is wanted saves a second full-size allocation — and
-        // a plain store answers `read` with one request either way.
+        // with default arguments, and the difference is not merely a saved
+        // allocation. A vault's whole-object read re-hashes the plaintext it
+        // decrypted against the object's own recorded BLAKE3 — a statement about
+        // the entire file that a windowed read cannot make, because it never sees
+        // the bytes outside its window. So asking for everything when everything
+        // is what was asked for buys the stronger check as well as one buffer
+        // instead of two. A plain store answers `read` with one request either
+        // way.
         let bytes = if self.slice.start == 0 && self.slice.length == self.size {
             source.read(self.spec.path()).await?
         } else {

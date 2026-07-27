@@ -188,6 +188,34 @@ impl Out {
         astyle_eprintln!("{style}{ERROR_PREFIX}{style:#} {}", text.as_ref());
     }
 
+    /// A pre-formatted line of stderr, verbatim: no prefix, no styling, and not
+    /// suppressed by `--quiet` or by a machine `--format`.
+    ///
+    /// Exists for exactly one caller, and the constraints come from it: the
+    /// recovery-phrase block `dctl init` prints
+    /// ([`crate::commands::init::phrase`]). Each of the three properties is
+    /// load-bearing rather than convenient.
+    ///
+    /// * **Verbatim** — the block draws its own frame and its own column grid,
+    ///   and a prefix glyph on every line would break both. What makes it
+    ///   readable is that it does not look like the rest of the output.
+    /// * **Not suppressed by `--quiet`** — for the same reason [`Out::error`] is
+    ///   not. `--quiet` asks for less noise, not for an irreversible thing to
+    ///   happen silently; a vault whose second key was generated and never shown
+    ///   has no second key at all.
+    /// * **On stderr under every format** — stdout is the result stream, so a
+    ///   phrase written there would land in `| tee` output, a JSON document or a
+    ///   CI artefact. A phrase in a log file is a compromised vault, and unlike
+    ///   a password it cannot be rotated away.
+    pub fn notice(&self, text: impl AsRef<str>) {
+        let mut stderr = std::io::stderr().lock();
+        // A failed write to stderr has nowhere to be reported, and it must not
+        // fail the command: the vault has already been created by the time this
+        // runs, and turning "the terminal went away" into an error would report
+        // a failure for work that succeeded.
+        let _ = writeln!(stderr, "{}", text.as_ref());
+    }
+
     /// A success confirmation on stderr, so it does not pollute piped data.
     ///
     /// The mark follows the palette: a sink that is allowed to emit ANSI is

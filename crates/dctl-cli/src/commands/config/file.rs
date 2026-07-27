@@ -2,7 +2,7 @@
 //!
 //! Exists to be substituted into other commands: `$(dctl config file)` is how a
 //! script, a dotfile installer or a support request finds the file without
-//! hard-coding XDG, `Application Support` and `%APPDATA%` and getting one of
+//! hard-coding a path and getting it wrong when `DCTL_HOME` is set, or when one of
 //! them wrong.
 //!
 //! Because it is meant for substitution, the path is the **only** thing on

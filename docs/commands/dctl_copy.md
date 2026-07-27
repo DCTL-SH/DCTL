@@ -22,10 +22,10 @@ paths — `./photos/raw/a.cr3` becomes `vault:photos/2024/raw/a.cr3`. A `SOURCE`
 that names a single file is allowed and lands *inside* `DEST` under its own
 name, matching rclone: `dctl copy report.pdf vault:archive` writes
 `vault:archive/report.pdf`. When you want `DEST` to be the object's name rather
-than the directory it goes in, use [`copyto`](dctl_copyto.md). A **plain** remote
-addresses exactly as written; a **vault** remote does not yet apply the prefix
-after the colon to the stored key, and *What runs today* says exactly what
-happens instead.
+than the directory it goes in, use [`copyto`](dctl_copyto.md). Both kinds of
+remote address exactly as written: the path after the colon is applied to the
+stored key for a plain remote and for a vault alike. It was not always so, and
+*What runs today* records what this page claimed while it was not.
 
 **What "identical" means.** The decision is made once, per file, by the shared
 comparison rules — the same code `sync` uses, which is what stops the two verbs
@@ -287,7 +287,7 @@ Two things to know before pointing a nightly job at one:
   write itself has only been run against the local-filesystem backend behind the
   same trait. Try it with `--dry-run` and a small tree first.
 * **A plain destination is not incrementally comparable by default** — see
-  "Re-running a copy" below. Objects carry the time the store wrote them, so the
+  "Re-running a copy" above. Objects carry the time the store wrote them, so the
   default size-and-time comparison finds every file different on the next run
   and re-uploads it. Use `--size-only` for a plain remote you re-copy on a
   schedule, and remember that a provider charges for the upload either way.
@@ -295,37 +295,40 @@ Two things to know before pointing a nightly job at one:
 Reading a bucket is unchanged and needs no flags: the backend `copy` fetches
 from is the one `dctl ls` lists through.
 
-> **DATA LOSS — do not use a sub-path with a vault destination in this build.**
->
-> `dctl copy ./src archive:photos` stores `a.txt` and `sub/b.txt` at the
-> **vault's root**, not under `photos/`. A session carries the remote but not the
-> prefix, so every sealed destination collapses onto the root.
->
-> That is not merely misplacement. Two copies to what look like different
-> destinations collide, and the second **silently destroys the first**:
->
-> ```
-> $ dctl copy ./tree-one archive:site-a     # Files: 1 / 1, Errors: 0, exit 0
-> $ dctl copy ./tree-two archive:site-b     # Files: 1 / 1, Errors: 0, exit 0
-> $ dctl ls archive:
->       17 B report.txt                     # one object, not two
-> $ dctl cat archive:report.txt
-> TREE-TWO-CONTENT                          # tree-one is unrecoverable
-> ```
->
-> Both runs reported success. Until this is fixed, treat a vault destination as
-> addressing the root only, and give each tree a distinct filename rather than a
-> distinct prefix.
->
-> An earlier revision of this page claimed the gap "does not lose data or report
-> success falsely". Both halves were wrong, and the sentence is recorded here
-> rather than deleted because a false safety claim is the kind of thing a
-> reviewer relies on, and its removal should be visible.
+**A sub-path on a vault destination is honoured.** `dctl copy ./src
+archive:photos` stores `photos/a.txt` and `photos/sub/b.txt`, the same way a
+plain destination does. The reproduction this page used to carry now round-trips
+intact:
 
-A **plain** destination does not have that gap — `dctl copy ./src backup:photos`
-stores `photos/a.txt` — because it must not: the destination listing is taken
-under the same prefix, so writing anywhere else would make every re-run copy the
-same files again.
+```console
+$ dctl copy ./tree-one archive:site-a
+$ dctl copy ./tree-two archive:site-b
+$ dctl ls archive:
+      17 B site-a/report.txt
+      17 B site-b/report.txt
+$ dctl cat archive:site-a/report.txt
+TREE-ONE-CONTENT
+```
+
+That block is worth reading as a history of how this page has been wrong, because
+it has now been wrong in **both** directions about the same behaviour. It first
+claimed the gap "does not lose data or report success falsely" when the sealed
+path did both: two copies to different prefixes collided at the vault root and
+the second silently destroyed the first, with `Errors: 0` and exit 0 on each. The
+correction replaced that with a **DATA LOSS** banner telling readers never to use
+a sub-path with a vault — and the banner outlived the defect, so the page then
+spent its most prominent warning forbidding an operation that works.
+
+The overselling direction is the dangerous one and the underselling direction is
+not free: a standing "DATA LOSS" notice that is not true is how a reader learns
+to skim the ones that are. Both sentences are recorded rather than deleted
+because a safety claim, in either direction, is the kind of thing a reviewer
+relies on, and its removal should be visible.
+
+A **plain** destination behaves identically — `dctl copy ./src backup:photos`
+stores `photos/a.txt` — because it must: the destination listing is taken under
+the same prefix, so writing anywhere else would make every re-run copy the same
+files again.
 
 `local:` is not a way round any of this — that prefix means "read the rest as a
 filesystem path", so it lands in the plain-write refusal below, which is the
@@ -691,7 +694,7 @@ the full list. The ones that change what this command does:
 | `--index <PATH>` | The index database the vault commit is written to. Defaults to the platform data directory. |
 | `--format`, `--json` | Render the plan as a table, one JSON document, or one JSON Lines record per action. |
 | `--min-size`, `--max-size`, `--max-depth` | Honoured by the walk, and applied to both listings. An unsatisfiable size range is a usage error rather than a silent transfer of nothing. |
-| `--include`, `--exclude`, `--filter-from`, `--files-from` | **Refused** with exit 7, not ignored. |
+| `--include`, `--exclude`, `--filter-from`, `--files-from` | **Honoured**, and applied to the walk before anything is transferred. A rule file that cannot be read or parsed is a usage error (exit **1**) naming the file and the line, never a run with the rules dropped. |
 | `-P`, `--progress`, `--stats` | Per-file bars showing the real pipeline stage — a row at `verify` has been written but is not yet counted as stored. |
 | `--transfers`, `--bwlimit`, `--retries`, `--low-level-retries` | Parsed and **not consulted**. Files move one at a time, unshaped and unretried. |
 | `--immutable` | **Honoured at plan time.** Any `update` in the plan fails the run with exit **7** before anything moves, naming the paths; a missing destination is an addition and still copies. Refused with `--no-traverse` (exit **1**), which never lists the destination. |

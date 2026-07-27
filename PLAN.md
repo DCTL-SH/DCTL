@@ -301,19 +301,50 @@ AES-NI when present) · SIMD BLAKE3 · zero-copy `bytes` · encrypted LRU chunk 
 
 ## 11. Roadmap (durability + logging are day-1, not deferred)
 
+**A phase is delivered when its capability works end to end.** A command that
+parses its arguments and then refuses is not delivery; neither is a backend that
+compiles but has never been pointed at the provider it names. The status column
+below is written to that rule, because a roadmap that marks a phase done on the
+strength of a refusal is the same misreport §6 forbids, moved up a level.
+
 - **Phase 0 — Foundations:** workspace; `dctl-crypto` (clean-room streaming AEAD,
   KDF, envelope, recovery); **verified-write state machine + WAL + audit log +
   error taxonomy + `tracing`**; auth/key model; `Backend` trait w/ Range +
   checksums; local-FS backend; proptest + fuzz.
+  → **Delivered, except the second factor.** The envelope, the verified-write
+  state machine, the audit chain, the error taxonomy and the local-FS backend all
+  work end to end, and §8's recovery key is real: `dctl init` issues a BIP-39
+  phrase, `dctl vault recover` opens a vault with it, and `--recovery-phrase`
+  unlocks any command. **`--key-file` is refused** — the engine still derives the
+  key from the password alone, so the "know + have" half of §8 is outstanding and
+  this phase is not closed.
 - **Phase 1 — B2 MVP:** B2 backend (multipart + per-part checksums), `copy`/`move`/
   `sync` in **both plain and crypt** modes with the full §6 contract, encrypted
   index, `ls`/`verify`/`check`.
+  → **Partially delivered, and the unverified part is the provider.** Against
+  `local:` and a vault the phase is complete: the encrypted index, `ls`/`verify`/
+  `check`, and `copy`/`move`/`sync` in both plain and crypt modes all work under
+  the §6 contract, as do the listing, removal and audit families. **Nothing has
+  been exercised against live B2, S3 or R2.** Those backends compile and are
+  reachable, and a missing credential is the only thing that stops a run today —
+  which is exactly the state that looks like success from inside the repository.
+  Remote↔remote transfer is refused in both directions. Until one real bucket
+  round-trips, this phase is not delivered.
 - **Phase 2 — Streaming mount:** `fuser` read-first VFS, Range reader, prefetch,
   encrypted cache — play a huge encrypted video straight off B2.
+  → **Not delivered.** `dctl mount` parses every argument it owns and then
+  refuses; there is no `dctl-mount` crate and no FUSE/FSKit/WinFSP adapter.
 - **Phase 3 — Google Drive:** OAuth, resumable, 750 GB/day pacer + quota/backoff.
+  → **Not started.** `dctl config providers` lists `local`, `b2`, `s3` and `r2`
+  only.
 - **Phase 4 — Hardening:** `--pad`, snapshots/versioning (optional), crash-
   consistency test suite, format fuzzing, external-audit prep.
+  → **Not delivered.** There is no `--pad` flag; `restore --at`/`--snapshot` and
+  `backup --snapshot` refuse, naming the single-current-version index as the gap;
+  `cleanup --class versions` reports `unsupported` on a backend that cannot
+  enumerate versions.
 - **Phase 5 — GUI + providers.**
+  → **Not started.**
 
 ---
 
@@ -417,7 +448,7 @@ rclone stores provider creds and crypt passwords in the file, only *"obscured"*
 with reversible obfuscation (anyone with the file recovers them). Unacceptable for
 a security-first tool.
 
-- **`~/.config/dctl/config.toml`** (TOML, XDG paths, `--config`/`DCTL_CONFIG`
+- **`~/.dctl/config.toml`** (TOML, one home for everything, `--config`/`DCTL_CONFIG`
   override, enforced `0600`, warns if world-readable): **non-secret** settings only
   — named remotes (type, endpoint, bucket, region), vault-remote wrapping, chunk
   sizes, cache dir/size, verify policy, mount defaults, pacer/quota limits.

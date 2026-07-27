@@ -52,22 +52,22 @@ carries no counters and never says an object was removed.
 
 ### What runs today
 
-**The removal itself is not implemented in this build.** Argument parsing,
-target resolution, the directory refusal, the destructive gate and the
-`--dry-run` plan all run now. `Vault::delete_file` exists in the core crate, but
-the command context carries no vault handle to call it on, so after printing its
-plan the command exits **7** (`fatal_error`):
+**The removal runs.** `Vault::delete_file` is reached and the named object is
+gone when the command returns:
 
 ```
-error: dctl deletefile is not implemented in this build
-warning: The removal itself is not wired up yet, because it needs removing a
-named object from a vault. Nothing was changed. Parsing, target resolution,
-filter validation and the destructive gate all ran — re-run with --dry-run to
-see the resolved request. See PLAN.md §11 for the phase that delivers the rest.
+$ dctl deletefile vault:r2/a.txt --force
+Command  deletefile
+Target   vault:r2/a.txt
+Mode     execute
+removed              6 B  r2/a.txt
+OK removed: 1 object(s), 6 B
 ```
 
-Nothing is changed on any run, including one with `--force`. The vault handle
-and index work arrive with the `PLAN.md` §11 **Phase 1 (B2 MVP)** milestone.
+Earlier revisions of this page said the removal "is not implemented in this
+build" and quoted an exit-7 refusal that no build now produces. Understating a
+destructive command is the dangerous direction: it invites a reader to point
+`--force` at a path they have not checked.
 
 ```
 dctl deletefile REMOTE:PATH [flags]
@@ -166,11 +166,16 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | Code | Name | When |
 |------|------|------|
 | 1 | `usage` | Unparseable command line; a target that names a directory (trailing separator) or the vault root (`REMOTE:`); a local, UNC or too-short-remote target; a target containing `..`; `--interactive` with no terminal to prompt on. |
-| 7 | `fatal_error` | The removal engine is unavailable. **Every run that gets past validation ends here today**, including `--dry-run`. Nothing was changed. |
+| 4 | `file_not_found` | The named object does not exist. |
+| 7 | `fatal_error` | The remote is not configured and is not a known provider. |
+| 22 | `vault_locked` | Wrong password or recovery phrase, or a damaged envelope. |
+| 23 | `index_error` | The encrypted index or its journal could not be read or written. |
 | 25 | `cancelled` | An interactive confirmation was declined, or the run was interrupted with Ctrl-C. |
 
-Exit code 0 is not currently reachable. When the engine lands, 4
-(`file_not_found`) becomes reachable for a target that does not exist.
+Exit **0** means the object was removed. An earlier revision of this table said 0
+"is not currently reachable" and that every run past validation ended at 7 with
+the engine unavailable; neither is true, and 4 is produced today rather than
+being owed.
 
 ## See also
 

@@ -583,7 +583,20 @@ Additive `dctl-store` modules; each is a `Target` variant + `build`/`resolve` ar
 
 ### M9 — Ranged Vault crypto: efficient/huge Vault mount + full-read integrity (resolves D5, D12)
 `VaultBackend` already exists (M4); this milestone makes its `get_range` chunk-ranged instead of whole-fetch-slice, and restores whole-file integrity on complete reads.
-- **Touch:** `crates/dctl-crypto/src/object/seal.rs` (`pub(crate) data_start()` helper), new `crates/dctl-crypto/src/object/reader.rs` (`ObjectReader`); `VaultBackend::get_range`/`as_stream_read` use it; full-read integrity check on handle close (D5).
+
+> **The chunk-ranged decrypt is DONE and shipped — do not rebuild it.** It landed as
+> `dctl-crypto/src/object/range.rs` (`RangeHeader`/`ChunkSpan`: §3 covering-chunk
+> arithmetic + per-chunk authentication) and `dctl-core/src/range.rs`
+> (`Vault::open_range_reader` → `RangeReader`: one `Backend::get_range` per window),
+> with a bounded decrypted-chunk cache at `dctl-cli/src/source/chunk_cache.rs`. Named
+> `range.rs` rather than the `reader.rs`/`data_start()` sketched below, and it needed no
+> change to `seal.rs`. `dctl cat --offset` against a Vault is already ranged. What is
+> **still outstanding** in this milestone is D5: the full-read integrity check on handle
+> close — a windowed read cannot evaluate the whole-object footer or `content_blake3`
+> (stated on `dctl_core::range`), so a handle that has cumulatively covered `[0, size)`
+> must fold a streaming BLAKE3 and check it. Nothing tracks coverage yet.
+
+- **Touch:** ~~`crates/dctl-crypto/src/object/seal.rs` (`pub(crate) data_start()` helper), new `crates/dctl-crypto/src/object/reader.rs` (`ObjectReader`)~~ **done, as `object/range.rs`**; `VaultBackend::get_range`/`as_stream_read` use it; full-read integrity check on handle close (D5).
 - **Crates:** none.
 - **Commands lit:** Vault `mount`/`serve` of huge files (one chunk per read); Vault `cat --offset` becomes ranged.
 - **Tests:** proptest ranged-decrypt == whole-object `open` at random offsets; per-chunk tamper detection on partial reads; a fully-read handle verifies the index `content_hash`; mounting a >1 GiB Vault file fetches O(chunk) not O(file) (assert `get_range` sizes).

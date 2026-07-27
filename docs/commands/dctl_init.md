@@ -47,15 +47,77 @@ the envelope — or replacing it with a new one — makes every object already
 stored permanently unreadable. The bytes remain in the bucket and the provider
 will keep billing for them, but nothing can decrypt them again.
 
+## It prints a recovery phrase. Write it down.
+
+The envelope gets **two** key slots, not one (`docs/FORMAT.md` §2.1): your
+password, and a freshly generated 24-word BIP-39 **recovery phrase**. Both wrap
+the same root key, independently, so either one opens the vault on its own. A
+forgotten password is therefore survivable — which `PLAN.md` §13.2 calls the #1
+risk of a twenty-year tool.
+
+The phrase is printed **once**, on stderr, immediately after the vault is
+created:
+
+```
+========================================================================
+  RECOVERY PHRASE - WRITE THESE WORDS DOWN ON PAPER, NOW
+  Vault: archive    Words: 24
+========================================================================
+
+    1 shiver     2 quantum    3 raw        4 toss
+    5 copy       6 secret     7 theme      8 alone
+    ...
+   21 bulk      22 original  23 response  24 word
+
+  Shown once, here. DCTL stores it nowhere it can read, so nothing can
+  print it again - not this machine, not the provider, not a support
+  request.
+  ...
+========================================================================
+```
+
+Four things about that output are deliberate:
+
+* **It is on stderr, never stdout.** stdout is the result stream, so
+  `dctl init --json | tee provisioning.log` is an ordinary thing to run — and a
+  phrase in a log file is a vault that is permanently compromised, because
+  unlike a password it cannot be rotated away. `--json` reports only
+  `"recovery_phrase_issued": true`; the words are not in the document.
+* **`--quiet` does not suppress it.** `--quiet` asks for less noise, not for
+  something irreversible to happen silently. A vault whose second key was
+  generated and never shown has no second key at all.
+* **It cannot be shown again.** Not by re-running anything. The phrase is
+  generated, wrapped into the mnemonic slot, and dropped: DCTL keeps no copy,
+  which is the property that makes it worth having — a phrase the tool could
+  reprint is a phrase an attacker holding the envelope could reprint.
+* **Paper, not the machine the vault is on.** Anyone holding the words can read
+  every file in the vault.
+
+Once it is on paper, prove it works:
+
+```
+dctl vault recover archive: --keep-password
+```
+
+That checks the phrase opens the vault and changes nothing (`PLAN.md` §13.6 — a
+backup you have never restored is not a backup). To *use* it later, see
+[dctl vault](dctl_vault.md), or pass `--recovery-phrase` to any command.
+
+**Changing your password never invalidates the phrase.** Only the password slot
+is rewritten; the paper stays current forever.
+
+You cannot choose the phrase. `dctl init --recovery-phrase …` is refused rather
+than ignored: the words are 256 bits of CSPRNG output, and a phrase a person
+picked would be the weakest way into the vault.
+
 That asymmetry (seconds to run, impossible to undo) shapes the whole command:
 
-* **The password is typed twice** when it comes from a terminal. There is no
-  recovery path for a mistyped password in this build — the root key is wrapped
-  under whatever was typed and nothing anywhere records what that was — so the
-  two readings must match or the run fails with nothing created. A password that
-  arrives from `--password`, `--password-command` or `--password-file` is *not*
-  confirmed: reading the same source twice is not a check, so the confirmation
-  is skipped rather than faked.
+* **The password is typed twice** when it comes from a terminal. A mistyped
+  password wraps the root key under a secret nobody knows, so the two readings
+  must match or the run fails with nothing created. A password that arrives from
+  `--password`, `--password-command` or `--password-file` is *not* confirmed:
+  reading the same source twice is not a check, so the confirmation is skipped
+  rather than faked.
 * **A password shorter than 8 characters is refused**, at creation only.
   Unlocking never re-applies today's policy to an older vault.
 * **An existing local index is a hard refusal** without `--force`.
@@ -196,8 +258,7 @@ well, and the only thing missing is the factor. Two-factor unlock arrives with
 the `PLAN.md` §8 envelope-slot work.
 
 **The index.** Each vault needs its own index database. It defaults to
-`vault.redb` inside the platform data directory (`~/.local/share/dctl/` on
-Linux, `~/Library/Application Support/dctl/` on macOS, `%APPDATA%\dctl\data\` on
+`vault.redb` inside `~/.dctl/index/`.
 Windows) and is chosen with `--index` or `DCTL_INDEX`. Initialising a second
 vault without giving it a distinct `--index` hits the refusal below, which is
 the point of the refusal:

@@ -141,26 +141,43 @@ impl From<CoreError> for CliError {
             // `--password-file` is named because it really is a password source
             // and really can be the culprit (a trailing byte, the wrong line).
             //
-            // It also no longer sends the reader to a `vault recover` subcommand
-            // with "your BIP39 phrase". Neither has ever existed: there is no
-            // `vault` verb in any build, and `dctl init` writes a single
-            // password key slot and issues no phrase, so the instruction spent
-            // the one attempt a frightened operator had on a command that
-            // answers `unrecognized subcommand`. What is left is the truth —
-            // the password is the only way in, and the envelope's only backup is
-            // a copy of the store — which is worse news and better advice.
+            // This hint has named a nonexistent command twice, and the history
+            // is why the wording below is so specific. It used to send the
+            // reader to a `dctl vault recover` subcommand with "your BIP39
+            // phrase" when neither existed; that was replaced with the honest
+            // statement that a password was the only way in, and this is the
+            // third and — the point — *true* version: `dctl init` now writes a
+            // mnemonic slot beside the password slot and prints the phrase
+            // once, `--recovery-phrase` is a global on every command, and
+            // `dctl vault recover` exists. `crate::cli::mentions` fails the
+            // build if any of those spellings stops naming a real command.
+            //
+            // Both remedies are ordered by what the reader most likely has. The
+            // phrase comes first because somebody reading this has already
+            // tried the password. The envelope repair comes last because it is
+            // the answer when the secret is not the problem.
+            //
+            // Deliberately still does not mention `--key-file`. This build
+            // cannot mix a second factor into the KEK at all —
+            // `crate::session::factor` refuses the flag before an unlock is
+            // attempted — so naming it would send the reader hunting a keyfile
+            // problem that cannot exist. `--password-file` is named because it
+            // really is a password source and really can be the culprit.
             CoreError::Unlock => Self::new(ExitCode::VaultLocked, error.to_string()).with_hint(
                 format!(
                     "Check the password, including how it reached DCTL — a \
                      --password-file or --password-command that emits a stray \
                      character produces a different secret than the one you \
-                     typed. There is no second way in: this build unlocks a \
-                     vault with a password and nothing else, and issues no \
-                     recovery phrase. If the password is definitely right, the \
-                     envelope itself may be damaged; it is stored as \
+                     typed. If the password is gone, use the recovery phrase \
+                     printed when the vault was created: `dctl vault recover \
+                     REMOTE:` opens the vault with it and sets a new password, \
+                     and --recovery-phrase works on any command. A password \
+                     change never invalidates that phrase, so an old sheet of \
+                     paper is still current. If neither secret is the problem, \
+                     the envelope itself may be damaged; it is stored as \
                      '{VAULT_ENVELOPE_OBJECT_KEY}' in the object store, and \
                      restoring that one object from a replica of the store \
-                     (`dctl replicate` copies it) is the only repair.",
+                     (`dctl replicate` copies it) is the repair.",
                 ),
             ),
 
@@ -262,33 +279,70 @@ mod tests {
     }
 
     #[test]
-    fn the_unlock_hint_promises_no_recovery_this_build_cannot_perform() {
-        // Defect D6. The hint told the reader to run a `vault recover`
-        // subcommand with "your BIP39 phrase". There is no `vault` verb, and
-        // `dctl init`
-        // creates one password key slot and issues no phrase — so both halves
-        // named something that has never existed, in the message read by
-        // someone who believes their vault may be lost.
+    fn the_unlock_hint_offers_the_recovery_route_this_build_now_has() {
+        // Defect D6, and its resolution. The hint once told the reader to run a
+        // `vault recover` subcommand with "your BIP39 phrase" when neither
+        // existed, so the one instruction a frightened operator would follow
+        // was spent on `unrecognized subcommand`. It was then rewritten to say
+        // plainly that a password was the only way in — true at the time, and
+        // the worst possible truth.
         //
-        // `crate::cli::mentions` catches the command half across the whole
-        // crate. This pins the promise as well as the spelling: an offer of
-        // recovery is what makes an operator stop looking for their password.
+        // Both halves are now real: `dctl init` writes a mnemonic slot beside
+        // the password slot and prints the phrase once, and `dctl vault
+        // recover` opens a vault with it. So the hint offers it again, and this
+        // test exists to keep the *promise* honest rather than to forbid it —
+        // an offer of recovery is what makes an operator stop hunting for their
+        // password, so it must never again describe something absent.
+        //
+        // The command spelling is enforced separately and mechanically by
+        // `crate::cli::mentions`, which parses every `dctl …` this crate writes
+        // down. That is deliberate duplication of concern: this test would pass
+        // for a hint that named a plausible-sounding sibling verb, and that one
+        // would not — it asks the argument parser rather than a human.
         let err = CliError::from(dctl_core::CoreError::Unlock);
         let hint = err.hint().expect("an unlock failure must explain itself");
-        for absent in ["vault recover", "BIP39", "phrase generated"] {
-            assert!(
-                !hint.contains(absent),
-                "the unlock hint must not offer a recovery route this build \
-                 does not have ('{absent}'): {hint}"
-            );
-        }
-        // And it must still name the one repair that is real, which was
-        // verified by hand: `dctl replicate` copies the envelope object
+
+        assert!(
+            hint.contains("dctl vault recover"),
+            "the hint must name the command that performs a recovery: {hint}"
+        );
+        assert!(
+            hint.contains("--recovery-phrase"),
+            "and the flag that opens every other command with the phrase: {hint}"
+        );
+        assert!(
+            hint.contains("never invalidates"),
+            "someone who has changed their password since `init` must be told \
+             their old phrase is still current, or they will not try it: {hint}"
+        );
+        // And it must still name the repair that does not involve a secret at
+        // all, verified by hand: `dctl replicate` copies the envelope object
         // byte-for-byte into a second store.
         assert!(
             hint.contains(VAULT_ENVELOPE_OBJECT_KEY),
             "the hint must name the object that would have to be restored: {hint}"
         );
+    }
+
+    #[test]
+    fn the_unlock_hint_never_claims_the_password_is_the_only_way_in() {
+        // The previous wording, kept as a negative because it was correct once
+        // and is now the most damaging sentence the tool could print: somebody
+        // holding a valid recovery phrase, told there is no second way in,
+        // stops looking. A stale message survives the feature that made it
+        // false unless something fails when it does.
+        let err = CliError::from(dctl_core::CoreError::Unlock);
+        let hint = err.hint().expect("an unlock failure must explain itself");
+        for absent in [
+            "no second way in",
+            "issues no recovery phrase",
+            "password and nothing else",
+        ] {
+            assert!(
+                !hint.contains(absent),
+                "the unlock hint still denies the recovery path ('{absent}'): {hint}"
+            );
+        }
     }
 
     #[test]

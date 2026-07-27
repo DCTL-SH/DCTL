@@ -6,7 +6,7 @@ Clean up a remote: abandoned uploads, stale temporary objects, old versions.
 
 The other five removal commands remove things you put there. `dctl cleanup`
 removes the debris DCTL and the provider leave behind — none of it visible in a
-listing, all of it billed for. Three classes, selectable individually with
+listing, all of it billed for. Four classes, selectable individually with
 `--class` because they carry very different risks:
 
 * **`multipart` — abandoned multipart uploads.** `PLAN.md` §6 step 3 stages
@@ -19,6 +19,12 @@ listing, all of it billed for. Three classes, selectable individually with
   writes to a temporary key first and only makes an object visible once its
   checksum matches, so an interrupted write is guaranteed to leave a partial
   object that was never committed and that nothing references.
+* **`orphans` — content objects no index record refers to.** The store holds an
+  object that nothing in the encrypted index points at, so no path can ever name
+  it and no read will ever reach it. It is billable and invisible, which is why
+  it is swept by default — but it is also what a *stale* index looks like from
+  the outside, so run [`dctl index rebuild`](dctl_index.md) first if you have any
+  reason to doubt the index you are sweeping against.
 * **`versions` — superseded object versions.** On a versioned bucket every
   overwrite and every delete keeps the previous object alive and billable.
   **This is the dangerous class**: pruning versions destroys the only remaining
@@ -26,7 +32,7 @@ listing, all of it billed for. Three classes, selectable individually with
   was giving you — including the ability to recover from a mistaken
   [`purge`](dctl_purge.md).
 
-With no `--class` flag, **all three classes are swept**. A cleanup that swept
+With no `--class` flag, **all four classes are swept**. A cleanup that swept
 nothing by default would be a command that only looked like it worked.
 
 **`--min-age` is the load-bearing flag, not a tuning knob.** Every one of those
@@ -49,28 +55,41 @@ and `--exclude` cannot narrow this command. Target parsing is the family's
 strict one: at least two characters before the colon (so `C:\data` is a local
 path and is refused), no UNC paths, no `..`.
 
-**Reclaimed space is reported through the ordinary counters.** When the engine
-lands, what was removed is counted through the same `file_deleted` statistic and
-end-of-run summary rows every other command uses; this command introduces no
-second vocabulary for the same numbers.
+**Reclaimed space is reported through the ordinary counters.** What was removed
+is counted through the same `file_deleted` statistic and end-of-run summary rows
+every other command uses; this command introduces no second vocabulary for the
+same numbers.
 
 ### What runs today
 
-**The sweep is not implemented in this build.** Argument parsing, target
-resolution, class selection, `--min-age` validation, the destructive gate and
-the `--dry-run` plan all run now. The sweep itself needs provider APIs the
-backend does not expose yet — listing in-progress multipart uploads, listing
-object versions — and the command context carries no vault handle. After
-printing its plan the command exits **7** (`fatal_error`):
+**The sweep runs, and reports per class which ones a backend can actually
+answer.** `staging` and `orphans` are reclaimed from the object store directly.
+`multipart` and `versions` need provider APIs a backend may not expose — the
+local backend does not — and those classes come back as `unsupported` with a
+warning naming what could not be enumerated, rather than as silence that would
+read as "nothing to reclaim":
 
+```console
+$ dctl cleanup vault: --force
+Command      cleanup
+Target       vault:
+Mode         execute
+Classes      multipart, staging, orphans, versions
+Minimum age  1d00h
+unsupported            -  multipart
+unsupported            -  versions
+warning: multipart: This backend exposes no way of listing a provider's in-progress multipart uploads. Nothing of that class was touched. [...]
+warning: versions: This backend exposes no way of listing an object's superseded versions. Nothing of that class was touched. [...]
+OK removed: 0 object(s), 0 B
+$ echo $?
+0
 ```
-error: dctl cleanup is not implemented in this build
-warning: The removal itself is not wired up yet, because it needs listing a
-provider's in-progress multipart uploads, staged objects and versions. Nothing
-was changed. Parsing, target resolution, filter validation and the destructive
-gate all ran — re-run with --dry-run to see the resolved request. See PLAN.md
-§11 for the phase that delivers the rest.
-```
+
+The run is exit **0** because it did everything that could be done and said
+exactly what could not. Earlier revisions of this page said the whole sweep "is
+not implemented in this build" and quoted an exit-7 refusal that no build now
+produces — which is the difference that matters: `unsupported` is a per-class
+fact about one backend, not a statement about the command.
 
 The alternative — printing `reclaimed 0 bytes` from a sweep that never listed
 anything — is exactly the lie `PLAN.md` §6 forbids. The provider APIs for
@@ -84,11 +103,10 @@ dctl cleanup REMOTE: [flags]
 
 ## Examples
 
-In this build every run that gets past validation ends with the engine refusal
-shown above; those two stderr lines are omitted from the examples below except
-where they are the point.
+Every example below runs in this build. Earlier revisions of this page prefaced
+them with an engine refusal that no longer exists.
 
-Preview a default cleanup of a whole remote: all three classes, the 24-hour
+Preview a default cleanup of a whole remote: all four classes, the 24-hour
 margin. The `Minimum age` row is printed the way DCTL prints every duration,
 which is also a spelling `--min-age` accepts:
 
@@ -98,7 +116,7 @@ warning: [dry-run] would clean up: b2prod:
 Command      cleanup
 Target       b2prod:
 Mode         dry-run
-Classes      multipart, staging, versions
+Classes      multipart, staging, orphans, versions
 Minimum age  1d00h
 ```
 
@@ -205,12 +223,16 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | Code | Name | When |
 |------|------|------|
 | 1 | `usage` | Unparseable command line, including an unknown `--class`; an unparseable or overflowing `--min-age`; a local, UNC, too-short-remote, empty or `..`-containing target; `--interactive` with no terminal to prompt on. |
-| 7 | `fatal_error` | The sweep is unavailable. **Every run that gets past validation ends here today**, including `--dry-run`. Nothing was changed. |
+| 7 | `fatal_error` | The remote is not configured and is not a known provider. |
+| 22 | `vault_locked` | Wrong password or recovery phrase, or a damaged envelope. |
+| 23 | `index_error` | The encrypted index or its journal could not be read or written. |
 | 25 | `cancelled` | An interactive confirmation was declined, or the run was interrupted with Ctrl-C. |
 
-Exit code 0 is not currently reachable: this command will not report reclaimed
-space it did not reclaim. When the engine lands, 6 (`partial_failure`) becomes
-reachable for a sweep in which some deletions failed.
+Exit **0** means the sweep ran. It covers a run in which some classes came back
+`unsupported` because the backend cannot enumerate them — the command still did
+everything it could and named what it could not, which is why that is a success
+and not a failure. An earlier revision of this table said 0 "is not currently
+reachable"; it is the ordinary outcome.
 
 ## See also
 

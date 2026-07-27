@@ -78,6 +78,7 @@ async fn run_inner(ctx: &Ctx, command: &Command) -> Result<()> {
         Command::Index(args) => commands::index::run(ctx, args).await,
 
         // ── Audit & recovery ─────────────────────────────────────────────
+        Command::Vault(args) => commands::vault::run(ctx, args).await,
         Command::Audit(args) => commands::audit::run(ctx, args).await,
         Command::Backup(args) => commands::backup::run(ctx, args).await,
         Command::Restore(args) => commands::restore::run(ctx, args).await,

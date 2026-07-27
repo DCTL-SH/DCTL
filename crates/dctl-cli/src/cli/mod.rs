@@ -16,9 +16,13 @@
 
 pub mod globals;
 
-// A test and nothing else: it reads this crate's own source and asks the parser
-// below whether every `dctl …` the binary writes down names a command that
-// exists. Four have not. See the module for why that is checked mechanically.
+// Tests and nothing else. `mentions` reads this crate's own source and
+// `doc_mentions` reads `docs/`, and both ask the parser below whether every
+// `dctl …` they find names a command that exists. Four hints and four
+// documentation lines have not. See the modules for why that is checked
+// mechanically rather than by review.
+#[cfg(test)]
+mod doc_mentions;
 #[cfg(test)]
 mod mentions;
 
@@ -174,6 +178,16 @@ pub enum Command {
     Index(commands::index::IndexArgs),
 
     // ── Audit & recovery ─────────────────────────────────────────────────
+    /// Operate on a vault's key material: recover one with its recovery phrase.
+    ///
+    /// Grouped with the recovery verbs because that is what it is for, and named
+    /// as a group rather than a bare verb because the envelope has more
+    /// operations coming (`PLAN.md` §13.2's Shamir shares, device slots) and all
+    /// of them act on the same object. `dctl vault recover` is also the command
+    /// [`crate::error`]'s unlock hint names, which makes its spelling a
+    /// published contract rather than a preference.
+    Vault(commands::vault::VaultArgs),
+
     /// Inspect and verify the tamper-evident audit log.
     Audit(commands::audit::AuditArgs),
 
@@ -248,6 +262,7 @@ impl Command {
             Self::Scrub(_) => "scrub",
             Self::Hashsum(_) => "hashsum",
             Self::Index(_) => "index",
+            Self::Vault(_) => "vault",
             Self::Audit(_) => "audit",
             Self::Backup(_) => "backup",
             Self::Restore(_) => "restore",

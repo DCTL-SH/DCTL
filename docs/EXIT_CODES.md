@@ -142,12 +142,33 @@ than producing one identical failure per file across ten million files.
 `--password-file` or `--password-command` that emits a stray character produces a
 different secret than the one you typed.
 
-**There is no second way in.** This build unlocks a vault with a password and
-nothing else. `dctl init` writes a single key slot and issues no recovery phrase,
-and no `dctl vault recover` subcommand has ever existed. This page previously
-told you to run one, using "the BIP39 phrase generated at init" — neither the
-command nor the phrase is real, and following that advice cost you the time you
-had to find the password instead.
+**There is a second way in: the recovery phrase.** `dctl init` prints a BIP-39
+phrase when it creates the vault and reports `recovery_phrase_issued true`. That
+phrase opens the vault independently of the password, and **changing the password
+never invalidates it** — an old sheet of paper is still current.
+
+```
+dctl vault recover vault:            # open with the phrase, then set a new password
+dctl vault recover vault: --keep-password   # prove the phrase still works, change nothing
+```
+
+The phrase is not limited to that one verb. `--recovery-phrase` and
+`--recovery-phrase-file` are **global** flags, so `ls`, `cat`, `copy` and
+`restore` all run under the phrase alone — which matters, because somebody who
+has lost their password needs their data back, not a demonstration that the
+phrase is valid. Prefer `--recovery-phrase-file` or `DCTL_RECOVERY_PHRASE`: an
+argument is visible to every other process on the machine, and unlike a password
+this secret cannot be rotated.
+
+Two earlier revisions of this page were wrong about this in opposite directions,
+and both cost the reader the same thing. The first told you to run
+`dctl vault recover` with "the BIP39 phrase generated at init" when neither
+existed. The correction then over-swung to "there is no second way in… no
+`dctl vault recover` subcommand has ever existed", and stayed on the page after
+both became real — telling somebody who was locked out to give up while the
+command that would have let them in was in the binary they were running. A page
+read at that moment has to be re-checked against the binary, not against the last
+thing that was true.
 
 If the password is definitely right, the envelope itself may be damaged. It is a
 single object, `system/envelope.bin`, in the vault's object store. Restoring that

@@ -4,7 +4,7 @@
 //! considered.
 //!
 //! It **creates the file with the right permissions from the start**. A user who
-//! runs `mkdir -p ~/.config/dctl && $EDITOR config.toml` gets whatever their
+//! runs `mkdir -p ~/.dctl && $EDITOR ~/.dctl/config.toml` gets whatever their
 //! umask says, which on plenty of systems is world-readable; the file then names
 //! their buckets and endpoints to every account on the machine. Going through
 //! [`crate::config::save`] means owner-only from the first byte rather than

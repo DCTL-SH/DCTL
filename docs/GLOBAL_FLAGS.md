@@ -53,8 +53,9 @@ global block, and are not repeated below.
 ### `--config PATH`
 
 The configuration file this invocation uses. The default is `config.toml` inside
-the platform config directory — `~/.config/dctl` on Linux,
-`~/Library/Application Support/dctl` on macOS, the roaming `%APPDATA%\dctl\config`
+`~/.dctl/config.toml`. One directory holds everything DCTL writes, and the
+layout is identical on macOS, Linux and Windows; `DCTL_HOME` relocates the whole
+tree at once.
 on Windows, and `./.dctl` where no home directory can be determined. A file you
 *name* and get wrong is a hard error; the
 *default* path being absent is a fresh installation and yields an empty
@@ -80,8 +81,7 @@ remote named `C`.
 The local encrypted index database (`redb`), which is the record of what is
 actually stored: the durability contract's commit step (`PLAN.md` §6 step 6)
 writes here, and nothing counts as stored until it does. The default is
-`vault.redb` inside the platform data directory — `~/.local/share/dctl` on Linux,
-`~/Library/Application Support/dctl` on macOS, `%APPDATA%\dctl\data` on Windows.
+`vault.redb` inside `~/.dctl/index/`.
 Point it somewhere else to keep several vaults side by side on one machine, or to
 put the index on a disk you actually back up.
 
@@ -94,6 +94,8 @@ put the index on a disk you actually back up.
 | `--password` | `PASSWORD` | none | `DCTL_PASSWORD` |
 | `--password-command` | `COMMAND` | none | `DCTL_PASSWORD_COMMAND` |
 | `--password-file` | `PATH` | none | — |
+| `--recovery-phrase` | `PHRASE` | none | `DCTL_RECOVERY_PHRASE` |
+| `--recovery-phrase-file` | `PATH` | none | — |
 | `--key-file` | `PATH` | none | — |
 | `--no-ask-password` | — | off | — |
 
@@ -103,6 +105,10 @@ never surprised by a prompt it did not ask for:
 ```
 --password / DCTL_PASSWORD  →  --password-command  →  --password-file  →  interactive prompt
 ```
+
+The recovery phrase is a **separate factor**, not another entry in that chain: it
+unwraps its own slot in the envelope, so supplying it does not consult the
+password sources at all.
 
 Whatever the source, one trailing line ending is stripped and nothing else:
 leading and interior whitespace are part of the passphrase, because trimming them
@@ -132,6 +138,28 @@ prints the secret on failure must not leak it into DCTL's logs.
 Reads the password from the first line of a file. Useful for a systemd unit or a
 Kubernetes secret mounted at a path, where a command would be indirection for its
 own sake. Protect the file yourself — DCTL reads whatever mode you left on it.
+
+### `--recovery-phrase PHRASE`
+
+The BIP-39 phrase `dctl init` prints once, used **instead of** the password. It
+is global rather than a flag on `dctl vault recover`, and that is the point of the
+recovery story: somebody who has lost their password needs their data, not a
+receipt saying the phrase is valid. `dctl ls vault: --recovery-phrase "…"` and
+`dctl cat`, `dctl copy`, `dctl restore` all run under it.
+
+Same exposure warning as `--password` — an argument is visible in `ps` — with one
+difference that makes it worse: **a phrase cannot be rotated by changing the
+password.** Changing the password never invalidates the phrase, which is what
+keeps a paper backup current for the vault's whole life and is also why leaking it
+is permanent. Prefer `DCTL_RECOVERY_PHRASE` or the file form.
+
+### `--recovery-phrase-file PATH`
+
+The whole file is read and BIP-39's own whitespace rules are applied — not
+`--password-file`'s first-line rule. Twenty-four words come off a sheet of paper,
+and somebody transcribing them will break the lines where the paper breaks them;
+reading only the first line would reject a correct phrase at the one moment it is
+being used.
 
 ### `--key-file PATH`
 

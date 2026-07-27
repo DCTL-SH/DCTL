@@ -52,23 +52,23 @@ of directories, and this command cannot report a sweep that did not happen.
 
 ### What runs today
 
-**The sweep is not implemented in this build.** Argument parsing, target
-resolution, the destructive gate and the `--dry-run` plan all run now. The walk
-needs recursive directory enumeration, which the vault does not expose, and the
-command context carries no vault handle to ask with. After printing its plan the
-command exits **7** (`fatal_error`):
+**The sweep runs.** Recursive enumeration shipped with the listing family, and
+this command walks it:
 
 ```
-error: dctl rmdirs is not implemented in this build
-warning: The removal itself is not wired up yet, because it needs walking a
-vault's directories to find the empty ones. Nothing was changed. Parsing, target
-resolution, filter validation and the destructive gate all ran — re-run with
---dry-run to see the resolved request. See PLAN.md §11 for the phase that
-delivers the rest.
+$ dctl rmdirs vault: --force
+Command     rmdirs
+Target      vault:
+Mode        execute
+Leave root  no
+OK removed: 0 object(s), 0 B
 ```
 
-Recursive enumeration arrives with the `PLAN.md` §11 **Phase 1 (B2 MVP)**
-milestone, alongside the encrypted index and `ls`.
+A vault stores no record of a directory that holds no objects, so on a healthy
+vault there is usually nothing for this sweep to find and `0 object(s)` is the
+honest answer rather than a failure — exit **0**. Earlier revisions of this page
+said the sweep "is not implemented in this build" and quoted an exit-7 refusal
+that no build now produces.
 
 ```
 dctl rmdirs REMOTE:PATH [flags]
@@ -76,9 +76,8 @@ dctl rmdirs REMOTE:PATH [flags]
 
 ## Examples
 
-In this build every run that gets past validation ends with the engine refusal
-shown above; those two stderr lines are omitted from the examples below except
-where they are the point.
+Every example below runs in this build. Earlier revisions of this page prefaced
+them with an engine refusal that no longer exists.
 
 Sweep a whole vault, keeping the root — the shape a nightly job wants:
 
@@ -94,15 +93,17 @@ Leave root  yes
 Tidy up after a filtered delete. `dctl delete --include '*.tmp'` leaves the
 directories that held the scratch files standing; this removes the ones it
 emptied, plus any parents that became empty as a result. `--force` approves the
-sweep without prompting, and in this build the run then stops at the engine:
+sweep without prompting:
 
 ```console
 $ dctl rmdirs b2prod:bucket/media/scratch --force
-error: dctl rmdirs is not implemented in this build
-warning: The removal itself is not wired up yet, because it needs walking a
-vault's directories to find the empty ones. Nothing was changed. [...]
+Command     rmdirs
+Target      b2prod:bucket/media/scratch
+Mode        execute
+Leave root  no
+OK removed: 0 object(s), 0 B
 $ echo $?
-7
+0
 ```
 
 The JSON plan carries the flag, and JSON Lines keeps one plan on one line so a
@@ -166,12 +167,15 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | Code | Name | When |
 |------|------|------|
 | 1 | `usage` | Unparseable command line; a local, UNC, too-short-remote, empty or `..`-containing target; `--interactive` with no terminal to prompt on. A bare `REMOTE:` is **not** an error here. |
-| 7 | `fatal_error` | The sweep is unavailable. **Every run that gets past validation ends here today**, including `--dry-run`. Nothing was changed. |
+| 7 | `fatal_error` | The remote is not configured and is not a known provider. |
+| 22 | `vault_locked` | Wrong password or recovery phrase, or a damaged envelope. |
+| 23 | `index_error` | The encrypted index or its journal could not be read or written. |
 | 25 | `cancelled` | An interactive confirmation was declined, or the run was interrupted with Ctrl-C. |
 
-Exit code 0 is not currently reachable. When the engine lands, a sweep that
-finds nothing to remove will be a success, not a failure — an empty sweep is the
-normal state of a tidy vault.
+Exit **0** covers both a sweep that removed directories and one that found
+nothing to remove — an empty sweep is the normal state of a tidy vault, and is a
+success rather than a failure. An earlier revision of this table said 0 "is not
+currently reachable" and described that behaviour as owed; it is what runs.
 
 ## See also
 

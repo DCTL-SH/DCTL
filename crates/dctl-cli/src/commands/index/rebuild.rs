@@ -204,7 +204,7 @@ mod tests {
         // enough to make every path listable again.
         use std::sync::Arc;
 
-        use dctl_core::Vault;
+        use dctl_core::{UnlockKey, Vault};
         use dctl_store::{Backend, LocalFs};
 
         let dir = tempfile::TempDir::new().unwrap();
@@ -214,7 +214,7 @@ mod tests {
 
         {
             let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(&store));
-            let vault = Vault::init(backend, &index, "pw").await.unwrap();
+            let vault = Vault::init(backend, &index, "pw").await.unwrap().vault;
             vault.put_file("photos/a.jpg", b"aaa").await.unwrap();
             vault.put_file("notes.txt", b"n").await.unwrap();
         }
@@ -250,7 +250,9 @@ mod tests {
 
         // Both files are addressable again from the backend alone.
         let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(&store));
-        let vault = Vault::unlock(backend, &index, "pw").await.unwrap();
+        let vault = Vault::unlock(backend, &index, UnlockKey::Password("pw"))
+            .await
+            .unwrap();
         let paths: Vec<String> = vault
             .list("")
             .unwrap()

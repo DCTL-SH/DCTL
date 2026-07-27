@@ -372,9 +372,10 @@ impl Engine {
                 )
             }
             (RemoteSpec::Named { .. }, RemoteSpec::Local(to)) => {
-                // The source is only read, so `writable` does not apply: a plain
-                // object store is a legitimate thing to copy *from*, and it is
-                // already a legitimate thing to list.
+                // A read, so the sealed question is the only one there is: a
+                // plain object store is a legitimate thing to copy *from*, and
+                // has been for as long as it has been a legitimate thing to
+                // list.
                 if Place::of(ctx, source)? == Place::Sealed {
                     (
                         Direction::Download,
@@ -1712,13 +1713,9 @@ mod tests {
         let error = Engine::connect(&ctx, "copy", &source, &dest)
             .await
             .expect_err("no B2 credentials are exported in a test run");
+        // Not `VaultLocked`, which is what a bucket misclassified as sealed
+        // would produce under `--no-ask-password`.
         assert_eq!(error.code(), ExitCode::FatalError);
-        assert_ne!(
-            error.code(),
-            ExitCode::VaultLocked,
-            "a plain bucket must never be treated as a vault: {}",
-            error.message()
-        );
         assert!(
             error
                 .message()
@@ -1780,6 +1777,27 @@ mod tests {
         );
         // …and neither refusal asked for a password on the way to being made.
         assert_ne!(one_sealed.code(), ExitCode::VaultLocked);
+
+        // The message — not just the hint — carries the capability and the crate
+        // that owes it, because that is the half a `--json` consumer and a
+        // support ticket quote. Checking only the hint is how "dctl copy:
+        // transfers between two remotes" survived: true, useless, and identical
+        // for two gaps that are years apart.
+        assert!(
+            both_plain.message().contains("dctl-cli"),
+            "two plain ends are a CLI engine gap: {}",
+            both_plain.message()
+        );
+        assert!(
+            one_sealed.message().contains("dctl-core"),
+            "a sealed end is a core gap: {}",
+            one_sealed.message()
+        );
+        assert!(
+            !both_plain.message().contains("re-encrypt"),
+            "neither end is encrypted: {}",
+            both_plain.message()
+        );
     }
 
     #[tokio::test]

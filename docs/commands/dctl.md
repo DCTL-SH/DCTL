@@ -137,7 +137,11 @@ the shipped binary in `crates/dctl-cli/tests/invariant_i4/`.
 * **I1** — a write through a vault remote is always sealed. No flag disables it.
 * **I2** — foreign plaintext is never written into a vault's object store.
 * **I3** — a write to an ordinary location is plaintext, and that is a
-  first-class supported operation, not a degraded mode.
+  first-class supported operation, not a degraded mode. That now includes a
+  plain **bucket**: `dctl copy ./src b2:mybucket` stores unencrypted objects
+  through the provider's backend, with no vault and no password. (It has not
+  been exercised against live B2/S3/R2 credentials — see
+  [copy](dctl_copy.md#what-runs-today).)
 * **I4** — **DCTL never applies or omits encryption because of a destination's
   contents. What a command encrypts is determined solely by the remote name
   typed. A destination's contents may cause DCTL to refuse, never to change what
@@ -216,18 +220,35 @@ named remotes with their type, bucket, endpoint, region and policy defaults.
 
 ### Where the file lives
 
-| Platform | Default configuration file |
-|----------|----------------------------|
-| Linux / BSD | `$XDG_CONFIG_HOME/dctl/config.toml`, i.e. `~/.config/dctl/config.toml` |
-| macOS | `~/Library/Application Support/dctl/config.toml` |
-| Windows | `%APPDATA%\dctl\config\config.toml` |
-| Fallback | `./.dctl/config.toml`, when no home directory can be determined |
 
-Two related directories follow the same conventions: the encrypted index
-(`vault.redb`) lives in the data directory — `~/.local/share/dctl`,
-`~/Library/Application Support/dctl`, `%APPDATA%\dctl\data` — and the VFS cache
-used by [`mount`](dctl_mount.md) lives in the cache directory — `~/.cache/dctl`,
-`~/Library/Caches/dctl`, `%LOCALAPPDATA%\dctl\cache`.
+DCTL keeps everything it writes in one directory, `~/.dctl`, with the same layout
+on every platform:
+
+| Path | Holds |
+|---|---|
+| `~/.dctl/config.toml` | the configuration |
+| `~/.dctl/index/` | the encrypted per-vault indexes |
+| `~/.dctl/cache/` | the encrypted chunk cache |
+| `~/.dctl/audit/` | the tamper-evident audit logs |
+| `~/.dctl/logs/` | files written with `--log-file` |
+
+That is deliberately *not* the platform convention. What lives here is recovery
+metadata — the index maps logical paths to opaque object keys, the config says
+which remote holds which vault — and someone backing up their DCTL state before
+rebuilding a machine has to be able to find all of it. Scattering it across
+`~/.config`, `~/.local/share` and `~/.cache` would turn that into research.
+
+`DCTL_HOME` relocates the entire tree, as one variable, so a profile cannot end
+up half in one place and half in another. On Unix the directory is created
+`0700`: its contents are encrypted or non-secret by design, but the set of remote
+names and bucket paths is worth keeping to the owner.
+
+Of those, only `cache/` is disposable — deleting it costs a re-fetch and nothing
+else. `index/` is a rebuildable cache in principle (every object is
+self-describing, so [`dctl index rebuild`](dctl_index.md) reconstructs it by
+scanning object headers), but rebuilding is a full listing pass and the rebuilt
+rows carry no plaintext sizes, so it is worth backing up rather than discarding.
+`config.toml` and `audit/` have no other copy at all.
 
 Run [`dctl config file`](dctl_config.md) to print the path this machine actually
 resolved, with no label and nothing else on the line, so it substitutes cleanly:
@@ -273,8 +294,21 @@ dctl --version             # version and build metadata; see also `dctl version`
 ```
 
 Subcommand names may be **abbreviated** as long as the prefix is unambiguous, so
-`dctl cop ...` reaches `copy`. Prefer the full name in scripts: a future command
-can make today's abbreviation ambiguous.
+`dctl scr` reaches `scrub` and `dctl mkd` reaches `mkdir`. An ambiguous prefix is
+refused rather than guessed:
+
+```
+$ dctl cop
+error: unrecognized subcommand 'cop'
+
+  tip: some similar subcommands exist: 'completion', 'copyto', 'copy'
+```
+
+`cop` is a prefix of both `copy` and `copyto`, so it names neither — this page
+used it as its example of an abbreviation that works, which it never has. Prefer
+the full name in scripts for exactly the reason the example got it wrong: a future
+command can make today's abbreviation ambiguous, and the failure is at the command
+line rather than anywhere a test would see it.
 
 [`dctl completion`](dctl_completion.md) generates a shell completion script for
 bash, zsh, fish, PowerShell and Elvish. The exit-code contract is in
@@ -315,6 +349,17 @@ intact, mount it. This is the same order `dctl --help` prints.
 | [dctl copyto](dctl_copyto.md) | Copy a single file or directory to an exact destination name. |
 | [dctl moveto](dctl_moveto.md) | Move a single file or directory to an exact destination name. |
 
+### Replication
+
+| Command | Description |
+|---------|-------------|
+| [dctl replicate](dctl_replicate.md) | Replicate a vault's ciphertext objects to a second store. No password. |
+
+Its own group, and its own verb, for the reason given under *Encryption is
+decided by the name you type*: replication copies opaque objects between two
+store remotes without a key, so it is neither a transfer of files nor something a
+password-holding command should be able to do by accident.
+
 ### Content
 
 | Command | Description |
@@ -354,6 +399,7 @@ intact, mount it. This is the same order `dctl --help` prints.
 
 | Command | Description |
 |---------|-------------|
+| [dctl vault](dctl_vault.md) | Operate on a vault's key material: recover one with its recovery phrase. |
 | [dctl audit](dctl_audit.md) | Inspect and verify the tamper-evident audit log. |
 | [dctl backup](dctl_backup.md) | Back up a local tree into a vault. |
 | [dctl restore](dctl_restore.md) | Restore a vault, or part of one, to a local tree. |

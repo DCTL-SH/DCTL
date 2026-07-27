@@ -44,7 +44,8 @@ encryption, and **20-year restorability** (data decodable from the format spec a
 | XChaCha20-Poly1305 AEAD (buffered **and** constant-memory streaming) | ✅ | `dctl-crypto` `object/`, `object/stream.rs` |
 | AES-256-GCM archival profile | 🧊 | `algo`/`wrap_algo = 2` reserved in the frozen format |
 | Argon2id KDF envelope (DKE1), **key-committing** slots | ✅ | bounded cost params, anti-downgrade AAD |
-| Multiple unlock paths: password, BIP-39 mnemonic, device key | ✅ | ≥1 portable-slot invariant enforced |
+| Multiple unlock paths: password **and** BIP-39 mnemonic | ✅ | `Vault::init` writes both slots and returns the phrase; `dctl init` prints it once, `--recovery-phrase` opens any command, `dctl vault recover` rotates the password without disturbing it (`FORMAT.md` §2.1/§2.2) |
+| Device-key unlock slot | 🧊 | `slot_type = 0` reserved; no platform-keystore integration exists, and nothing reads or writes one |
 | Shamir shared slots | 🧊 | `slot_type = 3` reserved, not specified |
 | HKDF-SHA512 domain-separated sub-keys | ✅ | immutable random root key |
 | Per-object random DEK, wrapped | ✅ | |
@@ -111,7 +112,7 @@ separate gap (§7).
 | `config`, `version`, `completion` | ✅ | |
 | `init` | ✅ | creates a Vault, writes envelope to the base store |
 | `ls` `lsd` `lsl` `lsjson` `tree` `size` | 🟢 | plain + Vault enumeration, single-endpoint |
-| `cat` | 🟢 | ranged on plain; whole-object buffer on Vault (see M9) |
+| `cat` | 🟢 | ranged on plain **and** on Vault — a window fetches only its covering chunks (M9) |
 | `delete` `deletefile` `rm` `purge` `rmdir` `rmdirs` | 🟢 | plain + Vault |
 | `verify` `check` `scrub` `hashsum` | 🟢 | `check` gained read-only remote↔remote; `hashsum` downloads-and-hashes (no remote-native hash yet) |
 | `about` | 🟢 | usage / quota / capability |
@@ -146,7 +147,7 @@ separate gap (§7).
 ## 8. Mount & Serve  — ⬜ not started
 
 - **`mount`** (FUSE): stub only. Needs a VFS layer over the backend + `fuser` adapter
-  (per-OS: macFUSE / libfuse / WinFSP). Vault mounts additionally need ranged decrypt (§ M9).
+  (per-OS: macFUSE / libfuse / WinFSP). The ranged Vault decrypt a Vault mount needs is done (§ M9).
 - **`serve`** (http / webdav / sftp / ftp / nfs): no command exists yet.
 
 ---
@@ -178,7 +179,7 @@ work is an **ad-hoc `dctl-cli`-local implementation** (a `Place` enum + `PlainRe
 | M6 capability-aware server copy/move + track-renames | ⬜ | |
 | M7 streaming — retire the 1 GiB limit | ⬜ | |
 | M8 `dctl-vfs` + `dctl-mount` (FUSE) | ⬜ | |
-| M9 ranged Vault crypto (efficient huge-file mount) | ⬜ | |
+| M9 ranged Vault crypto (efficient huge-file mount) | ✅ | `dctl_core::range` — a window fetches only its covering chunks, per-chunk authenticated; bounded decrypted-chunk cache in the CLI. Measured: a 10-byte window costs ~1.6 MiB peak RSS above baseline against +97 MiB for the whole-object read it replaced (96 MiB object), and stays flat at 512 MiB where whole-object exceeds 700 MiB |
 | M10 `dctl serve` | ⬜ | |
 
 ---

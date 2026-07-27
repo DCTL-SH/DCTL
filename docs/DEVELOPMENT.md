@@ -238,18 +238,25 @@ only the password) is smoke-tested against the local backend.
 
 ## Known WIP (read before you panic)
 
-The CLI refactor is in flight, and there is **one known-failing test**:
+**No known-failing test.** This section previously named one —
+`the_key_file_refusal_names_the_flag_and_never_calls_a_working_command_missing`
+in `crates/dctl-cli/tests/cli.rs` — because the `--key-file` refusal chokepoint in
+`main.rs` built its message from the command name alone and so reported that
+`init` "is not implemented in this build", which was false. The chokepoint now
+appends the flag itself, the message names the flag and the layer that owes it,
+and the test passes:
 
-- `dctl-cli`'s
-  `the_key_file_refusal_names_the_flag_and_never_calls_a_working_command_missing`
-  (in `crates/dctl-cli/tests/cli.rs`). The `--key-file` refusal chokepoint in
-  `main.rs` builds its message from the command name alone, so `dctl init
-  --key-file …` currently reports that `init` "is not implemented in this build" —
-  a false statement, since `init` creates vaults fine. The refusal message is the
-  bug, not `init`. Multi-factor key files are owed by `dctl-core` (FORMAT §8); the
-  test asserts the message should say so.
+```
+error: dctl init: the --key-file second factor (missing in dctl-core: Vault::init
+and ::unlock take a password and no factor parameter) is not implemented in this
+build
+```
 
-If you touch that chokepoint, fixing this test is the natural scope. For the full,
+`--key-file` is still refused everywhere — multi-factor key material is owed by
+`dctl-core` (`PLAN.md` §8) — but the *message* is no longer a false statement
+about a working command.
+
+For the full,
 regularly-verified feature matrix — what is committed, what is working-but-
 uncommitted, and what is not started (mount, serve, network plain backends,
 general remote↔remote) — see [PROJECT_STATUS.md](PROJECT_STATUS.md).

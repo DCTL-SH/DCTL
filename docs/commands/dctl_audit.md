@@ -86,9 +86,8 @@ next to the encrypted index — `--index /data/vaults/one.redb` puts it at
 `/data/vaults/audit.jsonl` — so a machine working with two vaults keeps two
 independent chains instead of interleaving them into one that describes neither.
 With no `--index`, it falls back to the platform data directory —
-`~/.local/share/dctl/audit.jsonl` on Linux,
-`~/Library/Application Support/dctl/audit.jsonl` on macOS, and the equivalent
-under `%APPDATA%` on Windows — which is where the index defaults to as well. The
+`~/.dctl/audit/` — the same directory tree the index and config live in, so a
+single backup of `~/.dctl` captures all of it.
 file is named `audit.jsonl` in every case, and it is line-delimited JSON: one
 record per line, which is what makes the break report's line number meaningful.
 

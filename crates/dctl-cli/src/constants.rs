@@ -756,6 +756,9 @@ pub const PATH_SEPARATOR: char = '/';
 pub const ENV_CONFIG: &str = "CONFIG";
 pub const ENV_REMOTE: &str = "REMOTE";
 pub const ENV_PASSWORD: &str = "PASSWORD";
+/// Backs `--recovery-phrase`, so an unattended restore drill can run the
+/// recovery path without the phrase appearing in a process listing.
+pub const ENV_RECOVERY_PHRASE: &str = "RECOVERY_PHRASE";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Interactive prompts
@@ -766,6 +769,16 @@ pub const PASSWORD_PROMPT: &str = "Vault password: ";
 
 /// Prompt shown when a new password must be typed twice.
 pub const PASSWORD_CONFIRM_PROMPT: &str = "Confirm vault password: ";
+
+/// Prompt shown when the recovery phrase is typed at a terminal.
+///
+/// Read with echo **off**, like a password, even though the words are being
+/// copied off a sheet of paper the operator is holding: the phrase opens the
+/// vault outright, and a 24-word line left in a scrollback buffer or a
+/// screen-shared terminal is a compromised vault. Names the count so someone
+/// halfway through typing can tell whether they have transcribed a 12-word
+/// wallet phrase by mistake.
+pub const RECOVERY_PHRASE_PROMPT: &str = "Recovery phrase (24 words): ";
 
 /// Word a user must type to confirm a destructive operation without `--force`.
 pub const DESTRUCTIVE_CONFIRMATION: &str = "yes";
@@ -895,6 +908,70 @@ pub const INIT_FIELD_PASSWORD_SOURCE: &str = "password_source";
 /// recoverable with `dctl config import`, and a run that reported one boolean
 /// for both would leave a script unable to tell which half is missing.
 pub const INIT_FIELD_REGISTERED: &str = "registered";
+
+/// See [`INIT_FIELD_VAULT_REMOTE`]. Whether a recovery phrase was issued.
+///
+/// A boolean, and it will never be anything else. The phrase itself must not
+/// appear in `--json`, in `--format text`, or on stdout in any form: `dctl init
+/// --json | tee provisioning.log` is an ordinary thing for an operator to run,
+/// and a phrase in a log file is a compromised vault — one that stays
+/// compromised, because the phrase cannot be rotated away by changing the
+/// password. The words go to stderr, once, and this field is how a script
+/// confirms they were produced without ever holding them.
+pub const INIT_FIELD_RECOVERY_PHRASE_ISSUED: &str = "recovery_phrase_issued";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Recovery phrase (`dctl init` display, `--recovery-phrase` unlock)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Words per line when the recovery phrase is printed for transcription.
+///
+/// Four fits the longest BIP-39 word (eight characters) plus its index inside 72
+/// columns, so the block does not wrap on an 80-column terminal — and a wrapped
+/// phrase is a mis-transcribed phrase. It also makes 24 words exactly six rows,
+/// which is countable at a glance: someone checking their paper against the
+/// screen can see a missing line without counting to twenty-four.
+pub const RECOVERY_PHRASE_COLUMNS: usize = 4;
+
+/// Width of the rules that bracket the recovery-phrase block.
+///
+/// 72 rather than 80 so the block survives being pasted into an email, a ticket
+/// or a terminal with a narrow margin without the rules folding onto a second
+/// line and destroying the visual frame that makes the block obviously
+/// different from ordinary output.
+pub const RECOVERY_PHRASE_RULE_WIDTH: usize = 72;
+
+/// Character the recovery-phrase rules are drawn from.
+///
+/// ASCII, deliberately, while the rest of the CLI is free to use box-drawing
+/// glyphs. This is the one message whose legibility cannot be allowed to depend
+/// on a terminal's encoding: a mojibake rule around a recovery phrase makes the
+/// most important output the tool ever produces look like a rendering bug.
+pub const RECOVERY_PHRASE_RULE_CHAR: char = '=';
+
+// ─────────────────────────────────────────────────────────────────────────────
+// `dctl vault recover`
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Column headers for the `dctl vault recover` result table.
+pub const VAULT_COLUMN_SETTING: &str = "Setting";
+/// See [`VAULT_COLUMN_SETTING`].
+pub const VAULT_COLUMN_VALUE: &str = "Value";
+
+/// Row labels in the `dctl vault recover` result, spelled as the JSON fields.
+///
+/// Same rule as [`INIT_FIELD_VAULT_REMOTE`]: a script ported between
+/// `--format text` and `--format json` changes its parser and nothing else.
+pub const VAULT_FIELD_REMOTE: &str = "remote";
+/// See [`VAULT_FIELD_REMOTE`]. Whether the phrase opened the vault.
+pub const VAULT_FIELD_UNLOCKED: &str = "unlocked";
+/// See [`VAULT_FIELD_REMOTE`]. Whether a new password was set.
+///
+/// Separate from [`VAULT_FIELD_UNLOCKED`] because the two genuinely differ: the
+/// phrase can open a vault on a run that was told not to change anything
+/// (`--dry-run`, or `--keep-password`), and reporting one boolean for both would
+/// have a script believe a password it cannot use is now in force.
+pub const VAULT_FIELD_PASSWORD_CHANGED: &str = "password_changed";
 
 /// Suffix appended to `--name` to name the base store remote `dctl init`
 /// registers alongside the vault.
@@ -2734,43 +2811,71 @@ pub const CAT_JSON_STREAM_HINT: &str = "stdout carries either object bytes or JS
      would corrupt the stream and the document. Add --discard to read the objects \
      and emit only the JSON report, or drop --json to get the bytes.";
 
-/// Object size at or above which a whole-object read served for a byte window
-/// is announced before it happens.
-///
-/// A sealed vault has no ranged read — `dctl_core` exposes `get_file` and
-/// nothing narrower — so `dctl cat b2vault:film.mkv --offset 0 --count 4` pulls
-/// and decrypts the entire object to hand back four bytes. That is documented on
-/// [`crate::source::vault`] and it is not faked, which is right: a short read or
-/// a refusal would trade a known cost for an unknown wrong answer. But a cost
-/// nobody sees until it is incurred is only honest in principle. On a metered
-/// backend the whole object leaves the provider, and the user finds out on an
-/// invoice rather than at the prompt.
-///
-/// Sixty-four mebibytes is where the two costs that matter both become real:
-///
-/// * **Memory.** The plaintext is buffered whole. Unattended runs live in
-///   containers and CI runners given 128–512 MiB, so this is the size at which
-///   the buffer alone is a material fraction of the budget rather than noise.
-/// * **Money.** At commodity egress rates a full object transfer at this size is
-///   the point where a scripted loop stops rounding to nothing.
-///
-/// It is deliberately well above the objects people window into casually —
-/// configuration files, logs, documents, photographs — so the ordinary
-/// `cat --head` never warns. That is the property that keeps the warning worth
-/// reading: one that fires on routine work is one an operator learns to skip,
-/// and it would then be missing for the disk image or the database dump, which
-/// is the case it exists for.
-pub const RANGED_READ_WHOLE_OBJECT_WARN_BYTES: u64 = 64 * 1024 * 1024;
+// ─────────────────────────────────────────────────────────────────────────────
+// Ranged reads of a sealed vault — the decrypted-chunk cache
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// A vault serves a byte window by fetching and authenticating only the chunks
+// covering it (`docs/FORMAT.md` §3, `crate::source::chunk_cache`). That makes a
+// single window O(window) instead of O(object). These three bounds are what make
+// a *sequence* of windows O(object) instead of O(object × reads): the kernel asks
+// a filesystem for 4 KiB at a time, and a chunk is 1 MiB by default, so without a
+// cache one chunk would be fetched and decrypted 256 times over.
 
-/// What the warning above says after it has quoted the two sizes.
+/// Decrypted plaintext the vault chunk cache holds, across every open object.
 ///
-/// Names the cause rather than only the effect. "This is slow" invites a retry;
-/// "there is no ranged read here, so the window costs the object" tells the
-/// reader that retrying costs the same again, and that the fix is to read the
-/// object once rather than to window it repeatedly.
-pub const RANGED_READ_WHOLE_OBJECT_NOTE: &str = "a sealed vault has no ranged read, so the window is served by fetching and \
-     decrypting the whole object. On a metered backend the whole object is what \
-     gets billed, and repeating the read costs the same again.";
+/// The cache is a cap, not a reservation: nothing is allocated until a chunk is
+/// read, and a run that touches one small file never approaches this figure. What
+/// it has to be large enough for is the *working set* of the reads actually in
+/// flight — each sequential reader needs the chunk it is inside and, at a
+/// boundary, the one it is moving into, or it re-fetches on every crossing.
+///
+/// Sixteen mebibytes is sixteen chunks at the 1 MiB default: enough for several
+/// concurrent sequential readers to each keep their current and next chunk
+/// resident, which is the pattern a mount produces when a file manager is
+/// generating thumbnails while a player streams. It is also at least one chunk at
+/// the format's 16 MiB maximum, so a single chunk of any legal object always
+/// fits — a cache that could not hold one chunk would evict it before the read
+/// that fetched it finished and would degrade to no cache at all.
+///
+/// It stays an order of magnitude below the 128–512 MiB that unattended runs get
+/// in containers and CI runners, so the cache is never the reason a run is
+/// killed. Raising it trades resident memory for fewer requests, which is the
+/// right trade on a metered backend with memory to spare and the wrong one
+/// everywhere else.
+pub const VAULT_CHUNK_CACHE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Chunks the cache will hold, regardless of how small they are.
+///
+/// [`VAULT_CHUNK_CACHE_BYTES`] alone does not bound the *number* of entries:
+/// `chunk_size` is written into each object by whoever sealed it and may legally
+/// be as small as one byte, so a byte budget could admit millions of rows. That
+/// matters because eviction picks the least recently used entry by scanning, and
+/// a scan over millions of rows on every store would cost more than the fetch it
+/// was avoiding.
+///
+/// Two hundred and fifty-six is chosen from the other end: it is exactly what
+/// [`VAULT_CHUNK_CACHE_BYTES`] holds at a 64 KiB chunk size, so for any chunk
+/// size *above* that — which is every object a real writer produces, the format's
+/// own default being 1 MiB — the byte budget binds first and this bound never
+/// fires. It engages only below 64 KiB, where it keeps both the eviction scan and
+/// the map itself at a fixed, tiny cost no matter what an object declares.
+pub const VAULT_CHUNK_CACHE_MAX_CHUNKS: usize = 256;
+
+/// Objects the cache keeps open for random access at once.
+///
+/// An open reader holds a resolved object key, the object's authenticated
+/// geometry and its unwrapped DEK — a few hundred bytes. What it saves is a
+/// header round trip and an index lookup on every window, which is the difference
+/// between one request per read and two.
+///
+/// Sixty-four is sized for the concurrency a filesystem actually presents rather
+/// than for the size of the vault: a desktop with a media player, a file manager
+/// generating previews and a backup tool walking the tree has tens of files open,
+/// not thousands. Evicting a reader costs one header read the next time that path
+/// is touched and can never return wrong bytes, so the bound is a memory
+/// decision, not a correctness one.
+pub const VAULT_RANGE_READER_CACHE_MAX: usize = 64;
 
 /// Outcome slugs in `rcat`'s JSON record.
 ///

@@ -61,26 +61,28 @@ why this command currently fails rather than exiting 0 (see below), and why a
 
 ### What runs today
 
-**The removal itself is not implemented in this build.** Argument parsing,
-target resolution, filter validation, the destructive gate and the `--dry-run`
-plan all run now. The deletion does not: the vault exposes no filtered listing
-and the command context carries no vault handle, so after printing its plan the
-command exits **7** (`fatal_error`) with:
+**The removal runs.** The filtered listing this command needs shipped with the
+rest of the listing family, and `delete` uses it: objects are selected, removed
+and counted, and the plan and the execution report the same paths.
 
 ```
-error: dctl delete is not implemented in this build
-warning: The removal itself is not wired up yet, because it needs listing a vault
-so the filters can select what to remove. Nothing was changed. Parsing, target
-resolution, filter validation and the destructive gate all ran — re-run with
---dry-run to see the resolved request. See PLAN.md §11 for the phase that
-delivers the rest.
+$ dctl delete vault:r1 --include '*.txt' --force
+Command                   delete
+Target                    vault:r1
+Mode                      execute
+Include                   *.txt
+Remove empty directories  no
+removed              6 B  r1/a.txt
+removed             12 B  r1/b.txt
+removed              8 B  r1/sub/c.txt
+OK removed: 3 object(s), 26 B
 ```
 
-This is on purpose. A command that quietly exited 0 having deleted nothing would
-break `PLAN.md` §6's core promise more thoroughly than any crash. Nothing is
-changed on any run, including a run with `--force`. The vault enumeration these
-commands need arrives with the `PLAN.md` §11 **Phase 1 (B2 MVP)** work that also
-delivers `ls`, the encrypted index and the B2 backend.
+Earlier revisions of this page said the deletion "is not implemented in this
+build" and quoted an exit-7 refusal. No build now produces it. A page that
+understates a **destructive** command is not the harmless direction of drift: a
+reader who believes `--force` cannot remove anything is the reader most likely to
+run it against the wrong path to see what the plan says.
 
 ```
 dctl delete REMOTE:PATH [flags]
@@ -88,9 +90,9 @@ dctl delete REMOTE:PATH [flags]
 
 ## Examples
 
-In this build every run that gets past validation ends with the engine refusal
-shown above; those two stderr lines are omitted from the examples below except
-where they are the point.
+Every example below runs in this build and removes what it names. Earlier
+revisions of this page prefaced them with an engine refusal that no longer
+exists.
 
 Preview what a filtered delete would cover. The plan goes to stdout; the
 `[dry-run]` notice goes to stderr. Today the run then exits 7, so `--dry-run`
@@ -209,13 +211,24 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 
 | Code | Name | When |
 |------|------|------|
+| 0 | `success` | The selected objects were removed — including when the filters selected none, which is a true answer to the question that was asked rather than a failure. |
 | 1 | `usage` | Unparseable command line; a target that is a local path, a UNC path, a too-short remote name, empty, or contains `..`; an unparseable or crossed size bound; an invalid `--max-depth`; `--interactive` with no terminal to prompt on. |
-| 7 | `fatal_error` | The removal engine is unavailable. **Every run that gets past validation ends here today**, including `--dry-run`. Nothing was changed. |
+| 7 | `fatal_error` | The remote is not configured and is not a known provider. |
+| 22 | `vault_locked` | Wrong password or recovery phrase, or a damaged envelope. |
+| 23 | `index_error` | The encrypted index or its journal could not be read or written. |
 | 25 | `cancelled` | An interactive confirmation was declined, or the run was interrupted with Ctrl-C. |
 
-Exit code 0 is not currently reachable for this command: it cannot report a
-deletion it did not perform. When the engine lands, 6 (`partial_failure`) will
-also become reachable for a run in which some objects failed to delete.
+An earlier revision of this table said exit 0 "is not currently reachable" and
+that **every** run past validation ended at 7 with the engine unavailable.
+Neither is true: the removal runs, and a `--dry-run` exits 0 as well.
+
+Note the one place `delete` differs from its neighbours: a target that holds
+nothing exits **0**, not 3. `delete` is filter-driven — it asks "remove whatever
+matches under here" — and an empty match is a real answer. [`purge`](dctl_purge.md)
+and [`rmdir`](dctl_rmdir.md) name a specific directory and so exit **3** when it
+is not there, and [`deletefile`](dctl_deletefile.md) names one object and exits
+**4**. Three codes for three different questions, which is why a script must not
+treat them as one.
 
 ## See also
 

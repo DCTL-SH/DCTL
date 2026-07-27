@@ -130,18 +130,17 @@ output nor the exit code.
 
 ### Status in this build
 
-**`dctl tree` cannot read a vault in this build.** The layout engine, both glyph
-sets, the level composition, the filters and the JSON framing are implemented
-and unit-tested; the index read is not, because the runtime context does not yet
-carry an unlocked vault handle. A complete invocation fails with
+**`dctl tree` reads a vault, and reads a local directory.** The layout engine,
+both glyph sets, the level composition, the filters and the JSON framing are
+implemented, and so is the index read this page once said was missing:
+`dctl tree vault:` draws the stored objects and `dctl tree ./src` draws a
+local tree. Earlier revisions quoted an exit-7 `reading the object index is not
+implemented` error that no build now produces.
 
-```
-error: vault:photos: reading the object index is not implemented in this build
-warning: The listing pipeline is complete; what is missing is the vault handle, which Ctx does not carry yet. See PLAN.md §11.
-```
-
-and exit code **7**, never with a lone root label. `PLAN.md` §11 delivers the
-index in **Phase 1 (B2 MVP)**.
+The one gap left is shared with the rest of the listing family: a **local path
+that does not exist** produces a lone root label and exit **0** rather than exit 3
+(`dir_not_found`). See [dctl ls](dctl_ls.md) for why that matters before a script
+branches on it.
 
 ```
 dctl tree [REMOTE:PATH] [flags]
@@ -149,9 +148,8 @@ dctl tree [REMOTE:PATH] [flags]
 
 ## Examples
 
-The drawings below are what the renderer produces. In this build every complete
-invocation stops at the index read described under *Status in this build* and
-prints the exit-7 error instead.
+The drawings below are what the renderer produces, and every one of them runs in
+this build.
 
 Draw a subtree. The root label is the spec as typed, so the picture identifies
 itself:
@@ -212,14 +210,20 @@ dctl tree vault:photos --format json-lines | jq -r '.Path'
 ```
 
 A Windows path is local on every platform — `C:` is a drive letter, never a
-remote named `C` — so it is refused rather than drawing a tree of the wrong
-thing. A UNC path such as `\\nas\media\photos` behaves the same way:
+remote named `C` — so it is walked as a directory rather than resolved against
+the configured remotes, and a tree of it is drawn. A UNC path such as
+`\\nas\media\photos` behaves the same way; a remote named `C` would instead fail
+with `unknown remote 'C'` and exit 7:
 
 ```
 dctl tree C:\Users\mx\Pictures
-error: listing a local directory is not implemented in this build
-warning: Give a remote spec such as 'vault:photos' instead of a filesystem path.
+C:\Users\mx\Pictures
+└── holiday/
+    └── IMG_0001.JPG
 ```
+
+On a machine where that path does not exist the drawing is a lone root label and
+the exit code is **0**, not 3 — see *Status in this build*.
 
 ## Options
 
@@ -238,8 +242,8 @@ to every subcommand.
 
 Every global flag is accepted. The ones that matter here are `--ascii` (the sole
 input to the glyph choice), `--max-depth` (composed with `--level`, tighter
-wins), the filters `--include` / `--exclude` / `--min-size` / `--max-size`
-(`--filter-from` and `--files-from` are refused), `--format` / `--json` (which
+wins), the filters `--include` / `--exclude` / `--min-size` / `--max-size` /
+`--filter-from` / `--files-from`, `--format` / `--json` (which
 replace the drawing with the flat record stream), `--units` (the footer's byte
 figure) and `-v` (whether the footer appears at all). See
 [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.

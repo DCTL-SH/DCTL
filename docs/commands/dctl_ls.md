@@ -66,9 +66,12 @@ user no way to tell which one was lying.
 * `--max-depth N` counts from the listing root and is one-based, so
   `--max-depth 1` means "objects sitting directly in the root". `-1` is
   unlimited and is the default.
-* `--filter-from` and `--files-from` are **refused, not ignored** (exit 7). A
-  listing whose rule file was silently dropped looks complete, and listings are
-  what people read before deciding what to delete.
+* `--filter-from` and `--files-from` are **honoured**, by the same rule engine
+  `dctl copy` uses, so the objects `ls` shows are the objects a transfer over the
+  same scope would take. A rule file that cannot be read or parsed is a **usage
+  error** (exit 1) naming the file and the line, never a run with the rules
+  dropped: a listing whose rule file was silently ignored looks complete, and
+  listings are what people read before deciding what to delete.
 
 ### Ordering, memory and what is actually shown
 
@@ -89,9 +92,21 @@ because it never sends bytes to a provider.
 
 The mirror-image half of that contract is the one `ls` has to keep: **never
 report an outcome that did not happen.** A listing that cannot reach the index
-fails loudly with a non-zero exit code; it never renders as an empty vault. A
-script that branched on an empty listing could go on to prune a backup it
-believed had been superseded.
+fails loudly with a non-zero exit code rather than rendering as an empty vault —
+a wrong password is exit **22**, an unreadable index is **23**, an unknown remote
+is **7**. A script that branched on an empty listing could go on to prune a
+backup it believed had been superseded.
+
+**Where that does not yet hold: a local path that does not exist.** `dctl ls
+./nope` prints nothing and exits **0**, with only a `-v` note on stderr; so do
+`lsl`, `lsjson`, `lsd`, `tree` and `size` over the same target. Exit **3**
+(`dir_not_found`) is the code for it, and the removal family already uses it —
+`dctl purge vault:absent` exits 3 — but the listing family does not consult the
+filesystem before reporting an empty result. Until it does, **do not branch on an
+empty local listing**; the empty answer and the mistyped-path answer are the same
+answer. A vault prefix that holds nothing is genuinely empty and exit 0 is
+correct there, which is why the two cases have to be separated rather than made
+uniform.
 
 When a listing legitimately comes back empty, `ls` says so on stderr — and
 distinguishes the two reasons, because "the directory is empty" sends a user
@@ -122,23 +137,20 @@ subtree that was named.
 
 ### Status in this build
 
-**`dctl ls` cannot read a vault in this build.** Spec parsing, the glob, size
-and depth filters, the ordering contract, the streaming pipeline and all three
-output formats are implemented and unit-tested; the single missing step is the
-index read itself, because the runtime context does not yet carry an unlocked
-vault handle. A complete invocation therefore fails with
+**`dctl ls` reads a vault, and reads a local directory.** Spec parsing, the glob,
+the size and depth filters, the rule files, the ordering contract, the streaming
+pipeline and all three output formats are implemented, and so is the index read
+this page once said was missing: `dctl ls vault:` lists stored objects, and
+`dctl ls ./src` walks the filesystem. Earlier revisions of this page claimed both
+were unimplemented and quoted an exit-7 error that no build now produces — the
+listing shipped and the page did not follow. Undersold documentation is its own
+defect: a reader who believes the command cannot work will not run it, and will
+not report the one case where it still misreports (an absent local path, above).
 
-```
-error: vault:photos: reading the object index is not implemented in this build
-warning: The listing pipeline is complete; what is missing is the vault handle, which Ctx does not carry yet. See PLAN.md §11.
-```
-
-and exit code **7**. It deliberately does not print an empty listing. Pointing
-`ls` at a local path fails with its own distinct message, because the fix is
-different: one is "wait for a release", the other is "write a remote spec".
-
-`PLAN.md` §11 delivers this in **Phase 1 (B2 MVP)**, which is the phase that
-brings the encrypted index and names `ls` explicitly.
+The remaining gaps are named where they bite rather than here: exit **3** is not
+produced for a missing local directory (*Ordering, memory and what is actually
+shown*), and a row straight out of `dctl index rebuild` carries no size until the
+object is next read (*Synopsis*).
 
 ```
 dctl ls [REMOTE:PATH] [flags]
@@ -146,9 +158,8 @@ dctl ls [REMOTE:PATH] [flags]
 
 ## Examples
 
-The listings below are what the renderer produces. In this build every complete
-invocation stops at the index read described under *Status in this build* and
-prints the exit-7 error instead.
+The listings below are what the renderer produces, and every one of them runs in
+this build.
 
 List everything in a vault, recursively:
 
@@ -191,14 +202,20 @@ dctl ls vault:photos/2024 --json | jq '[.[].Size] | add'
 ```
 
 A Windows path is local, not a remote called `C`. DCTL treats a drive letter and
-a UNC path as local on every platform, so the same script behaves the same way
-on a build agent — and refuses rather than quietly listing something else:
+a UNC path as local on every platform, so the same script behaves the same way on
+a build agent: the path is walked as a directory, and it is never resolved
+against the configured remotes. The proof is what you *do not* get — a remote
+named `C` would fail with `unknown remote 'C'` and exit 7:
 
 ```
 dctl ls C:\Users\mx\Pictures
-error: listing a local directory is not implemented in this build
-warning: Give a remote spec such as 'vault:photos' instead of a filesystem path.
+  2.10 MiB IMG_0001.JPG
+  3.40 MiB holiday/IMG_0002.JPG
 ```
+
+On a machine where that path does not exist the listing is empty and the exit
+code is **0**, not 3 — see *Ordering, memory and what is actually shown* before
+you let a script read anything into an empty local listing.
 
 A rule file shapes the listing, in file order. It is read by the same engine
 `dctl copy` uses, so the objects `ls` shows are the objects the transfer that
@@ -236,8 +253,8 @@ subcommand.
 
 Every global flag is accepted. The ones that change what this command does are
 `--remote` (the default target), the filters
-`--include` / `--exclude` / `--min-size` / `--max-size` / `--max-depth`
-(`--filter-from` and `--files-from` are refused), `--format` / `--json` and
+`--include` / `--exclude` / `--min-size` / `--max-size` / `--max-depth` /
+`--filter-from` / `--files-from`, `--format` / `--json` and
 `--units` (output shape), `--quiet` and `-v` (whether the stderr notes appear),
 and `--config` / `--index` / the `--password*` group (reaching the vault at
 all). See [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
@@ -246,19 +263,20 @@ all). See [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | The listing was printed, including when it was legitimately empty. Not reachable in this build. |
+| 0 | `success` | The listing was printed, including when it was legitimately empty — **and, for now, also when a local path does not exist**; see *Ordering, memory and what is actually shown*. |
 | 1 | `usage` | No path and no `--remote`; a remote name shorter than two characters or containing an illegal character; a `..` component; a malformed `--include`/`--exclude` pattern or `--min-size`/`--max-size` value; an unknown flag or a second positional. |
 | 2 | `uncategorised` | A stdout write failed for a reason other than a broken pipe (a full disk on a redirected listing). A broken pipe — `\| head` — is success. |
-| 5 | `temporary_error` | The provider could not be reached and the retry budget was exhausted. Needs the engine work below. |
-| 7 | `fatal_error` | Returned by every complete invocation in this build (`reading the object index is not implemented`), by a local target, and by `--filter-from`/`--files-from`. |
-| 22 | `vault_locked` | Wrong password or second factor, or a damaged envelope. Needs the engine work below. |
-| 23 | `index_error` | The encrypted index or its journal could not be read. Needs the engine work below. |
+| 5 | `temporary_error` | The provider could not be reached and the retry budget was exhausted. |
+| 7 | `fatal_error` | The remote name is not configured and is not a known provider (`unknown remote 'x'`). |
+| 22 | `vault_locked` | Wrong password or recovery phrase, or a damaged envelope. |
+| 23 | `index_error` | The encrypted index or its journal could not be read (a missing or unreadable `--index` path). |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. A truncated listing is never reported as complete. |
 
-In this build only **1**, **2**, **7** and **25** are reachable; a usage error
-is always reported before the unimplemented one, so a typo in a pattern is
-diagnosed as a typo. Codes 0, 5, 22 and 23 need the index read described under
-*Status in this build*.
+All of these are reachable. A usage error is reported before anything else is
+attempted, so a typo in a pattern is diagnosed as a typo rather than as a failure
+to reach the vault. Exit **3** is the one code in the contract this command does
+not yet produce, and *Ordering, memory and what is actually shown* says where it
+is missing.
 
 See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 

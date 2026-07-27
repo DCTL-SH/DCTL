@@ -162,7 +162,8 @@ mod tests {
             "correct horse battery",
         )
         .await
-        .expect("a fresh vault initialises");
+        .expect("a fresh vault initialises")
+        .vault;
 
         for (path, bytes) in files {
             vault.put_file(path, bytes).await.expect("a verified write");
@@ -238,7 +239,8 @@ mod tests {
             "correct horse battery",
         )
         .await
-        .expect("a fresh vault initialises");
+        .expect("a fresh vault initialises")
+        .vault;
 
         let payload: Vec<u8> = (0..=255_u8).cycle().take(200_000).collect();
         let spooled = spool::capture(&ctx(&[]), &mut payload.as_slice()).expect("the spool");

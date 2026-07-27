@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use dctl_core::Vault;
+use dctl_core::{UnlockKey, Vault};
 use dctl_store::Backend;
 
 use crate::constants::INDEX_FILE_NAME;
@@ -12,7 +12,7 @@ use crate::error::Result;
 use crate::logging::fields;
 use crate::remote::RemoteSpec;
 
-use super::{factor, password};
+use super::{factor, secret};
 
 /// What the user is told did not happen when `--key-file` is refused here.
 ///
@@ -71,6 +71,59 @@ impl std::fmt::Debug for Session {
 /// [`ExitCode::FatalError`]: crate::exit::ExitCode::FatalError
 /// [`ExitCode::VaultLocked`]: crate::exit::ExitCode::VaultLocked
 pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Session> {
+    let prepared = prepare(ctx, spec)?;
+
+    // Acquired after the preparation so a typo in the remote name fails before
+    // the user is asked for a secret. Being prompted for a password and *then*
+    // told the remote does not exist is a small cruelty that is easy to avoid.
+    //
+    // Which secret — password or recovery phrase — is [`super::secret`]'s single
+    // decision, so every command that opens a vault accepts a phrase without
+    // knowing that phrases exist. That is what makes a second key worth having:
+    // it has to open `ls`, `cat`, `copy` and `restore`, not just a command named
+    // after recovery.
+    let secret = secret::acquire(&ctx.globals)?;
+    ctx.out.info(secret.describe());
+    tracing::debug!(recovery = secret.is_recovery(), "unlock secret resolved");
+
+    prepared.unlock(spec, secret.key()).await
+}
+
+/// Everything an unlock needs except the secret.
+///
+/// The type exists to make one ordering rule structural instead of remembered:
+/// **nothing that can fail on its own may be left until after a secret has been
+/// asked for.** A caller has to hold one of these before it can unlock, and
+/// obtaining one has already refused an inapplicable `--key-file`, resolved the
+/// index, followed the vault chain and built the backend.
+///
+/// That ordering costs nothing on the password path and matters a great deal on
+/// the recovery path: `dctl vault recover` asks somebody to transcribe
+/// twenty-four words off a sheet of paper, and reporting *"unknown remote"*
+/// afterwards would spend the most expensive thing the tool ever asks for on a
+/// typo that was visible from the first instruction.
+pub struct Prepared {
+    backend: Arc<dyn Backend>,
+    index: PathBuf,
+}
+
+/// Do everything an unlock needs doing before a secret is worth asking for.
+///
+/// Takes the **whole parsed spec**, never the remote's name on its own, and that
+/// is the entire reason for the signature. A bare name is indistinguishable from
+/// a relative directory — `RemoteSpec::parse("b2")` finds no colon and answers
+/// `Local("b2")` — so a caller that passed one had its remote silently
+/// reinterpreted as a filesystem path: `dctl copy ./src b2:mybucket` unlocked a
+/// vault in `./b2`, discarded the bucket entirely, and reported a clean success.
+/// A [`RemoteSpec`] has already decided which of the two it is, and cannot be
+/// re-decided here.
+///
+/// # Errors
+/// [`ExitCode::FatalError`] for a `--key-file` this build cannot apply, an
+/// unresolvable remote, or an unreadable configuration.
+///
+/// [`ExitCode::FatalError`]: crate::exit::ExitCode::FatalError
+pub fn prepare(ctx: &Ctx, spec: &RemoteSpec) -> Result<Prepared> {
     // First, ahead of even the remote: a second factor this build cannot mix
     // into the KEK is refused rather than dropped, because unlocking with the
     // password alone would give the caller weaker protection than they asked
@@ -79,31 +132,39 @@ pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Session> {
     // reported — a misspelled remote is a typo, a discarded factor is not.
     factor::refuse_if_present(&ctx.globals, "unlocking a vault", NOTHING_HAPPENED)?;
 
-    let index = index_path(ctx);
-    let backend = build_backend(ctx, spec)?;
-
-    // Acquired after the backend so a typo in the remote name fails before the
-    // user is asked for a secret. Being prompted for a password and *then* told
-    // the remote does not exist is a small cruelty that is easy to avoid.
-    let password = password::acquire(&ctx.globals)?;
-    ctx.out.info(format!(
-        "password read from {}",
-        password.source().describe()
-    ));
-
-    let vault = Vault::unlock(backend, &index, password.expose()).await?;
-
-    tracing::debug!(
-        { fields::REMOTE } = %spec,
-        index = %index.display(),
-        "vault unlocked"
-    );
-
-    Ok(Session {
-        vault,
-        remote: spec.to_string(),
-        index,
+    Ok(Prepared {
+        index: index_path(ctx),
+        backend: build_backend(ctx, spec)?,
     })
+}
+
+impl Prepared {
+    /// Unwrap the root key with `key` and hand back a [`Session`].
+    ///
+    /// Consumes `self`, so the backend is built exactly once per invocation:
+    /// two constructions of "the backend for this spec" are two chances for
+    /// them to disagree.
+    ///
+    /// # Errors
+    /// [`ExitCode::VaultLocked`] when the envelope is missing, unparseable, or
+    /// holds no slot this secret opens (via [`dctl_core::CoreError::Unlock`]).
+    ///
+    /// [`ExitCode::VaultLocked`]: crate::exit::ExitCode::VaultLocked
+    pub async fn unlock(self, spec: &RemoteSpec, key: UnlockKey<'_>) -> Result<Session> {
+        let vault = Vault::unlock(self.backend, &self.index, key).await?;
+
+        tracing::debug!(
+            { fields::REMOTE } = %spec,
+            index = %self.index.display(),
+            "vault unlocked"
+        );
+
+        Ok(Session {
+            vault,
+            remote: spec.to_string(),
+            index: self.index,
+        })
+    }
 }
 
 /// Build the storage backend a vault's objects actually live in.

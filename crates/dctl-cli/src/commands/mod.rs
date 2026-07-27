@@ -83,5 +83,6 @@ pub mod sync;
 pub mod touch;
 pub mod transfer;
 pub mod tree;
+pub mod vault;
 pub mod verify;
 pub mod version;

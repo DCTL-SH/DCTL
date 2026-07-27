@@ -259,7 +259,8 @@ mod tests {
 
         let vault = Vault::init(backend, &index_path, "pw")
             .await
-            .expect("a fresh vault initialises");
+            .expect("a fresh vault initialises")
+            .vault;
         for (path, bytes) in files {
             vault.put_file(path, bytes).await.expect("a verified write");
         }

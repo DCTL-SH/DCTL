@@ -17,6 +17,10 @@ hkdf = "0.13"
 # clean-room reproducible); `zeroize` wipes ML-KEM decapsulation-key material.
 ml-kem = { workspace = true, features = ["deterministic", "zeroize"] }
 x25519-dalek = { workspace = true }
+# Secure memory for the session-long-lived name-layer keys (mlock-pinned +
+# zeroize-on-drop). dctl-crypto itself writes no unsafe; the unsafe FFI is
+# encapsulated in dctl-secmem, so this crate stays `#![forbid(unsafe_code)]`.
+dctl-secmem = { workspace = true }
 # shared across the workspace
 blake3 = { workspace = true }
 sha2 = { workspace = true }

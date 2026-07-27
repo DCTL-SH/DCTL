@@ -70,25 +70,26 @@ that would later destroy those survivors too.
 
 ### What runs today
 
-**The removal itself is not implemented in this build.** Argument parsing,
-target resolution, the extra `--force`/`--interactive` gate, the ignored-filter
-warning, the destructive gate and the `--dry-run` plan all run now. The tree
-removal does not: it needs recursive enumeration the vault does not expose, and
-the command context carries no vault handle. After printing its plan the command
-exits **7** (`fatal_error`):
+**The tree removal runs.** The recursive enumeration this command needs shipped
+with the listing family, and `purge` removes the path and everything beneath it:
 
 ```
-error: dctl purge is not implemented in this build
-warning: The removal itself is not wired up yet, because it needs removing a
-directory tree and everything beneath it. Nothing was changed. Parsing, target
-resolution, filter validation and the destructive gate all ran — re-run with
---dry-run to see the resolved request. See PLAN.md §11 for the phase that
-delivers the rest.
+$ dctl purge vault:r2 --force
+Command  purge
+Target   vault:r2
+Mode     execute
+removed             12 B  r2/b.txt
+removed              8 B  r2/sub/c.txt
+OK removed: 2 object(s), 20 B
 ```
 
-Nothing is changed on any run, including one with `--force`. The recursive
-enumeration arrives with the `PLAN.md` §11 **Phase 1 (B2 MVP)** milestone, which
-also delivers the encrypted index and `ls`.
+A path that holds nothing is exit **3** (`dir_not_found`) with a note saying so,
+not a silent success.
+
+Earlier revisions of this page said the removal "is not implemented in this
+build" and quoted an exit-7 refusal that no build now produces. For the most
+destructive verb in the tool, that understatement is the worst possible drift —
+it reads as a safety net, and there is none.
 
 ```
 dctl purge REMOTE:PATH [flags]
@@ -96,9 +97,9 @@ dctl purge REMOTE:PATH [flags]
 
 ## Examples
 
-In this build every run that gets past validation ends with the engine refusal
-shown above; those two stderr lines are omitted from the examples below except
-where they are the point.
+Every example below runs in this build and removes what it names. Earlier
+revisions of this page prefaced them with an engine refusal that no longer
+exists.
 
 Preview a tree removal. No approval flag is needed for a preview, because a
 preview removes nothing:
@@ -126,15 +127,18 @@ $ echo $?
 
 Approve it explicitly. `--force` is the scriptable "yes, all of it";
 `--interactive` prompts on stderr and requires the exact word `yes`. Past the
-gate, this build stops at the engine rather than removing anything:
+gate the tree is gone:
 
 ```console
 $ dctl purge vault:projects/apollo --force
-error: dctl purge is not implemented in this build
-warning: The removal itself is not wired up yet, because it needs removing a
-directory tree and everything beneath it. Nothing was changed. [...]
+Command  purge
+Target   vault:projects/apollo
+Mode     execute
+removed             6 B  projects/apollo/a.txt
+removed            12 B  projects/apollo/b.txt
+OK removed: 2 object(s), 18 B
 $ echo $?
-7
+0
 ```
 
 Filters do not narrow a purge, and DCTL says so rather than letting you believe
@@ -208,12 +212,17 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | Code | Name | When |
 |------|------|------|
 | 1 | `usage` | Unparseable command line; a local, UNC, too-short-remote, empty or `..`-containing target; **a run with neither `--force` nor `--interactive` nor `--dry-run`**; `--interactive` with no terminal to prompt on. |
-| 7 | `fatal_error` | The removal engine is unavailable. **Every run that gets past the gates ends here today**, including `--dry-run`. Nothing was changed. |
+| 3 | `dir_not_found` | The path holds nothing, so there is nothing to purge. |
+| 7 | `fatal_error` | The remote is not configured and is not a known provider. |
+| 22 | `vault_locked` | Wrong password or recovery phrase, or a damaged envelope. |
+| 23 | `index_error` | The encrypted index or its journal could not be read or written. |
 | 25 | `cancelled` | An interactive confirmation was declined, or the run was interrupted with Ctrl-C. |
 
-Exit code 0 is not currently reachable. When the engine lands, 3
-(`dir_not_found`) becomes reachable for a target that does not exist, and 6
-(`partial_failure`) for a tree that was only partly removed.
+Exit **0** means the tree was removed. An earlier revision of this table said 0
+"is not currently reachable" and that every run past the gates ended at 7; neither
+is true, and 3 is produced today rather than being owed. 6 (`partial_failure`)
+remains unreachable — a tree is removed object by object and a failure part-way
+through is reported as an error rather than a partial success.
 
 ## See also
 

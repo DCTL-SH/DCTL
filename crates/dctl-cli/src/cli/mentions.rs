@@ -8,9 +8,13 @@
 //! * A refusal named `archive:` before that spelling was addressable.
 //! * A hint named `dctl index rebuild` before the verb existed — recorded in
 //!   [`crate::commands::index`], which was written to close it.
-//! * [`crate::error`]'s unlock hint named `dctl vault recover`, a command that
-//!   has never existed in any build, alongside a "BIP39 phrase" that `dctl init`
-//!   has never issued.
+//! * [`crate::error`]'s unlock hint named `dctl vault recover` alongside a
+//!   "BIP39 phrase", when neither the command nor the phrase existed in any
+//!   build. Both exist now — [`crate::commands::vault`] holds the verb and
+//!   `dctl init` issues the phrase — so the hint names them again, truthfully
+//!   this time. That this scan would have caught the original *and* passes the
+//!   replacement is the whole design: it checks the claim against the command
+//!   tree, not against a list of forbidden words.
 //! * `dctl --help` itself told every reader to run `dctl help exitcodes`.
 //!
 //! A wrong hint is worse than no hint. It is read at the moment the user is
@@ -87,16 +91,22 @@ const EXEMPT: &[(&str, &str)] = &[
 /// instruction, and there is no subcommand for a parser to confirm.
 const ELISION: &[&str] = &["…", "..."];
 
-/// This module's own path, which is excluded from the scan.
+/// The scanner modules' own paths, which are excluded from the scan.
 ///
-/// It has to be. The documentation above names every command that has ever been
-/// wrongly promised — that list *is* the explanation — so a scanner that read
-/// its own source would report each of them forever. Excluding the file is
-/// sound because it contains no instruction to a user: nothing here is printed
-/// by the binary. Exempting those mentions globally instead would be the
-/// dangerous fix, since it would also excuse `dctl vault recover` the next time
-/// somebody puts it back into a hint.
-const SELF_PATH: &str = "cli/mentions.rs";
+/// They have to be. The documentation in each names every command that has ever
+/// been wrongly promised — that list *is* the explanation — so a scanner that
+/// read it would report each of them forever. [`super::doc_mentions`] is on the
+/// list for the same reason and earned its place the same way: it was written,
+/// and this test immediately reported eleven findings in its prose, every one of
+/// them a string the module exists to talk about.
+///
+/// Excluding these two files is sound because neither contains an instruction to
+/// a user: both are `#[cfg(test)]` and nothing in either is printed by the
+/// binary. That is the whole of the justification, and it is why the list must
+/// not grow to a file that ships. Exempting those mentions *globally* instead
+/// would be the dangerous fix, since it would also excuse the next
+/// plausible-looking verb somebody puts into a hint.
+const SCANNER_PATHS: &[&str] = &["cli/mentions.rs", "cli/doc_mentions.rs"];
 
 /// Whether `mention` parses as far as naming a real command.
 ///
@@ -107,8 +117,18 @@ const SELF_PATH: &str = "cli/mentions.rs";
 /// force every example in the documentation to be a runnable one, and the
 /// examples are illustrations: `dctl copy SOURCE DEST` should stay legible.
 fn names_a_real_command(mention: &str) -> bool {
-    let words = mention.split_whitespace();
-    match Cli::try_parse_from(words) {
+    names_a_real_command_argv(&mention.split_whitespace().collect::<Vec<_>>())
+}
+
+/// The same question asked of an already-split command line.
+///
+/// [`super::doc_mentions`] has to strip metavariables and shell pipelines before
+/// it can ask, so it arrives holding words rather than a string. Splitting them
+/// back into one and re-splitting would be a round trip that could only lose
+/// information — a documented path containing a space would become two
+/// arguments — so the parser is reached directly.
+pub(super) fn names_a_real_command_argv<S: AsRef<str>>(argv: &[S]) -> bool {
+    match Cli::try_parse_from(argv.iter().map(AsRef::as_ref)) {
         Ok(_) => true,
         Err(error) => error.kind() != ErrorKind::InvalidSubcommand,
     }
@@ -120,7 +140,7 @@ fn names_a_real_command(mention: &str) -> bool {
 /// exactly `dctl` is not a mention: `dctl_core::Vault` and `dctl-store` are Rust
 /// paths and crate names, and treating them as command lines would bury the
 /// real findings in noise.
-fn mentions_on(line: &str) -> Vec<String> {
+pub(super) fn mentions_on(line: &str) -> Vec<String> {
     let mut found = Vec::new();
     for delimiter in ['`', '\''] {
         let mut rest = line;
@@ -188,7 +208,7 @@ fn every_mention() -> Vec<(String, String)> {
             .display()
             .to_string()
             .replace('\\', "/");
-        if shown == SELF_PATH {
+        if SCANNER_PATHS.contains(&shown.as_str()) {
             continue;
         }
         for (number, line) in text.lines().enumerate() {
@@ -309,16 +329,23 @@ mod tests {
         // The check's own smoke test. Every assertion above is worthless if
         // `names_a_real_command` answers "fine" to everything — which is
         // exactly what a mis-set `ErrorKind` comparison would do.
-        // All four of these were live in this crate's hints and help text until
-        // this check read them back. The last two are nested, which is the shape
-        // a top-level-verb-only check would have missed entirely.
-        assert!(!names_a_real_command("dctl vault recover"));
+        // All of these were live in this crate's hints and help text until this
+        // check read them back. Two are nested, which is the shape a
+        // top-level-verb-only check would have missed entirely.
         assert!(!names_a_real_command("dctl help exitcodes"));
         assert!(!names_a_real_command("dctl index verify"));
         assert!(!names_a_real_command("dctl config set b2prod bucket=films"));
+        // A near-miss of a verb that now exists: `dctl vault recover` was the
+        // most damaging of the historical instances, and the failure mode that
+        // replaces it is a hint naming a plausible *sibling* of a real verb.
+        assert!(!names_a_real_command("dctl vault restore"));
 
         // ...and equally worthless if it answers "broken" to everything.
         assert!(names_a_real_command("dctl index rebuild"));
+        // The verb that closed the worst of the four. It is real now, and the
+        // unlock hint names it again — this is the assertion that would fail if
+        // it were ever removed while that hint still pointed at it.
+        assert!(names_a_real_command("dctl vault recover archive:"));
         assert!(names_a_real_command("dctl scrub archive:"));
         assert!(names_a_real_command("dctl --json size archive:"));
         // An illustration with placeholders still names a real verb.

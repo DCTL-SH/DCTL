@@ -213,7 +213,7 @@ $ dctl config verify
 Name           Type   Mode    Store          Status
 archive        vault  sealed  archive-store  ok
 archive-store  local  plain   archive-store  ok
-✓ 2 remote(s) in /home/ops/.config/dctl/config.toml verified
+✓ 2 remote(s) in /home/ops/.dctl/config.toml verified
 ```
 
 The `Mode` column is only possible because what a remote encrypts follows the
@@ -251,7 +251,7 @@ end up inside the command substitution.
 
 `dctl config touch` creates the file if it is missing, with the right
 permissions and the no-secrets header from the first byte — which
-`mkdir -p ~/.config/dctl && $EDITOR config.toml` does not give you, since that
+`mkdir -p ~/.dctl && $EDITOR ~/.dctl/config.toml` does not give you, since that
 takes whatever your umask says. Idempotent: an existing file is never rewritten,
 because comments and formatting are things a human put there deliberately. The
 `created` field describes *this run*, so a provisioning script can tell a fresh
@@ -356,8 +356,8 @@ question, so both work in a provisioning script:
 
 ```console
 $ dctl config touch
-✓ created /home/mx/.config/dctl/config.toml
-/home/mx/.config/dctl/config.toml  true
+✓ created /home/mx/.dctl/config.toml
+/home/mx/.dctl/config.toml  true
 $ dctl config create b2prod b2 bucket=media-archive chunk_size=8388608
 ✓ created remote 'b2prod'
 b2prod  b2
@@ -427,7 +427,7 @@ reasons, never values:
 ```console
 $ dctl config redact
 warning: 1 value(s) were withheld from this report: s3west.endpoint (the URL
-carries a password). They do not belong in /home/mx/.config/dctl/config.toml —
+carries a password). They do not belong in /home/mx/.dctl/config.toml —
 treat them as exposed
 s3west  bucket    archive
 s3west  endpoint  <redacted>
@@ -462,7 +462,7 @@ A credential written into the file by hand stops every command that reads it,
 rather than being quietly ignored:
 
 ```console
-$ printf 'app_key = "K001x"\n' >> ~/.config/dctl/config.toml
+$ printf 'app_key = "K001x"\n' >> ~/.dctl/config.toml
 $ dctl config list
 error: configuration key 'remotes.b2prod.app_key' looks like a credential, and
 credentials are never stored in the configuration file
@@ -554,7 +554,7 @@ ones that matter here:
 
 | Flag | Effect here |
 |------|-------------|
-| `--config <PATH>` (`DCTL_CONFIG`) | The file to read and write. Defaults to the platform location — `~/.config/dctl/config.toml` on Linux, `~/Library/Application Support/dctl/config.toml` on macOS, `%APPDATA%\dctl\config\config.toml` on Windows. A path that does not exist reads as an empty configuration. |
+| `--config <PATH>` (`DCTL_CONFIG`) | The file to read and write. Defaults to `~/.dctl/config.toml` on every platform; `DCTL_HOME` relocates the whole tree. A path that does not exist reads as an empty configuration. |
 | `-n`, `--dry-run` | `create`, `update`, `delete`, `import`, `touch` and `edit` report what they would do and change nothing. `import` additionally contacts no store. The read-only subcommands are unaffected. |
 | `--force` | `create` and `import`: replace an existing section instead of refusing. `delete`: skip the confirmation prompt. |
 | `-i`, `--interactive` | `delete` prompts before removing; requires typing `yes`. Conflicts with `--force`. |

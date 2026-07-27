@@ -34,7 +34,7 @@ device key) that never leaves the client.
 | **Harvest-now-decrypt-later quantum adversary** | stores ciphertext today, has a CRQC later, does **not** have the vault root | Symmetric owner path (`kem_id=0`) is already PQ-safe; shared/recipient path (`kem_id=1`) is protected by the ML-KEM-768 leg of the hybrid (§3). |
 | **Recipient-key or root-key compromise** | later obtains the long-term private key / root | **Recovers all past objects** encrypted to that key. There is **no forward secrecy** — by design (§5, §6). |
 | **Malicious sharer** | holds a recipient's public key | Can seal an object that recipient will accept; the recipient **cannot** verify who sealed it (no sender authentication in v1, §6). |
-| **Local forensic actor** | reads swap / core dumps / attaches a debugger | **`zeroize`-on-drop only today**; `mlock` / dump-exclusion / `PT_DENY_ATTACH` are implemented in `dctl-secmem` but **not yet wired in** (§4.4). |
+| **Local forensic actor** | reads swap / core dumps / attaches a debugger | The vault **root key** and the **name-layer keys** are held in `dctl-secmem`'s `LockedSecret` (`mlock`-pinned out of swap/dumps + zeroize-on-drop + no-`Debug`), and `PT_DENY_ATTACH` is installed at vault open on Apple release builds. **Residual:** the ephemeral per-operation DEK/`KW` and the recipient-identity keypair are still `zeroize`-on-drop only (§4.4). |
 
 ---
 
@@ -226,32 +226,38 @@ it in a core dump. [`dctl-secmem`](../crates/dctl-secmem/src/lib.rs) is the **on
 permitted to contain `unsafe` (every block carries a `// SAFETY:` note), isolating platform
 FFI so `dctl-crypto` stays `#![forbid(unsafe_code)]`.
 
-> **Not yet wired in (accuracy).** `dctl-secmem` is a built, self-tested workspace member, but
-> **no other crate currently depends on it** (`grep -r dctl-secmem crates/*/Cargo.toml` shows
-> only its own manifest). The live root key, sub-keys, DEKs, and KEK are today held in
-> `zeroize::Zeroizing`, **not** `LockedSecret`, so those secrets are protected **only by
-> zeroize-on-drop** — `mlock`, dump-exclusion, and `PT_DENY_ATTACH` are **not active today**.
-> Everything in this subsection describes what `dctl-secmem` provides **once wired into
-> `dctl-crypto` / `dctl-core`**, which is still pending. This matches the accuracy notes in
-> [`ARCHITECTURE.md`](./ARCHITECTURE.md) and [`CRATES.md`](./CRATES.md).
+> **What is wired in.** `dctl-secmem` is a dependency of both `dctl-crypto` and `dctl-core`
+> (`grep -r dctl-secmem crates/*/Cargo.toml`). The vault **root key** (`dctl-core`) and the two
+> **name-layer sub-keys** (`dctl-crypto`, §5) — the session-long-lived raw-byte secrets — are
+> held in `LockedSecret`: `mlock`-pinned, dump-excluded where the platform allows, zeroized on
+> drop, and never `Debug`-printed. `apple_harden_crash_reporter()` runs **once at vault open**.
+> **Residual (documented follow-up), NOT yet `mlock`'d:** (1) the *ephemeral* per-operation
+> DEK / `KW` / wrapping-keys and derived subkeys live only within a single seal/open call and
+> stay in `zeroize::Zeroizing` — adequate for a value that never outlives one operation; and
+> (2) the recipient-identity keypair (`x25519-dalek` `StaticSecret` + `ml-kem`
+> `DecapsulationKey`) are **typed** library keys that zeroize on drop but are not raw buffers —
+> pinning them needs a raw-bytes store/reconstruct refactor of the KEM hot path, tracked
+> separately.
 
 - **`LockedSecret`** — a heap buffer pinned with `mlock` / `VirtualLock` on construction and
-  unlocked + zeroized on drop; never `Clone` (duplicating a secret must be explicit). It is
-  **designed to** hold the root key, sub-keys, DEKs, and the KEK during derivation **once wired
-  in** (today those live in `zeroize::Zeroizing`).
+  unlocked + zeroized on drop; never `Clone` (duplicating a secret must be explicit) and never
+  leaks its contents through `Debug`. It **holds** the vault root key (`dctl-core`) and the two
+  name-layer sub-keys (§5) for the life of an unlocked vault. The ephemeral per-operation
+  DEK / `KW` and derived subkeys still use `zeroize::Zeroizing` — they never outlive a single
+  operation.
 - **Dump exclusion** — `madvise(MADV_DONTDUMP)` on Linux/Android; `VM_BEHAVIOR_ZERO_WIRED_PAGES`
   on Darwin (wired pages zeroed on free).
 - **Anti-debug** — `apple_harden_crash_reporter()` installs `PT_DENY_ATTACH` on Apple
   **release** builds so a forensic actor with an unlocked device cannot attach `lldb` to
   dump key memory.
 
-> **Honest limits.** First and most important: **this is not wired in yet** — `dctl-secmem` is
-> not a dependency of `dctl-crypto` / `dctl-core`, so the live root key / sub-keys / DEKs / KEK
-> are protected **today by `zeroize`-on-drop alone** (see the caveat above). Once wired in, all
-> locking is still **best-effort**: unprivileged containers or a low `RLIMIT_MEMLOCK` can deny
-> `mlock` (logged as a WARN, never fatal — zeroize-on-drop still applies). `PT_DENY_ATTACH` is
-> Apple-release-only and is compiled out in debug builds; it is not a defense against an attacker
-> with kernel privileges.
+> **Honest limits.** All locking is **best-effort**: unprivileged containers or a low
+> `RLIMIT_MEMLOCK` can deny `mlock` (logged as a WARN, never fatal — zeroize-on-drop still
+> applies). `PT_DENY_ATTACH` is Apple-release-only and is compiled out in debug builds; it is
+> not a defense against an attacker with kernel privileges. Coverage is also **partial by
+> design today**: only the long-lived raw-byte secrets above (root key + name-layer keys) are
+> `mlock`'d — the ephemeral per-operation DEK / `KW` and the recipient-identity keypair
+> (`x25519-dalek` / `ml-kem` typed keys) are `zeroize`-on-drop only, a documented follow-up.
 
 ### 4.5 Metadata-private index (SQLCipher)
 
@@ -347,7 +353,7 @@ require a future ephemeral-recipient suite (a new `hybrid_suite`).
 | **Attacker-influenceable decrypted paths** | A decrypted `path`/`path_hint` is only DEK-authenticated; the host must re-validate before filesystem use. | [`FORMAT.md §11`](./FORMAT.md#11-security-considerations) |
 | **Shared-backend trust assumption** | Sharing/discovery assume the recipient reads the **owner's** store (`r/*`, `g/*`, `d/*` all live in the owner's backend). This is the model, not a leak, but it means recipients share a namespace with the owner. | [`§12.6`](./FORMAT.md#126-grant-sidecar-dgs1-frozen), [`§14`](./FORMAT.md#14-shared-object-discovery-dgd1-dhex-recipient_key_idhex-file_id--frozen) |
 | **Slot removal ≠ revocation** | Removing a password/slot does not invalidate a previously-captured envelope + secret. | [`FORMAT.md §11`](./FORMAT.md#11-security-considerations) |
-| **Secure memory (`mlock` / anti-debug) is not yet wired in** | `dctl-secmem` is built but is **not** a dependency of the crypto/core crates, so the live root key / sub-keys / DEKs / KEK get **`zeroize`-on-drop only** today — no `mlock`, dump-exclusion, or `PT_DENY_ATTACH`. Even once wired in these are best-effort (denied by container limits; Apple-release-only anti-debug; no defense vs. kernel-level attackers). | §4.4 |
+| **Secure memory is `mlock`'d only for the long-lived keys** | The vault root key and the name-layer keys are held in `dctl-secmem`'s `LockedSecret` (`mlock` + dump-exclusion + zeroize-on-drop + no-`Debug`), and `PT_DENY_ATTACH` runs at vault open. Still best-effort (denied by container limits; Apple-release-only anti-debug; no defense vs. kernel-level attackers), and the **ephemeral per-operation DEK / `KW` and the recipient-identity keypair (`x25519-dalek` / `ml-kem` typed keys) remain `zeroize`-on-drop only** — a documented follow-up. | §4.4 |
 
 ---
 

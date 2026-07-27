@@ -279,7 +279,8 @@ mod tests {
             let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(&store));
             let vault = Vault::init(backend, &index, "pw")
                 .await
-                .expect("a fresh vault initialises");
+                .expect("a fresh vault initialises")
+                .vault;
             for (path, size) in TREE {
                 vault
                     .put_file(path, &vec![b'x'; *size])

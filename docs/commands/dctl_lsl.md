@@ -81,18 +81,17 @@ either way. `--dry-run` changes neither the output nor the exit code.
 
 ### Status in this build
 
-**`dctl lsl` cannot read a vault in this build.** The time conversion, the
-column layout, the filters, the ordering contract and both output formats are
-implemented and unit-tested; the index read is not, because the runtime context
-does not yet carry an unlocked vault handle. A complete invocation fails with
+**`dctl lsl` reads a vault, and reads a local directory.** The time
+conversion, the column layout, the filters and the ordering contract are
+implemented, and so is the index read this page once said was missing:
+`dctl lsl vault:` lists stored objects and `dctl lsl ./src` walks the
+filesystem. Earlier revisions quoted an exit-7 `reading the object index is not
+implemented` error that no build now produces.
 
-```
-error: vault:photos: reading the object index is not implemented in this build
-warning: The listing pipeline is complete; what is missing is the vault handle, which Ctx does not carry yet. See PLAN.md §11.
-```
-
-and exit code **7**, never with an empty listing. `PLAN.md` §11 delivers the
-index in **Phase 1 (B2 MVP)**.
+The one gap left is shared with the rest of the listing family: a **local path
+that does not exist** produces an empty listing and exit **0** rather than exit 3
+(`dir_not_found`). See [dctl ls](dctl_ls.md) for why that matters before a script
+branches on it.
 
 ```
 dctl lsl [REMOTE:PATH] [flags]
@@ -100,9 +99,8 @@ dctl lsl [REMOTE:PATH] [flags]
 
 ## Examples
 
-The listings below are what the renderer produces. In this build every complete
-invocation stops at the index read described under *Status in this build* and
-prints the exit-7 error instead.
+The listings below are what the renderer produces, and every one of them runs in
+this build.
 
 List a subtree with modification times:
 
@@ -141,13 +139,17 @@ dctl lsl vault:photos --json | jq -r 'sort_by(.ModTime) | .[-1].Path'
 ```
 
 A Windows path is local on every platform — `C:` is a drive letter, never a
-remote named `C` — and is refused rather than quietly listing something else:
+remote named `C` — so it is walked as a directory and never resolved against the
+configured remotes. A remote named `C` would instead fail with
+`unknown remote 'C'` and exit 7:
 
 ```
 dctl lsl C:\Users\mx\Pictures
-error: listing a local directory is not implemented in this build
-warning: Give a remote spec such as 'vault:photos' instead of a filesystem path.
+  2.10 MiB 2024-01-02T09:15:00Z IMG_0001.JPG
 ```
+
+On a machine where that path does not exist the listing is empty and the exit
+code is **0**, not 3 — see *Status in this build*.
 
 ## Options
 
@@ -164,8 +166,8 @@ propagated to every subcommand.
 
 Every global flag is accepted. The relevant ones are `--remote` (the default
 target), the filters
-`--include` / `--exclude` / `--min-size` / `--max-size` / `--max-depth`
-(`--filter-from` and `--files-from` are refused), `--format` / `--json` /
+`--include` / `--exclude` / `--min-size` / `--max-size` / `--max-depth` /
+`--filter-from` / `--files-from`, `--format` / `--json` /
 `--units` (output shape — note that the time column is **not** affected by any
 flag, by design), `--quiet` and `-v` (whether the stderr notes appear), and
 `--config` / `--index` / the `--password*` group. See

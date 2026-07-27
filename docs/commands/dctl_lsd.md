@@ -81,8 +81,8 @@ construction: `--include`/`--exclude` globs with exclusion winning,
 `--min-size`/`--max-size`, and the same `REMOTE:PATH` grammar. Size limits apply
 to **objects only** and never to a synthesised directory — excluding a directory
 because its recursive total exceeded `--max-size` would hide every small file
-inside it. `--filter-from` and `--files-from` are refused rather than ignored
-(exit 7).
+inside it. `--filter-from` and `--files-from` are **honoured**; a rule file that
+cannot be read or parsed is a usage error (exit 1) naming the file and the line.
 
 Under `--json` or `--format json-lines`, each directory is emitted as the same
 record shape the rest of the family uses, with `"IsDir": true`, `Size` carrying
@@ -110,19 +110,17 @@ under the path. Those notes never touch stdout.
 
 ### Status in this build
 
-**`dctl lsd` cannot read a vault in this build.** The directory inference, the
-recursive totals, the depth rules, the ordering contract and both output
-formats are implemented and unit-tested; the index read is not, because the
-runtime context does not yet carry an unlocked vault handle. A complete
-invocation fails with
+**`dctl lsd` reads a vault, and reads a local directory.** The directory
+inference, the recursive totals, the depth rules and the ordering contract are
+implemented, and so is the index read this page once said was missing:
+`dctl lsd vault:` lists the vault's directories and `dctl lsd ./src` lists a
+local tree's. Earlier revisions quoted an exit-7 `reading the object index is not
+implemented` error that no build now produces.
 
-```
-error: vault:photos: reading the object index is not implemented in this build
-warning: The listing pipeline is complete; what is missing is the vault handle, which Ctx does not carry yet. See PLAN.md §11.
-```
-
-and exit code **7**, never with an empty listing. `PLAN.md` §11 delivers the
-index in **Phase 1 (B2 MVP)**.
+The one gap left is shared with the rest of the listing family: a **local path
+that does not exist** produces an empty listing and exit **0** rather than exit 3
+(`dir_not_found`). See [dctl ls](dctl_ls.md) for why that matters before a script
+branches on it.
 
 ```
 dctl lsd [REMOTE:PATH] [flags]
@@ -130,9 +128,8 @@ dctl lsd [REMOTE:PATH] [flags]
 
 ## Examples
 
-The listings below are what the renderer produces. In this build every complete
-invocation stops at the index read described under *Status in this build* and
-prints the exit-7 error instead.
+The listings below are what the renderer produces, and every one of them runs in
+this build.
 
 See the top level of a vault — the usual first command against an unfamiliar
 one:
@@ -185,13 +182,17 @@ dctl lsd vault: --json | jq -r '.[] | "\(.Size)\t\(.Path)"'
 ```
 
 A Windows path is local — `C:` is a drive letter, never a remote named `C`, on
-every platform — and is refused rather than quietly listing something else:
+every platform — so it is walked as a directory rather than resolved against the
+configured remotes. A remote named `C` would instead fail with
+`unknown remote 'C'` and exit 7:
 
 ```
 dctl lsd C:\Users\mx\Pictures
-error: listing a local directory is not implemented in this build
-warning: Give a remote spec such as 'vault:photos' instead of a filesystem path.
+  2.10 MiB         1 holiday/
 ```
+
+On a machine where that path does not exist the listing is empty and the exit
+code is **0**, not 3 — see *Status in this build*.
 
 ## Options
 

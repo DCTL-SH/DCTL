@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use dctl_core::error::ErrorKind;
-use dctl_core::{CoreError, Vault};
+use dctl_core::{CoreError, UnlockKey, Vault};
 use dctl_store::{
     Backend, ByteRange, ContentHash, LocalFs, ObjectKey, ObjectMeta, Page, PutOutcome, StoreError,
 };
@@ -32,11 +32,26 @@ fn env() -> Env {
     }
 }
 
+/// Create a vault and keep only the vault.
+///
+/// `Vault::init` returns a [`dctl_core::NewVault`] carrying the recovery phrase
+/// beside the vault, because a caller that never sees the phrase has created a
+/// vault whose second key nobody knows. Nothing in *this* file is about
+/// recovery — that is `tests/recovery.rs` — so the phrase is dropped here on
+/// purpose, in one place, rather than at forty call sites.
+async fn init_vault(
+    backend: Arc<dyn Backend>,
+    index_path: &std::path::Path,
+    password: &str,
+) -> dctl_core::Result<Vault> {
+    Ok(Vault::init(backend, index_path, password).await?.vault)
+}
+
 #[tokio::test]
 async fn init_unlock_put_get_roundtrip() {
     let e = env();
     {
-        let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+        let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
             .await
             .unwrap();
         vault
@@ -44,7 +59,7 @@ async fn init_unlock_put_get_roundtrip() {
             .await
             .unwrap();
     }
-    let vault = Vault::unlock(e.backend.clone(), &e.index_path, "pw")
+    let vault = Vault::unlock(e.backend.clone(), &e.index_path, UnlockKey::Password("pw"))
         .await
         .unwrap();
     let got = vault.get_file("photos/a.jpg").await.unwrap();
@@ -54,17 +69,22 @@ async fn init_unlock_put_get_roundtrip() {
 #[tokio::test]
 async fn wrong_password_fails_to_unlock() {
     let e = env();
-    Vault::init(e.backend.clone(), &e.index_path, "correct")
+    init_vault(e.backend.clone(), &e.index_path, "correct")
         .await
         .unwrap();
-    let result = Vault::unlock(e.backend.clone(), &e.index_path, "wrong").await;
+    let result = Vault::unlock(
+        e.backend.clone(),
+        &e.index_path,
+        UnlockKey::Password("wrong"),
+    )
+    .await;
     assert!(matches!(result, Err(CoreError::Unlock)));
 }
 
 #[tokio::test]
 async fn put_overwrites_same_path() {
     let e = env();
-    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
     vault.put_file("k", b"first").await.unwrap();
@@ -76,7 +96,7 @@ async fn put_overwrites_same_path() {
 #[tokio::test]
 async fn list_filters_by_prefix() {
     let e = env();
-    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
     vault.put_file("a/1", b"x").await.unwrap();
@@ -91,7 +111,7 @@ async fn list_filters_by_prefix() {
 #[tokio::test]
 async fn delete_removes_object_and_record() {
     let e = env();
-    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
     vault.put_file("gone", b"data").await.unwrap();
@@ -116,14 +136,16 @@ async fn restore_on_a_fresh_device_from_backend_only() {
 
     // Device A: create the vault and store some files, then go away.
     {
-        let a = Vault::init(backend.clone(), &a_path, "pw").await.unwrap();
+        let a = init_vault(backend.clone(), &a_path, "pw").await.unwrap();
         a.put_file("photos/2026/a.jpg", b"alpha").await.unwrap();
         a.put_file("photos/2026/b.jpg", b"bravo").await.unwrap();
         a.put_file("docs/notes.txt", b"charlie").await.unwrap();
     }
 
     // Device B: SAME backend, a brand-new EMPTY index. Unlock with only the password.
-    let b = Vault::unlock(backend.clone(), &b_path, "pw").await.unwrap();
+    let b = Vault::unlock(backend.clone(), &b_path, UnlockKey::Password("pw"))
+        .await
+        .unwrap();
 
     // (1) A file is readable even before any rebuild — resolved via the backend's
     //     authoritative name record. This is the core cross-device guarantee.
@@ -185,7 +207,7 @@ async fn put_file_from_path_streams_multichunk_roundtrip() {
     std::fs::write(&src_path, &data).unwrap();
 
     {
-        let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+        let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
             .await
             .unwrap();
         vault
@@ -207,7 +229,7 @@ async fn put_file_from_path_streams_multichunk_roundtrip() {
     }
 
     // Round-trips through a fresh unlock (index reopened from scratch on disk).
-    let vault = Vault::unlock(e.backend.clone(), &e.index_path, "pw")
+    let vault = Vault::unlock(e.backend.clone(), &e.index_path, UnlockKey::Password("pw"))
         .await
         .unwrap();
     assert_eq!(
@@ -229,7 +251,7 @@ async fn get_file_to_path_streams_multichunk_roundtrip() {
     let out = TempDir::new().unwrap();
     let dest = out.path().join("nested/decrypted.bin");
 
-    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
     vault
@@ -246,7 +268,7 @@ async fn get_file_to_path_streams_multichunk_roundtrip() {
 
     // Round-trips through a fresh unlock too (index reopened from disk).
     drop(vault);
-    let vault = Vault::unlock(e.backend.clone(), &e.index_path, "pw")
+    let vault = Vault::unlock(e.backend.clone(), &e.index_path, UnlockKey::Password("pw"))
         .await
         .unwrap();
     let dest2 = out.path().join("again.bin");
@@ -260,7 +282,7 @@ async fn get_file_to_path_streams_multichunk_roundtrip() {
 #[tokio::test]
 async fn get_file_to_path_tamper_errors_and_leaves_no_dest() {
     let e = env();
-    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
     vault
@@ -307,7 +329,7 @@ async fn get_file_to_path_cross_device_via_name_record() {
     std::fs::write(&src_path, &data).unwrap();
 
     {
-        let a = Vault::init(backend.clone(), &idx_a.path().join("a.redb"), "pw")
+        let a = init_vault(backend.clone(), &idx_a.path().join("a.redb"), "pw")
             .await
             .unwrap();
         a.put_file_from_path("media/movie.bin", &src_path)
@@ -315,9 +337,13 @@ async fn get_file_to_path_cross_device_via_name_record() {
             .unwrap();
     }
 
-    let b = Vault::unlock(backend.clone(), &idx_b.path().join("b.redb"), "pw")
-        .await
-        .unwrap();
+    let b = Vault::unlock(
+        backend.clone(),
+        &idx_b.path().join("b.redb"),
+        UnlockKey::Password("pw"),
+    )
+    .await
+    .unwrap();
     let out = TempDir::new().unwrap();
     let dest = out.path().join("movie.bin");
     b.get_file_to_path("media/movie.bin", &dest).await.unwrap();
@@ -335,7 +361,7 @@ async fn get_file_to_path_cross_device_via_name_record() {
 #[tokio::test]
 async fn stream_and_buffered_puts_interoperate() {
     let e = env();
-    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
 
@@ -365,7 +391,7 @@ async fn stream_and_buffered_puts_interoperate() {
 #[tokio::test]
 async fn overwrite_gcs_the_previous_object() {
     let e = env();
-    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
     let obj_dir = e._store.path().join("o");
@@ -395,7 +421,7 @@ async fn cross_device_delete_removes_object_and_name_record() {
     let idx_a = TempDir::new().unwrap();
     let idx_b = TempDir::new().unwrap();
     {
-        let a = Vault::init(backend.clone(), &idx_a.path().join("a.redb"), "pw")
+        let a = init_vault(backend.clone(), &idx_a.path().join("a.redb"), "pw")
             .await
             .unwrap();
         a.put_file("secret.txt", b"classified").await.unwrap();
@@ -403,9 +429,13 @@ async fn cross_device_delete_removes_object_and_name_record() {
 
     // Device B: fresh empty index. Delete resolves via the name record (no rebuild),
     // and must actually remove both the object and the name record from the backend.
-    let b = Vault::unlock(backend.clone(), &idx_b.path().join("b.redb"), "pw")
-        .await
-        .unwrap();
+    let b = Vault::unlock(
+        backend.clone(),
+        &idx_b.path().join("b.redb"),
+        UnlockKey::Password("pw"),
+    )
+    .await
+    .unwrap();
     assert!(
         b.delete_file("secret.txt").await.unwrap(),
         "cross-device delete finds and removes it"
@@ -455,13 +485,13 @@ fn only_object_file_id(store: &std::path::Path) -> [u8; 16] {
 #[tokio::test]
 async fn shared_put_roundtrips_and_head_is_kem1() {
     let e = env();
-    let owner = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let owner = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
 
     // A separate vault (its own root → its own identity) supplies a recipient to share to.
     let r_env = env();
-    let recipient = Vault::init(r_env.backend.clone(), &r_env.index_path, "pw2")
+    let recipient = init_vault(r_env.backend.clone(), &r_env.index_path, "pw2")
         .await
         .unwrap();
 
@@ -486,15 +516,15 @@ async fn recipient_in_set_decrypts_but_non_recipient_errors() {
     // Name records are per-root, so B and C resolve the object through their OWN name
     // record (minted by a placeholder put) whose stored bytes we replace with O's object.
     let o_env = env();
-    let o = Vault::init(o_env.backend.clone(), &o_env.index_path, "pw")
+    let o = init_vault(o_env.backend.clone(), &o_env.index_path, "pw")
         .await
         .unwrap();
     let b_env = env();
-    let b = Vault::init(b_env.backend.clone(), &b_env.index_path, "pw")
+    let b = init_vault(b_env.backend.clone(), &b_env.index_path, "pw")
         .await
         .unwrap();
     let c_env = env();
-    let c = Vault::init(c_env.backend.clone(), &c_env.index_path, "pw")
+    let c = init_vault(c_env.backend.clone(), &c_env.index_path, "pw")
         .await
         .unwrap();
 
@@ -531,11 +561,11 @@ async fn owner_auto_included_even_when_not_passed() {
     // §12.8 owner-inclusion MUST: a kem_id=1 object has no symmetric fallback, so the
     // owner is always added to the recipient set even when not passed in `recipients`.
     let e = env();
-    let owner = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let owner = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
     let r_env = env();
-    let recipient = Vault::init(r_env.backend.clone(), &r_env.index_path, "pw2")
+    let recipient = init_vault(r_env.backend.clone(), &r_env.index_path, "pw2")
         .await
         .unwrap();
     assert_ne!(owner.identity_key_id(), recipient.identity_key_id());
@@ -559,11 +589,11 @@ async fn shared_object_reads_via_get_file_to_path_and_verifies() {
     // genuinely multi-chunk payload (> the 1 MiB default chunk). The owner is always a
     // recipient, so it can read/verify its own shared object.
     let e = env();
-    let owner = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let owner = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
     let r_env = env();
-    let recipient = Vault::init(r_env.backend.clone(), &r_env.index_path, "pw2")
+    let recipient = init_vault(r_env.backend.clone(), &r_env.index_path, "pw2")
         .await
         .unwrap();
 
@@ -589,7 +619,7 @@ async fn shared_object_reads_via_get_file_to_path_and_verifies() {
 #[tokio::test]
 async fn publish_then_fetch_recipient_roundtrips_and_bad_key_errors() {
     let e = env();
-    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
 
@@ -622,7 +652,7 @@ async fn publish_then_fetch_recipient_roundtrips_and_bad_key_errors() {
 #[tokio::test]
 async fn tampered_object_is_detected_on_read() {
     let e = env();
-    let vault = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
     vault
@@ -668,11 +698,11 @@ async fn sidecar_add_grants_read_then_remove_revokes() {
     // backends. Sharing ships the object + sidecar bytes to B's backend (name records are
     // per-root), exactly like the other cross-vault sharing tests.
     let o_env = env();
-    let o = Vault::init(o_env.backend.clone(), &o_env.index_path, "pw")
+    let o = init_vault(o_env.backend.clone(), &o_env.index_path, "pw")
         .await
         .unwrap();
     let b_env = env();
-    let b = Vault::init(b_env.backend.clone(), &b_env.index_path, "pw2")
+    let b = init_vault(b_env.backend.clone(), &b_env.index_path, "pw2")
         .await
         .unwrap();
     assert_ne!(o.identity_key_id(), b.identity_key_id());
@@ -900,7 +930,7 @@ async fn faulty_vault(pw: &str) -> (Vault, Arc<FaultyGrantGet>, TempDir, TempDir
     let inner: Arc<dyn Backend> = Arc::new(LocalFs::new(store.path()));
     let faulty = Arc::new(FaultyGrantGet::new(inner));
     let backend: Arc<dyn Backend> = faulty.clone();
-    let vault = Vault::init(backend, &index.path().join("v.redb"), pw)
+    let vault = init_vault(backend, &index.path().join("v.redb"), pw)
         .await
         .unwrap();
     (vault, faulty, store, index)
@@ -914,11 +944,11 @@ async fn share_add_recipients_transient_get_error_aborts_without_wiping_sidecar(
     let (o, faulty, o_store, _o_idx) = faulty_vault("pw").await;
 
     let b_env = env();
-    let b = Vault::init(b_env.backend.clone(), &b_env.index_path, "pwb")
+    let b = init_vault(b_env.backend.clone(), &b_env.index_path, "pwb")
         .await
         .unwrap();
     let c_env = env();
-    let c = Vault::init(c_env.backend.clone(), &c_env.index_path, "pwc")
+    let c = init_vault(c_env.backend.clone(), &c_env.index_path, "pwc")
         .await
         .unwrap();
 
@@ -976,7 +1006,7 @@ async fn get_file_sidecar_only_recipient_transient_get_error_is_retryable_not_de
     // [Fix B / LOW] A sidecar-only recipient hitting a transient error on the sidecar GET
     // must get a RETRYABLE (Transient) error, never a false permanent "not a recipient".
     let o_env = env();
-    let o = Vault::init(o_env.backend.clone(), &o_env.index_path, "pw")
+    let o = init_vault(o_env.backend.clone(), &o_env.index_path, "pw")
         .await
         .unwrap();
 
@@ -1029,11 +1059,11 @@ async fn genuine_absent_sidecar_stays_permanent_not_a_recipient_and_share_add_st
     // still a permanent "not a recipient" (fail-closed) for get, and still lets share_add
     // start a fresh grant_gen=1 sidecar. No fault injection — real absence.
     let o_env = env();
-    let o = Vault::init(o_env.backend.clone(), &o_env.index_path, "pw")
+    let o = init_vault(o_env.backend.clone(), &o_env.index_path, "pw")
         .await
         .unwrap();
     let b_env = env();
-    let b = Vault::init(b_env.backend.clone(), &b_env.index_path, "pwb")
+    let b = init_vault(b_env.backend.clone(), &b_env.index_path, "pwb")
         .await
         .unwrap();
 
@@ -1077,11 +1107,11 @@ async fn genuine_absent_sidecar_stays_permanent_not_a_recipient_and_share_add_st
 #[tokio::test]
 async fn share_add_on_missing_or_non_recipient_errors() {
     let e = env();
-    let owner = Vault::init(e.backend.clone(), &e.index_path, "pw")
+    let owner = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
     let r_env = env();
-    let stranger = Vault::init(r_env.backend.clone(), &r_env.index_path, "pw2")
+    let stranger = init_vault(r_env.backend.clone(), &r_env.index_path, "pw2")
         .await
         .unwrap();
 
@@ -1130,7 +1160,7 @@ async fn import_keypair_round_trips_across_reunlock() {
     let p1 = idx1.path().join("a.redb");
 
     let key_id = {
-        let o = Vault::init(backend.clone(), &p1, "pw").await.unwrap();
+        let o = init_vault(backend.clone(), &p1, "pw").await.unwrap();
         assert_eq!(
             o.identity_key_ids().len(),
             1,
@@ -1145,7 +1175,9 @@ async fn import_keypair_round_trips_across_reunlock() {
     // Re-unlock with a FRESH index: the k/* store is listed + reloaded.
     let idx2 = TempDir::new().unwrap();
     let p2 = idx2.path().join("b.redb");
-    let o2 = Vault::unlock(backend.clone(), &p2, "pw").await.unwrap();
+    let o2 = Vault::unlock(backend.clone(), &p2, UnlockKey::Password("pw"))
+        .await
+        .unwrap();
     let ids = o2.identity_key_ids();
     assert_eq!(ids.len(), 2, "root + imported after reload");
     assert!(
@@ -1172,7 +1204,7 @@ async fn imported_identity_discovers_reads_and_revokes_shared_object() {
 
     let data = pseudo_random(200_003);
     {
-        let o = Vault::init(backend.clone(), &p1, "pw").await.unwrap();
+        let o = init_vault(backend.clone(), &p1, "pw").await.unwrap();
         // Import ext's private material (from-material variant), then share the object to
         // ext via the grant sidecar (owner-only object first → sidecar grant writes a DGD1).
         let returned = o.import_keypair_material(&ext).await.unwrap();
@@ -1189,7 +1221,9 @@ async fn imported_identity_discovers_reads_and_revokes_shared_object() {
     // Re-unlock with a FRESH index → forces reload of k/* and name-record resolution.
     let idx2 = TempDir::new().unwrap();
     let p2 = idx2.path().join("v2.redb");
-    let o2 = Vault::unlock(backend.clone(), &p2, "pw").await.unwrap();
+    let o2 = Vault::unlock(backend.clone(), &p2, UnlockKey::Password("pw"))
+        .await
+        .unwrap();
     assert!(
         o2.identity_key_ids().contains(&ext_key_id),
         "imported identity must reload after restart"
@@ -1249,7 +1283,7 @@ async fn unlock_transient_imported_key_get_error_fails_not_silently_drops_identi
     // the imported identity silently dropped.
     faulty.arm_imported();
     let backend: Arc<dyn Backend> = faulty.clone();
-    let err = match Vault::unlock(backend, &idx_path, "pw").await {
+    let err = match Vault::unlock(backend, &idx_path, UnlockKey::Password("pw")).await {
         Ok(_) => panic!("armed transient k/* GET must fail unlock, not drop the identity"),
         Err(e) => e,
     };
@@ -1267,7 +1301,9 @@ async fn unlock_transient_imported_key_get_error_fails_not_silently_drops_identi
     // identity was genuinely present all along (the armed unlock did not drop it, it aborted).
     faulty.disarm_imported();
     let backend: Arc<dyn Backend> = faulty.clone();
-    let o2 = Vault::unlock(backend, &idx_path, "pw").await.unwrap();
+    let o2 = Vault::unlock(backend, &idx_path, UnlockKey::Password("pw"))
+        .await
+        .unwrap();
     assert!(
         o2.identity_key_ids().contains(&kid),
         "after the fault clears, the imported identity reloads into the set"
@@ -1302,7 +1338,9 @@ async fn share_add_self_heals_missing_discovery_record_on_retry() {
 
     // Re-unlock so the vault holds `ext` (root + imported) and can discover as B.
     let backend: Arc<dyn Backend> = faulty.clone();
-    let o2 = Vault::unlock(backend, &idx_path, "pw").await.unwrap();
+    let o2 = Vault::unlock(backend, &idx_path, UnlockKey::Password("pw"))
+        .await
+        .unwrap();
     assert!(o2.identity_key_ids().contains(&ext_kid));
 
     // Arm the DGD1 (`d/*`) PUT fault and grant `ext`: the grant sidecar (`g/*`) PUT succeeds but

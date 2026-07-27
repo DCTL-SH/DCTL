@@ -74,9 +74,9 @@ permission to claim a verification that never ran.
 run warns when a cheaper strength was requested. The report records the strength
 that actually *ran* (`strict`), not the one that was asked for.
 
-The reason is that the cheaper two cannot be performed at all with the calls that
-exist, and performing something else while reporting the requested name would be
-the misreport `PLAN.md` §6 forbids:
+One of the cheaper two cannot be performed at all with the calls that exist; the
+other has not been designed. Performing something else while reporting the
+requested name would be the misreport `PLAN.md` §6 forbids:
 
 * `checksum` would need the provider's checksum of the *stored object* compared
   against one DCTL holds. `dctl_core::Vault` exposes no such value — the index
@@ -84,16 +84,19 @@ the misreport `PLAN.md` §6 forbids:
   under is deliberately unreachable from the read abstraction. Since `checksum`
   is the *default*, honouring it literally would make a bare `dctl verify
   archive:` read nothing and then print a wall of `ok`.
-* `sample` would need a ranged authenticated read. A vault decrypts the whole
-  object and slices it, because `dctl_core` has no narrower call — so a "sample"
-  would cost more memory, read exactly as much, and prove less.
+* `sample` could now be built — a vault serves a genuine ranged authenticated
+  read, so spot-checking a few windows of a huge object costs O(window). It is
+  still not built, and that difference is deliberate: which windows, how many,
+  and what a pass over 1% of a file entitles anyone to claim are design
+  questions, and answering them badly produces a check that reads cheap and
+  proves nothing.
 
-The day `dctl-core` grows a ranged authenticated read and exposes a stored-object
-checksum, this becomes a real dial and the warning disappears.
+The day `dctl-core` exposes a stored-object checksum, and `sample` is designed
+rather than merely enabled, this becomes a real dial and the warning disappears.
 
 ```console
 $ dctl verify archive:
-warning: --verify=checksum asks for a cheaper check than `dctl verify` can perform in this build: dctl-core exposes no stored-object checksum and no ranged authenticated read, so every selected object is read back in full
+warning: --verify=checksum asks for a cheaper check than `dctl verify` can perform in this build: dctl-core exposes no stored-object checksum, and no sampling strategy is defined, so every selected object is read back in full
 warning: verifying the tree 'archive:' reads every object it contains
 Status  Size  Path
 ------  ----  ----------------------

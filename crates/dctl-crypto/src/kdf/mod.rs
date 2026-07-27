@@ -13,5 +13,5 @@ mod salt;
 
 pub use calibrate::{CalibratedParams, calibrate};
 pub use derive::{derive_kek, derive_kek_with_params, normalize_passphrase, validate_params};
-pub use mnemonic::{derive_kek_from_mnemonic, generate_mnemonic};
+pub use mnemonic::{derive_kek_from_mnemonic, generate_mnemonic, validate_mnemonic};
 pub use salt::generate_salt;

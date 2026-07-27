@@ -1743,31 +1743,39 @@ fn listing_a_directory_still_reports_paths_relative_to_it() {
     );
 }
 
-// ── a windowed read of a sealed object says what it will cost ────────────────
+// ── a windowed read of a sealed object moves the window, not the object ─────
 
-/// Object size at or above which a whole-object read is announced.
+/// A sealed object comfortably larger than any per-read buffer, so a window of it
+/// cannot be served by accident from something that happened to be resident.
 ///
-/// Mirrors `constants::RANGED_READ_WHOLE_OBJECT_WARN_BYTES`. Spelled out rather
-/// than imported because this crate ships no library target, and spelled as the
-/// same arithmetic so a reader can check the two by eye.
-const RANGED_READ_WARN_BYTES: usize = 64 * 1024 * 1024;
+/// Sixty-four mebibytes was the threshold the old whole-object warning fired at,
+/// kept here on purpose: this is the exact size that used to produce a 64 MiB
+/// transfer to return four bytes.
+const RANGED_READ_FIXTURE_BYTES: usize = 64 * 1024 * 1024;
 
 #[test]
-fn a_window_of_a_large_sealed_object_warns_before_it_downloads_the_lot() {
-    // Defect D8. `dctl_core` exposes no ranged read, so a vault serves a byte
-    // window by fetching and decrypting the entire object. That is correct —
-    // faking a short read would be worse — and it was documented only in the
-    // source tree. `dctl cat b2vault:film.mkv --offset 0 --count 4` on a 40 GB
-    // object is a 40 GB download that returns four bytes and exits 0, and the
-    // user finds out on an invoice with nothing tying the charge to the command.
+fn a_window_of_a_large_sealed_object_is_served_without_moving_the_object() {
+    // Defect D8, closed. `dctl-core` had no ranged read, so a vault served a byte
+    // window by fetching and decrypting the entire object: `--offset 0 --count 4`
+    // against a 40 GB film was a 40 GB download that returned four bytes and
+    // exited 0. The command warned about it, because warning was the only honest
+    // thing available.
     //
-    // The read still happens. What changes is that its price is stated at
-    // pre-flight, while the run could still be interrupted.
+    // It now reads only the chunks covering the window (`docs/FORMAT.md` §3), so
+    // there are two things to assert and they are equally important: the bytes are
+    // right, and the warning is *gone*. A warning about a cost that is no longer
+    // paid is the kind an operator learns to filter out before the run that
+    // mattered.
     let sandbox = Sandbox::new();
     sandbox.dir("vault");
-    // One byte over the threshold: the warning is what is being tested, so the
-    // fixture must sit on the warning side of the boundary rather than near it.
-    sandbox.write("src/huge.bin", &vec![0_u8; RANGED_READ_WARN_BYTES + 1]);
+
+    // A recognisable pattern rather than zeros: a window taken from the wrong
+    // offset — or from a chunk cached under the wrong index — cannot compare equal
+    // to the right one by luck.
+    let bytes: Vec<u8> = (0..RANGED_READ_FIXTURE_BYTES)
+        .map(|i| (i % 251) as u8)
+        .collect();
+    sandbox.write("src/huge.bin", &bytes);
 
     sandbox
         .dctl()
@@ -1786,37 +1794,36 @@ fn a_window_of_a_large_sealed_object_warns_before_it_downloads_the_lot() {
         .assert()
         .success();
 
-    // Four bytes asked for; the whole object moved. Both numbers have to appear,
-    // because the object size is the one that gets billed and the only one the
-    // reader can act on.
+    // A ten-byte window from deep inside the object — past any header, past the
+    // first chunk, and nowhere near a boundary the arithmetic could stumble on.
+    let offset = RANGED_READ_FIXTURE_BYTES / 2 + 12_345;
     let windowed = sandbox
         .dctl()
         .env("DCTL_PASSWORD", GOOD_PASSWORD)
         .arg("cat")
         .arg(format!("{VAULT_NAME}:huge.bin"))
-        .args(["--offset", "0", "--count", "4", "--discard"])
+        .args(["--offset", &offset.to_string(), "--count", "10"])
         .assert()
         .success();
-    let warned = String::from_utf8_lossy(&windowed.get_output().stderr).into_owned();
-    assert!(
-        warned.contains("warning"),
-        "a window served by a whole-object read must announce itself:\n{warned}"
-    );
-    assert!(
-        warned.contains("64.0 MiB") || warned.contains("65.0 MiB"),
-        "the warning must quote the size that will actually be transferred:\n{warned}"
-    );
-    assert!(
-        warned.contains("no ranged read"),
-        "the warning must name the cause, or a reader will simply retry:\n{warned}"
+    assert_eq!(
+        windowed.get_output().stdout,
+        bytes[offset..offset + 10],
+        "a window of a sealed object must be exactly the plaintext at that offset"
     );
 
-    // The control that makes the assertion above mean something. A plain store
-    // serves the identical window of the identical bytes with a genuine ranged
-    // request, so it must stay silent — proving the warning tracks what the read
-    // costs and not merely how big the object is. A warning that fired on both
-    // would be noise, and noise is what gets filtered out before the run that
-    // mattered.
+    let stderr = String::from_utf8_lossy(&windowed.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("no ranged read"),
+        "the whole-object warning must be gone, not merely quiet:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("warning"),
+        "a windowed read of a sealed object has nothing to warn about:\n{stderr}"
+    );
+
+    // The control that gives the assertions above their meaning: a plain store
+    // has always served genuine ranges, and must return the identical bytes for
+    // the identical window. Two different code paths, one answer.
     sandbox
         .dctl()
         .args(["config", "create", "plain", "local"])
@@ -1827,14 +1834,374 @@ fn a_window_of_a_large_sealed_object_warns_before_it_downloads_the_lot() {
         .dctl()
         .arg("cat")
         .arg("plain:huge.bin")
-        .args(["--offset", "0", "--count", "4", "--discard"])
+        .args(["--offset", &offset.to_string(), "--count", "10"])
         .arg("--no-ask-password")
         .assert()
         .success();
-    let quiet = String::from_utf8_lossy(&plain.get_output().stderr).into_owned();
-    assert!(
-        !quiet.contains("no ranged read"),
-        "a store that serves real ranges must not warn about egress it does not \
-         spend:\n{quiet}"
+    assert_eq!(
+        plain.get_output().stdout,
+        windowed.get_output().stdout,
+        "a sealed vault and a plain store must agree byte for byte on a window"
     );
+}
+
+// ── 20. a vault is recoverable without its password ───────────────────────────
+//
+// `PLAN.md` §13.2 calls key survival the #1 risk of a twenty-year tool. The
+// tests below are the only place that claim is checked the way a user would
+// check it: through the real binary, against the real bytes, with the password
+// genuinely gone rather than merely unused.
+
+/// Pull the recovery phrase out of what `dctl init` wrote to stderr.
+///
+/// Parses the numbered grid rather than looking for a run of words, because the
+/// numbering is the property worth depending on: a block that renumbered or
+/// reordered its words would still contain twenty-four valid BIP-39 words and
+/// would still look right to a laxer parser, while producing a phrase that
+/// opens nothing. Words are accepted only when their printed number is the next
+/// one expected, so this reads the phrase exactly as a human transcribing the
+/// block would.
+fn recovery_phrase_from(stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let mut words: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        for pair in tokens.chunks(2) {
+            let [number, word] = pair else { continue };
+            if number.parse::<usize>() == Ok(words.len() + 1) {
+                words.push((*word).to_string());
+            }
+        }
+    }
+    assert!(
+        !words.is_empty(),
+        "no recovery phrase was printed. stderr was:\n{text}"
+    );
+    words.join(" ")
+}
+
+/// Create a vault, seal one file into it, and return the recovery phrase.
+///
+/// The password is used here and *never again* by the callers below — that is
+/// the point of the fixture.
+fn vault_with_a_file_and_its_phrase(sandbox: &Sandbox, contents: &[u8]) -> String {
+    sandbox.write("src/secret.txt", contents);
+    sandbox.dir("vault");
+
+    let init = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success();
+    let phrase = recovery_phrase_from(&init.get_output().stderr);
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+
+    phrase
+}
+
+#[test]
+fn a_vault_opens_with_its_phrase_after_the_password_is_gone() {
+    // THE proof. A vault is created, a file is sealed into it, the password is
+    // then discarded entirely — `--no-ask-password` makes a password
+    // *impossible* to supply, and the harness already clears `DCTL_PASSWORD` —
+    // and the file comes back byte-identical from the phrase alone.
+    //
+    // The index is deleted first, so this is a machine that has never seen the
+    // vault: everything needed comes from the object store plus twenty-four
+    // words on a piece of paper.
+    const SECRET: &[u8] = b"the bytes a forgotten password must not destroy";
+
+    let sandbox = Sandbox::new();
+    let phrase = vault_with_a_file_and_its_phrase(&sandbox, SECRET);
+
+    std::fs::remove_file(sandbox.path("index.redb")).expect("destroy the local index");
+
+    // A phrase drives an ordinary command, not just a recovery-shaped one.
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .args(["--recovery-phrase", &phrase])
+        .args(["index", "rebuild", &format!("{VAULT_NAME}:")])
+        .assert()
+        .success();
+
+    let read_back = sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .args(["--recovery-phrase", &phrase])
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:secret.txt"))
+        .assert()
+        .success();
+
+    assert_eq!(
+        read_back.get_output().stdout,
+        SECRET,
+        "the phrase alone must return the exact bytes that were sealed"
+    );
+}
+
+#[test]
+fn the_phrase_is_printed_on_stderr_and_never_on_stdout() {
+    // stdout is the result stream: `dctl init --json | tee provisioning.log` is
+    // an ordinary thing to run, and a phrase in a log file is a vault that is
+    // permanently compromised — unlike a password, it cannot be rotated away.
+    // Asserted under `--json`, which is the shape a provisioning script uses.
+    let sandbox = Sandbox::new();
+    sandbox.dir("vault");
+
+    let output = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("--json")
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    let phrase = recovery_phrase_from(&output.stderr);
+    assert_eq!(
+        phrase.split_whitespace().count(),
+        24,
+        "a 256-bit phrase is 24 words: {phrase}"
+    );
+
+    // Not one of those words may be on stdout, and the document must say only
+    // *that* a phrase was issued.
+    let document = json(&output.stdout);
+    assert_eq!(document["recovery_phrase_issued"], true);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for word in phrase.split_whitespace() {
+        assert!(
+            !stdout.contains(word),
+            "the word '{word}' reached stdout:\n{stdout}"
+        );
+    }
+}
+
+#[test]
+fn quiet_does_not_suppress_the_phrase() {
+    // `--quiet` asks for less noise, not for something irreversible to happen
+    // silently. A vault whose second key was generated and never shown has no
+    // second key at all, and nothing can print it afterwards.
+    let sandbox = Sandbox::new();
+    sandbox.dir("vault");
+
+    let output = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("--quiet")
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+
+    assert_eq!(
+        recovery_phrase_from(&output.stderr)
+            .split_whitespace()
+            .count(),
+        24
+    );
+}
+
+#[test]
+fn recovering_sets_a_new_password_and_leaves_the_phrase_working() {
+    // `PLAN.md` §13.2's independence promise, end to end: rotating one wrapper
+    // of the root key must not disturb another. If it did, the first password
+    // change would silently destroy the paper backup and nobody would find out
+    // until the day they needed it.
+    const NEW_PASSWORD: &str = "an entirely different secret";
+    const SECRET: &[u8] = b"still readable after the password changed";
+
+    let sandbox = Sandbox::new();
+    let phrase = vault_with_a_file_and_its_phrase(&sandbox, SECRET);
+
+    sandbox
+        .dctl()
+        .args(["--recovery-phrase", &phrase])
+        .args(["--password", NEW_PASSWORD])
+        .args(["vault", "recover", &format!("{VAULT_NAME}:")])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("still opens this vault"));
+
+    // The old password is gone: VaultLocked (22), not a success.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:secret.txt"))
+        .assert()
+        .code(22);
+
+    // The new password works …
+    let by_password = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", NEW_PASSWORD)
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:secret.txt"))
+        .assert()
+        .success();
+    assert_eq!(by_password.get_output().stdout, SECRET);
+
+    // … and so does the phrase that was issued before the change.
+    let by_phrase = sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .args(["--recovery-phrase", &phrase])
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:secret.txt"))
+        .assert()
+        .success();
+    assert_eq!(
+        by_phrase.get_output().stdout,
+        SECRET,
+        "a password change must never invalidate the recovery phrase"
+    );
+}
+
+#[test]
+fn a_restore_drill_proves_the_phrase_without_changing_the_vault() {
+    // `PLAN.md` §13.6: a backup nobody restored is not a backup. Checking the
+    // paper still works has to be a read-only act, or it will not be done
+    // yearly — so `--keep-password` must leave the existing password in force.
+    const SECRET: &[u8] = b"drill";
+
+    let sandbox = Sandbox::new();
+    let phrase = vault_with_a_file_and_its_phrase(&sandbox, SECRET);
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .args(["--recovery-phrase", &phrase])
+        .args([
+            "vault",
+            "recover",
+            &format!("{VAULT_NAME}:"),
+            "--keep-password",
+        ])
+        .assert()
+        .success();
+
+    // Unchanged: the original password still opens the vault.
+    let still = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:secret.txt"))
+        .assert()
+        .success();
+    assert_eq!(still.get_output().stdout, SECRET);
+}
+
+#[test]
+fn a_mistyped_phrase_says_so_instead_of_blaming_the_vault() {
+    // BIP-39 carries a checksum, so "you mistyped a word" is distinguishable
+    // from "this phrase is for another vault" — and the two have opposite
+    // remedies. Reporting the first as `unlock failed` sends someone holding a
+    // correct sheet of paper looking for a damaged envelope.
+    let sandbox = Sandbox::new();
+    let phrase = vault_with_a_file_and_its_phrase(&sandbox, b"x");
+
+    let mut words: Vec<&str> = phrase.split_whitespace().collect();
+    words[0] = "zoo";
+    let mangled = words.join(" ");
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .args(["--recovery-phrase", &mangled])
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:secret.txt"))
+        .assert()
+        .code(22)
+        .stderr(predicates::str::contains("not a valid recovery phrase"));
+}
+
+#[test]
+fn init_refuses_a_phrase_rather_than_ignoring_it() {
+    // The trap: `--recovery-phrase` is global, so it parses on `init`, and
+    // somebody who has read that a phrase opens a vault will try to supply one.
+    // Ignoring it would generate a *different* phrase while the operator
+    // believed theirs was in force.
+    let sandbox = Sandbox::new();
+    sandbox.dir("vault");
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--recovery-phrase", "legal winner thank year"])
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .code(1)
+        .stderr(predicates::str::contains("generated, not chosen"));
+
+    assert!(
+        !sandbox.path("vault").join(ENVELOPE).exists(),
+        "a refused init must create no vault"
+    );
+}
+
+#[test]
+fn the_unlock_failure_names_a_recovery_command_that_exists() {
+    // The hint read by somebody who believes their vault is lost. It has named
+    // a nonexistent command twice in this codebase's history; this asserts both
+    // that it offers the route *and* that the route runs.
+    let sandbox = Sandbox::new();
+    sandbox.dir("vault");
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success();
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", "not the password at all")
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:anything.txt"))
+        .assert()
+        .code(22)
+        .stderr(predicates::str::contains("dctl vault recover"));
+
+    // And the named command is real: it parses, resolves the vault, and reaches
+    // its own refusal — no phrase was supplied — rather than clap's
+    // "unrecognized subcommand". `--keep-password` is what makes the missing
+    // *phrase* the thing reported: without it an unattended run is refused
+    // earlier, for having no new password to set.
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .args([
+            "vault",
+            "recover",
+            &format!("{VAULT_NAME}:"),
+            "--keep-password",
+        ])
+        .assert()
+        .code(22)
+        .stderr(predicates::str::contains("recovery phrase"));
 }

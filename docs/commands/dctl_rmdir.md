@@ -44,26 +44,27 @@ no-op a tool is tempted to report as success whether or not it happened.
 
 ### What runs today
 
-**Neither the emptiness check nor the removal is implemented in this build.**
-Argument parsing, target resolution, the root refusal, the destructive gate and
-the `--dry-run` plan all run now. Both remaining halves need directory
-enumeration, which the vault does not expose, and the command context carries no
-vault handle to ask with. After printing its plan the command exits **7**
-(`fatal_error`):
+**Both the emptiness check and the removal run.** Directory enumeration shipped
+with the listing family, and this command uses it: a non-empty directory is
+refused as a **usage error** (exit 1) that names one of the objects standing in
+the way, and points at the two commands that would do what was probably meant.
 
 ```
-error: dctl rmdir is not implemented in this build
-warning: The removal itself is not wired up yet, because it needs checking that
-a directory is empty and removing it. Nothing was changed. Parsing, target
-resolution, filter validation and the destructive gate all ran — re-run with
---dry-run to see the resolved request. See PLAN.md §11 for the phase that
-delivers the rest.
+$ dctl rmdir vault:r3 --force
+error: 'vault:r3' is not empty: it holds 'r3/a.txt'
+warning: Use `dctl purge` to remove a directory and everything in it, or `dctl delete` to remove the objects and leave the structure standing.
 ```
 
-In particular, **a `dctl rmdir` that exits non-zero today does not mean the
-directory was non-empty** — nothing was inspected. Directory enumeration arrives
-with the `PLAN.md` §11 **Phase 1 (B2 MVP)** milestone; when it does, a non-empty
-directory joins the list of failures below, never becomes a recursion.
+A path that does not exist at all is exit **3** (`dir_not_found`), with a note
+explaining that a vault stores no record of an empty directory and so cannot tell
+one that was never created from one that holds nothing.
+
+In particular, **a `dctl rmdir` that exits 1 saying the directory is not empty
+did inspect it**, and names the object it found. An earlier revision of this page
+said the opposite — that nothing was inspected and a non-zero exit meant only
+that the command was unimplemented — which would have taught a reader to ignore
+the one message that is telling them the truth. A non-empty directory is a
+failure here and never becomes a recursion.
 
 ```
 dctl rmdir REMOTE:PATH [flags]
@@ -71,9 +72,8 @@ dctl rmdir REMOTE:PATH [flags]
 
 ## Examples
 
-In this build every run that gets past validation ends with the engine refusal
-shown above; those two stderr lines are omitted from the examples below except
-where they are the point.
+Every example below runs in this build. Earlier revisions of this page prefaced
+them with an engine refusal that no longer exists.
 
 Preview the removal of one directory. The `[dry-run]` notice goes to stderr, the
 plan to stdout:
@@ -165,12 +165,18 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | Code | Name | When |
 |------|------|------|
 | 1 | `usage` | Unparseable command line; **the vault root (`REMOTE:`)**; a local, UNC, too-short-remote, empty or `..`-containing target; `--interactive` with no terminal to prompt on. |
-| 7 | `fatal_error` | The emptiness check and removal are unavailable. **Every run that gets past validation ends here today**, including `--dry-run`. Nothing was changed. |
+| 3 | `dir_not_found` | The directory does not exist. |
+| 7 | `fatal_error` | The remote is not configured and is not a known provider. |
+| 22 | `vault_locked` | Wrong password or recovery phrase, or a damaged envelope. |
+| 23 | `index_error` | The encrypted index or its journal could not be read or written. |
 | 25 | `cancelled` | An interactive confirmation was declined, or the run was interrupted with Ctrl-C. |
 
-Exit code 0 is not currently reachable. When the engine lands, 3
-(`dir_not_found`) becomes reachable for a directory that does not exist, and a
-non-empty directory will fail — as an error, never as a recursion.
+Exit **0** means the directory was removed. A **non-empty** directory is exit
+**1**, in the `usage` row above: it names the object that is in the way and never
+becomes a recursion. An earlier revision of this table said 0 and 3 were
+unreachable and that the emptiness check itself was unavailable — so a reader was
+told that a non-zero exit carried no information about emptiness, when it is
+precisely what it carries.
 
 ## See also
 

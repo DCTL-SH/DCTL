@@ -315,6 +315,28 @@ pub const DEFAULT_ARGON2_P_LANES: u32 = 4;
 /// Argon2id salt length (bytes).
 pub const DEFAULT_SALT_LEN: usize = 16;
 
+/// Entropy behind a generated recovery mnemonic (bytes).
+///
+/// 32 bytes = 256 bits, which BIP-39 encodes as **24 words**. Matched to
+/// [`KEY_LEN`] on purpose: the phrase is one of the ways into the *same* 32-byte
+/// root key, so giving it less entropy than the key it protects would make the
+/// recovery path the cheapest thing to attack. A 12-word (128-bit) phrase is the
+/// common wallet choice and is rejected here for that reason — the extra twelve
+/// words cost one more line on a sheet of paper and are the difference between
+/// the key's own strength and half of it.
+pub const RECOVERY_MNEMONIC_ENTROPY_BYTES: usize = KEY_LEN;
+/// Words in a generated recovery phrase — a *derived* fact, not a free choice.
+///
+/// BIP-39 packs 11 bits of entropy per word plus a checksum of one bit per 32
+/// bits of entropy, so 256 bits becomes `(256 + 8) / 11 = 24` words. Stated as a
+/// constant because hosts print it ("write these 24 words down") and check it,
+/// and the assertion below keeps it tied to the entropy rather than to memory.
+pub const RECOVERY_MNEMONIC_WORDS: usize = 24;
+const _: () = assert!(
+    RECOVERY_MNEMONIC_WORDS
+        == (RECOVERY_MNEMONIC_ENTROPY_BYTES * 8 + RECOVERY_MNEMONIC_ENTROPY_BYTES * 8 / 32) / 11
+);
+
 // Mandatory Argon2id parameter ceilings (FORMAT.md §2). Because envelope KDF
 // params are read from untrusted storage *before* the wrapped-root tag can be
 // checked, decoders MUST reject out-of-range params before ever running the KDF —
@@ -334,3 +356,28 @@ pub const ARGON2_MAX_P_LANES: u32 = 8;
 pub const DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024;
 /// Hard upper bound on `chunk_size` (16 MiB); objects outside `(0, MAX]` are rejected.
 pub const MAX_CHUNK_SIZE: u32 = 16 * 1024 * 1024;
+
+/// Leading bytes a random-access reader fetches to learn where an object's payload
+/// starts (`object::range`).
+///
+/// A DSF1 header is self-describing but variable-length: `head(68) ‖ kem_ct_len(2) ‖
+/// kem_wrap(K) ‖ wrapped_dek(72) ‖ meta_len(4) ‖ enc_metadata(M)`, with `K ≤ 65535` and
+/// `M ≤ 262144`. Asking for the worst case every time would be a 320 KiB request per
+/// object opened; asking for the minimum would be three round trips before a single byte
+/// of payload. Neither is right for a mount that opens files constantly.
+///
+/// One page is the balance. For the ordinary `kem_id = 0` object it covers `146` fixed
+/// bytes plus roughly 3.9 KiB of §4 metadata — a path hint, an mtime, a content type —
+/// which is every object a filesystem will ever produce, since §5 caps a path at 4096
+/// bytes and the rest of the record is fixed-width. It also covers a §12 single-recipient
+/// hybrid object, whose `kem_wrap` block is about 1.3 KiB. An object that needs more (a
+/// many-recipient share, an unusually large extension region) is not refused: the reader
+/// is told the exact length it still needs and issues one further, precisely-sized read.
+///
+/// Below a page there is nothing to gain — a filesystem read, a TLS record and an HTTP
+/// range response are all billed in units at least this large, so a smaller probe costs
+/// the same and only makes the second round trip more likely.
+pub const OBJECT_HEADER_PROBE_LEN: usize = 4096;
+/// The probe must at least reach `meta_len` for the common `kem_id = 0` object, or the
+/// "usually one request" claim above is simply false.
+const _: () = assert!(OBJECT_HEADER_PROBE_LEN >= OBJECT_HEAD_LEN + 2 + WRAPPED_DEK_LEN + 4);

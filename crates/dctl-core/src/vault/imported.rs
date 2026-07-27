@@ -39,7 +39,7 @@ impl Vault {
         keypair: &kem::RecipientKeypair,
     ) -> Result<[u8; KEY_ID_LEN]> {
         let key_id = keypair.key_id;
-        let dik1 = kem::serialize_dik1(&self.root_key, keypair)?;
+        let dik1 = kem::serialize_dik1(self.root()?, keypair)?;
         let key = format!("{}{}", layout::IMPORTED_KEY_PREFIX, hex::encode(key_id));
         let expected = ContentHash::blake3(&dik1);
         self.backend
@@ -82,7 +82,7 @@ impl Vault {
                     // "not a recipient" for a genuinely-owned object. Propagate and fail unlock.
                     Err(e) => return Err(e.into()),
                 };
-                match kem::parse_dik1(&self.root_key, bytes.as_ref()) {
+                match kem::parse_dik1(self.root()?, bytes.as_ref()) {
                     Ok(keypair) => {
                         // §13: key_id MUST equal the "k/<hex key_id>" path component.
                         if key_matches_path(key_str, &keypair.key_id) {

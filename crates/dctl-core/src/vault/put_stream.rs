@@ -60,7 +60,10 @@ impl Vault {
 
         // Seal the source straight to a temp object off the async runtime (heavy CPU +
         // blocking file I/O). Everything here is O(chunk_size)/O(buffer) memory.
-        let root_key = self.root_key.clone();
+        // A transient owned copy for the blocking sealer: `LockedSecret` is not `Clone`,
+        // so the root is copied into a `Zeroizing<[u8; 32]>` that wipes when the task
+        // returns. `seal_source_to_temp` still takes `&Zeroizing<[u8; 32]>`.
+        let root_key = Zeroizing::new(*self.root()?);
         let chunk_size = self.chunk_size;
         let source = source.to_path_buf();
         let meta_path = path.clone();

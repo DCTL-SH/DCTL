@@ -6,11 +6,20 @@
 //! Every [`put_file`](Vault::put_file) encrypts to a self-describing object, does a
 //! verified write to the backend, then commits the index — success is reported only
 //! after the durable index commit.
+//!
+//! Reads come in three shapes and the cost difference between them is the point:
+//! [`get_file`](Vault::get_file) buffers a whole object,
+//! [`get_file_to_path`](Vault::get_file_to_path) streams one at `O(chunk_size)`, and
+//! [`open_range_reader`](Vault::open_range_reader) serves a byte window by fetching only
+//! the chunks covering it — `O(window)` in egress as well as memory, which is what makes
+//! a mount and a seek possible. See [`range`] for what a partial read authenticates and
+//! what it deliberately cannot.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod error;
+pub mod range;
 mod vault;
 
 /// §12 asymmetric-recipient types (hybrid X25519 + ML-KEM-768), re-exported so callers can
@@ -19,4 +28,18 @@ mod vault;
 pub use dctl_crypto::kem;
 pub use dctl_index::Record;
 pub use error::{CoreError, Result};
-pub use vault::Vault;
+pub use vault::{NewVault, UnlockKey, Vault};
+
+/// Check a typed recovery phrase against BIP-39 without attempting an unlock.
+///
+/// Re-exported from the crypto core rather than reimplemented, because a host
+/// that validated phrases with its own copy of the word list would eventually
+/// accept one the KDF rejects — or worse, reject one it accepts, and tell
+/// somebody holding a correct phrase that it is wrong.
+///
+/// Hosts need this because [`Vault::unlock`] cannot answer the question that
+/// matters at recovery time. "No slot opened" covers both *you mistyped a word*
+/// and *this phrase belongs to a different vault*, and those have opposite
+/// remedies. BIP-39's checksum separates them, so a caller can say which one
+/// happened before spending an Argon2id derivation finding out.
+pub use dctl_crypto::kdf::validate_mnemonic as validate_recovery_phrase;

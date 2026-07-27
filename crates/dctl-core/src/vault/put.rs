@@ -28,7 +28,7 @@ impl Vault {
         // Seal into a self-describing DSF1 object (embeds its own root-wrapped DEK
         // + encrypted metadata). The backend key is the object's random file_id.
         let obj = object::seal(
-            &self.root_key,
+            self.root()?,
             data,
             &Metadata::new(path.as_str()),
             self.chunk_size,

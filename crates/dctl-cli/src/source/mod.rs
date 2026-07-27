@@ -50,24 +50,24 @@
 //! ## Reads are whole-buffer, and wiped on drop
 //!
 //! [`Source::read`] and [`Source::read_range`] return
-//! [`Zeroizing<Vec<u8>>`](zeroize::Zeroizing) rather than a `Read`. Two reasons,
-//! and only one of them is the core's:
+//! [`Zeroizing<Vec<u8>>`](zeroize::Zeroizing) rather than a `Read`. Plaintext
+//! that came out of a vault is key-adjacent material by the time it is in a
+//! buffer, and `PLAN.md` §7 wants it gone from memory when the buffer dies rather
+//! than left in a freed page. A plain store's bytes were never secret, but one
+//! return type means no caller has to know which it is holding — and wiping bytes
+//! that did not need wiping costs a `memset`.
 //!
-//! * Plaintext that came out of a vault is key-adjacent material by the time it
-//!   is in a buffer, and `PLAN.md` §7 wants it gone from memory when the buffer
-//!   dies rather than left in a freed page. A plain store's bytes were never
-//!   secret, but one return type means no caller has to know which it is
-//!   holding — and wiping bytes that did not need wiping costs a `memset`.
-//! * `dctl_core::Vault` exposes `get_file`, which decrypts and authenticates a
-//!   whole object, and nothing narrower. A streaming reader here would be a
-//!   façade over a buffer that already exists.
-//!
-//! That makes a vault read O(object) in memory. It is stated on
-//! [`Source::read_range`] and repeated in [`vault`] because it is the kind of
-//! cost that must be found in the documentation rather than in an OOM — and,
-//! since documentation is only read by people who already suspect a problem, it
-//! is also reported by [`Source::ranged_read`] so a command can say so out loud
-//! before spending anybody's egress budget. See [`ranged`].
+//! The *size* of that buffer is now the caller's to choose on both
+//! implementations. [`Source::read`] is whole-object by definition. A
+//! [`Source::read_range`] is O(window): a plain store issues a ranged `GET`, and
+//! a vault fetches and authenticates only the chunks covering the window
+//! (`docs/FORMAT.md` §3) rather than opening the whole object to slice it. That
+//! is a change — the vault used to transfer and decrypt everything, which cost
+//! +97 MB of resident memory to return a 10-byte window of a 95 MiB object, and
+//! it needed a pre-flight warning on `cat` to say so. Both the cost and the
+//! warning are gone. See [`vault`] for what a windowed read of a sealed object
+//! does and does not authenticate, and [`chunk_cache`] for why the chunks are
+//! kept between reads.
 //!
 //! ## The path vocabulary
 //!
@@ -80,17 +80,16 @@
 //! implementations would get right.
 
 pub mod assurance;
+pub mod chunk_cache;
 pub mod entry;
 pub mod open;
 pub mod plain;
-pub mod ranged;
 pub mod sizes;
 pub mod vault;
 
 pub use assurance::Assurance;
 pub use entry::Entry;
 pub use open::open;
-pub use ranged::RangedRead;
 pub use sizes::Sizes;
 
 use async_trait::async_trait;
@@ -179,15 +178,24 @@ pub trait Source: Send + Sync {
     /// a local file — `dctl cat --offset` on a file that shrank should report an
     /// honest short read, not a failure.
     ///
-    /// **Cost differs by implementation, sharply.** A plain store performs a
-    /// genuine ranged read: seeking 40 GB into an object costs one request. A
-    /// vault decrypts and authenticates the *whole* object and then slices,
-    /// because `dctl_core` exposes no ranged read — so memory and egress are
-    /// O(object), not O(window). See [`vault`].
+    /// **Both implementations serve a window at O(window), and an implementation
+    /// that cannot must not be added silently.** A plain store issues a ranged
+    /// `GET`; a vault computes the chunks covering the window from the object's
+    /// authenticated geometry and fetches exactly those (`docs/FORMAT.md` §3).
+    /// Seeking 40 GB into an object costs one request on either. A source that
+    /// served a window by moving the whole object would make `dctl cat --count 4`
+    /// a 40 GB transfer that returns four bytes and exits 0 — a cost discovered
+    /// on an invoice, with nothing tying it to the command. The vault did exactly
+    /// that until it learned to read a chunk range, and the announcement it
+    /// needed in the meantime is gone with it.
     ///
-    /// That difference is not left for the caller to discover. [`Source::ranged_read`]
-    /// reports it before the read happens, which is what lets `cat` warn about a
-    /// four-byte window that is about to cost a 40 GB download.
+    /// **What a window authenticates is not what a whole read authenticates.** On
+    /// a vault every returned byte carries a Poly1305 tag binding it to this
+    /// object at this chunk index, but the footer BLAKE3 and the object's
+    /// recorded whole-plaintext hash both cover bytes a window never fetched and
+    /// are therefore *not* checked here. That is by design and not a shortcut —
+    /// [`Source::verify`] is the read that makes the whole-object statement. See
+    /// [`vault`].
     ///
     /// # Errors
     /// As [`Source::read`].
@@ -197,19 +205,6 @@ pub trait Source: Send + Sync {
         offset: u64,
         length: Option<u64>,
     ) -> Result<Zeroizing<Vec<u8>>>;
-
-    /// What a [`Source::read_range`] on this source costs.
-    ///
-    /// Deliberately has no default. A new implementation must state its price,
-    /// because the wrong answer here is silent: a source that inherited
-    /// [`RangedRead::Windowed`] without meaning to would spend a caller's egress
-    /// budget without ever saying so, which is the exact failure this exists to
-    /// close. Being made to answer is cheap; discovering the answer on an
-    /// invoice is not.
-    ///
-    /// This is not a way to ask which implementation is in hand — see
-    /// [`ranged`] — but what the next read will move.
-    fn ranged_read(&self) -> RangedRead;
 
     /// Describe one object without reading it, or [`None`] if it is not there.
     ///

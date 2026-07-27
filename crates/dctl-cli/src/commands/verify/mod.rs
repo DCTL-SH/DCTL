@@ -30,10 +30,10 @@
 //!   BLAKE3.
 //!
 //! **Every selected object is read back in full here, whatever `--verify`
-//! says**, and the run warns when a cheaper strength was asked for. The reason
-//! is that the cheaper two cannot be performed at all with the primitives that
-//! exist, and performing something else while reporting the requested name would
-//! be the misreport `PLAN.md` §6 forbids:
+//! says**, and the run warns when a cheaper strength was asked for. One of the
+//! cheaper two cannot be performed at all with the primitives that exist; the
+//! other has not been designed. Performing something else while reporting the
+//! requested name would be the misreport `PLAN.md` §6 forbids:
 //!
 //! * `checksum` would need the provider's own checksum of the *stored object*
 //!   compared against one DCTL holds. `dctl_core::Vault` exposes no such value —
@@ -44,17 +44,20 @@
 //!   `checksum` is the *default*, that would make the bare `dctl verify
 //!   archive:` a command that proves nothing while looking like it proved
 //!   everything. It is the single worst outcome available here.
-//! * `sample` would need a ranged authenticated read.
-//!   [`Source::read_range`](crate::source::Source::read_range) on a vault
-//!   decrypts the whole object and slices it, because `dctl_core` has no
-//!   narrower call — so a "sample" of a vault costs O(object) memory instead of
-//!   O(chunk), reads exactly as much, and proves less. It would be strictly
-//!   worse than the thing it is meant to be cheaper than.
+//! * `sample` now *could* be built — [`Source::read_range`](crate::source::Source::read_range)
+//!   on a vault is a genuine ranged authenticated read, so spot-checking a few
+//!   windows of a huge object costs O(window) rather than O(object). It is still
+//!   not built, and the difference between "impossible" and "not yet written" is
+//!   exactly the sort of thing this project may not blur: what a `sample` would
+//!   have to decide — which windows, how many, and what a pass over 1% of a file
+//!   licenses anybody to say — is a design question, not a plumbing one, and
+//!   answering it badly produces a check that reads cheap and proves nothing.
 //!
 //! So the report records the strength that actually *ran* rather than the one
 //! that was requested, exactly as [`super::scrub`] does and for the same reason.
-//! The day `dctl-core` grows a ranged authenticated read and exposes a stored-
-//! object checksum, this becomes a real dial and the warning disappears.
+//! The day `dctl-core` exposes a stored-object checksum, and `sample` is
+//! designed rather than merely enabled, this becomes a real dial and the warning
+//! disappears.
 //!
 //! ## What a pass proves depends on the remote
 //!
@@ -138,8 +141,8 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     if !mode::proves_whole_plaintext(requested) {
         ctx.out.warn(format!(
             "--verify={} asks for a cheaper check than `{command}` can perform in this \
-             build: dctl-core exposes no stored-object checksum and no ranged \
-             authenticated read, so every selected object is read back in full",
+             build: dctl-core exposes no stored-object checksum, and no sampling \
+             strategy is defined, so every selected object is read back in full",
             mode::slug(requested)
         ));
     }
@@ -370,7 +373,7 @@ mod tests {
 
         {
             let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(&store));
-            let vault = Vault::init(backend, &index, "pw").await.unwrap();
+            let vault = Vault::init(backend, &index, "pw").await.unwrap().vault;
             vault.put_file("photos/a.jpg", b"aaa").await.unwrap();
             vault.put_file("notes.txt", b"n").await.unwrap();
         }

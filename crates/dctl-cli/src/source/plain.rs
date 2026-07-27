@@ -43,7 +43,7 @@ use crate::platform::path;
 use crate::remote::RemoteSpec;
 
 use super::entry::Entry;
-use super::{Assurance, Entries, RangedRead, Sizes, Source};
+use super::{Assurance, Entries, Sizes, Source};
 
 /// An object store, read without interpretation.
 pub struct PlainSource {
@@ -120,13 +120,6 @@ impl Source for PlainSource {
             Err(StoreError::RangeOutOfBounds { .. }) => Ok(Zeroizing::new(Vec::new())),
             Err(error) => Err(error.into()),
         }
-    }
-
-    fn ranged_read(&self) -> RangedRead {
-        // `Backend::get_range` issues a genuine ranged request, so seeking 40 GB
-        // into an object costs one request and transfers only the window. There
-        // is nothing here for `cat` to warn about at any object size.
-        RangedRead::Windowed
     }
 
     async fn stat(&self, path: &str) -> Result<Option<Entry>> {

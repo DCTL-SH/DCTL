@@ -123,7 +123,7 @@ dctl index rebuild archive:
 warning: a rebuild is a list-only pass, so the rows it writes carry no size and no content hash until each file is next read
 Files  Index
 -----  ------------------------------------
- 1204  /home/mx/.local/share/dctl/index.redb
+ 1204  /home/mx/.dctl/index/vault.redb
 ```
 
 Reconcile after a `scrub` reported `missing` objects — the index and the provider

@@ -17,8 +17,10 @@ That makes `copyto` the verb for "upload this and call it that" — the one a
 backup script reaches for when the destination name carries a date, a build
 number or a content hash. It is the same distinction as `cp` versus `cp` with an
 explicit target filename, and the same one rclone draws. Those arrows describe
-the intended addressing; the prefix inside a remote is not yet applied to the
-stored key, and *What runs today* says exactly what lands where instead.
+the addressing that runs: the path after the colon is applied to the stored key,
+so `dctl copyto ./report.txt archive:deep/nested/r.txt` stores
+`deep/nested/r.txt`. An earlier revision of this page said the prefix was not yet
+applied, which stopped being true without the page changing.
 
 **For a directory source the two verbs coincide.** A tree copied under an exact
 name is just a tree whose destination root is that name, so `dctl copyto ./site
@@ -91,44 +93,42 @@ copy    1.91 MiB  big.mov -> archive-2024.mov
 
 ### What runs today
 
-**`copyto` transfers real bytes now**, in the same two shapes as
-[`copy`](dctl_copy.md): filesystem to filesystem, and filesystem into a vault
-with `--no-traverse`. A renamed local copy is read, written and flushed; an
-upload is sealed, written with the verified write and committed to the index,
-after the password is acquired once at connect time.
+**`copyto` transfers real bytes**, in every direction `copy` reaches:
+filesystem to filesystem, filesystem into a vault, and a vault back out to the
+filesystem. A renamed local copy is read, written and flushed; an upload is
+sealed, written with the verified write and committed to the index, after the
+password is acquired once at connect time.
 
-`--no-traverse` is needed for the vault case because **listing a named remote is
-still unimplemented**, and that refusal has the same three consequences it has
-for `copy`:
+`--no-traverse` is **not** required for a vault destination any more: listing a
+vault works, so the destination is planned against what is actually stored. The
+flag still does what it says — skip the destination listing entirely — and is
+still the way to avoid the read-and-hash cost the vault comparison otherwise
+pays.
 
-* A vault **destination** must be planned with `--no-traverse`, which also skips
-  the "is `DEST` an existing directory?" lookup — so that particular refusal
-  cannot fire, and an existing object is never examined. The transfer is planned
-  as a `copy` with the reason `destination-not-listed`, whatever is already
-  there.
-* A vault **source** cannot be planned at all: `dctl copyto vault:a.tar ./a.tar`
-  stops at source enumeration with exit **7**. The engine implements downloads;
-  the command cannot reach them yet.
-* **Remote to remote** stops at the same place, and the engine refuses it a
-  second time if it ever gets past: a direct vault-to-vault path needs
-  re-encryption support `dctl-core` does not expose.
+A vault **source** is planned and downloaded: `dctl copyto archive:site-a/report.txt
+./out.txt` writes the plaintext, and `dctl moveto` removes the vault object after
+the local write is durable. Earlier revisions of this page said a `REMOTE:PATH`
+source "cannot be planned at all" and stopped at exit **7**; that was true and
+stopped being true without the page changing.
 
-**Addressing a vault is unfinished in exactly the way `copy` documents.** The
-name before the colon is resolved as a **directory relative to the working
-directory**, so `archive:` unlocks the vault in `./archive`; a remote defined
-with `dctl config create`, and the `b2:`/`s3:`/`r2:` shorthands, are not
-resolved there and fail to unlock with exit **22**. The logical path *after* the
-colon is not applied to the stored key, so an exact-name upload stores the
-destination's **last component** at the vault root: `dctl copyto ./dump.sql
-archive:backups/day.sql` stores `day.sql`, not `backups/day.sql`. The name is
-still honoured — that is the one thing `copyto` exists for — but the directory
-above it is not. See
-[copy's *What runs today*](dctl_copy.md#what-runs-today).
+**Remote to remote is still refused**, in both directions, and this one is real:
+a direct vault-to-vault path needs the re-encrypting transfer `dctl-core` does
+not expose, and a plain-to-plain path needs an engine that holds two backends at
+once. Neither is scheduled by `PLAN.md` §11.
+
+**Addressing a vault applies the whole path.** `dctl copyto ./dump.sql
+archive:backups/day.sql` stores `backups/day.sql` — the directory above the name
+is honoured along with the name. An earlier revision said only the **last
+component** was kept and the rest silently dropped at the vault root, which was a
+real defect and is fixed. See
+[copy's *What runs today*](dctl_copy.md#what-runs-today) for the history, which is
+worth reading before trusting any remaining addressing claim on this page.
 
 The family's data-safety refusals apply unchanged, all exit **7**: a **plain
 write into a directory that holds a vault**, a file **above the 1 GiB whole-file
-limit** (the core is whole-buffer; streaming is `PLAN.md` §16.2), a **pattern
-filter**, and **`--checksum`** when no hashes are available.
+limit** (the core is whole-buffer; streaming is `PLAN.md` §16.2), and
+**`--checksum`** when no hashes are available. Pattern filters are *not* on that
+list any more — they are honoured, as the Synopsis says.
 
 `--immutable` **is** honoured, at plan time: if `DEST` already names an object
 that would be replaced, the plan's single entry is an `update` and the run fails
@@ -288,7 +288,7 @@ the full list. The ones that change what this command does:
 | `--format`, `--json` | Render the plan as a table, one JSON document, or one JSON Lines record per action. |
 | `--min-size`, `--max-size` | Honoured. If they exclude the single named file, that is a usage error rather than a silent no-op. |
 | `--max-depth` | Honoured for a directory source. |
-| `--include`, `--exclude`, `--filter-from`, `--files-from` | **Refused** with exit 7, not ignored. |
+| `--include`, `--exclude`, `--filter-from`, `--files-from` | **Honoured.** A rule file that cannot be read or parsed is a usage error (exit **1**) naming the file and the line, never a run with the rules dropped. |
 | `--transfers`, `--bwlimit`, `--retries` | Parsed and **not consulted**. |
 | `--immutable` | **Honoured at plan time.** A `DEST` that already exists makes the entry an `update`, which fails the run with exit **7** before anything moves. A `DEST` that does not exist yet still transfers. Refused with `--no-traverse` (exit **1**). |
 | `-P`, `--progress` | A per-file bar showing the real pipeline stage. |

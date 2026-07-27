@@ -22,10 +22,21 @@
 //! apply ([`factor`]). Every unlock in the binary passes through here, so a
 //! command family added later inherits that refusal instead of having to
 //! remember it.
+//!
+//! ## Two ways in, resolved once
+//!
+//! A vault has two independent unlock paths — the password and the recovery
+//! phrase (`docs/FORMAT.md` §2) — and [`secret`] is the single place that
+//! decides which one a run uses. That matters more than it looks: the value of a
+//! second key is that it opens *everything*, so `ls`, `cat`, `copy` and
+//! `restore` must all accept a phrase without any of them being taught about it.
+//! They are, because they all arrive here.
 
 pub mod factor;
 pub mod open;
 pub mod password;
+pub mod phrase;
+pub mod secret;
 pub mod store;
 
 pub use open::{Session, open};

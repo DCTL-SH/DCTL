@@ -475,7 +475,8 @@ mod tests {
             let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(&store));
             let vault = Vault::init(backend, &index, "correct horse battery")
                 .await
-                .expect("a fresh vault initialises");
+                .expect("a fresh vault initialises")
+                .vault;
             let mut written = 0u64;
             for (path, bytes) in [
                 ("photos/2024/a.jpg", vec![7u8; 4096]),

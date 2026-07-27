@@ -8,6 +8,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use dctl_crypto::constants::{FILE_ID_LEN, KEM_ID_HYBRID, KEM_ID_NONE, KEY_LEN, OBJECT_HEAD_LEN};
@@ -19,6 +20,7 @@ use zeroize::Zeroizing;
 use super::put_stream::io_err;
 use super::{Vault, layout};
 use crate::error::{CoreError, Result};
+use crate::range::{self, RangeReader};
 
 /// Working-buffer size for the streaming decrypt-to-disk copy.
 const STREAM_BUF_LEN: usize = 128 * 1024;
@@ -76,7 +78,7 @@ impl Vault {
         // has already verified every chunk tag and `meta.size == plaintext_len`.
         let head = object::parse_head(&object)?;
         let opened = match head.kem_id {
-            KEM_ID_NONE => object::open(&self.root_key, &object)?,
+            KEM_ID_NONE => object::open(self.root()?, &object)?,
             // §12: recover `KW` via this vault's identity — inline recipient first, then
             // the §12.6 grant sidecar — then decode with it.
             KEM_ID_HYBRID => {
@@ -99,6 +101,66 @@ impl Vault {
             "decrypted and integrity-verified"
         );
         Ok(opened.plaintext)
+    }
+
+    /// Open the file at `path` for **random access**: a reader that serves any byte
+    /// window by fetching only the chunks covering it (`docs/FORMAT.md` §3).
+    ///
+    /// This is the narrow read [`get_file`](Vault::get_file) is not. `get_file` downloads
+    /// and decrypts the whole object, so a 10-byte window of a 95 MiB file costs 95 MiB of
+    /// egress and ~97 MB of resident memory, and a seek through a 40 GB film costs 40 GB
+    /// every time. A [`RangeReader`] costs one bounded header read to open and then
+    /// **one** ranged request per window, for exactly the covering chunks.
+    ///
+    /// Opening resolves the path the same way every other read does — local index first,
+    /// then the authoritative §5 name record — so it works cross-device with only the
+    /// password, and it decodes both `kem_id` paths: the symmetric owner path unwraps the
+    /// DEK under the vault root, and the §12 hybrid path recovers the per-object `KW`
+    /// first (inline recipient, then the §12.6 grant sidecar) exactly as `get_file` does.
+    ///
+    /// **Integrity.** Every window is authenticated per chunk, which binds each returned
+    /// byte to this object at this index (§3). The footer BLAKE3 and the metadata's
+    /// `content_blake3` are whole-object checks that no partial read can evaluate; they
+    /// are not faked here, and [`verify_file`](Vault::verify_file) — behind `dctl verify`
+    /// and `dctl scrub` — remains the read that makes the whole-object statement. See
+    /// [`crate::range`].
+    ///
+    /// Hold the reader for as long as the file is being read. It is what caches the
+    /// resolution, the geometry and the unwrapped DEK, and re-opening per window turns
+    /// one round trip into three.
+    ///
+    /// # Errors
+    /// [`CoreError::NotFound`] if the path resolves nowhere, [`CoreError::Integrity`] if
+    /// the object stops inside its own header, [`CoreError::Crypto`] if the header does
+    /// not authenticate under this vault's keys, and whatever the backend reported.
+    #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
+    pub async fn open_range_reader(&self, path: &str) -> Result<RangeReader> {
+        let path = path::normalize(path)?;
+        let object_key = self
+            .lookup_object_key(&path)
+            .await?
+            .ok_or_else(|| CoreError::NotFound(path.clone()))?;
+        tracing::debug!(object = %object_key, "resolved object key for ranged read");
+        let key = ObjectKey::new(object_key);
+
+        let (prefix, header_len) = range::fetch_header(self.backend.as_ref(), &key, &path).await?;
+        let header = match object::parse_head(&prefix)?.kem_id {
+            KEM_ID_NONE => object::RangeHeader::open(self.root()?, &prefix[..header_len])?,
+            // §12: the same `KW` recovery `get_file` performs, and it needs only the head
+            // and the inline `kem_wrap` block — both inside the header prefix already
+            // fetched, so the hybrid path costs no extra read of the object either.
+            KEM_ID_HYBRID => {
+                let kw = self.recover_object_kw(&prefix).await?;
+                object::RangeHeader::open_with_kw(&kw, &prefix[..header_len])?
+            }
+            other => return Err(unsupported_kem_id(other)),
+        };
+        Ok(RangeReader::new(
+            Arc::clone(&self.backend),
+            key,
+            header,
+            path,
+        ))
     }
 
     /// Fetch and decrypt the file at `logical_path` straight to the local file `dest`, at
@@ -153,7 +215,10 @@ impl Vault {
             KEM_ID_NONE => {
                 let obj_temp = tempfile::NamedTempFile::new().map_err(io_err)?;
                 self.backend.get_to_path(&key, obj_temp.path()).await?;
-                let root_key = self.root_key.clone();
+                // A transient owned copy for the blocking task: `LockedSecret` is not
+                // `Clone` (duplicating a pinned secret must be explicit), so the root is
+                // copied into a `Zeroizing<[u8; 32]>` that wipes when the task returns.
+                let root_key = Zeroizing::new(*self.root()?);
                 let dest = dest.to_path_buf();
                 let err_path = path.clone();
                 tokio::task::spawn_blocking(move || -> Result<()> {
@@ -204,7 +269,7 @@ impl Vault {
             // `kem_id=0`: stream-decrypt to a sink at O(chunk_size) — no plaintext buffer.
             KEM_ID_NONE => {
                 let mut sink = std::io::sink();
-                object::open_stream(&self.root_key, &object, &mut sink)?;
+                object::open_stream(self.root()?, &object, &mut sink)?;
             }
             // `kem_id=1` (§12): recover `KW` (inline recipient first, then the §12.6 grant
             // sidecar), then the buffered opener verifies every chunk tag, the footer, and
