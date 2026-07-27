@@ -208,6 +208,17 @@ pub async fn run(ctx: &Ctx, args: &MountArgs) -> Result<()> {
         return Err(no_filesystem_layer());
     }
 
+    // `backend::attached` answers "was a FUSE layer compiled in"; this answers
+    // "can this machine actually mount", which is a different question and the
+    // one that was previously guessed at from an errno *after* the attempt.
+    //
+    // It runs BEFORE the vault is opened on purpose. A refusal here costs no
+    // password prompt and unlocks no keys — and the previous ordering meant a
+    // mount that could never succeed still asked for the vault password first,
+    // holding an unlocked root key in memory to reach a failure that was
+    // knowable beforehand.
+    crate::mount::preflight().into_result()?;
+
     serve(ctx, args, &source).await
 }
 

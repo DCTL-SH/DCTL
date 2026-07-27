@@ -109,10 +109,12 @@ pub mod errno;
 pub mod fs;
 pub mod handle;
 pub mod inode;
+pub mod preflight;
 pub mod refuse;
 pub mod session;
 pub mod state;
 pub mod tree;
 
 pub use config::MountConfig;
+pub use preflight::check as preflight;
 pub use session::mount;
