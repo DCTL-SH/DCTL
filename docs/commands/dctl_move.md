@@ -90,10 +90,11 @@ the sources gone regardless, remove them explicitly with
 **Comparison, filters and failure policy** are the family's, identical to
 [`copy`](dctl_copy.md): size and modification time by default with a one-second
 tolerance, `--checksum` or `--size-only` to change it, `--ignore-existing` and
-`--update` to skip — including the substitution a vault side forces, where the
-default becomes a content comparison and the run warns why, which matters more
-here than anywhere else because what this command does with "identical" is
-delete the source; every filter honoured through one engine
+`--update` to skip. What "identical" means matters more here than anywhere else,
+because what this command does with it is delete the source — so it is worth
+reading `copy`'s note on the one edit the default cannot see (same size, same
+timestamp) and reaching for `--checksum` when a source is rewritten by something
+that preserves timestamps; every filter honoured through one engine
 (`--include`, `--exclude`, `--filter-from`, `--files-from`, `--min-size`,
 `--max-size`, `--max-depth`); per-file failures counted and survived (exit 6), fatal
 failures stopping the run. Symbolic links are never followed and are counted and

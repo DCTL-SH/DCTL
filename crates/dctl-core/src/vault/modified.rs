@@ -5,12 +5,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 /// When the content being stored was last modified, as the caller knows it.
 ///
 /// A **required argument of every write**, and an enum rather than an
-/// `Option<i64>`, because the difference is the whole point. Each write path
-/// used to stamp [`Modified::now_unix`] into the index record on its own
-/// authority: a true statement about the *write*, and no statement at all about
-/// the file the write was made from. A vault destination could therefore never
-/// match its source by modification time, so every incremental `copy` found the
-/// whole dataset "modified" and re-sent it — nightly, forever.
+/// `Option<i64>`, because the difference is the whole point. Each write path used
+/// to stamp the clock into the index record on its own authority: a true
+/// statement about the *write*, and no statement at all about the file the write
+/// was made from. A vault destination could therefore never match its source by
+/// modification time, so every incremental `copy` found the whole dataset
+/// "modified" and re-sent it — nightly, forever.
 ///
 /// An optional parameter would have fixed that call site and left the next one
 /// free to omit it, which is the same defect waiting to be reintroduced by
@@ -32,9 +32,14 @@ pub enum Modified {
     /// The content came into being during this write, so the clock is the honest
     /// answer rather than a substitute for one.
     ///
-    /// Reached by a stream with no file behind it (`dctl rcat` reads standard
-    /// input) and by an object created empty (`dctl touch`). Both genuinely
-    /// originate now; neither is copied from a source whose time was lost.
+    /// Reached by a stream with no file behind it: `dctl rcat` spools standard
+    /// input to a temporary file and stores that, and the temporary file's own
+    /// modification time is the moment of the spool — a number that would look
+    /// exactly like a real source timestamp to every later comparison. Saying
+    /// "now" records the same instant while claiming only what is true.
+    ///
+    /// Resolved at the commit rather than by the caller, so a caller that means
+    /// "now" cannot spell it as a timestamp captured earlier in the run.
     Now,
     /// A source exists but its modification time could not be established.
     ///

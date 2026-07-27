@@ -381,7 +381,9 @@ sequenceDiagram
    expected value.
 5. **Verified write** of the authoritative `n/*` name record
    (`seal_record` → path → `file_id`).
-6. **Commit the index record** — *this* is what makes the file "stored".
+6. **Commit the index record** — *this* is what makes the file "stored". Its
+   `modified_unix` is the `Modified` the **caller** supplied, never the clock:
+   see below.
 7. GC the superseded object (delete-last), if the path previously mapped to a
    different `file_id`.
 
@@ -402,6 +404,22 @@ sequenceDiagram
 
 `Vault::put_file` is the buffered equivalent for small data: same order, same
 guarantees, whole plaintext in RAM.
+
+**Every put takes a `Modified`, and it is required.** The index record's
+`modified_unix` describes the *content*, not the write — `Modified::At(seconds)`
+for a copy of something that already had an age, `Modified::Now` for content that
+originates in the call (a pipe, an object created empty), `Modified::Unknown` when
+a source exists but its time could not be read, which is recorded as absence
+rather than as a fabricated `now`.
+
+It is an enum and a required argument rather than an `Option` because the three
+are genuinely different claims and the wrong one is expensive. Every put path used
+to stamp `now_unix()` on its own authority, which is true about the write and says
+nothing about the file it was made from; a vault destination could therefore never
+match its source by modification time, so `dctl copy` found the entire dataset
+"modified" on every run and re-uploaded it, and `dctl check` called a tree it had
+just written entirely different. Naming the case at each call site is what makes
+that impossible to reintroduce by omission.
 
 ### 5.3 Get a file
 

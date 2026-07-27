@@ -1560,6 +1560,119 @@ fn size_only_is_still_honoured_exactly_against_a_vault() {
         .stderr(predicates::str::contains("size-only"));
 }
 
+#[test]
+fn backup_and_restore_return_the_dates_as_well_as_the_bytes() {
+    // `backup` and `restore` are the pair the whole tool is for, and they are a
+    // separate code path from `copy` — `backup` streams through
+    // `put_file_from_path` and `restore` writes through `get_file_to_path`, so a
+    // fix applied to the transfer engine reaches neither of them.
+    //
+    // A restore that returns the right bytes under the right names with every
+    // timestamp set to the moment of the restore has not reproduced the tree. It
+    // has produced one that every tool sorting or syncing by date reads as
+    // entirely rewritten — including this one, on the very next `dctl check`.
+    let sandbox = aged_source_and_vault();
+    let source_modified = whole_seconds(
+        std::fs::metadata(sandbox.path("src/a.txt"))
+            .expect("the fixture file")
+            .modified()
+            .expect("this platform reports modification times"),
+    );
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("backup")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("restore")
+        .arg(format!("{VAULT_NAME}:"))
+        .arg(sandbox.path("recovered"))
+        .assert()
+        .success();
+
+    assert_eq!(sandbox.read("recovered/a.txt"), b"first");
+    assert_eq!(
+        whole_seconds(
+            std::fs::metadata(sandbox.path("recovered/a.txt"))
+                .expect("the restored file")
+                .modified()
+                .expect("a modification time")
+        ),
+        source_modified,
+        "a restored file must carry the time it was backed up with"
+    );
+
+    // The property that makes it more than cosmetic: the restored tree compares
+    // equal to the original, so it can be backed up again for nothing.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("check")
+        .arg(sandbox.path("recovered"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success()
+        .stdout("");
+}
+
+#[test]
+fn touch_stores_a_chosen_time_in_a_vault_and_still_refuses_to_move_one() {
+    // The half of `--timestamp` that became possible, and the half that did not.
+    //
+    // Creating an object with a chosen time used to be refused because the write
+    // took no timestamp; it takes one now, so the flag is honoured and `lsl`
+    // prints the second that was asked for rather than the second of the write.
+    // Re-stamping an object the vault already holds is a different gap — it needs
+    // a call that edits an existing index row — and it still refuses, loudly, at
+    // exit 7.
+    let sandbox = aged_source_and_vault();
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("touch")
+        .args(["-t", "2024-05-01T12:00:00Z"])
+        .arg(format!("{VAULT_NAME}:dated"))
+        .assert()
+        .success();
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("lsl")
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("2024-05-01T12:00:00Z dated"));
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("touch")
+        .args(["-t", "2024-06-01T12:00:00Z"])
+        .arg(format!("{VAULT_NAME}:dated"))
+        .assert()
+        .code(7)
+        .stderr(predicates::str::contains("re-stamping"));
+
+    // …and the refusal changed nothing, which is the part worth proving.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("lsl")
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("2024-05-01T12:00:00Z dated"));
+}
+
 // ── the harness itself ────────────────────────────────────────────────────────
 
 #[test]

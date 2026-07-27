@@ -317,8 +317,10 @@ fn advise(ctx: &Ctx, args: &MountArgs) {
 
 /// Describe the mount on stderr at `-v`.
 fn report(ctx: &Ctx, source: &Source, args: &MountArgs) {
-    ctx.out
-        .info(format!("mounting {source} at {}", args.mountpoint.display()));
+    ctx.out.info(format!(
+        "mounting {source} at {}",
+        args.mountpoint.display()
+    ));
 
     // The backend actually being used, never the one `PLAN.md` §15 prefers — see
     // [`backend::attached`] for why naming the preference here would tell a macOS

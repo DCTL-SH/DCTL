@@ -296,18 +296,19 @@ $ echo $?
 ## Options
 
 ```
+      --read-only                  Serve the filesystem read-only
       --allow-other                Let other users access the mount
       --allow-root                 Let root access the mount, without opening it to everyone
-      --attr-timeout <DURATION>    How long the kernel may cache file attributes [default: 1s]
-      --buffer-size <SIZE>         In-memory read-ahead buffer held per open file [default: 16M]
       --daemon                     Detach and run in the background
-      --dir-cache-time <DURATION>  How long a directory listing is cached before it is re-read [default: 5m]
-  -h, --help                       help for mount
-      --no-modtime                 Do not read modification times, reporting the mount time instead
-      --read-only                  Serve the filesystem read-only
-      --vfs-cache-mode <MODE>      How much of a file the VFS keeps on local disk [default: off] [possible values: off, minimal, writes, full]
-      --vfs-read-ahead <SIZE>      Extra data to fetch past the end of a read, when the VFS cache is on
       --volname <NAME>             Name shown for the volume in the desktop file manager
+      --dir-cache-time <DURATION>  How long a directory listing is cached before it is re-read [default: 5m]
+      --vfs-cache-mode <MODE>      How much of a file the VFS keeps on local disk [default: off] [possible values: off, minimal, writes, full]
+      --vfs-read-ahead <SIZE>      Extra data to fetch past the end of a read, when the VFS cache is on [default: 0]
+      --buffer-size <SIZE>         In-memory read-ahead buffer held per open file [default: 16M]
+      --attr-timeout <DURATION>    How long the kernel may cache file attributes [default: 1s]
+      --no-modtime                 Do not read modification times, reporting the mount time instead
+  -h, --help                       Print help (see more with '--help')
+  -V, --version                    Print version
 ```
 
 Both positionals are required, in order: `<REMOTE:>` — a bare `REMOTE:` for the

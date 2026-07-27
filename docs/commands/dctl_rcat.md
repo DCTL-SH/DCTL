@@ -33,6 +33,13 @@ ceiling *after* the producer had run. Spooling moves the ceiling to free space i
 the temporary directory, which is a resource an operator can see, measure and
 change.
 
+**The modification time recorded is the moment of the write**, and that is the
+only honest answer available: a pipe has no modification time, and the spool file
+that carries it does have one — the instant of the capture — which would look
+exactly like a real source timestamp to every later comparison. So the core is
+told `Modified::Now` explicitly rather than being left to read the temporary
+file's own.
+
 **The cost of that choice is stated rather than buried: the plaintext touches the
 local disk before it is sealed.** The spool file is created with owner-only
 permissions and an unguessable name, it is unlinked when the command ends — on

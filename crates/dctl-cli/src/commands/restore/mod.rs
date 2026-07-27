@@ -473,6 +473,7 @@ mod tests {
             logical: path.to_string(),
             size,
             measured: true,
+            modified: dctl_core::Modified::At(1_700_000_000),
         }
     }
 

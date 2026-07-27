@@ -60,7 +60,7 @@ under active refactor, `Planned` means specified but not built.
 | **Asymmetric sharing** | `kem_id=1` hybrid recipient wrap, grant sidecars (add/remove without re-upload) | Done (assumes a **shared** backend) |
 | **Shared-object discovery** | DGD1 discovery (`discover_shared` / `get_shared`) | Done |
 | **Imported keys** | DIK1 imported-key store, multi-identity open | Done |
-| **`mount`** | FUSE-style mount of a vault | **Stub / partial** — do not rely on it |
+| **`mount`** | Read-only FUSE mount of a vault: chunk-ranged reads, inferred directories, `EROFS` on every write | Implemented on Linux (FUSE3) and macOS (macFUSE); Windows refuses by name (needs WinFSP). **Not yet exercised against a live kernel** — the logic is unit-tested end to end over a real backend, but no mount has been attached on a machine with the FUSE extension loaded |
 | **Reference decoder + KAT** (`dctl-decode`) | Dependency-free C99 decoder + cross-validation | Done |
 
 See [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) for the current per-area

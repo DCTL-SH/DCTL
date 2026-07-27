@@ -69,6 +69,17 @@
 //! does and does not authenticate, and [`chunk_cache`] for why the chunks are
 //! kept between reads.
 //!
+//! ## And a hint, which is not a fourth capability
+//!
+//! [`Source::prefetch`] sits beside the three above and is deliberately not one
+//! of them: it returns nothing, promises nothing, and cannot fail in any way a
+//! caller could act on. It exists because `PLAN.md` §15 makes *latency*, not
+//! decryption, the thing a streaming mount has to hide — a player asking for
+//! chunk *k* should find *k+1* already fetched — and only the source knows what
+//! "the next chunk" is. The caller says where a reader is heading; each
+//! implementation decides what that is worth, and one of the two decides it is
+//! worth nothing (see [`plain`], which has no cache for a fetch to land in).
+//!
 //! ## The path vocabulary
 //!
 //! Every path crossing this trait is a **logical path**: `/`-separated, NFC, no

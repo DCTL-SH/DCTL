@@ -323,7 +323,9 @@ impl MountState {
             }
             // The two synthetic entries come first, so a child's own position is
             // its index plus two.
-            let position = u64::try_from(index).unwrap_or(u64::MAX).saturating_add(leading);
+            let position = u64::try_from(index)
+                .unwrap_or(u64::MAX)
+                .saturating_add(leading);
             let number = interior.inodes.intern(&child.path, child.kind);
             entries.push(DirEntry {
                 ino: number,
@@ -361,7 +363,7 @@ impl MountState {
     /// # Errors
     /// Whatever listing the root reported.
     pub async fn statfs(&self) -> Result<Totals> {
-        let listing = self.listing(&self.config.root.clone()).await?;
+        let listing = self.listing(&self.config.root).await?;
         Ok(Totals {
             bytes: listing.subtree_bytes,
             objects: listing.subtree_objects,
@@ -504,7 +506,11 @@ impl MountState {
             return;
         }
         let from = offset.saturating_add(size);
-        if !self.interior().handles.claim_read_ahead(handle, from, window) {
+        if !self
+            .interior()
+            .handles
+            .claim_read_ahead(handle, from, window)
+        {
             return;
         }
 
@@ -529,9 +535,7 @@ impl MountState {
     /// precisely the failure this module's no-panic rule exists to prevent. The
     /// worst a recovered lock can carry is a stale recency counter in a cache.
     fn interior(&self) -> MutexGuard<'_, Interior> {
-        self.interior
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
+        self.interior.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
@@ -663,7 +667,9 @@ mod tests {
             };
             let size = entry.size.unwrap_or(0);
             let content = Self::content(path, size);
-            let start = usize::try_from(offset).unwrap_or(usize::MAX).min(content.len());
+            let start = usize::try_from(offset)
+                .unwrap_or(usize::MAX)
+                .min(content.len());
             let end = length
                 .map_or(content.len(), |len| {
                     start.saturating_add(usize::try_from(len).unwrap_or(usize::MAX))
@@ -747,7 +753,13 @@ mod tests {
         // ENOENT is a normal answer every program handles; reporting it as a
         // failure would make a missing file look like broken hardware.
         let (_, state) = mounted(&[("a.txt", Some(3))]);
-        assert!(state.lookup(INodeNo::ROOT, "b.txt").await.unwrap().is_none());
+        assert!(
+            state
+                .lookup(INodeNo::ROOT, "b.txt")
+                .await
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[tokio::test]
@@ -762,7 +774,11 @@ mod tests {
         // Nothing stores `photos`; it exists because `photos/a.jpg` does, and the
         // mount has to be able to walk into it.
         let (_, state) = mounted(&[("photos/a.jpg", Some(9))]);
-        let dir = state.lookup(INodeNo::ROOT, "photos").await.unwrap().unwrap();
+        let dir = state
+            .lookup(INodeNo::ROOT, "photos")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(dir.kind, fuser::FileType::Directory);
         let file = state.lookup(dir.ino, "a.jpg").await.unwrap().unwrap();
         assert_eq!(file.size, 9);
@@ -773,7 +789,11 @@ mod tests {
         // The only place a directory's existence is recorded: `stat`ing it
         // through the source would report that it is not there.
         let (_, state) = mounted(&[("photos/a.jpg", Some(9))]);
-        let dir = state.lookup(INodeNo::ROOT, "photos").await.unwrap().unwrap();
+        let dir = state
+            .lookup(INodeNo::ROOT, "photos")
+            .await
+            .unwrap()
+            .unwrap();
         let again = state.getattr(dir.ino).await.unwrap().unwrap();
         assert_eq!(again.kind, fuser::FileType::Directory);
         assert_eq!(again.ino, dir.ino);
@@ -824,7 +844,14 @@ mod tests {
         let attr = state.lookup(INodeNo::ROOT, "a.txt").await.unwrap().unwrap();
         let (handle, _) = state.open(attr.ino).unwrap();
         assert_eq!(state.read(handle, 2, 100).await.unwrap().unwrap().len(), 2);
-        assert!(state.read(handle, 400, 100).await.unwrap().unwrap().is_empty());
+        assert!(
+            state
+                .read(handle, 400, 100)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -1005,7 +1032,11 @@ mod tests {
             .collect();
         assert_eq!(names, vec![".", "..", "2024"]);
         assert!(
-            state.lookup(INodeNo::ROOT, "secret.txt").await.unwrap().is_none(),
+            state
+                .lookup(INodeNo::ROOT, "secret.txt")
+                .await
+                .unwrap()
+                .is_none(),
             "a file outside the mounted subtree was reachable"
         );
     }
@@ -1073,5 +1104,159 @@ mod tests {
         state.forget(attr.ino, 1);
         let again = state.lookup(INodeNo::ROOT, "a.txt").await.unwrap().unwrap();
         assert_eq!(again.ino, attr.ino);
+    }
+
+    /// The same operations against a **real** source over a **real** backend.
+    ///
+    /// The fixture above is a stand-in for the parts of a source the mount does
+    /// not care which it got, and it is the right tool for the offset arithmetic
+    /// and the cache behaviour — but it is written by the same hand as the code
+    /// it checks, and a shared misunderstanding would pass both. These drive
+    /// [`PlainSource`](crate::source::plain::PlainSource) over
+    /// [`LocalFs`](dctl_store::LocalFs), which is the implementation `dctl ls`
+    /// and `dctl cat` use for a `local:` remote: real directory paging, real
+    /// ranged reads, real `stat`.
+    ///
+    /// The sealed source is not driven here because it is already driven end to
+    /// end, against a real vault with a metered backend, in
+    /// [`crate::source::vault`] — including the property this mount depends on
+    /// most, that a window transfers the window and not the object.
+    mod over_a_real_backend {
+        use super::*;
+        use crate::source::plain::PlainSource;
+        use dctl_store::{Backend, LocalFs};
+        use tempfile::TempDir;
+
+        /// A directory of real files, served through the real plain source.
+        fn served(files: &[(&str, &[u8])]) -> (TempDir, MountState) {
+            let root = TempDir::new().expect("a temporary directory");
+            for (path, bytes) in files {
+                let full = root.path().join(path);
+                if let Some(parent) = full.parent() {
+                    std::fs::create_dir_all(parent).expect("a parent directory");
+                }
+                std::fs::write(&full, bytes).expect("a file");
+            }
+            let backend: Arc<dyn Backend> = Arc::new(LocalFs::new(root.path()));
+            let source: Arc<dyn Source> = Arc::new(PlainSource::new(backend));
+            let state = MountState::new(
+                source,
+                config("", 0),
+                Identity::capture(Path::new("."), false),
+            );
+            (root, state)
+        }
+
+        #[tokio::test]
+        async fn a_tree_of_real_files_is_walked_the_way_a_shell_walks_it() {
+            // The whole read path in one test: opendir, readdir, lookup into a
+            // subdirectory, and a read of what is found there.
+            let (_root, state) = served(&[
+                ("top.txt", b"top"),
+                ("photos/2024/note.txt", b"hello from the vault"),
+                ("photos/big.bin", &[7u8; 4096]),
+            ]);
+
+            let (root_dir, _) = state.opendir(INodeNo::ROOT).await.unwrap().unwrap();
+            let names: Vec<String> = state
+                .readdir(INodeNo::ROOT, root_dir, 0)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect();
+            assert_eq!(names, vec![".", "..", "photos", "top.txt"]);
+
+            let photos = state
+                .lookup(INodeNo::ROOT, "photos")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(photos.kind, fuser::FileType::Directory);
+
+            let year = state.lookup(photos.ino, "2024").await.unwrap().unwrap();
+            let note = state.lookup(year.ino, "note.txt").await.unwrap().unwrap();
+            assert_eq!(note.size, 20);
+
+            let (handle, kind) = state.open(note.ino).unwrap();
+            assert_eq!(kind, Kind::File);
+            let bytes = state.read(handle, 0, 64).await.unwrap().unwrap();
+            assert_eq!(bytes.as_slice(), b"hello from the vault");
+            assert!(state.release(handle));
+        }
+
+        #[tokio::test]
+        async fn a_window_of_a_real_file_is_exactly_the_window() {
+            // What a player seeking into a film asks for, against bytes that are
+            // really on disk rather than a fixture's arithmetic.
+            let content: Vec<u8> = (0..4096u32).map(|byte| byte as u8).collect();
+            let (_root, state) = served(&[("film.bin", &content)]);
+
+            let attr = state
+                .lookup(INodeNo::ROOT, "film.bin")
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(attr.size, 4096);
+            let (handle, _) = state.open(attr.ino).unwrap();
+
+            for (offset, size) in [(0u64, 16u32), (1_000, 100), (4_090, 6)] {
+                let window = state.read(handle, offset, size).await.unwrap().unwrap();
+                let from = usize::try_from(offset).unwrap();
+                let to = from + usize::try_from(size).unwrap();
+                assert_eq!(
+                    window.as_slice(),
+                    &content[from..to],
+                    "window at {offset}+{size}"
+                );
+            }
+
+            // Past the end is short rather than an error — how EOF is signalled.
+            assert!(
+                state
+                    .read(handle, 5_000, 16)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+
+        #[tokio::test]
+        async fn statfs_counts_what_is_really_there() {
+            let (_root, state) = served(&[("a.bin", &[0u8; 100]), ("d/b.bin", &[0u8; 200])]);
+            let totals = state.statfs().await.unwrap();
+            assert_eq!(totals.bytes, Some(300));
+            assert_eq!(totals.objects, 2);
+        }
+
+        #[tokio::test]
+        async fn a_name_that_is_not_there_is_absent_and_not_an_error() {
+            let (_root, state) = served(&[("a.bin", b"x")]);
+            assert!(
+                state
+                    .lookup(INodeNo::ROOT, "b.bin")
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+
+        #[tokio::test]
+        async fn an_empty_directory_does_not_exist_because_nothing_implies_it() {
+            // The consequence of inferring directories from paths, visible
+            // through the mount: `mkdir` on a store makes nothing, so a
+            // directory with no objects under it is not there to be found.
+            let (root, state) = served(&[("a.bin", b"x")]);
+            std::fs::create_dir(root.path().join("empty")).expect("a real directory");
+
+            let (handle, _) = state.opendir(INodeNo::ROOT).await.unwrap().unwrap();
+            let names: Vec<String> = state
+                .readdir(INodeNo::ROOT, handle, 0)
+                .unwrap()
+                .into_iter()
+                .map(|entry| entry.name)
+                .collect();
+            assert_eq!(names, vec![".", "..", "a.bin"]);
+        }
     }
 }

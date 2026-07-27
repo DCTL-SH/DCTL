@@ -174,7 +174,10 @@ mod tests {
         .vault;
 
         for (path, bytes) in files {
-            vault.put_file(path, bytes, dctl_core::Modified::Now).await.expect("a verified write");
+            vault
+                .put_file(path, bytes, dctl_core::Modified::Now)
+                .await
+                .expect("a verified write");
         }
         (dir, vault)
     }

@@ -617,11 +617,11 @@ impl StageDriver for Engine {
     ///
     /// Every arm also answers *when the content last changed*, because that fact
     /// belongs to the content and the destination has to record it — see
-    /// [`super::staged`]. Three of the five can: a local file is asked through
-    /// the same handle its bytes were read from, and a vault object carries the
-    /// time in its index row. A plain object store cannot, and says so rather
-    /// than substituting the clock: what it reports is when the provider accepted
-    /// the object, which is a true fact about a different event.
+    /// [`super::staged`]. Four of the five can: a local file is asked through the
+    /// same handle its bytes were read from, and a vault object carries the time
+    /// in its index row. A plain object store cannot, and says so rather than
+    /// substituting the clock: what it reports is when the provider accepted the
+    /// object, which is a true fact about a different event.
     async fn read(&self, entry: &PlanEntry) -> Result<()> {
         self.check_size(entry)?;
 
@@ -977,12 +977,16 @@ async fn read_local(path: &std::path::Path) -> Result<Staged> {
     };
 
     let mut file = tokio::fs::File::open(path).await.map_err(at)?;
-    let modified = file
-        .metadata()
-        .await
-        .map_or(Modified::Unknown, |meta| Modified::of(&meta));
+    let metadata = file.metadata().await.ok();
+    let modified = metadata.as_ref().map_or(Modified::Unknown, Modified::of);
 
-    let mut bytes = Zeroizing::new(Vec::new());
+    // Sized from the same metadata, so the ordinary case reads into one
+    // allocation. That is not only speed: a `Vec` that grows leaves the old
+    // buffer's plaintext behind in freed memory, and `Zeroizing` wipes the
+    // buffer it still owns rather than every buffer this value ever had.
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        metadata.map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(0)),
+    ));
     file.read_to_end(&mut bytes).await.map_err(at)?;
 
     Ok(Staged::new(bytes, modified))
@@ -1048,62 +1052,30 @@ async fn write_durably(path: &std::path::Path, bytes: &[u8], modified: Modified)
 /// Fill the staging file with `bytes`, stamp it with `modified`, and put both on
 /// stable storage — leaving it ready to publish with a rename.
 ///
-/// The stamp and the `fsync` happen together on the blocking pool because Tokio
-/// wraps neither timestamp call: `tokio::fs::File` offers `set_len` and
-/// `set_permissions` and no `set_times`, so a std handle has to be reached for.
-/// Doing both there costs one hop instead of two, and — more importantly — keeps
-/// the ordering in one place: the time is set *before* the sync, so the metadata
-/// the sync flushes is the metadata the file is published with.
+/// The order is the contract: the time is set *before* the `fsync`, so the
+/// metadata the sync flushes is the metadata the file is published with.
 async fn fill(staging: &std::path::Path, bytes: &[u8], modified: Modified) -> Result<()> {
     use tokio::io::AsyncWriteExt as _;
 
     let mut file = tokio::fs::File::create(staging).await?;
     file.write_all(bytes).await?;
 
-    // Resolved before the handle is handed over: `Modified::Now` must mean the
-    // moment of the write, and a time this platform cannot represent leaves the
-    // file with the one it was written at rather than failing a transfer whose
-    // bytes are perfectly correct.
-    let when = modified.resolve().and_then(system_time);
-    let file = file.into_std().await;
+    // Explicit, and not redundant with the `sync_all` below. `tokio::fs::File`
+    // performs writes on the blocking pool and stashes a failure from the last
+    // one in `last_write_err`; that error is surfaced by `poll_flush` and
+    // *swallowed* by `complete_inflight`, which is what both `sync_all` and
+    // `into_std` call. Without this line a write that failed after the final
+    // `write_all` returned would be dropped on the floor, and the rename below
+    // would publish a truncated file as a successful transfer.
+    file.flush().await?;
 
-    tokio::task::spawn_blocking(move || -> std::io::Result<()> {
-        // Only the modification time, never the access time. The two answer
-        // different questions — "when did this content last change" against
-        // "when did somebody last look at it" — and a file this run has just
-        // written genuinely *was* accessed now. `touch(1)` moves both because it
-        // is asked to; a transfer is not.
-        if let Some(when) = when {
-            file.set_times(std::fs::FileTimes::new().set_modified(when))?;
-        }
-        file.sync_all()
-    })
-    .await
-    .map_err(|error| {
-        CliError::new(
-            ExitCode::FatalError,
-            format!("the durable-write task failed: {error}"),
-        )
-    })??;
+    // The open handle rather than the path, so the time lands on the inode that
+    // is about to be renamed into place — see `platform::times`.
+    let file = crate::platform::times::stamp_open(file, modified).await?;
+    file.sync_all().await?;
 
     Ok(())
 }
-
-/// A whole-second unix timestamp as a [`SystemTime`], including before 1970.
-///
-/// [`None`] for a value this platform's clock cannot represent, which keeps
-/// "unrepresentable" distinguishable from "the epoch" — stamping a file with
-/// 1970 because its real time did not fit would be an invented answer.
-fn system_time(seconds: i64) -> Option<std::time::SystemTime> {
-    let magnitude = std::time::Duration::from_secs(seconds.unsigned_abs());
-    if seconds >= 0 {
-        std::time::SystemTime::UNIX_EPOCH.checked_add(magnitude)
-    } else {
-        std::time::SystemTime::UNIX_EPOCH.checked_sub(magnitude)
-    }
-}
-
-
 
 /// A staging path beside the destination, on the same filesystem so the rename
 /// is atomic. The pid and a counter keep concurrent writers apart.
@@ -1556,7 +1528,9 @@ mod tests {
         let dest = dir.path().join("out.bin");
         std::fs::write(&dest, b"old contents that are longer").unwrap();
 
-        write_durably(&dest, b"new", Modified::Unknown).await.unwrap();
+        write_durably(&dest, b"new", Modified::Unknown)
+            .await
+            .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");
     }
 
@@ -1598,7 +1572,10 @@ mod tests {
             .unwrap();
 
         let modified = std::fs::metadata(&dest).unwrap().modified().unwrap();
-        assert!(modified >= before, "the file was stamped with something old");
+        assert!(
+            modified >= before,
+            "the file was stamped with something old"
+        );
     }
 
     #[test]

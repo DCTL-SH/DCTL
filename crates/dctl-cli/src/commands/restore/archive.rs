@@ -47,11 +47,12 @@
 
 use std::path::Path;
 
-use dctl_core::Record;
+use dctl_core::{Modified, Record};
 
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
+use crate::platform::times;
 use crate::remote::RemoteSpec;
 use crate::session::{self, Session};
 
@@ -84,6 +85,19 @@ pub struct Object {
     /// The same distinction is drawn, for the same reason, in
     /// [`crate::source::vault`].
     pub measured: bool,
+    /// When the file this object was made from was last modified.
+    ///
+    /// Carried through the restore so the tree that lands is the tree that was
+    /// backed up — dates and all. A restore that returned the right bytes under
+    /// the right names with every timestamp set to the moment of the restore has
+    /// not reproduced the tree; it has produced a tree that *looks* entirely
+    /// rewritten to every tool that sorts, compares or syncs by date, including
+    /// this one.
+    ///
+    /// [`Modified::Unknown`] for a row `dctl index rebuild` wrote, which recovers
+    /// from a list-only pass and records no time — the same reason `measured` has
+    /// to exist.
+    pub modified: Modified,
 }
 
 impl Object {
@@ -93,6 +107,7 @@ impl Object {
             logical: record.path.clone(),
             size: record.size,
             measured: !(record.size == 0 && record.content_hash.is_empty()),
+            modified: record.modified_unix.map_or(Modified::Unknown, Modified::At),
         }
     }
 }
@@ -164,11 +179,19 @@ impl Archive {
     /// directories: they exist only as prefixes of object paths, so every one
     /// the destination needs has to be materialised on the way past.
     ///
+    /// The recorded modification time is applied **after** the length check, so a
+    /// file that failed it is removed rather than stamped. Stamping is the last
+    /// thing that happens to a restored file, and it happens to every file that
+    /// survives — a restore that returned the bytes but not the dates would hand
+    /// back a tree that every later `dctl check` or `dctl copy` reads as entirely
+    /// rewritten.
+    ///
     /// # Errors
     /// [`ExitCode::IntegrityFailure`] when the object does not authenticate, or
     /// when what landed is not the length the index recorded; whatever the
-    /// filesystem reported when a directory could not be created; and whatever
-    /// the provider reported when the object could not be fetched.
+    /// filesystem reported when a directory could not be created or a timestamp
+    /// could not be set; and whatever the provider reported when the object could
+    /// not be fetched.
     pub async fn fetch(&self, object: &Object, destination: &Path) -> Result<()> {
         if let Some(parent) = destination.parent() {
             tokio::fs::create_dir_all(parent).await.map_err(|error| {
@@ -182,7 +205,8 @@ impl Archive {
             .get_file_to_path(&object.logical, destination)
             .await?;
 
-        self.confirm_length(object, destination).await
+        self.confirm_length(object, destination).await?;
+        times::stamp(destination, object.modified).await
     }
 
     /// Compare what landed against what the catalogue said it would be.

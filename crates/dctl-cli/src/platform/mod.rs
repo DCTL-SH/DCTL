@@ -17,7 +17,11 @@
 //!    perfectly legal elsewhere, so a tree synced from Linux can be impossible
 //!    to write on Windows. [`names`] detects this *before* a transfer starts
 //!    rather than failing halfway through.
-//! 4. **Path *identity*.** `./vault`, `vault`, `staging/../vault` and a symlink
+//! 4. **Modification times.** A transfer's job is to make the destination hold
+//!    what the source holds, and that includes *when it last changed* — the fact
+//!    every incremental run compares. Writing a file is not enough; it has to be
+//!    stamped, and exactly one place knows how. See [`times`].
+//! 5. **Path *identity*.** `./vault`, `vault`, `staging/../vault` and a symlink
 //!    to it are four spellings of one directory, and every platform lets an
 //!    operator type any of them. [`resolve`] reduces them to one answer, which
 //!    is what lets [`crate::addressing`] give the same answer to all four —
@@ -26,6 +30,7 @@
 pub mod names;
 pub mod path;
 pub mod resolve;
+pub mod times;
 
 /// True when the target platform's filesystem is case-insensitive by default.
 ///

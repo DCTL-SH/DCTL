@@ -205,13 +205,11 @@ pub fn build(resolved: &Resolved) -> Result<Arc<dyn Backend>> {
 /// rather than a panic, keeping this lib code panic-free.
 fn connect_sftp(host: &str, base: &str) -> Result<Arc<dyn Backend>> {
     let handle = tokio::runtime::Handle::try_current().map_err(|_| {
-        CliError::fatal("the sftp backend must be built inside the async runtime").with_hint(
-            "This is an internal error. Please report the command that produced it.",
-        )
+        CliError::fatal("the sftp backend must be built inside the async runtime")
+            .with_hint("This is an internal error. Please report the command that produced it.")
     })?;
     let config = SftpConfig::new(host, base);
-    let backend =
-        tokio::task::block_in_place(|| handle.block_on(SftpBackend::connect(config)))?;
+    let backend = tokio::task::block_in_place(|| handle.block_on(SftpBackend::connect(config)))?;
     Ok(Arc::new(backend))
 }
 

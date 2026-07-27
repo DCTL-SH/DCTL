@@ -36,10 +36,10 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 use fuser::{
-    AccessFlags, BsdFileFlags, Errno, FileHandle, Filesystem, FopenFlags, Generation, INodeNo,
-    KernelConfig, LockOwner, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr, ReplyCreate,
-    ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs, ReplyWrite,
-    ReplyXattr, Request, TimeOrNow, WriteFlags,
+    AccessFlags, BsdFileFlags, CopyFileRangeFlags, Errno, FileHandle, Filesystem, FopenFlags,
+    Generation, INodeNo, KernelConfig, LockOwner, OpenAccMode, OpenFlags, RenameFlags, ReplyAttr,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
+    ReplyWrite, ReplyXattr, Request, TimeOrNow, WriteFlags,
 };
 
 use crate::constants::{MOUNT_BLOCK_SIZE, MOUNT_MAX_NAME_LEN};
@@ -440,7 +440,14 @@ impl Filesystem for VaultFs {
     /// filesystem has no xattr support at all, which on macOS — where Finder and
     /// Spotlight query attributes on everything they see — produces a stream of
     /// confusing failures rather than a clean "not set".
-    fn getxattr(&self, _req: &Request, _ino: INodeNo, _name: &OsStr, _size: u32, reply: ReplyXattr) {
+    fn getxattr(
+        &self,
+        _req: &Request,
+        _ino: INodeNo,
+        _name: &OsStr,
+        _size: u32,
+        reply: ReplyXattr,
+    ) {
         reply.error(Errno::NO_XATTR);
     }
 
@@ -636,6 +643,59 @@ impl Filesystem for VaultFs {
         reply: ReplyEmpty,
     ) {
         refuse::empty("fsyncdir", "", reply);
+    }
+
+    /// `copy_file_range(2)`: a server-side copy, which writes to a destination.
+    ///
+    /// Easy to miss because it reads like a read — the interesting half of it is
+    /// the *out* file, and that is a write. The default would answer `ENOSYS`,
+    /// which makes the kernel fall back to read-then-write; the read half would
+    /// then succeed against this mount and the write half would fail somewhere
+    /// else, which is a worse story than refusing here.
+    fn copy_file_range(
+        &self,
+        _req: &Request,
+        _ino_in: INodeNo,
+        _fh_in: FileHandle,
+        _offset_in: u64,
+        _ino_out: INodeNo,
+        _fh_out: FileHandle,
+        _offset_out: u64,
+        _len: u64,
+        _flags: CopyFileRangeFlags,
+        reply: ReplyWrite,
+    ) {
+        refuse::write_range(reply);
+    }
+
+    /// macOS only: rename the volume.
+    ///
+    /// On the wall because it changes what the filesystem presents, and because
+    /// `--volname` is where a volume name is decided — a mount whose name could
+    /// be changed from Finder would have two sources for one setting, and the
+    /// flag would silently stop describing the mount.
+    #[cfg(target_os = "macos")]
+    fn setvolname(&self, _req: &Request, name: &OsStr, reply: ReplyEmpty) {
+        refuse::empty("setvolname", &name.to_string_lossy(), reply);
+    }
+
+    /// macOS only: `exchangedata(2)`, which swaps the contents of two files.
+    ///
+    /// A mutation of both, and one that predates `rename` on HFS+ — still used by
+    /// some macOS applications to save a document atomically, which is exactly the
+    /// path that must meet a refusal rather than a partial success.
+    #[cfg(target_os = "macos")]
+    fn exchange(
+        &self,
+        _req: &Request,
+        _parent: INodeNo,
+        name: &OsStr,
+        _newparent: INodeNo,
+        _newname: &OsStr,
+        _options: u64,
+        reply: ReplyEmpty,
+    ) {
+        refuse::empty("exchange", &name.to_string_lossy(), reply);
     }
 
     /// `close(2)` on a descriptor, which happens on every open file whether it

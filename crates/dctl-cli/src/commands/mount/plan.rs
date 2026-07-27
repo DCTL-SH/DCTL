@@ -264,7 +264,10 @@ mod tests {
 
     #[test]
     fn allow_other_widens_the_session_and_is_the_superset_of_allow_root() {
-        assert_eq!(resolve(&ctx(&[]), &args(&[]), &source()).unwrap().acl, SessionACL::Owner);
+        assert_eq!(
+            resolve(&ctx(&[]), &args(&[]), &source()).unwrap().acl,
+            SessionACL::Owner
+        );
         assert_eq!(
             resolve(&ctx(&[]), &args(&["--allow-root"]), &source())
                 .unwrap()
@@ -280,9 +283,13 @@ mod tests {
         // Both given: the wider one, because that is unambiguously what was asked
         // for and refusing the combination would be pedantry.
         assert_eq!(
-            resolve(&ctx(&[]), &args(&["--allow-other", "--allow-root"]), &source())
-                .unwrap()
-                .acl,
+            resolve(
+                &ctx(&[]),
+                &args(&["--allow-other", "--allow-root"]),
+                &source()
+            )
+            .unwrap()
+            .acl,
             SessionACL::All
         );
     }
@@ -301,8 +308,8 @@ mod tests {
     #[test]
     fn every_cache_mode_but_off_is_refused_by_name() {
         for mode in ["minimal", "writes", "full"] {
-            let error = resolve(&ctx(&[]), &args(&["--vfs-cache-mode", mode]), &source())
-                .unwrap_err();
+            let error =
+                resolve(&ctx(&[]), &args(&["--vfs-cache-mode", mode]), &source()).unwrap_err();
             assert_eq!(error.code(), ExitCode::Usage, "{mode}");
             assert!(
                 error.message().contains("--vfs-cache-mode") && error.message().contains(mode),
@@ -319,10 +326,14 @@ mod tests {
         // It used to be a warning, when nothing could mount. A refusal is right
         // now that something can: the user would otherwise be paying attention to
         // a dial with nothing behind it.
-        let error = resolve(&ctx(&[]), &args(&["--vfs-read-ahead", "128M"]), &source())
-            .unwrap_err();
+        let error =
+            resolve(&ctx(&[]), &args(&["--vfs-read-ahead", "128M"]), &source()).unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
-        assert!(error.hint().is_some_and(|hint| hint.contains("--buffer-size")));
+        assert!(
+            error
+                .hint()
+                .is_some_and(|hint| hint.contains("--buffer-size"))
+        );
         // Zero — the default — is not a request and is not refused.
         assert!(resolve(&ctx(&[]), &args(&["--vfs-read-ahead", "0"]), &source()).is_ok());
     }

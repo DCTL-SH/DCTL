@@ -224,7 +224,11 @@ async fn changing_the_password_leaves_the_recovery_phrase_working() {
     let created = Vault::init(e.backend.clone(), &e.index_path, PASSWORD)
         .await
         .unwrap();
-    created.vault.put_file("kept.bin", CONTENTS, Modified::Now).await.unwrap();
+    created
+        .vault
+        .put_file("kept.bin", CONTENTS, Modified::Now)
+        .await
+        .unwrap();
     let phrase = created.recovery_phrase.to_string();
 
     created.vault.change_password(NEW_PASSWORD).await.unwrap();

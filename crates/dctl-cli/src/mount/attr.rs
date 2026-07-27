@@ -87,7 +87,9 @@ impl Identity {
     /// vault belongs to root.
     #[must_use]
     pub fn capture(mountpoint: &Path, no_modtime: bool) -> Self {
-        let (uid, gid) = probe_ownership().or_else(|| owner_of(mountpoint)).unwrap_or_default();
+        let (uid, gid) = probe_ownership()
+            .or_else(|| owner_of(mountpoint))
+            .unwrap_or_default();
         Self {
             uid,
             gid,
@@ -326,10 +328,7 @@ mod tests {
     fn a_recorded_modification_time_is_reported() {
         let identity = identity();
         let attr = file(INodeNo(2), 0, Some(1_700_000_000), &identity);
-        assert_eq!(
-            attr.mtime,
-            UNIX_EPOCH + Duration::from_secs(1_700_000_000)
-        );
+        assert_eq!(attr.mtime, UNIX_EPOCH + Duration::from_secs(1_700_000_000));
         // Read-only, so access time cannot be tracked and follows modification.
         assert_eq!(attr.atime, attr.mtime);
     }

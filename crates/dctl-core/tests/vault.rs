@@ -114,7 +114,10 @@ async fn delete_removes_object_and_record() {
     let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
         .await
         .unwrap();
-    vault.put_file("gone", b"data", Modified::Now).await.unwrap();
+    vault
+        .put_file("gone", b"data", Modified::Now)
+        .await
+        .unwrap();
 
     assert!(vault.delete_file("gone").await.unwrap());
     assert!(!vault.delete_file("gone").await.unwrap());
@@ -137,9 +140,15 @@ async fn restore_on_a_fresh_device_from_backend_only() {
     // Device A: create the vault and store some files, then go away.
     {
         let a = init_vault(backend.clone(), &a_path, "pw").await.unwrap();
-        a.put_file("photos/2026/a.jpg", b"alpha", Modified::Now).await.unwrap();
-        a.put_file("photos/2026/b.jpg", b"bravo", Modified::Now).await.unwrap();
-        a.put_file("docs/notes.txt", b"charlie", Modified::Now).await.unwrap();
+        a.put_file("photos/2026/a.jpg", b"alpha", Modified::Now)
+            .await
+            .unwrap();
+        a.put_file("photos/2026/b.jpg", b"bravo", Modified::Now)
+            .await
+            .unwrap();
+        a.put_file("docs/notes.txt", b"charlie", Modified::Now)
+            .await
+            .unwrap();
     }
 
     // Device B: SAME backend, a brand-new EMPTY index. Unlock with only the password.
@@ -286,7 +295,11 @@ async fn get_file_to_path_tamper_errors_and_leaves_no_dest() {
         .await
         .unwrap();
     vault
-        .put_file("photos/a.jpg", b"the quick brown fox jumps over", Modified::Now)
+        .put_file(
+            "photos/a.jpg",
+            b"the quick brown fox jumps over",
+            Modified::Now,
+        )
         .await
         .unwrap();
 
@@ -372,7 +385,10 @@ async fn stream_and_buffered_puts_interoperate() {
     let src_path = src.path().join("s.bin");
     std::fs::write(&src_path, &payload).unwrap();
 
-    vault.put_file("via/buffered", &payload, Modified::Now).await.unwrap();
+    vault
+        .put_file("via/buffered", &payload, Modified::Now)
+        .await
+        .unwrap();
     vault
         .put_file_from_path("via/streamed", &src_path, Modified::Now)
         .await
@@ -402,7 +418,10 @@ async fn overwrite_gcs_the_previous_object() {
 
     // Overwriting the same path must GC the previous ciphertext, not orphan it on the
     // untrusted backend (a private tool must not leave prior versions recoverable).
-    vault.put_file("k", b"second and longer", Modified::Now).await.unwrap();
+    vault
+        .put_file("k", b"second and longer", Modified::Now)
+        .await
+        .unwrap();
     assert_eq!(
         count(&obj_dir),
         1,
@@ -424,7 +443,9 @@ async fn cross_device_delete_removes_object_and_name_record() {
         let a = init_vault(backend.clone(), &idx_a.path().join("a.redb"), "pw")
             .await
             .unwrap();
-        a.put_file("secret.txt", b"classified", Modified::Now).await.unwrap();
+        a.put_file("secret.txt", b"classified", Modified::Now)
+            .await
+            .unwrap();
     }
 
     // Device B: fresh empty index. Delete resolves via the name record (no rebuild),
@@ -497,7 +518,12 @@ async fn shared_put_roundtrips_and_head_is_kem1() {
 
     let data = b"hello asymmetric recipients";
     owner
-        .put_file_shared("shared/a", data, &[recipient.identity().clone()], Modified::Now)
+        .put_file_shared(
+            "shared/a",
+            data,
+            &[recipient.identity().clone()],
+            Modified::Now,
+        )
         .await
         .unwrap();
 
@@ -542,9 +568,13 @@ async fn recipient_in_set_decrypts_but_non_recipient_errors() {
 
     // Mint a resolvable "p" on B and C (placeholder put), then repoint it at the shared
     // object by overwriting the stored object bytes in place (the object KEY is unchanged).
-    b.put_file("p", b"placeholder", Modified::Now).await.unwrap();
+    b.put_file("p", b"placeholder", Modified::Now)
+        .await
+        .unwrap();
     std::fs::write(only_object_path(b_env._store.path()), &shared).unwrap();
-    c.put_file("p", b"placeholder", Modified::Now).await.unwrap();
+    c.put_file("p", b"placeholder", Modified::Now)
+        .await
+        .unwrap();
     std::fs::write(only_object_path(c_env._store.path()), &shared).unwrap();
 
     // B is a recipient → decrypts to the original plaintext.
@@ -573,7 +603,12 @@ async fn owner_auto_included_even_when_not_passed() {
     // The recipient set does NOT contain the owner's identity...
     let data = b"write-only backup with no symmetric fallback";
     owner
-        .put_file_shared("backup/x", data, &[recipient.identity().clone()], Modified::Now)
+        .put_file_shared(
+            "backup/x",
+            data,
+            &[recipient.identity().clone()],
+            Modified::Now,
+        )
         .await
         .unwrap();
 
@@ -599,7 +634,12 @@ async fn shared_object_reads_via_get_file_to_path_and_verifies() {
 
     let data = pseudo_random(1024 * 1024 + 9_001);
     owner
-        .put_file_shared("media/clip.bin", &data, &[recipient.identity().clone()], Modified::Now)
+        .put_file_shared(
+            "media/clip.bin",
+            &data,
+            &[recipient.identity().clone()],
+            Modified::Now,
+        )
         .await
         .unwrap();
 
@@ -712,7 +752,9 @@ async fn sidecar_add_grants_read_then_remove_revokes() {
 
     // O uploads an object shared to OWNER-ONLY (B is not an inline recipient).
     let data = b"payload shared later via the grant sidecar, never re-uploaded".repeat(4);
-    o.put_file_shared("clip", &data, &[], Modified::Now).await.unwrap();
+    o.put_file_shared("clip", &data, &[], Modified::Now)
+        .await
+        .unwrap();
     // The owner always reads its own object (inline).
     assert_eq!(
         o.get_file("clip").await.unwrap().as_slice(),
@@ -720,7 +762,9 @@ async fn sidecar_add_grants_read_then_remove_revokes() {
     );
 
     // Mint a resolvable "clip" on B, then repoint it at O's shared object bytes.
-    b.put_file("clip", b"placeholder", Modified::Now).await.unwrap();
+    b.put_file("clip", b"placeholder", Modified::Now)
+        .await
+        .unwrap();
     let shared = only_object_bytes(o_store);
     std::fs::write(only_object_path(b_store), &shared).unwrap();
 
@@ -1016,13 +1060,17 @@ async fn get_file_sidecar_only_recipient_transient_get_error_is_retryable_not_de
 
     // O grants B purely via the sidecar (B is NOT an inline recipient).
     let data = b"sidecar-only recipient payload, never re-uploaded".repeat(8);
-    o.put_file_shared("clip", &data, &[], Modified::Now).await.unwrap();
+    o.put_file_shared("clip", &data, &[], Modified::Now)
+        .await
+        .unwrap();
     o.share_add_recipients("clip", &[b.identity().clone()])
         .await
         .unwrap();
 
     // Repoint B's "clip" at O's shared object bytes and ship the sidecar to B's store.
-    b.put_file("clip", b"placeholder", Modified::Now).await.unwrap();
+    b.put_file("clip", b"placeholder", Modified::Now)
+        .await
+        .unwrap();
     let shared = only_object_bytes(o_env._store.path());
     std::fs::write(only_object_path(b_store.path()), &shared).unwrap();
     copy_sidecar(o_env._store.path(), b_store.path());
@@ -1069,10 +1117,14 @@ async fn genuine_absent_sidecar_stays_permanent_not_a_recipient_and_share_add_st
 
     // Owner-only object; no sidecar exists yet anywhere.
     let data = b"owner only, no sidecar yet";
-    o.put_file_shared("clip", data, &[], Modified::Now).await.unwrap();
+    o.put_file_shared("clip", data, &[], Modified::Now)
+        .await
+        .unwrap();
 
     // Repoint B's "clip" at O's object but ship NO sidecar → B is genuinely not a recipient.
-    b.put_file("clip", b"placeholder", Modified::Now).await.unwrap();
+    b.put_file("clip", b"placeholder", Modified::Now)
+        .await
+        .unwrap();
     std::fs::write(
         only_object_path(b_env._store.path()),
         only_object_bytes(o_env._store.path()),
@@ -1125,9 +1177,15 @@ async fn share_add_on_missing_or_non_recipient_errors() {
     ));
 
     // A non-recipient vault cannot add recipients to an object it cannot read.
-    owner.put_file_shared("doc", b"secret", &[], Modified::Now).await.unwrap();
+    owner
+        .put_file_shared("doc", b"secret", &[], Modified::Now)
+        .await
+        .unwrap();
     let shared = only_object_bytes(e._store.path());
-    stranger.put_file("doc", b"placeholder", Modified::Now).await.unwrap();
+    stranger
+        .put_file("doc", b"placeholder", Modified::Now)
+        .await
+        .unwrap();
     std::fs::write(only_object_path(r_env._store.path()), &shared).unwrap();
     assert!(
         stranger
@@ -1138,7 +1196,10 @@ async fn share_add_on_missing_or_non_recipient_errors() {
     );
 
     // A plain kem_id=0 object has no recipients to add — rejected.
-    owner.put_file("plain", b"symmetric", Modified::Now).await.unwrap();
+    owner
+        .put_file("plain", b"symmetric", Modified::Now)
+        .await
+        .unwrap();
     assert!(
         owner
             .share_add_recipients("plain", &[stranger.identity().clone()])
@@ -1333,7 +1394,9 @@ async fn share_add_self_heals_missing_discovery_record_on_retry() {
 
     // Owner-only object: no inline recipients → no sidecar and no DGD1 exist yet.
     let data = b"payload shared to B via the grant sidecar, never re-uploaded";
-    o.put_file_shared("clip", data, &[], Modified::Now).await.unwrap();
+    o.put_file_shared("clip", data, &[], Modified::Now)
+        .await
+        .unwrap();
     drop(o); // release the index; re-unlock loads `ext` into the in-memory identity set
 
     // Re-unlock so the vault holds `ext` (root + imported) and can discover as B.
@@ -1555,5 +1618,8 @@ async fn a_shared_object_records_its_source_time_like_any_other() {
         .put_file_shared("shared/report.txt", b"payload", &[], Modified::At(1_234))
         .await
         .unwrap();
-    assert_eq!(record(&vault, "shared/report.txt").modified_unix, Some(1_234));
+    assert_eq!(
+        record(&vault, "shared/report.txt").modified_unix,
+        Some(1_234)
+    );
 }

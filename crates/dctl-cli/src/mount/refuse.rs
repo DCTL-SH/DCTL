@@ -99,6 +99,16 @@ pub fn write(reply: ReplyWrite) {
     reply.error(READ_ONLY);
 }
 
+/// Refuse a `copy_file_range`, which replies with a written byte count.
+///
+/// Separate from [`write`] only so the log says which of the two was attempted:
+/// a server-side copy reads like a read and is easy to overlook when working out
+/// why something failed.
+pub fn write_range(reply: ReplyWrite) {
+    record("copy_file_range", "");
+    reply.error(READ_ONLY);
+}
+
 /// Refuse a `create`, which is `open(O_CREAT)`.
 pub fn create(name: &OsStr, reply: ReplyCreate) {
     record("create", &name.to_string_lossy());
@@ -126,7 +136,9 @@ pub fn open_for_write(reply: ReplyOpen) {
 /// refuse before anything tries; and it is what this module's documentation
 /// points at rather than repeating.
 pub const REFUSED: &[&str] = &[
+    "copy_file_range",
     "create",
+    "exchange",
     "fallocate",
     "fsync",
     "fsyncdir",
@@ -138,6 +150,7 @@ pub const REFUSED: &[&str] = &[
     "rename",
     "rmdir",
     "setattr",
+    "setvolname",
     "setxattr",
     "symlink",
     "truncate",
@@ -176,20 +189,24 @@ mod tests {
         // operations below are the complete set POSIX offers for changing a
         // file, its name, its metadata or its size.
         for operation in [
-            "write",      // change contents
-            "truncate",   // change length
-            "setattr",    // change mode, owner, times, or length
-            "create",     // make a file
-            "mknod",      // make a node
-            "mkdir",      // make a directory
-            "unlink",     // remove a file
-            "rmdir",      // remove a directory
-            "rename",     // move
-            "link",       // add a name
-            "symlink",    // add a symbolic name
-            "setxattr",   // change extended metadata
+            "write",       // change contents
+            "truncate",    // change length
+            "setattr",     // change mode, owner, times, or length
+            "create",      // make a file
+            "mknod",       // make a node
+            "mkdir",       // make a directory
+            "unlink",      // remove a file
+            "rmdir",       // remove a directory
+            "rename",      // move
+            "link",        // add a name
+            "symlink",     // add a symbolic name
+            "setxattr",    // change extended metadata
             "removexattr", // remove extended metadata
-            "fallocate",  // reserve space
+            "fallocate",   // reserve space
+            // The two that read like reads and are not.
+            "copy_file_range", // write a copy of a range, server-side
+            "exchange",        // macOS: swap the contents of two files
+            "setvolname",      // macOS: rename the volume
         ] {
             assert!(
                 REFUSED.contains(&operation),

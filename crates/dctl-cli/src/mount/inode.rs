@@ -423,7 +423,10 @@ mod tests {
         let ino = table.intern("a.txt", Kind::File);
         table.remember(ino);
         table.forget(ino, 1);
-        assert_eq!(table.resolve(ino).map(|(path, _)| path), Some("a.txt".into()));
+        assert_eq!(
+            table.resolve(ino).map(|(path, _)| path),
+            Some("a.txt".into())
+        );
         assert_eq!(table.intern("a.txt", Kind::File), ino);
     }
 

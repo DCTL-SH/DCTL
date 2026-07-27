@@ -156,7 +156,7 @@ dctl touch REMOTE:PATH [flags]
 ## Examples
 
 Create an empty object in a vault. It is a real object: it appears in `ls`, it
-can be read back, and it carries the time of the write:
+can be read back, and it carries the time the plan printed:
 
 ```console
 $ dctl touch archive:sentinel

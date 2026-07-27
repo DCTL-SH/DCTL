@@ -3085,9 +3085,9 @@ pub const TOUCH_RESTAMP_FEATURE: &str = "a dctl_core::Vault call that updates th
 /// missing branch here: the modification time lives in the encrypted index,
 /// `dctl_core::Vault` exposes no operation that updates a record's
 /// `modified_unix`, and the index itself is private to the core — so there is no
-/// call for this command to make. Re-storing the object would move the time to
-/// *now* rather than to the time that was asked for, which is a different write
-/// than the one requested and is therefore not done silently.
+/// call for this command to make. Re-storing the object would need its contents,
+/// which `touch` does not have and must not destroy: a `touch` that emptied a
+/// file would be the worst bug in the tool.
 pub const TOUCH_RESTAMP_HINT: &str = "The object was not modified. A vault keeps modification times in its \
      encrypted index and dctl-core exposes no call that updates one, so DCTL \
      will not pretend to. Re-write the object (`dctl copy` or `dctl rcat`) if a \

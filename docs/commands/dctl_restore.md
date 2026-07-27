@@ -95,6 +95,17 @@ file at all** — not a partial one, not a stale one — and exits **21**. Peak
 memory is O(chunk) per file, so the largest object in the vault restores on a
 laptop (`PLAN.md` §16.2).
 
+**Each restored file carries the modification time it was backed up with.** It is
+applied last, after the length check, so a file that failed verification is
+removed rather than stamped. A restore that returned the right bytes under the
+right names with every timestamp set to the moment of the restore would not have
+reproduced the tree — it would have produced one that every tool sorting or
+syncing by date reads as entirely rewritten, this one included: the next `dctl
+check` against the vault would report every path as differing. Objects whose index
+row carries no time (what `dctl index rebuild` writes, since it recovers from a
+list-only pass) land with the time of the restore, because that is the only fact
+available.
+
 On top of that, the length of what landed is compared against the length the
 index recorded. The core proves an object is consistent with *itself*; this
 catches an **index that disagrees with the store**, which is what a partial

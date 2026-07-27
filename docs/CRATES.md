@@ -303,13 +303,14 @@ commits the index — **success is reported only after the durable index commit.
 | Method | Role |
 |--------|------|
 | `Vault::init(…)` / `Vault::unlock(…)` | Create / open a vault |
-| `put_file(path, data)` / `put_file_from_path(logical, source)` | Buffered / streaming (constant-memory) put |
+| `put_file(path, data, modified)` / `put_file_from_path(logical, source, modified)` | Buffered / streaming (constant-memory) put. `modified` is a required `Modified` — the source's own time, `Now`, or `Unknown` — so no write path can stamp the clock by omission |
 | `get_file(path) -> Zeroizing<Vec<u8>>` / `get_file_to_path(logical, dest)` | Buffered / streaming get |
 | `list(prefix) -> Vec<Record>` | List by prefix |
+| `record(path) -> Option<Record>` | Keyed lookup of one path (no prefix scan) |
 | `delete_file(path) -> bool` | Delete |
 | `verify_file(path)` | Integrity check |
 | `rebuild_index() -> u64` | **Cross-device restore** — rescan backend, rebuild index from password alone |
-| `put_file_shared(…)` | §12 asymmetric put to recipients |
+| `put_file_shared(…, modified)` | §12 asymmetric put to recipients |
 | `share_add_recipients(…)` / `share_remove_recipient(…)` | §12.6 grant sidecar (no re-upload) |
 | `discover_shared() -> Vec<SharedObject>` / `get_shared(file_id)` / `get_shared_to_path(…)` | §14 DGD1 discovery + fetch |
 | `publish_identity()` / `fetch_recipient(key_id) -> kem::Drk1Public` | §12.3 recipient registry |
@@ -317,7 +318,7 @@ commits the index — **success is reported only after the durable index commit.
 | `identity()` / `identity_key_id()` / `identity_key_ids()` | This vault's recipient identity |
 
 Also re-exported at crate root: `pub use dctl_crypto::kem;` (recipient public-key types),
-`pub use dctl_index::Record;`, and `CoreError` / `Result`.
+`pub use dctl_index::Record;`, `Modified`, and `CoreError` / `Result`.
 
 **Modules:** `vault` (submodules: `mod`, `layout`, `put`, `put_stream`, `get`, `list`,
 `restore`, `share`, `imported`), `error`.

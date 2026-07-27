@@ -44,35 +44,38 @@ that downgrades itself silently is worse than one that fails, because it reports
 a guarantee it did not check. In practice that is the default mode against a
 destination with no recorded modification time.
 
-### A sealed vault is compared by content, and says so
+### A sealed vault is compared like anything else, and there is no substitution
 
-There is one substitution, it goes *upwards*, and it is announced every time.
+There used to be one. It goes in the history rather than in a footnote, because
+it changed what a `check` run cost and a script may still be reading for it.
 
-A vault records the moment each object was written, not the modification time of
-the file it was written from: `dctl-core`'s `put_file` takes no such parameter.
-The number in the index is therefore true and describes something else, so the
-default size-and-modtime comparison against a vault answers a question about
-when the copy ran. Before this was fixed, `dctl check ./src archive:` reported
-every path as `differ` immediately after `dctl copy ./src archive:` had stored
-them correctly.
+A vault used to record the moment each object was written, not the modification
+time of the file it was written from — `dctl-core`'s `put_file` took no such
+parameter. The number in the index was therefore true and described something
+else, so the default size-and-modtime comparison against a vault answered a
+question about when the copy ran: `dctl check ./src archive:` reported every path
+as `differ` immediately after `dctl copy ./src archive:` had stored them
+correctly.
 
-The same index record carries the plaintext BLAKE3, so a vault can answer the
-*stronger* question for free. When either side of a `check` is a vault and no
-comparison flag was given, `check` runs the `checksum` comparison instead and
-prints a warning on stderr naming the side that forced it. The report's
-`comparison` field says `checksum`, because that is what ran.
+The answer at the time was to substitute the *stronger* comparison — the index
+also carries the plaintext BLAKE3 — and announce it on stderr. It worked, and it
+cost a full read of the other side on every run.
 
-It is not free: the other side is read end to end to produce a hash. Two ways
-out, both honoured exactly as typed:
+The write takes the time now (`dctl_core::Modified`), so a vault's index row
+carries the source's own modification time and the ordinary size-and-modtime
+comparison answers it from metadata alone. The report's `comparison` field says
+`size-and-modtime`, because that is what ran; nothing is substituted and the
+warning that announced the substitution no longer appears.
 
-* `--size-only` compares sizes alone. Sizes need no clock, so a vault does not
-  disturb it and nothing is substituted or announced.
-* `--checksum` asks for the content comparison outright, which is what would
-  happen anyway — no warning, because nothing was substituted.
+`dctl copy`, `move` and `sync` reach the same answer the same way, which is what
+keeps `check` and `copy` agreeing about the same two trees. See
+`docs/commands/dctl_copy.md`, including the note on what happens the first time
+this build meets a vault written by an older one.
 
-`dctl copy`, `move` and `sync` make the identical substitution for the identical
-reason, which is what keeps `check` and `copy` agreeing about the same two trees.
-See `docs/commands/dctl_copy.md`.
+*What that leaves.* Size and modification time cannot see an edit that changed
+neither — the same limit rclone and rsync have. `--checksum` is the mode that
+proves contents, and against a vault half of it is free: the index answers for
+its side without reading an object.
 
 `--checksum` is the exception, and deliberately so. A vault knows the plaintext
 BLAKE3 of everything it holds and answers from its index for nothing; a local

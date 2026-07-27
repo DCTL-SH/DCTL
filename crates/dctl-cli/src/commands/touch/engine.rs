@@ -201,18 +201,15 @@ async fn sealed(ctx: &Ctx, request: Request<'_>) -> Result<Outcome> {
 /// Collapsing them would make `touch` report a missing object as an untimed one
 /// and create nothing.
 ///
-/// `Vault::list` matches by byte prefix, so `a.txt` would also report
-/// `a.txt.bak`; the exact comparison is what makes this a lookup rather than a
-/// search. It reads the local index only — no provider request, no download.
+/// [`Vault::record`] rather than a filtered [`Vault::list`]: `list` matches by
+/// byte prefix, so `a.txt` would also report `a.txt.bak` and every caller would
+/// have to remember to filter. It reads the local index only — no provider
+/// request, no download.
 ///
 /// # Errors
 /// Whatever the index reported.
 fn record(vault: &Vault, path: &str) -> Result<Option<Option<i64>>> {
-    Ok(vault
-        .list(path)?
-        .into_iter()
-        .find(|record| record.path == path)
-        .map(|record| record.modified_unix))
+    Ok(vault.record(path)?.map(|record| record.modified_unix))
 }
 
 /// The filesystem path: both halves, performed by the operating system.
@@ -477,26 +474,39 @@ mod tests {
     #[tokio::test]
     async fn a_chosen_time_no_longer_stops_a_vault_before_it_is_even_opened() {
         // The refusal this replaces was honest while `Vault::put_file` took no
-        // timestamp: there was no argument for `--timestamp` to become, so it was
-        // rejected before the vault was opened. That argument now exists, so the
-        // flag has to reach the write.
+        // timestamp: there was no argument for `--timestamp` to become, so the
+        // request was thrown out before the vault was even addressed. That
+        // argument now exists, so the flag has to reach the write.
         //
-        // Asserted through the *ordering*, which is the part that changed and the
-        // part a unit test can see without a vault: under `--no-ask-password` an
-        // unlock cannot succeed, so `VaultLocked` proves the run got as far as
-        // trying to open the vault. `FatalError` — what the old pre-check
-        // produced — would mean the request was thrown out before that, which is
-        // exactly the behaviour being removed. The object really being created
-        // with the chosen second is pinned end to end in `tests/cli.rs`.
+        // Asserted through *which* failure comes back, because that is the part a
+        // unit test can see without a vault. This fixture's configuration has no
+        // `archive` remote, so a request that gets as far as opening one fails at
+        // resolution and says so by name. The old pre-check produced a refusal
+        // about a missing core capability instead, naming neither the remote nor
+        // anything a reader could act on — so both assertions below fail against
+        // it, which is what makes this a test and not a restatement.
+        //
+        // That the object is then really created carrying the chosen second is
+        // pinned end to end in `tests/cli.rs`, where there is a real vault.
         let target = target("archive:sentinel");
         let error = sealed(
             &ctx(&["--no-ask-password"]),
             request(&target, "2024-05-01T12:00:00Z", true),
         )
         .await
-        .expect_err("no password is available, so the vault cannot open");
+        .expect_err("this fixture has no such remote to open");
 
-        assert_eq!(error.code(), ExitCode::VaultLocked);
+        assert_eq!(error.code(), ExitCode::FatalError);
+        assert!(
+            error.message().contains("archive"),
+            "the failure must be about opening the remote, not about the flag: {}",
+            error.message()
+        );
+        assert!(
+            !error.message().contains("accepts a modification time"),
+            "the retired refusal is back: {}",
+            error.message()
+        );
     }
 
     #[tokio::test]

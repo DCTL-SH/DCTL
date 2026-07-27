@@ -39,6 +39,15 @@ file through a buffer and refuses anything above
 `TRANSFER_WHOLE_FILE_LIMIT` (1 GiB). A backup tool that could not store the
 largest file on the disk would not be a backup tool.
 
+**Each file is stored with its own modification time**, read from the source
+immediately before it is sealed rather than carried from the scan: a scan of ten
+million files can finish hours before a given file's turn comes, and the recorded
+time is worth having only if it describes the bytes that were actually stored.
+That is what lets a later `dctl check` or `dctl copy` recognise an unchanged file
+instead of re-storing it. A source whose time cannot be read is stored with none —
+never with the clock, which would look like a real answer and could stop the file
+ever being backed up again.
+
 **One bad file does not abandon the run.** A file that cannot be read or that the
 core refuses is counted, reported by name, and skipped; the run continues and the
 recorded errors downgrade the exit code to **6** (`partial_failure`). A *fatal*
