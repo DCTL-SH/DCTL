@@ -18,6 +18,7 @@ pub mod local;
 pub mod model;
 pub mod r2;
 pub mod s3;
+pub mod sftp;
 mod streaming;
 mod tls;
 
@@ -28,3 +29,4 @@ pub use local::LocalFs;
 pub use model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 pub use r2::R2Backend;
 pub use s3::{S3Backend, S3Config};
+pub use sftp::{SftpBackend, SftpConfig};

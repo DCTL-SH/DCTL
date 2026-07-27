@@ -24,6 +24,11 @@ sha2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+openssh = { version = "0.11", features = ["native-mux"] }
+openssh-sftp-client = { version = "0.15", features = ["openssh"] }
+# Drives the SFTP `ReadDir` stream (a `futures_core::Stream`) with a clean
+# `.next().await` in the recursive listing walk.
+tokio-stream = "0.1"
 
 [dev-dependencies]
 bytes = { workspace = true }
