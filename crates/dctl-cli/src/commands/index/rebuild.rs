@@ -21,13 +21,27 @@
 //! object body is fetched, so a vault of any size rebuilds for the price of a
 //! listing rather than of a restore.
 //!
-//! The consequence is that the rows it writes carry **no size and no content
-//! hash** — those live in the object bodies, and fetching them would turn a cheap
-//! reconciliation into a full read of the dataset. They populate again on first
-//! read of each file. A listing taken straight after a rebuild therefore shows
-//! zero-byte sizes for files that are not zero bytes, which is surprising enough
-//! that the command says so before it starts rather than leaving it to be
-//! discovered.
+//! The consequence is that the rows it writes carry **no size, no content hash
+//! and no modification time** — those live in the object bodies, and fetching
+//! them would turn a cheap reconciliation into a full read of the dataset. A
+//! listing taken straight after a rebuild therefore renders all three as `-`,
+//! which is surprising enough that the command says so before it starts rather
+//! than leaving it to be discovered.
+//!
+//! The time is the one with a consequence beyond the listing: a **restore** from
+//! a rebuilt index stamps every file with the time of the restore, because that
+//! is the only fact available. The bytes and the names are exact; the timestamps
+//! are not the ones that were backed up, and a tree recovered this way reads as
+//! entirely rewritten to anything that sorts or syncs by date — including
+//! `dctl check` against the vault it came from. See `docs/RESTORE_DRILL.md`,
+//! which measures it.
+//!
+//! `PLAN.md` §13.5 describes an index *"rebuildable by scanning object headers"*,
+//! and an object header does carry `mtime_unix` and `size`
+//! (`dctl_crypto::object::meta`). This rebuild scans **name records only**, so
+//! recovering the times and sizes is possible at the cost of one ranged header
+//! GET per object — far less than a full read, far more than a listing. It is
+//! not implemented.
 //!
 //! ## Idempotent, and safe to repeat
 //!
@@ -102,9 +116,17 @@ pub async fn run(ctx: &Ctx, args: &RebuildArgs) -> Result<()> {
     ctx.out.info(format!("{command}: {target}"));
     // Said before the scan, not after: someone watching a listing go to zeroes
     // afterwards should already know why.
+    // The modification time belongs in this sentence as much as the size does,
+    // and it costs more: a restore from a rebuilt index stamps every file with
+    // the time of the restore, because that is the only fact available. A tree
+    // recovered that way reads as entirely rewritten to anything that sorts or
+    // syncs by date — `dctl check` included. An operator learning that from the
+    // restored tree rather than from here has been told too late to choose
+    // differently. Measured by the restore drill; see docs/RESTORE_DRILL.md.
     ctx.out.warn(
-        "a rebuild is a list-only pass, so the rows it writes carry no size and no \
-         content hash until each file is next read",
+        "a rebuild is a list-only pass, so the rows it writes carry no size, no content hash \
+         and no modification time: files restored from a rebuilt index are byte-exact and \
+         carry the time of the restore",
     );
 
     let session = session::open(ctx, &target.spec()).await?;

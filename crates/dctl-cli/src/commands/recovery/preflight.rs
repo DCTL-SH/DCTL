@@ -123,6 +123,24 @@ impl Report {
     pub fn blocks(&self, path: &str) -> bool {
         self.blocking().any(|f| f.path == path)
     }
+
+    /// Take in findings raised somewhere other than [`inspect`].
+    ///
+    /// One caller today: a backup's scan is the only thing that can see two
+    /// *local* files collapsing onto one logical path, because by the time a
+    /// path set reaches [`inspect`] both spellings have already become the same
+    /// string and the collision is invisible. The finding still belongs in this
+    /// report rather than in a channel of its own — it is a reason a name will
+    /// not arrive intact, which is what this type is — so it reaches `--json`,
+    /// the printed table and [`Report::blocking_count`] the same way every other
+    /// finding does.
+    ///
+    /// Re-sorted afterwards, through the same ordering [`inspect`] uses, so a
+    /// merged report is still byte-identical between two runs over one tree.
+    pub fn absorb(&mut self, findings: Vec<Finding>) {
+        self.findings.extend(findings);
+        order(&mut self.findings);
+    }
 }
 
 /// Inspect a set of logical paths for everything that could stop them being
@@ -143,8 +161,17 @@ pub fn inspect(paths: &[String], root: Option<&Path>, audience: Audience) -> Rep
     collect_case_collisions(paths, audience, &mut findings);
     collect_type_conflicts(paths, &mut findings);
 
-    // Sorted for determinism: the same input must always produce the same
-    // report, or two runs cannot be compared.
+    order(&mut findings);
+
+    Report { findings }
+}
+
+/// Sort and de-duplicate a finding list.
+///
+/// Determinism: the same input must always produce the same report, or two runs
+/// cannot be compared. Shared with [`Report::absorb`] so a merged report is
+/// ordered by the same rule rather than by a second copy of it that could drift.
+fn order(findings: &mut Vec<Finding>) {
     findings.sort_by(|a, b| {
         a.path
             .cmp(&b.path)
@@ -152,8 +179,6 @@ pub fn inspect(paths: &[String], root: Option<&Path>, audience: Audience) -> Rep
             .then_with(|| a.detail.cmp(&b.detail))
     });
     findings.dedup();
-
-    Report { findings }
 }
 
 /// Windows-reserved characters, reserved device names, trailing dots and

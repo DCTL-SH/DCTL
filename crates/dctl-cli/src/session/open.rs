@@ -6,13 +6,12 @@ use std::sync::Arc;
 use dctl_core::{UnlockKey, Vault};
 use dctl_store::Backend;
 
-use crate::constants::INDEX_FILE_NAME;
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::logging::fields;
 use crate::remote::RemoteSpec;
 
-use super::{factor, secret};
+use super::{factor, index, secret};
 
 /// What the user is told did not happen when `--key-file` is refused here.
 ///
@@ -120,7 +119,10 @@ pub struct Prepared {
 ///
 /// # Errors
 /// [`ExitCode::FatalError`] for a `--key-file` this build cannot apply, an
-/// unresolvable remote, or an unreadable configuration.
+/// unresolvable remote, or an unreadable configuration. Plus whatever creating
+/// the index's directory reported ([`super::index::ensure_directory`]) — a
+/// read-only home or a permission the user does not have, surfaced here rather
+/// than after they have been asked for a secret.
 ///
 /// [`ExitCode::FatalError`]: crate::exit::ExitCode::FatalError
 pub fn prepare(ctx: &Ctx, spec: &RemoteSpec) -> Result<Prepared> {
@@ -132,10 +134,18 @@ pub fn prepare(ctx: &Ctx, spec: &RemoteSpec) -> Result<Prepared> {
     // reported — a misspelled remote is a typo, a discarded factor is not.
     factor::refuse_if_present(&ctx.globals, "unlocking a vault", NOTHING_HAPPENED)?;
 
-    Ok(Prepared {
-        index: index_path(ctx),
-        backend: build_backend(ctx, spec)?,
-    })
+    let backend = build_backend(ctx, spec)?;
+
+    // After the remote has resolved, so a typo does not leave a directory
+    // behind, and before the secret is acquired, which is this module's ordering
+    // rule: an index directory that cannot be created is a failure that has
+    // nothing to do with the password, and asking for one first — or for
+    // twenty-four transcribed words — spends the most expensive thing the tool
+    // ever asks for on a problem that was visible without it.
+    let index = index::path(ctx);
+    index::ensure_directory(&index)?;
+
+    Ok(Prepared { backend, index })
 }
 
 impl Prepared {
@@ -229,18 +239,6 @@ fn storage_remote(config: &crate::config::Config, spec: &RemoteSpec) -> Result<R
     })
 }
 
-/// The index database this run should use.
-///
-/// `--index` wins; otherwise the platform data directory. Resolved here rather
-/// than at each call site so two commands in the same invocation can never
-/// disagree about which index they are reading.
-fn index_path(ctx: &Ctx) -> PathBuf {
-    ctx.globals
-        .index
-        .clone()
-        .unwrap_or_else(|| dctl_meta::paths::data_dir().join(INDEX_FILE_NAME))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -260,25 +258,6 @@ mod tests {
 
     fn spec(input: &str) -> RemoteSpec {
         RemoteSpec::parse(input).expect("a well-formed spec")
-    }
-
-    #[test]
-    fn an_explicit_index_flag_wins() {
-        let ctx = ctx(&["--index", "/tmp/custom.redb"]);
-        assert_eq!(index_path(&ctx), PathBuf::from("/tmp/custom.redb"));
-    }
-
-    #[test]
-    fn the_default_index_lives_in_the_platform_data_directory() {
-        let ctx = ctx(&[]);
-        let path = index_path(&ctx);
-        assert!(path.ends_with(INDEX_FILE_NAME));
-        // Named after the binary, so a rebrand moves it (dctl_meta owns that).
-        assert!(
-            path.to_string_lossy().contains(dctl_meta::BINARY_NAME),
-            "got {}",
-            path.display()
-        );
     }
 
     #[tokio::test]

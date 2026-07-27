@@ -386,7 +386,7 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 3 | `dir_not_found` | `SOURCE` does not exist. A missing `DEST` is not an error. |
 | 5 | `temporary_error` | A cloud backend failed in a way worth retrying. `sync` addresses remotes — sealed and plain alike — so this is reachable wherever a cloud backend is actually contacted. A local-to-local sync does not produce it. |
 | 6 | `partial_failure` | The run finished with at least one failure. A failed deletion contributes to this and is **never** counted as a deletion in the summary — the "Deleted" number means files that are actually gone. |
-| 7 | `fatal_error` | Both sides are remotes; a file exceeded the whole-file limit; `DEST` is a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; `--immutable` and the plan would replace or delete anything, which is refused before any file is touched. |
+| 7 | `fatal_error` | Two or more local source files share one vault path once their names are normalised, refused before anything is read (see [../RESTORE_DRILL.md](../RESTORE_DRILL.md#the-sharp-edge-two-files-one-path)); both sides are remotes; a file exceeded the whole-file limit; `DEST` is a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; `--immutable` and the plan would replace or delete anything, which is refused before any file is touched. |
 | 25 | `cancelled` | The confirmation was declined, or the run was interrupted with Ctrl-C. Nothing further was deleted. |
 
 **20** (`checksum_mismatch`), **21** (`integrity_failure`), **22**

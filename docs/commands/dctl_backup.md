@@ -29,6 +29,37 @@ that:
 * A **control character** in a name is fatal regardless. No filesystem anywhere
   accepts one, so storing it would guarantee an object nobody can ever restore.
 
+**One local condition is a refusal rather than a warning, and it is the reverse
+of the case above.** Two files whose names differ only in Unicode normalisation —
+`re\u{301}sume\u{301}.txt` and `r\u{e9}sum\u{e9}.txt`, identical on screen and
+different on disk — are two files on a byte-oriented filesystem and **one**
+logical vault path, because a logical path is NFC so that one file has one key on
+every platform. Storing both would keep the last and report every one of them as
+backed up, which is the failure `PLAN.md` §6 forbids by name. So the run stops
+before anything is written (exit **7**), and every colliding file is listed with
+its non-ASCII characters escaped, because the names are the same glyphs and a
+message that printed them as they display would print one string twice:
+
+```
+Severity  Path        Problem
+--------  ----------  ----------------------------------------------------------------
+blocking  résumé.txt  2 local files normalise to this one vault path, so storing
+                      them all would keep only the last:
+                      '/src/re\u{0301}sume\u{0301}.txt', '/src/r\u{00e9}sum\u{00e9}.txt'
+
+error: 2 local file(s) share 1 vault path(s) once their names are normalised
+```
+
+The `Path` column carries the logical path — one row, because there is one
+destination — and the escapes are in the problem, where the two *source* names
+are named.
+
+Rename all but one at the source. There is no flag to proceed, because there is
+no correct file to keep: whichever were stored, the other is lost. The same
+refusal applies to `copy`, `sync` and `move` — every verb that reads a local
+tree. See [../RESTORE_DRILL.md](../RESTORE_DRILL.md#the-sharp-edge-two-files-one-path),
+which is where it was found.
+
 **Storing is constant-memory, and that is why `backup` is its own verb.** It
 uses the core's streaming store (`Vault::put_file_from_path`), which seals the
 source straight from disk into a temporary object and hands that to the backend's
@@ -309,7 +340,7 @@ consumer read "nothing to back up" from a run that never got as far as looking.
 | 3 | `dir_not_found` | The `<LOCAL>` source does not exist. Reported before the engine check, so a typo is never mistaken for a missing feature. |
 | 4 | `file_not_found` | A `--files-from` list does not exist. |
 | 6 | `partial_failure` | The walk recorded a problem — an unreadable directory, a name that is not valid UTF-8, a vanished file, a dangling symlink — or a file could not be stored. The rest of the tree was still stored. |
-| 7 | `fatal_error` | `--snapshot` on a real run; a name contains a control character no filesystem accepts; `--strict-names` was given and the pre-flight found anything; the `REMOTE` operand names a vault's object store rather than the vault; or the remote is not configured. |
+| 7 | `fatal_error` | `--snapshot` on a real run; a name contains a control character no filesystem accepts; two or more local files share one vault path once their names are normalised; `--strict-names` was given and the pre-flight found anything; the `REMOTE` operand names a vault's object store rather than the vault; or the remote is not configured. |
 | 20 | `checksum_mismatch` | A verified write refused to commit. Nothing was stored and the local source was not touched. |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. Nothing in flight was reported as complete. |
 

@@ -39,10 +39,10 @@ A rebuild is a **list-only pass**: every `n/*` record is listed and decrypted, b
 no object body is fetched. A vault of any size therefore rebuilds for the price
 of a listing rather than of a restore.
 
-The consequence is that the rows it writes carry **no size and no content hash**.
-Those live in the object bodies, and fetching them would turn a cheap
-reconciliation into a full read of the dataset. The command says so on stderr
-before it starts, because the effect is visible immediately afterwards:
+The consequence is that the rows it writes carry **no size, no content hash and
+no modification time**. Those live in the object bodies, and fetching them would
+turn a cheap reconciliation into a full read of the dataset. The command says so
+on stderr before it starts, because the effect is visible immediately afterwards:
 
 ```
 dctl ls archive:
@@ -120,7 +120,7 @@ needed; nothing local survives from before.
 
 ```
 dctl index rebuild archive:
-warning: a rebuild is a list-only pass, so the rows it writes carry no size and no content hash until each file is next read
+warning: a rebuild is a list-only pass, so the rows it writes carry no size, no content hash and no modification time: files restored from a rebuilt index are byte-exact and carry the time of the restore
 Files  Index
 -----  ------------------------------------
  1204  /home/mx/.dctl/index/vault.redb

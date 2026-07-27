@@ -2723,6 +2723,10 @@ pub const PREFLIGHT_PROBLEM_ILLEGAL_NAME: &str = "illegal-name";
 /// See [`PREFLIGHT_PROBLEM_ILLEGAL_NAME`]. Two vault paths differ only in case,
 /// which a case-insensitive filesystem cannot represent side by side.
 pub const PREFLIGHT_PROBLEM_CASE_COLLISION: &str = "case-collision";
+/// See [`PREFLIGHT_PROBLEM_ILLEGAL_NAME`]. Two or more local files whose names
+/// are different byte sequences normalise to one logical vault path, so a vault
+/// can hold only one of them.
+pub const PREFLIGHT_PROBLEM_NORMALISATION_COLLISION: &str = "normalisation-collision";
 /// See [`PREFLIGHT_PROBLEM_ILLEGAL_NAME`]. One path needs a directory where
 /// another needs a file of the same name.
 pub const PREFLIGHT_PROBLEM_TYPE_CONFLICT: &str = "directory-file-conflict";
@@ -5458,6 +5462,7 @@ mod tests {
         let problems = [
             PREFLIGHT_PROBLEM_ILLEGAL_NAME,
             PREFLIGHT_PROBLEM_CASE_COLLISION,
+            PREFLIGHT_PROBLEM_NORMALISATION_COLLISION,
             PREFLIGHT_PROBLEM_TYPE_CONFLICT,
             PREFLIGHT_PROBLEM_PATH_TOO_LONG,
         ];

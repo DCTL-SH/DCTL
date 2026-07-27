@@ -49,6 +49,7 @@ use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
 use crate::output::size;
+use crate::platform::collision;
 
 use super::recovery::report::{self, Document};
 use super::recovery::{Audience, Entry, Plan, Selection, SnapshotName, Target};
@@ -125,7 +126,13 @@ pub async fn run(ctx: &Ctx, args: &BackupArgs) -> Result<()> {
     }
 
     // Names are checked for *any* platform: this tree may be restored anywhere.
-    let findings = preflight::inspect(&scan.logical_paths(), None, Audience::AnyPlatform);
+    let mut findings = preflight::inspect(&scan.logical_paths(), None, Audience::AnyPlatform);
+    // Two local files that share one logical path are invisible to that
+    // inspection — by the time a path set reaches it, both spellings have
+    // already become the same string. Only the walk saw two files, so only the
+    // walk can report them, and they join the same report every other name
+    // problem lands in.
+    findings.absorb(collision::findings(&scan.collisions));
 
     let mut plan = Plan::new();
     for file in &scan.files {
@@ -141,7 +148,11 @@ pub async fn run(ctx: &Ctx, args: &BackupArgs) -> Result<()> {
     if let Some(name) = &snapshot {
         ctx.out.info(format!("snapshot {}", name.as_str()));
     }
-    if plan.is_empty() {
+    // `collisions` is the third reason a plan can be empty, and the only one
+    // where saying "nothing to back up" would be false: there *are* files under
+    // the source, and they were withheld because storing them would lose one.
+    // The refusal below says so precisely, so this says nothing at all.
+    if plan.is_empty() && scan.collisions.is_empty() {
         // Said out loud, because "no output and exit 0" is indistinguishable
         // from "it worked", and a backup that stored nothing is worth noticing.
         // The wording separates the two reasons: an empty tree and a tree the
@@ -206,12 +217,23 @@ fn vault_path(target: &Target, logical: &str) -> String {
 }
 
 /// Report the pre-flight outcome, and decide whether it stops the run.
+///
+/// # Errors
+/// [`ExitCode::FatalError`] for a normalisation collision (checked first, since
+/// it is the one with a specific remedy), for a name no filesystem anywhere
+/// accepts, or for any finding at all under `--strict-names`.
 fn summarise(
     ctx: &Ctx,
     scan: &scan::Scan,
     findings: &preflight::Report,
     strict: bool,
 ) -> Result<()> {
+    // Before the generic blocking branch below, which speaks about characters no
+    // filesystem accepts and would be the wrong account of this. Refused rather
+    // than warned about because there is no correct file to keep: whichever is
+    // stored, the other is lost, while the operator's own filesystem shows both.
+    collision::refuse(&scan.collisions, true)?;
+
     if findings.is_clean() {
         ctx.out.info(format!(
             "{} files ({}), {} skipped links, no name problems",
@@ -224,8 +246,11 @@ fn summarise(
 
     let blocking = findings.blocking_count();
     if blocking > 0 {
-        // A control character is the only finding that reaches here, and it
-        // guarantees an object no platform could ever restore.
+        // A control character is the only finding that reaches here *now*: the
+        // other blocking kind, a normalisation collision, was refused above with
+        // a message naming the two files. Ordered that way deliberately — this
+        // wording is about characters no filesystem accepts, which is a true but
+        // useless account of two names that are both perfectly legal.
         return Err(CliError::new(
             ExitCode::FatalError,
             format!("{blocking} name(s) cannot be restored on any platform"),

@@ -40,6 +40,7 @@ Look-it-up material. Precise, and meant to be linked into rather than read cover
 | [Error codes](ERROR_CODES.md) | The FFI-stable error-code contract surfaced by the library. | …you're handling or mapping DCTL errors programmatically. |
 | [Exit codes](EXIT_CODES.md) | The CLI exit-code contract for scripting and automation. | …you're wiring `dctl` into scripts, CI, or backup jobs. |
 | [Audit log](AUDIT_LOG.md) | The structured audit-log format and what operations are recorded. | …you need to trace or verify what a vault has done. |
+| [Restore drill](RESTORE_DRILL.md) | The full-recovery exercise — destroy the index, rebuild it from the store, restore on the recovery phrase alone — what each step proves, and the record of the last run. | …you are being audited, or you want to know whether the backup actually restores. |
 | [FROZEN format spec](FORMAT.md) | The design-locked v1 on-disk/wire format: DKE1 envelope, DSF1 objects, §5 name records, the §12 asymmetric sharing layer, and more. | …you're implementing a decoder, doing forensics, or need ground-truth for long-term restorability. |
 | [Project status](PROJECT_STATUS.md) | The current, deliberately honest state: what's green, what's WIP, and what's unverified. | …you're deciding whether to depend on a given feature today. |
 

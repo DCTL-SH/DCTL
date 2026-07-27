@@ -33,6 +33,7 @@
 //! They are, because they all arrive here.
 
 pub mod factor;
+pub mod index;
 pub mod open;
 pub mod password;
 pub mod phrase;

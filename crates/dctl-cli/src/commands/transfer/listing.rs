@@ -180,6 +180,17 @@ pub struct Listing {
     /// [`crate::platform::path`]). They cannot be stored under a name the user
     /// could later address, and they cannot be silently dropped either.
     pub unrepresentable_skipped: u64,
+    /// Groups of local files whose names collapse onto one logical path.
+    ///
+    /// Only a local walk can populate this: two spellings of one name are two
+    /// files on disk, and by the time they have become logical paths they are
+    /// the same string. A remote listing is keyed by logical path already, so
+    /// it cannot contain a collision — and if it could, the objects would
+    /// already exist and refusing to read them would help nobody.
+    ///
+    /// See [`crate::platform::collision`] for why the run is refused rather
+    /// than warned about.
+    pub collisions: Vec<crate::platform::collision::Collision>,
 }
 
 impl Listing {
@@ -196,8 +207,11 @@ impl Listing {
 /// continuing would report a successful transfer of nothing.
 ///
 /// # Errors
-/// [`ExitCode::DirNotFound`] when the endpoint does not exist, plus whatever
-/// opening or reading the remote reported.
+/// [`ExitCode::DirNotFound`] when the endpoint does not exist;
+/// [`ExitCode::FatalError`] when two or more local files share one logical path
+/// once their names are normalised, which is refused before anything is read
+/// (see [`crate::platform::collision`]); plus whatever opening or reading the
+/// remote reported.
 pub async fn source(ctx: &Ctx, endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
     let listing = enumerate(ctx, endpoint, options).await?;
     if !listing.exists {
@@ -207,6 +221,12 @@ pub async fn source(ctx: &Ctx, endpoint: &RemoteSpec, options: &ListOptions) -> 
         )
         .with_hint("Check the path, and the remote name if one was given."));
     }
+    // Every transfer verb's source side arrives here, which is why the refusal
+    // lives at this one point rather than in each of `copy`, `sync`, `move`,
+    // `copyto` and `moveto`. It is the source that matters: these are files the
+    // command is about to promise it transferred, and only one of them can
+    // exist at the destination.
+    crate::platform::collision::refuse(&listing.collisions, false)?;
     Ok(listing)
 }
 
@@ -384,6 +404,10 @@ fn relative_to(prefix: &str, path: &str) -> String {
 /// configuration cannot express but must still avoid.
 fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
     let mut listing = Listing::default();
+    // Fed as the walk goes, because the native spelling is available only here:
+    // an `Entry` deliberately carries the logical path and nothing else, and by
+    // then both spellings have already become one string.
+    let mut collisions = crate::platform::collision::Detector::new();
 
     let Ok(metadata) = fs::symlink_metadata(root) else {
         return Ok(listing);
@@ -463,6 +487,7 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
                     stack.push((child.path(), path));
                 }
             } else if metadata.is_file() && options.accepts_file(&path, metadata.len()) {
+                collisions.observe(&path, &child.path());
                 listing
                     .entries
                     .push(file_entry(path, &child.path(), &metadata, options)?);
@@ -483,6 +508,7 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
     // Deterministic order, so a plan printed twice is byte-identical and a diff
     // of two dry runs shows only what actually changed.
     listing.entries.sort_by(|a, b| a.path.cmp(&b.path));
+    listing.collisions = collisions.finish();
     Ok(listing)
 }
 

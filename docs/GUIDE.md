@@ -365,7 +365,7 @@ not a restore.
 
 ```console
 $ dctl index rebuild vault:
-warning: a rebuild is a list-only pass, so the rows it writes carry no size and no content hash until each file is next read
+warning: a rebuild is a list-only pass, so the rows it writes carry no size, no content hash and no modification time: files restored from a rebuilt index are byte-exact and carry the time of the restore
 Files  Index
 -----  ------------------------------------
     3  /home/you/recovered/index.redb

@@ -1,7 +1,7 @@
 //! Cross-platform behaviour that must be identical on macOS, Linux and Windows.
 //!
-//! Three problems bite a sync tool the moment it crosses an OS boundary, and all
-//! three are handled here rather than being sprinkled through the commands:
+//! Six problems bite a sync tool the moment it crosses an OS boundary, and all
+//! six are handled here rather than being sprinkled through the commands:
 //!
 //! 1. **Path spelling.** Windows uses `\`, everyone else uses `/`; Windows also
 //!    has drive letters, UNC shares and extended-length prefixes. Logical vault
@@ -26,7 +26,13 @@
 //!    operator type any of them. [`resolve`] reduces them to one answer, which
 //!    is what lets [`crate::addressing`] give the same answer to all four —
 //!    invariant I4 is a claim about spellings as much as about contents.
+//! 6. **Two local names, one logical path.** The NFC rule in (2) has a sharp
+//!    edge: on a byte-oriented filesystem two files whose names differ only in
+//!    normalisation are two files, and one vault path. Storing both keeps the
+//!    last and reports every one of them as stored, which is data loss with a
+//!    clean exit code. [`collision`] finds them and the run refuses.
 
+pub mod collision;
 pub mod names;
 pub mod path;
 pub mod resolve;

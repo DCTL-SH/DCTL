@@ -65,6 +65,11 @@ pub struct Scan {
     pub filtered: usize,
     /// Everything that could not be read or represented.
     pub problems: Vec<Problem>,
+    /// Groups of files whose names collapse onto one logical path. See
+    /// [`crate::platform::collision`]; they are **not** in `files`, because a
+    /// plan that listed them would promise to store bytes that cannot all be
+    /// stored.
+    pub collisions: Vec<crate::platform::collision::Collision>,
 }
 
 impl Scan {
@@ -221,6 +226,27 @@ pub fn walk(root: &Path, selection: &Selection, follow_links: bool) -> Scan {
     scan.files.sort_by(|a, b| a.logical.cmp(&b.logical));
     scan.skipped_links.sort();
     scan.problems.sort_by(|a, b| a.path.cmp(&b.path));
+
+    // After the sort, because the grouping is a pass over adjacent equals — and
+    // before anything else reads `files`, because the colliding entries are then
+    // taken back out. A plan that still listed them would show two `store` rows
+    // for one destination, which is the misleading output this refusal exists to
+    // remove; the caller refuses the run outright and the operator renames one.
+    let mut detector = crate::platform::collision::Detector::new();
+    for file in &scan.files {
+        detector.observe(&file.logical, &file.native);
+    }
+    scan.collisions = detector.finish();
+    if !scan.collisions.is_empty() {
+        let colliding: std::collections::HashSet<&str> = scan
+            .collisions
+            .iter()
+            .map(|collision| collision.logical.as_str())
+            .collect();
+        scan.files
+            .retain(|file| !colliding.contains(file.logical.as_str()));
+    }
+
     scan
 }
 

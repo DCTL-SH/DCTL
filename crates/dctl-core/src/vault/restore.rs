@@ -18,9 +18,17 @@ impl Vault {
     ///
     /// Idempotent — existing rows are overwritten with the authoritative mapping. A
     /// name record that cannot be decrypted (e.g. belongs to a different vault under a
-    /// shared bucket) is skipped with a warning rather than aborting the rebuild. Sizes
-    /// are left unset here (a rebuild stays a cheap, list-only pass); they populate on
-    /// first read of each file.
+    /// shared bucket) is skipped with a warning rather than aborting the rebuild.
+    ///
+    /// **Size, content hash and modification time are left unset**, because a rebuild
+    /// stays a cheap, list-only pass: they live in the object bodies, and fetching them
+    /// would turn a reconciliation into a full read of the dataset. This comment used
+    /// to claim they "populate on first read of each file"; they do not — `cat`,
+    /// `hashsum` and a whole `scrub` all leave the row exactly as unmeasured as they
+    /// found it, and only storing the file again records them. Nothing that *matters*
+    /// depends on the row: every read measures the object itself. What does depend on
+    /// it is a restore's timestamps, which fall back to the time of the restore. See
+    /// `docs/RESTORE_DRILL.md`.
     #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
     pub async fn rebuild_index(&self) -> Result<u64> {
         let mut cursor: Option<String> = None;
