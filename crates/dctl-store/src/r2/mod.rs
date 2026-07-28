@@ -91,6 +91,13 @@ impl Backend for R2Backend {
     fn name(&self) -> &'static str {
         "r2"
     }
+
+    /// The same `HEAD` on the bucket the S3 backend makes, and the same limit:
+    /// R2 speaks S3, and S3 gives a bucket no identifier.
+    async fn store_identity(&self) -> Result<Option<crate::guard::StoreIdentity>> {
+        self.client.bucket_identity().await
+    }
+
     async fn put(
         &self,
         key: &ObjectKey,

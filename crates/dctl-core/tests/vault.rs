@@ -138,6 +138,13 @@ async fn a_store_that_cannot_be_read_is_reported_as_that_rather_than_as_a_bad_pa
         fn name(&self) -> &'static str {
             "unreadable"
         }
+        async fn store_identity(&self) -> Result<Option<dctl_store::StoreIdentity>, StoreError> {
+            // A store nobody can read is still *there*: the guard's question is
+            // whether the container moved, not whether the objects in it can be
+            // fetched, and answering "gone" here would change what this test is
+            // about.
+            Ok(Some(dctl_store::StoreIdentity::existence_only()))
+        }
         async fn put(
             &self,
             _: &ObjectKey,
@@ -1117,6 +1124,10 @@ impl FaultyGrantGet {
 impl Backend for FaultyGrantGet {
     fn name(&self) -> &'static str {
         "faulty-grant-get"
+    }
+
+    async fn store_identity(&self) -> dctl_store::Result<Option<dctl_store::StoreIdentity>> {
+        self.inner.store_identity().await
     }
 
     async fn put(

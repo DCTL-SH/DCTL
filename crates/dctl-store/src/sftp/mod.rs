@@ -192,6 +192,45 @@ impl Backend for SftpBackend {
         "sftp"
     }
 
+    /// Whether the configured base is still a directory on the server.
+    ///
+    /// Existence, and nothing stronger, because SFTP version 3's
+    /// `SSH_FXP_STAT` returns size, uid, gid, permissions and two timestamps and
+    /// **no inode** — there is no field a replacement would have to change. The
+    /// two it does carry that might look usable are not: a directory's `mtime`
+    /// moves every time an object is written straight into the base, and its
+    /// owner and mode are whatever the process that re-created it had. So the
+    /// answer is [`StoreIdentity::existence_only`] and says so, rather than a
+    /// token that would look like a comparison and never be one.
+    ///
+    /// What makes existence worth having here is that the write path no longer
+    /// creates this directory ([`path::ancestor_dirs_below`]): a base that has
+    /// been removed stays removed, so it is still absent when the next write
+    /// checks, and every write that races past the check fails on the server
+    /// rather than landing in a re-created replacement.
+    ///
+    /// A path that exists and is **not** a directory is `None` rather than an
+    /// error: something is at the base and it is not a store, which is exactly
+    /// what the guard's `Gone` verdict means.
+    async fn store_identity(&self) -> Result<Option<crate::guard::StoreIdentity>> {
+        let base = if self.base.is_empty() {
+            "."
+        } else {
+            &self.base
+        };
+        let mut fs = self.sftp.fs();
+        match fs.metadata(base).await {
+            Ok(md) => Ok(md
+                .file_type()
+                .is_none_or(|kind| kind.is_dir())
+                .then(crate::guard::StoreIdentity::existence_only)),
+            Err(e) => match map_sftp_err(base, e) {
+                StoreError::NotFound(_) => Ok(None),
+                other => Err(other),
+            },
+        }
+    }
+
     /// Verified, atomic write of bytes already in hand.
     ///
     /// The order — stage, flush, close, stamp, rename, and remove the staging
@@ -468,8 +507,7 @@ fn map_sftp_err(key: &str, e: SftpError) -> StoreError {
             }
         }
         other => StoreError::Backend(format!(
-            "the sftp session to this host is no longer usable ({other}); run the \
-             command again to open a new one"
+            "the sftp session to this host is no longer usable ({other});              run the command again to open a new one"
         )),
     }
 }

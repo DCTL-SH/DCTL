@@ -24,6 +24,7 @@ use bytes::Bytes;
 use crate::backend::Backend;
 use crate::checksum::{ContentHash, HashAlgo};
 use crate::error::{Result, StoreError};
+use crate::guard::StoreIdentity;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
 
@@ -180,6 +181,168 @@ impl Backend for CountingBackend {
 
     async fn list_page(&self, _prefix: &str, _cursor: Option<String>) -> Result<Page> {
         self.attempt("list_page")?;
+        Ok(Page::default())
+    }
+
+    async fn store_identity(&self) -> Result<Option<StoreIdentity>> {
+        self.attempt("store_identity")?;
+        Ok(Some(StoreIdentity::distinguishing("counting")))
+    }
+}
+
+/// A backend whose store identity a test can change between two calls.
+///
+/// The other half of what a fake is needed for. `guard::Guarded`'s property is
+/// about one *process* whose store changes underneath it, and arranging that
+/// against a real provider means renaming a directory, deleting a bucket or
+/// unplugging a host — none of which the plain `cargo test --workspace` gate can
+/// do, and two of which need credentials. What the decorator does with a changed
+/// identity is not any provider's behaviour anyway; it is the decorator's, and
+/// this is what makes it assertable.
+pub struct IdentifiedBackend {
+    /// The current identity, or `None` for a store that is not there.
+    identity: Mutex<Option<StoreIdentity>>,
+    /// Whether the probe itself fails.
+    unprobeable: bool,
+    calls: Mutex<BTreeMap<&'static str, usize>>,
+}
+
+impl IdentifiedBackend {
+    /// A backend whose store currently identifies as `token`.
+    #[must_use]
+    pub fn at(token: &str) -> Self {
+        Self {
+            identity: Mutex::new(Some(StoreIdentity::distinguishing(token))),
+            unprobeable: false,
+            calls: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// A backend whose store does not exist yet — the `dctl config create …
+    /// path=/srv/new` case, where a first write legitimately creates it.
+    #[must_use]
+    pub fn absent() -> Self {
+        Self {
+            identity: Mutex::new(None),
+            unprobeable: false,
+            calls: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// A backend whose store cannot be identified at all.
+    #[must_use]
+    pub fn unprobeable() -> Self {
+        Self {
+            identity: Mutex::new(None),
+            unprobeable: true,
+            calls: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// The store is now a *different* one — a directory renamed away and
+    /// re-created, a bucket deleted and made again.
+    pub fn become_store(&self, token: &str) {
+        *self.identity.lock().expect("not poisoned") = Some(StoreIdentity::distinguishing(token));
+    }
+
+    /// The store is gone.
+    pub fn vanish(&self) {
+        *self.identity.lock().expect("not poisoned") = None;
+    }
+
+    /// How many times the store was asked what it is.
+    ///
+    /// The figure the probe-rate assertion rests on: a guard that cost one
+    /// provider round trip per write is the reason
+    /// `guard::constants::PROBE_INTERVAL` exists, and counting is the only way
+    /// to tell a bounded rate from an unbounded one.
+    #[must_use]
+    pub fn probes(&self) -> usize {
+        self.calls("store_identity")
+    }
+
+    /// How many times `operation` reached the provider.
+    #[must_use]
+    pub fn calls(&self, operation: &str) -> usize {
+        self.calls
+            .lock()
+            .expect("not poisoned")
+            .get(operation)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    fn record(&self, operation: &'static str) {
+        *self
+            .calls
+            .lock()
+            .expect("not poisoned")
+            .entry(operation)
+            .or_insert(0) += 1;
+    }
+}
+
+#[async_trait]
+impl Backend for IdentifiedBackend {
+    fn name(&self) -> &'static str {
+        "test"
+    }
+
+    async fn store_identity(&self) -> Result<Option<StoreIdentity>> {
+        self.record("store_identity");
+        if self.unprobeable {
+            return Err(StoreError::Backend(
+                "the store cannot be identified: the provider did not answer".into(),
+            ));
+        }
+        Ok(self.identity.lock().expect("not poisoned").clone())
+    }
+
+    async fn put(
+        &self,
+        _key: &ObjectKey,
+        data: Bytes,
+        expected: &ContentHash,
+        _modified: SourceModified,
+    ) -> Result<PutOutcome> {
+        self.record("put");
+        Ok(PutOutcome {
+            size: data.len() as u64,
+            verified: expected.clone(),
+        })
+    }
+
+    async fn get(&self, _key: &ObjectKey) -> Result<Bytes> {
+        self.record("get");
+        Ok(Bytes::from_static(b"payload"))
+    }
+
+    async fn get_range(&self, _key: &ObjectKey, _range: ByteRange) -> Result<Bytes> {
+        self.record("get_range");
+        Ok(Bytes::from_static(b"p"))
+    }
+
+    async fn head(&self, key: &ObjectKey) -> Result<ObjectMeta> {
+        self.record("head");
+        Ok(ObjectMeta {
+            key: key.clone(),
+            size: 7,
+            modified_unix: None,
+        })
+    }
+
+    async fn exists(&self, _key: &ObjectKey) -> Result<bool> {
+        self.record("exists");
+        Ok(true)
+    }
+
+    async fn delete(&self, _key: &ObjectKey) -> Result<()> {
+        self.record("delete");
+        Ok(())
+    }
+
+    async fn list_page(&self, _prefix: &str, _cursor: Option<String>) -> Result<Page> {
+        self.record("list_page");
         Ok(Page::default())
     }
 }

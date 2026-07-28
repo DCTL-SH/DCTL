@@ -34,7 +34,7 @@ use openssh_sftp_client::{Error as SftpError, UnixTimeStamp};
 use crate::error::{Result, StoreError};
 use crate::modified::SourceModified;
 
-use super::path::ancestor_dirs;
+use super::path::ancestor_dirs_below;
 use super::{SftpBackend, map_sftp_err};
 
 /// The access/modification pair a `SETSTAT` carries.
@@ -112,12 +112,14 @@ pub(super) trait RemoteFs: Sync {
     /// The staging-file handle this filesystem hands out.
     type File: StagedFile;
 
-    /// Realize `mkdir -p` for the parent of a remote **file** path.
+    /// Realize `mkdir -p` for the parent of a remote **file** path, **below the
+    /// configured base and never at or above it**.
     ///
     /// Infallible by design: an "already exists" on an intermediate directory is
     /// the ordinary case, and a genuinely un-writable parent surfaces when the
     /// subsequent create or rename fails, where the error can name what was
-    /// being attempted.
+    /// being attempted. A base that is *not* there is one of those failures now,
+    /// which is the point — see [`super::path::ancestor_dirs_below`].
     async fn mkdir_p(&self, remote_file: &str);
 
     /// Open a fresh remote file for writing (create + truncate).
@@ -191,7 +193,7 @@ impl RemoteFs for SftpBackend {
 
     async fn mkdir_p(&self, remote_file: &str) {
         let mut fs = self.sftp.fs();
-        for dir in ancestor_dirs(remote_file) {
+        for dir in ancestor_dirs_below(&self.base, remote_file) {
             let _ = fs.create_dir(&dir).await;
         }
     }

@@ -108,6 +108,9 @@ impl Backend for Watched {
     fn name(&self) -> &'static str {
         self.inner.name()
     }
+    async fn store_identity(&self) -> dctl_store::Result<Option<dctl_store::StoreIdentity>> {
+        self.inner.store_identity().await
+    }
     async fn put(
         &self,
         key: &ObjectKey,

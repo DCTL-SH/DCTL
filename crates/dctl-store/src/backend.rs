@@ -5,6 +5,7 @@ use bytes::Bytes;
 
 use crate::checksum::ContentHash;
 use crate::error::{Result, StoreError};
+use crate::guard::StoreIdentity;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
 
@@ -45,7 +46,32 @@ pub struct UploadTicket {
 #[async_trait]
 pub trait Backend: Send + Sync {
     /// Short, stable backend identifier (e.g. `"local"`, `"b2"`).
+    ///
+    /// Also what selects this backend's retry schedule
+    /// ([`RetryPolicy::for_backend`](crate::retry::RetryPolicy::for_backend)),
+    /// so it is a decision and not a label.
     fn name(&self) -> &'static str;
+
+    /// What the provider says this backend's container is, **right now**.
+    ///
+    /// [`None`] means there is nothing there — a bucket that has not been
+    /// created, a directory a first write will make. That is not an error: a
+    /// configuration may legitimately name a place that does not exist yet.
+    ///
+    /// Deliberately **not** a provided method. A default returning `None` would
+    /// give any backend added later a silently unguarded write path, which is
+    /// exactly the shape of defect `remote::registry::Built` documents about the
+    /// meter: five arms, four of which forgot. Requiring an answer means a new
+    /// provider cannot compile without deciding what it can tell about its own
+    /// container, and [`StoreIdentity::existence_only`] is how it says
+    /// "nothing, beyond that it is there".
+    ///
+    /// # Errors
+    /// Whatever the probe reported. A store that cannot be identified is one
+    /// [`Guarded`](crate::guard::Guarded) will not write into: recording
+    /// "unknown" and carrying on is the silent partial answer the guard exists
+    /// to remove.
+    async fn store_identity(&self) -> Result<Option<StoreIdentity>>;
 
     /// Atomically store `data` under `key`, verifying it matches `expected`, and
     /// record `modified` as the object's last-modified time.

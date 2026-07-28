@@ -94,8 +94,48 @@ pub(super) fn join(base: &str, rel: &str) -> String {
     }
 }
 
-/// The ancestor directories of a remote **file** path, shortest-first, so a caller
-/// can `mkdir` each in order to realize `mkdir -p` on the parent.
+/// The ancestor directories of a remote **file** path that lie strictly *below*
+/// `base`, shortest-first, so a caller can `mkdir` each in order to realize
+/// `mkdir -p` on the parent **without ever creating the base itself**.
+///
+/// Two things depend on the exclusion, and neither is cosmetic.
+///
+/// A configured base is a place the operator chose. Creating it is how a base
+/// that was renamed away mid-run got silently re-created underneath the run —
+/// seventeen of twenty-five objects landed in the replacement and were reported
+/// as stored and verified (`crate::guard::identity`). With this, a removed base
+/// makes every write fail loudly instead, which is what keeps
+/// `SftpBackend::store_identity`'s existence-only answer worth having: the guard
+/// refuses the sequential case, and nothing re-creates the base underneath a
+/// concurrent one.
+///
+/// And [`ancestor_dirs`] walked the path from the filesystem root, so
+/// `base=/srv/dctl` with key `a.txt` asked the server to create `/srv` — a
+/// directory *outside* the store, on a host where DCTL had been given one place
+/// to write.
+///
+/// - `base="/srv/store"`, `"/srv/store/a/b/obj"` → `["/srv/store/a", "/srv/store/a/b"]`
+/// - `base="/srv/store"`, `"/srv/store/obj"` → `[]`
+/// - `base=""` (home-relative), `"a/b/obj"` → `["a", "a/b"]`
+#[must_use]
+pub(super) fn ancestor_dirs_below(base: &str, path: &str) -> Vec<String> {
+    let all = ancestor_dirs(path);
+    if base.is_empty() {
+        return all;
+    }
+    // Component-wise rather than `starts_with`, so a base of `/srv/store` does
+    // not swallow `/srv/store-backup` — the same rule the listing prefix match
+    // has to obey, and for the same reason.
+    let depth = base.split('/').filter(|part| !part.is_empty()).count();
+    all.into_iter()
+        .filter(|dir| dir.split('/').filter(|part| !part.is_empty()).count() > depth)
+        .collect()
+}
+
+/// The ancestor directories of a remote **file** path, shortest-first.
+///
+/// Not called directly by the write path — [`ancestor_dirs_below`] is, and its
+/// documentation says why.
 ///
 /// The final component (the file itself) and the filesystem root are excluded. For
 /// an absolute path the entries keep their leading `/`.
@@ -237,6 +277,65 @@ mod tests {
             remote_path(&base, &ObjectKey::new("a/../b")),
             Err(StoreError::InvalidKey(_))
         ));
+    }
+
+    #[test]
+    fn a_write_never_creates_the_configured_base_or_anything_above_it() {
+        // The defect, stated as an assertion. `mkdir -p` walked the whole path
+        // from the filesystem root, so a base that had been renamed away mid-run
+        // was silently re-created underneath the run — seventeen of twenty-five
+        // objects landed in the replacement and were reported as stored and
+        // verified — and a first write with `base=/srv/store` asked the server to
+        // create `/srv`, a directory outside the store, on a host where DCTL had
+        // been given one place to write.
+        assert_eq!(
+            ancestor_dirs_below("/srv/store", "/srv/store/a/b/obj"),
+            vec!["/srv/store/a".to_string(), "/srv/store/a/b".to_string()]
+        );
+        // An object at the top of the store needs nothing created at all.
+        assert!(ancestor_dirs_below("/srv/store", "/srv/store/obj").is_empty());
+        // …and emphatically not `/srv`.
+        assert!(
+            !ancestor_dirs_below("/srv/store", "/srv/store/a/obj").contains(&"/srv".to_string())
+        );
+    }
+
+    #[test]
+    fn a_home_relative_base_still_creates_the_key_directories() {
+        // An empty base is the home-relative case: there is nothing configured
+        // above the key, so every ancestor of the key is the key's own.
+        assert_eq!(
+            ancestor_dirs_below("", "a/b/obj"),
+            vec!["a".to_string(), "a/b".to_string()]
+        );
+        assert!(ancestor_dirs_below("", "obj").is_empty());
+    }
+
+    #[test]
+    fn a_base_is_matched_by_component_and_not_by_prefix() {
+        // `/srv/store` must not swallow `/srv/store-backup`: the same rule the
+        // listing prefix match has to obey, and the bug that makes a `sync`
+        // delete a neighbouring tree if it is got wrong. A byte-wise
+        // `starts_with` would count `/srv/store-backup` as being inside the base
+        // and refuse to create it.
+        assert_eq!(
+            ancestor_dirs_below("/srv/store", "/srv/store-backup/a/obj"),
+            vec!["/srv/store-backup/a".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_trailing_or_doubled_separator_in_the_base_changes_nothing() {
+        // `normalize_base` already trims, but the depth count must not depend on
+        // it: an off-by-one here either re-creates the base or refuses to create
+        // the first directory inside it, and both are silent.
+        for base in ["/srv/store", "/srv/store/", "/srv//store"] {
+            assert_eq!(
+                ancestor_dirs_below(base, "/srv/store/a/obj"),
+                vec!["/srv/store/a".to_string()],
+                "{base}"
+            );
+        }
     }
 
     #[test]

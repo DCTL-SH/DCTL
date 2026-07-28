@@ -220,6 +220,25 @@ impl S3Client {
         }
     }
 
+    /// Whether the bucket is still there, as `HEAD /bucket` answers it.
+    ///
+    /// `None` for a bucket that is not there — which the guard reads as "nothing
+    /// to lose", the same as a directory a first write will create. A `403` is
+    /// **not** absence: the bucket exists and this key may not describe it, so
+    /// answering `None` would tell the guard the store had vanished and refuse
+    /// every later write for a credential problem. It is reported as the
+    /// provider error it is.
+    pub(crate) async fn bucket_identity(&self) -> Result<Option<crate::guard::StoreIdentity>> {
+        let resp = self.send(Method::HEAD, None, &[], &[], None).await?;
+        if resp.status().is_success() {
+            return Ok(Some(crate::guard::StoreIdentity::existence_only()));
+        }
+        if resp.status() == StatusCode::NOT_FOUND {
+            return Ok(None);
+        }
+        Err(Self::error(resp).await)
+    }
+
     // ---- operations ----------------------------------------------------------
 
     pub(crate) async fn put(

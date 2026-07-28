@@ -121,6 +121,7 @@ impl B2Backend {
         };
 
         Ok(AuthState {
+            account_id: parsed.account_id,
             api_url: parsed.api_url,
             download_url: parsed.download_url,
             auth_token: parsed.authorization_token,
@@ -159,7 +160,11 @@ impl B2Backend {
             .into_iter()
             .find(|b| b.bucket_name == self.bucket_name)
             .map(|b| b.bucket_id)
-            .ok_or_else(|| StoreError::Backend(format!("bucket not found: {}", self.bucket_name)))
+            // `NotFound`, not `Backend`: a bucket that is not there is an
+            // absence and the caller decides what it means. `store_identity`
+            // reads it as "nothing to lose"; an operation that needed the id
+            // reports it as the missing bucket it is.
+            .ok_or_else(|| StoreError::NotFound(format!("bucket {}", self.bucket_name)))
     }
 
     /// Authenticated POST of a JSON body to a `b2api/v2` endpoint, parsed into
@@ -304,6 +309,30 @@ fn retry_after_of(headers: &reqwest::header::HeaderMap) -> Option<Duration> {
 impl Backend for B2Backend {
     fn name(&self) -> &'static str {
         "b2"
+    }
+
+    /// The bucket's own id, resolved **fresh** from `b2_list_buckets`.
+    ///
+    /// Fresh, and that is the whole point: the id cached in [`AuthState`] was
+    /// resolved when this run authorized, so comparing it against itself would
+    /// answer `Proceed` for a bucket that had been deleted since. B2 gives a
+    /// re-created bucket a new id, which makes this a genuinely
+    /// [`distinguishing`](crate::guard::Strength::Distinguishing) identity —
+    /// one of only two providers that can offer one.
+    ///
+    /// A bucket that is not there is `None` rather than an error: a
+    /// configuration may name a bucket somebody has yet to create, and the guard
+    /// reads absence as "nothing to lose".
+    async fn store_identity(&self) -> Result<Option<crate::guard::StoreIdentity>> {
+        let auth = self.auth().await?;
+        match self
+            .resolve_bucket_id(&auth.api_url, &auth.auth_token, &auth.account_id)
+            .await
+        {
+            Ok(id) => Ok(Some(crate::guard::StoreIdentity::distinguishing(id))),
+            Err(StoreError::NotFound(_)) => Ok(None),
+            Err(other) => Err(other),
+        }
     }
 
     async fn put(

@@ -20,6 +20,7 @@ pub mod backend;
 pub mod checksum;
 pub mod durable;
 pub mod error;
+pub mod guard;
 pub mod links;
 pub mod local;
 pub mod meter;
@@ -38,6 +39,7 @@ mod tls;
 pub use backend::{Backend, UploadTicket};
 pub use checksum::{ContentHash, HashAlgo, Hasher};
 pub use error::{Result, StoreError};
+pub use guard::{Guarded, StoreIdentity};
 pub use links::{
     LINK_POLICY_CHOICES, LinkNote, LinkPolicy, LinkReport, LinkVerdict, UnknownLinkPolicy,
 };

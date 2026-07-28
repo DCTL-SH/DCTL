@@ -55,91 +55,47 @@
 use std::path::Path;
 
 use crate::error::StoreError;
-
-/// What a directory is, as far as this platform can tell one from another.
-///
-/// Opaque on purpose: nothing outside this module should read the number, only
-/// compare two of them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct RootId(u128);
+use crate::guard::StoreIdentity;
+use crate::guard::identity::{Verdict, refuse, verdict};
 
 /// The identity of `root` now, or [`None`] if there is nothing there.
 ///
-/// On Unix this is the device and inode pair, which survives a rename and is not
-/// reused by a directory created in the same place. Elsewhere it degrades to
-/// "something is there", which still catches the removal half of the defect and
-/// is stated rather than implied — a silent partial answer here would be the
-/// same shape of problem the module exists to remove.
-pub(super) fn identify(root: &Path) -> Option<RootId> {
+/// On Unix this is the device and inode pair, which survives a rename and is
+/// not reused by a directory created in the same place — so it is
+/// [`StoreIdentity::distinguishing`]. Elsewhere it degrades to "something is
+/// there", which still catches the removal half of the defect and is *stated*
+/// rather than implied: a silent partial answer here would be the same shape of
+/// problem the module exists to remove, which is why the weaker answer is
+/// spelled [`StoreIdentity::existence_only`] and travels with its own strength.
+#[must_use]
+pub(crate) fn identify(root: &Path) -> Option<StoreIdentity> {
     let meta = std::fs::metadata(root).ok()?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt as _;
-        Some(RootId(
-            (u128::from(meta.dev()) << 64) | u128::from(meta.ino()),
-        ))
+        Some(StoreIdentity::distinguishing(format!(
+            "{}:{}",
+            meta.dev(),
+            meta.ino()
+        )))
     }
     #[cfg(not(unix))]
     {
         let _ = meta;
-        Some(RootId(0))
-    }
-}
-
-/// What became of the root between construction and now.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Verdict {
-    /// Write. Either the root is the one this backend opened, or there was none
-    /// to open and creating it is the caller's ordinary first write.
-    Proceed,
-    /// The root existed and is gone.
-    Gone,
-    /// The root existed and a *different* directory now stands in its place.
-    Replaced,
-}
-
-/// Compare a recorded identity with a current one.
-///
-/// Pure, and that is what makes the rule assertable without arranging a
-/// filesystem for every case: the three outcomes are a function of two
-/// `Option<RootId>`s and nothing else.
-pub(super) const fn verdict(recorded: Option<RootId>, now: Option<RootId>) -> Verdict {
-    match (recorded, now) {
-        // Nothing was there to be lost. A first write creates the root.
-        (None, _) => Verdict::Proceed,
-        (Some(_), None) => Verdict::Gone,
-        (Some(before), Some(after)) => {
-            if before.0 == after.0 {
-                Verdict::Proceed
-            } else {
-                Verdict::Replaced
-            }
-        }
-    }
-}
-
-/// The error a caller reports, naming the root and what happened to it.
-///
-/// Says what the run must not be allowed to believe — that the objects are
-/// where they were asked to go — rather than only what the filesystem returned.
-pub(super) fn refuse(root: &Path, verdict: Verdict) -> StoreError {
-    let what = match verdict {
-        Verdict::Gone => "has been removed",
-        Verdict::Replaced => "has been replaced by a different directory",
-        // Never constructed: `check` only calls this on a refusal.
-        Verdict::Proceed => "changed",
-    };
-    StoreError::RootChanged {
-        root: root.display().to_string(),
-        detail: what,
+        Some(StoreIdentity::existence_only())
     }
 }
 
 /// Refuse the write if `root` is no longer the directory it was.
-pub(super) fn check(root: &Path, recorded: Option<RootId>) -> Result<(), StoreError> {
-    match verdict(recorded, identify(root)) {
+///
+/// The comparison itself is [`crate::guard::identity::verdict`], shared with the
+/// backend-agnostic guard. One rule, two call sites: this one sits immediately
+/// in front of each local write, and `guard::Guarded` covers every provider —
+/// including this one — from above.
+pub(super) fn check(root: &Path, recorded: Option<&StoreIdentity>) -> Result<(), StoreError> {
+    match verdict(recorded, identify(root).as_ref()) {
         Verdict::Proceed => Ok(()),
-        other => Err(refuse(root, other)),
+        other => Err(refuse(&root.display().to_string(), other)),
     }
 }
 
@@ -150,66 +106,53 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_root_that_never_existed_admits_the_write_that_creates_it() {
-        // `dctl config create backup local path=/srv/new` names a directory that
-        // does not exist yet, and the first copy through it must still work. A
-        // guard that refused here would break the ordinary case to catch the
-        // rare one.
-        assert_eq!(verdict(None, None), Verdict::Proceed);
-        assert_eq!(verdict(None, Some(RootId(7))), Verdict::Proceed);
-    }
-
-    #[test]
-    fn the_same_root_admits_the_write() {
-        assert_eq!(verdict(Some(RootId(7)), Some(RootId(7))), Verdict::Proceed);
-    }
-
-    #[test]
-    fn a_root_that_was_there_and_is_not_is_refused() {
-        assert_eq!(verdict(Some(RootId(7)), None), Verdict::Gone);
-    }
-
-    #[test]
-    fn a_root_replaced_by_a_different_directory_is_refused() {
-        // The case `create_dir_all` creates and the reason existence is not
-        // enough: something *is* at the path, and it is not the store.
-        assert_eq!(verdict(Some(RootId(7)), Some(RootId(8))), Verdict::Replaced);
-    }
-
-    #[test]
-    fn the_refusal_names_the_root_and_says_which_of_the_two_happened() {
-        let gone = refuse(Path::new("/srv/vault"), Verdict::Gone);
-        let text = gone.to_string();
-        assert!(text.contains("/srv/vault"), "{text}");
-        assert!(text.contains("removed"), "{text}");
-
-        let replaced = refuse(Path::new("/srv/vault"), Verdict::Replaced);
-        assert!(replaced.to_string().contains("replaced"));
-    }
-
-    #[test]
     fn a_real_directory_identifies_as_itself_and_a_replacement_does_not() {
-        // The half `verdict` cannot answer: that `identify` really distinguishes
-        // a renamed directory from one created in its place. Without this the
-        // pure tests above would pass over a function that returned a constant.
+        // The half a pure test cannot answer: that `identify` really
+        // distinguishes a renamed directory from one created in its place.
+        // Without this the rule's own tests in `guard::identity` would pass over
+        // a function that returned a constant.
         let temp = tempfile::TempDir::new().unwrap();
         let root = temp.path().join("store");
         std::fs::create_dir(&root).unwrap();
 
         let recorded = identify(&root);
         assert!(recorded.is_some());
-        assert!(check(&root, recorded).is_ok());
+        assert!(check(&root, recorded.as_ref()).is_ok());
 
         // Renamed away: nothing is there.
         std::fs::rename(&root, temp.path().join("store-moved")).unwrap();
-        assert_eq!(verdict(recorded, identify(&root)), Verdict::Gone);
+        assert!(identify(&root).is_none());
+        assert!(check(&root, recorded.as_ref()).is_err());
 
         // …and the directory that `create_dir_all` would put back is a
         // different one, which is the case a bare existence check would miss.
         std::fs::create_dir(&root).unwrap();
         #[cfg(unix)]
-        assert_eq!(verdict(recorded, identify(&root)), Verdict::Replaced);
-        #[cfg(unix)]
-        assert!(check(&root, recorded).is_err());
+        {
+            assert!(identify(&root).is_some());
+            let error = check(&root, recorded.as_ref()).unwrap_err();
+            assert!(error.to_string().contains("replaced"), "{error}");
+        }
+    }
+
+    #[test]
+    fn a_root_that_never_existed_admits_the_write_that_creates_it() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let missing = temp.path().join("not-yet");
+        assert!(identify(&missing).is_none());
+        assert!(check(&missing, None).is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_local_identity_is_the_strong_kind() {
+        // What `guard` reports in its log line, and what decides whether an
+        // operator can trust the guard to have seen a replacement on this
+        // provider.
+        let temp = tempfile::TempDir::new().unwrap();
+        assert_eq!(
+            identify(temp.path()).map(|id| id.strength()),
+            Some(crate::guard::Strength::Distinguishing)
+        );
     }
 }

@@ -51,6 +51,18 @@ impl Backend for S3Backend {
     fn name(&self) -> &'static str {
         "s3"
     }
+
+    /// `HEAD` on the bucket: existence, and nothing stronger.
+    ///
+    /// S3 gives a bucket **no identifier**. A bucket deleted and re-created
+    /// under the same name is a different bucket and this protocol offers
+    /// nothing that says so, which is why the answer is
+    /// [`StoreIdentity::existence_only`] rather than a token that would look
+    /// like a comparison and never be one.
+    async fn store_identity(&self) -> Result<Option<crate::guard::StoreIdentity>> {
+        self.client.bucket_identity().await
+    }
+
     async fn put(
         &self,
         key: &ObjectKey,

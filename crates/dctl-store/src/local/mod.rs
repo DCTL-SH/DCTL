@@ -48,7 +48,7 @@ pub struct LocalFs {
     /// `system/envelope.bin` was read out of it. Every write then checks that it
     /// is still writing into the same directory; see [`root`] for the run that
     /// reported `Files: 25 / 25, Errors: 0` into a replacement.
-    opened_as: Option<root::RootId>,
+    opened_as: Option<crate::guard::StoreIdentity>,
     /// Who is told about bytes as they move, window by window.
     ///
     /// See [`crate::meter`]. Held on the backend rather than passed per call
@@ -113,7 +113,7 @@ impl LocalFs {
     /// [`StoreError::RootChanged`] when the recorded root has been removed or
     /// replaced.
     pub(crate) fn require_same_root(&self) -> Result<()> {
-        root::check(&self.root, self.opened_as)
+        root::check(&self.root, self.opened_as.as_ref())
     }
 
     #[must_use]
@@ -131,6 +131,14 @@ impl LocalFs {
 impl Backend for LocalFs {
     fn name(&self) -> &'static str {
         "local"
+    }
+
+    /// The root's `(st_dev, st_ino)` pair — a renamed directory keeps its
+    /// inode, so the store moved away is distinguishable from the fresh one
+    /// created in its place. See [`root`] for the run this exists to stop
+    /// reporting as a success.
+    async fn store_identity(&self) -> Result<Option<crate::guard::StoreIdentity>> {
+        Ok(root::identify(&self.root))
     }
 
     async fn put(

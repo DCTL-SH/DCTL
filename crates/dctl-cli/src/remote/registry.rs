@@ -120,6 +120,24 @@ pub enum Target {
 }
 
 impl Target {
+    /// How the *container* this target writes into is named to an operator.
+    ///
+    /// Not the remote's configured alias and not [`Target::provider_type`]: this
+    /// is what a refusal prints when the store moves out from under a run, and
+    /// its reader needs to know which directory or which bucket to go and look
+    /// at. The alias would send them to the config file instead. See
+    /// [`dctl_store::guard`].
+    #[must_use]
+    pub fn container(&self) -> String {
+        match self {
+            Self::Local { root } => root.display().to_string(),
+            Self::B2 { bucket } => format!("{PROVIDER_B2}:{bucket}"),
+            Self::S3 { bucket, .. } => format!("{PROVIDER_S3}:{bucket}"),
+            Self::R2 { bucket, .. } => format!("{PROVIDER_R2}:{bucket}"),
+            Self::Sftp { host, base } => format!("{PROVIDER_SFTP}:{host}:{base}"),
+        }
+    }
+
     /// The provider type name this target builds — the same spelling a config
     /// section's `type` key carries, so logs, `dctl config list` and the config
     /// file all say the same word for the same thing.
@@ -214,7 +232,16 @@ pub fn build(
     // has to sit *underneath* the retry layer and be charged once per attempt.
     // Wrapping the other way round would let a run that is retrying sprint past
     // its `--bwlimit`, which is the opposite of what a limiter is for.
-    Ok(dctl_store::Retrying::wrap(built.metered(meter)))
+    // The store guard is outermost, and that order matters most. Its probe has
+    // to be retried like any other request — a `HEAD` on a bucket that answers
+    // `503` must not be read as "the bucket is gone" and refuse every later
+    // write — but a *refusal* it issues must never be retried, because a store
+    // that has been replaced will still be replaced five seconds later. This
+    // order gets both: the probe travels through the retrying backend
+    // underneath, and `StoreError::RootChanged` is classified permanent
+    // (`dctl_store::retry::observed`) so nothing above tries again.
+    let backend = dctl_store::Retrying::wrap(built.metered(meter));
+    Ok(dctl_store::Guarded::wrap(backend, target.container()))
 }
 
 /// A backend that has been constructed but not yet told who is watching it.

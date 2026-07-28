@@ -5,6 +5,13 @@ use serde::Deserialize;
 /// Cached result of `b2_authorize_account` (+ resolved bucket id).
 #[derive(Clone)]
 pub(crate) struct AuthState {
+    /// The account the key belongs to.
+    ///
+    /// Kept because `b2_list_buckets` needs it, and the store-identity probe has
+    /// to call that again — fresh — on every check: the `bucket_id` below was
+    /// resolved once when this run authorized, so comparing it against itself
+    /// would answer "unchanged" for a bucket that had since been deleted.
+    pub account_id: String,
     pub api_url: String,
     pub download_url: String,
     pub auth_token: String,

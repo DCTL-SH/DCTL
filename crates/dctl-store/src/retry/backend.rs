@@ -187,6 +187,19 @@ impl Backend for Retrying {
         })
         .await
     }
+
+    /// Retried like everything else, and that is the point of the layering.
+    ///
+    /// `guard::Guarded` sits *above* this wrapper, so the probe it makes travels
+    /// through here: a `HEAD` on a bucket that answers `503` is tried again
+    /// rather than read as "the bucket is gone", which would refuse every write
+    /// for the rest of the run over one moment of throttling.
+    async fn store_identity(&self) -> Result<Option<crate::guard::StoreIdentity>> {
+        run("store_identity", self.policy, |_| async move {
+            self.inner.store_identity().await
+        })
+        .await
+    }
 }
 
 #[cfg(test)]
