@@ -27,6 +27,8 @@ use clap::Args;
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::output::Units;
+use crate::output::color::Palette;
+use crate::output::paint;
 
 use super::listing::emit::Emitter;
 use super::listing::render::{row, size_column};
@@ -62,7 +64,7 @@ pub async fn run(ctx: &Ctx, args: &LsArgs) -> Result<()> {
         let units = ctx.out.units();
         stream
             .try_for_each(|entry| {
-                ctx.out.line(line(entry, units))?;
+                ctx.out.line(line(entry, units, ctx.out.palette()))?;
                 Ok(())
             })
             .await?;
@@ -74,8 +76,16 @@ pub async fn run(ctx: &Ctx, args: &LsArgs) -> Result<()> {
 }
 
 /// One text line: the size column, then the path.
-fn line(entry: &Entry, units: Units) -> String {
-    row(&[&size_column(entry.size(), units), entry.relative()])
+///
+/// Painted *after* the columns are measured, never before: an escape sequence
+/// costs bytes and no width, so styling a value and then padding it produces a
+/// column that is right in a `String` and ragged on a terminal. See
+/// [`crate::output::paint`].
+fn line(entry: &Entry, units: Units, palette: &Palette) -> String {
+    row(&[
+        &paint::number(palette, &size_column(entry.size(), units)),
+        &paint::path(palette, entry.relative()),
+    ])
 }
 
 #[cfg(test)]
@@ -117,7 +127,11 @@ mod tests {
 
     #[test]
     fn a_line_is_the_size_column_then_the_relative_path() {
-        let rendered = line(&entry("photos", "photos/2024/a.jpg", 1024), Units::Binary);
+        let rendered = line(
+            &entry("photos", "photos/2024/a.jpg", 1024),
+            Units::Binary,
+            &Palette::plain(),
+        );
         assert_eq!(rendered, "  1.00 KiB 2024/a.jpg");
         // The path column is last and unpadded, so `awk '{print $NF}'` works.
         assert!(rendered.ends_with("2024/a.jpg"));
@@ -126,7 +140,7 @@ mod tests {
     #[test]
     fn the_size_column_holds_its_width_across_magnitudes() {
         for size in [0, 1, 1023, 1024, 1 << 30, u64::MAX] {
-            let rendered = line(&entry("", "a", size), Units::Binary);
+            let rendered = line(&entry("", "a", size), Units::Binary, &Palette::plain());
             let column = rendered.rsplit_once(' ').map(|(head, _)| head.to_string());
             assert_eq!(
                 column.as_deref().map(|c| c.chars().count()),
@@ -138,8 +152,8 @@ mod tests {
 
     #[test]
     fn the_unit_convention_reaches_the_line() {
-        assert!(line(&entry("", "a", 1000), Units::Decimal).contains("kB"));
-        assert!(line(&entry("", "a", 1024), Units::Binary).contains("KiB"));
+        assert!(line(&entry("", "a", 1000), Units::Decimal, &Palette::plain()).contains("kB"));
+        assert!(line(&entry("", "a", 1024), Units::Binary, &Palette::plain()).contains("KiB"));
     }
 
     #[tokio::test]

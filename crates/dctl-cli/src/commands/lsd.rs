@@ -42,6 +42,8 @@ use crate::constants::{LSD_DEFAULT_DEPTH, MAX_DEPTH_UNLIMITED};
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::output::Units;
+use crate::output::color::Palette;
+use crate::output::paint;
 
 use super::listing::dirs::{Aggregator, Directory};
 use super::listing::emit::Emitter;
@@ -93,7 +95,7 @@ pub async fn run(ctx: &Ctx, args: &LsdArgs) -> Result<()> {
     } else {
         let mut emit = |dir: &Directory| -> Result<()> {
             shown += 1;
-            ctx.out.line(line(dir, units))?;
+            ctx.out.line(line(dir, units, ctx.out.palette()))?;
             Ok(())
         };
         stream
@@ -132,12 +134,15 @@ fn directory_depth(max_depth: i32, recursive: bool) -> Option<usize> {
 }
 
 /// One text line: total size, object count, then the directory path.
-fn line(dir: &Directory, units: Units) -> String {
+fn line(dir: &Directory, units: Units, palette: &Palette) -> String {
     let as_entry = dir.to_entry();
+    // Bold, not merely coloured: every row here is a directory, and the same
+    // treatment has to stay distinguishable from a file's when `ls` and `lsd`
+    // are read side by side on a terminal that shows no hue at all.
     row(&[
-        &size_column(dir.bytes(), units),
-        &count_column(dir.objects()),
-        &directory_path(as_entry.relative()),
+        &paint::number(palette, &size_column(dir.bytes(), units)),
+        &paint::number(palette, &count_column(dir.objects())),
+        &paint::directory(palette, &directory_path(as_entry.relative())),
     ])
 }
 
@@ -170,7 +175,7 @@ mod tests {
         let mut aggregator = Aggregator::new(root, depth);
         {
             let mut emit = |dir: &Directory| -> Result<()> {
-                lines.push(line(dir, Units::Binary));
+                lines.push(line(dir, Units::Binary, &Palette::plain()));
                 Ok(())
             };
             for (path, size) in paths {

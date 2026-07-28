@@ -22,8 +22,6 @@
 //! ([`render`]): the selection rules are the part worth testing, and they are
 //! testable only if choosing a row does not require a terminal.
 
-use anstream::eprintln as astyle_eprintln;
-
 use crate::constants::{
     SUMMARY_LABEL_CHECKS, SUMMARY_LABEL_DELETED, SUMMARY_LABEL_ELAPSED, SUMMARY_LABEL_ERRORS,
     SUMMARY_LABEL_FILES, SUMMARY_LABEL_MISMATCHES, SUMMARY_LABEL_RETRIES, SUMMARY_LABEL_SKIPPED,
@@ -237,9 +235,9 @@ pub fn render(out: &Out, snapshot: &Snapshot) {
     }
 
     let palette = out.palette();
-    astyle_eprintln!();
+    out.blank_stderr_line();
     for row in rows(snapshot, out.units()) {
-        astyle_eprintln!("{}", render_row(&row, palette));
+        out.stderr_row(&render_row(&row, palette));
     }
 }
 

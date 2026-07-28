@@ -18,6 +18,8 @@
 //! * [`color`], [`progress`], [`size`], [`stats`], [`table`] — the palette, the
 //!   live display, human-readable quantities, the counters they read, and
 //!   column alignment.
+//! * [`paint`] — which meaning gets which style, for the renderers that build a
+//!   line themselves instead of handing rows to [`table`].
 //! * [`hex`] — how a digest is spelled. Presentation, but the machine-readable
 //!   kind: `sha256sum -c` and a `--checksum` comparison both depend on it.
 //!
@@ -30,6 +32,7 @@
 pub mod color;
 pub mod format;
 pub mod hex;
+pub mod paint;
 pub mod progress;
 pub mod sink;
 pub mod size;

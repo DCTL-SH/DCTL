@@ -32,6 +32,8 @@
 
 use crate::constants::{LISTING_DIR_SUFFIX, PATH_SEPARATOR};
 use crate::error::Result;
+use crate::output::color::Palette;
+use crate::output::paint;
 
 use super::glyphs::Glyphs;
 
@@ -141,12 +143,19 @@ impl Tree {
 
     /// Draw the tree, one line per node, root label first.
     ///
+    /// `palette` styles the drawing without changing it: the connectors are
+    /// chrome and recede, a directory is bold, a file is not. The prefix is
+    /// accumulated **unpainted** and styled once per line, so the byte offsets
+    /// [`Step::Unwind`] truncates at stay the offsets of the glyphs and not of
+    /// whatever escape sequence happened to precede them.
+    ///
     /// # Errors
     /// Whatever `emit` returned — in practice a stdout write failure.
     pub fn render(
         &self,
         glyphs: Glyphs,
         dirs_only: bool,
+        palette: &Palette,
         emit: &mut dyn FnMut(&str) -> Result<()>,
     ) -> Result<Counts> {
         let mut counts = Counts::default();
@@ -154,7 +163,7 @@ impl Tree {
         let Some(root) = self.nodes.get(ROOT) else {
             return Ok(counts);
         };
-        emit(&root.name)?;
+        emit(&paint::directory(palette, &root.name))?;
 
         // An explicit stack rather than recursion: path depth is bounded only by
         // what a user typed, and overflowing the call stack part-way through a
@@ -177,18 +186,15 @@ impl Tree {
             let Some(current) = self.nodes.get(node) else {
                 continue;
             };
-            let suffix = if current.is_dir {
+            let name = if current.is_dir {
                 counts.directories += 1;
-                LISTING_DIR_SUFFIX.to_string()
+                paint::directory(palette, &format!("{}{LISTING_DIR_SUFFIX}", current.name))
             } else {
                 counts.files += 1;
-                String::new()
+                paint::path(palette, &current.name)
             };
-            emit(&format!(
-                "{prefix}{}{}{suffix}",
-                glyphs.connector(last),
-                current.name
-            ))?;
+            let drawn = format!("{prefix}{}", glyphs.connector(last));
+            emit(&format!("{}{name}", paint::chrome(palette, &drawn)))?;
 
             let children = self.visible_children(node, dirs_only);
             if !children.is_empty() {
@@ -306,7 +312,7 @@ mod tests {
                 lines.push(line.to_string());
                 Ok(())
             };
-            tree.render(glyphs, dirs_only, &mut emit)
+            tree.render(glyphs, dirs_only, &Palette::plain(), &mut emit)
                 .expect("collecting cannot fail");
         }
         lines
@@ -318,7 +324,7 @@ mod tests {
             tree.insert(path, Some(1));
         }
         let mut sink = |_: &str| -> Result<()> { Ok(()) };
-        tree.render(Glyphs::UNICODE, dirs_only, &mut sink)
+        tree.render(Glyphs::UNICODE, dirs_only, &Palette::plain(), &mut sink)
             .expect("collecting cannot fail")
     }
 
@@ -376,7 +382,8 @@ mod tests {
                 lines.push(line.to_string());
                 Ok(())
             };
-            tree.render(Glyphs::UNICODE, false, &mut emit).unwrap();
+            tree.render(Glyphs::UNICODE, false, &Palette::plain(), &mut emit)
+                .unwrap();
         }
         assert_eq!(lines, vec![".", "└── a/", "    ├── b/", "    └── x.bin"]);
         // The pruned object still counts towards the total.
@@ -467,7 +474,7 @@ mod tests {
             Err(CliError::new(ExitCode::Uncategorised, "stdout closed"))
         };
         let error = tree
-            .render(Glyphs::UNICODE, false, &mut failing)
+            .render(Glyphs::UNICODE, false, &Palette::plain(), &mut failing)
             .unwrap_err();
         assert_eq!(error.code(), ExitCode::Uncategorised);
     }

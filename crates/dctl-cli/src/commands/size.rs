@@ -61,6 +61,8 @@ use crate::constants::{
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::output::Units;
+use crate::output::color::Palette;
+use crate::output::paint;
 use crate::output::size::{bytes, count};
 use crate::source::Sizes;
 
@@ -165,7 +167,7 @@ pub async fn run(ctx: &Ctx, args: &SizeArgs) -> Result<()> {
     if ctx.out.is_json() {
         ctx.out.json(&totals)?;
     } else {
-        for line in report(&totals, ctx.out.units()) {
+        for line in report(&totals, ctx.out.units(), ctx.out.palette()) {
             ctx.out.line(line)?;
         }
     }
@@ -204,25 +206,41 @@ pub async fn run(ctx: &Ctx, args: &SizeArgs) -> Result<()> {
 /// `Unmeasured objects: 0` would be read past on every ordinary run, and this
 /// line is worth nothing unless it is noticed on the one run where it is not
 /// zero.
-fn report(totals: &Totals, units: Units) -> Vec<String> {
+fn report(totals: &Totals, units: Units, palette: &Palette) -> Vec<String> {
+    // The label carries the basis and the qualifier, and both are part of what
+    // the number *means* — so they are styled as label rather than as chrome. A
+    // reader who takes only the highlighted figure must not be able to leave the
+    // word `plaintext` or `at least` behind.
+    let basis = format!(
+        "{SIZE_REPORT_LABEL_BYTES} ({}):{}",
+        totals.sizes.label(),
+        if totals.bytes.is_some() {
+            String::new()
+        } else {
+            format!(" {SIZE_REPORT_LOWER_BOUND}")
+        }
+    );
     let mut lines = vec![
-        format!("{SIZE_REPORT_LABEL_OBJECTS} {}", count(totals.count)),
         format!(
-            "{SIZE_REPORT_LABEL_BYTES} ({}): {}{} ({} {SIZE_REPORT_EXACT_UNIT})",
-            totals.sizes.label(),
-            if totals.bytes.is_some() {
-                String::new()
-            } else {
-                format!("{SIZE_REPORT_LOWER_BOUND} ")
-            },
-            bytes(totals.measured_bytes, units),
-            totals.measured_bytes
+            "{} {}",
+            paint::label(palette, SIZE_REPORT_LABEL_OBJECTS),
+            paint::number(palette, &count(totals.count))
+        ),
+        format!(
+            "{} {} ({})",
+            paint::label(palette, &basis),
+            paint::number(palette, &bytes(totals.measured_bytes, units)),
+            paint::chrome(
+                palette,
+                &format!("{} {SIZE_REPORT_EXACT_UNIT}", totals.measured_bytes)
+            )
         ),
     ];
     if totals.unmeasured > 0 {
         lines.push(format!(
-            "{SIZE_REPORT_LABEL_UNMEASURED} {}",
-            count(totals.unmeasured)
+            "{} {}",
+            paint::label(palette, SIZE_REPORT_LABEL_UNMEASURED),
+            paint::number(palette, &count(totals.unmeasured))
         ));
     }
     lines
@@ -269,7 +287,11 @@ mod tests {
 
     #[test]
     fn the_report_carries_the_rounded_and_the_exact_figure() {
-        let report = report(&totals(1_234, 1_546_188_226), Units::Binary);
+        let report = report(
+            &totals(1_234, 1_546_188_226),
+            Units::Binary,
+            &Palette::plain(),
+        );
         assert_eq!(report[0], "Total objects: 1,234");
         assert_eq!(
             report[1],
@@ -291,6 +313,7 @@ mod tests {
                 sizes: Sizes::Plaintext,
             },
             Units::Binary,
+            &Palette::plain(),
         );
         assert_eq!(report[1], "Total size (plaintext): 14.0 KiB (14352 bytes)");
     }
@@ -299,7 +322,7 @@ mod tests {
     fn the_two_bases_are_distinguishable_at_a_glance() {
         // Same numbers, different meaning. If these rendered identically the
         // label would be worse than useless: it would look like a disclosure.
-        let stored = report(&totals(1, 1024), Units::Binary);
+        let stored = report(&totals(1, 1024), Units::Binary, &Palette::plain());
         let sealed = report(
             &Totals {
                 count: 1,
@@ -309,6 +332,7 @@ mod tests {
                 sizes: Sizes::Plaintext,
             },
             Units::Binary,
+            &Palette::plain(),
         );
         assert_ne!(stored[1], sealed[1]);
         // And the figure itself is untouched by the labelling.
@@ -320,21 +344,21 @@ mod tests {
     fn the_exact_figure_is_never_rounded_or_separated() {
         // It is there to be pasted into arithmetic, so no thousands separators
         // and no unit ladder.
-        let report = report(&totals(0, 1_000_000), Units::Decimal);
+        let report = report(&totals(0, 1_000_000), Units::Decimal, &Palette::plain());
         assert!(report[1].contains("(1000000 bytes)"), "{}", report[1]);
     }
 
     #[test]
     fn the_unit_convention_reaches_the_rounded_figure() {
         let totals = totals(1, 1_000_000_000_000);
-        assert!(report(&totals, Units::Binary)[1].contains("931.3 GiB"));
-        assert!(report(&totals, Units::Decimal)[1].contains("1.00 TB"));
+        assert!(report(&totals, Units::Binary, &Palette::plain())[1].contains("931.3 GiB"));
+        assert!(report(&totals, Units::Decimal, &Palette::plain())[1].contains("1.00 TB"));
     }
 
     #[test]
     fn an_empty_vault_reports_zeroes_rather_than_nothing() {
         // "Zero objects" is an answer; silence is not.
-        let report = report(&totals(0, 0), Units::Binary);
+        let report = report(&totals(0, 0), Units::Binary, &Palette::plain());
         assert_eq!(report[0], "Total objects: 0");
         assert!(report[1].starts_with("Total size (stored): 0 B"));
     }
@@ -373,7 +397,7 @@ mod tests {
         // The same fact in the rendering people paste into spreadsheets. The
         // qualifier is on the byte line itself, because a caveat on a third line
         // is a caveat that gets left behind by the copy.
-        let lines = report(&unmeasured_totals(4), Units::Binary);
+        let lines = report(&unmeasured_totals(4), Units::Binary, &Palette::plain());
         assert!(
             lines[1].contains(SIZE_REPORT_LOWER_BOUND),
             "got: {}",
@@ -390,7 +414,7 @@ mod tests {
         // need, or the caveat stops being read on the run where it matters. A
         // genuinely empty scope is measured, not unknown.
         for measured in [totals(3, 4096), totals(0, 0)] {
-            let lines = report(&measured, Units::Binary);
+            let lines = report(&measured, Units::Binary, &Palette::plain());
             assert_eq!(lines.len(), 2);
             assert!(
                 !lines[1].contains(SIZE_REPORT_LOWER_BOUND),
@@ -563,7 +587,7 @@ mod tests {
         );
 
         // And the difference is visible in the output, not just in the struct.
-        assert!(report(&sealed, Units::Binary)[1].contains("(plaintext)"));
-        assert!(report(&stored, Units::Binary)[1].contains("(stored)"));
+        assert!(report(&sealed, Units::Binary, &Palette::plain())[1].contains("(plaintext)"));
+        assert!(report(&stored, Units::Binary, &Palette::plain())[1].contains("(stored)"));
     }
 }

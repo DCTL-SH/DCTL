@@ -13,7 +13,7 @@
 
 use std::io::{IsTerminal, Write};
 
-use anstream::{AutoStream, eprintln as astyle_eprintln};
+use anstream::AutoStream;
 
 use crate::constants::{ERROR_PREFIX, SUCCESS_MARK, SUCCESS_MARK_ASCII, WARNING_PREFIX};
 
@@ -165,11 +165,31 @@ impl Out {
 
     // ── stderr: everything else ──────────────────────────────────────────
 
+    /// Write one already-styled line to stderr, honouring this run's `--color`.
+    ///
+    /// The counterpart of [`Out::line`], and it exists for the same reason that
+    /// one wraps stdout in an explicit [`AutoStream`]. `anstream::eprintln!`
+    /// writes through a *global* stream left on `Auto`, which re-runs its own
+    /// terminal check and strips everything the palette just produced — so
+    /// `--color always 2> >(less -R)` came out plain, and `dctl check` on two
+    /// matching trees emitted **zero** escape sequences under `--color always`
+    /// because its confirmation is a stderr line. Half the output layer obeyed
+    /// the flag and half re-decided it.
+    ///
+    /// A failed write to stderr is dropped rather than propagated: these are
+    /// notes about work, and a terminal that went away must not turn a
+    /// successful run into a failed one. [`Out::notice`] says the same thing at
+    /// more length for the one caller that cannot afford to be styled at all.
+    fn stderr_line(&self, text: &str) {
+        let mut stream = AutoStream::new(std::io::stderr().lock(), self.stream_color);
+        let _ = writeln!(stream, "{text}");
+    }
+
     /// A note shown at `-v` and above.
     pub fn info(&self, text: impl AsRef<str>) {
         if !self.quiet && self.verbosity >= 1 {
             let dim = self.palette.dim();
-            astyle_eprintln!("{dim}{}{dim:#}", text.as_ref());
+            self.stderr_line(&format!("{dim}{}{dim:#}", text.as_ref()));
         }
     }
 
@@ -177,7 +197,10 @@ impl Out {
     pub fn warn(&self, text: impl AsRef<str>) {
         if !self.quiet {
             let style = self.palette.warn();
-            astyle_eprintln!("{style}{WARNING_PREFIX}{style:#} {}", text.as_ref());
+            self.stderr_line(&format!(
+                "{style}{WARNING_PREFIX}{style:#} {}",
+                text.as_ref()
+            ));
         }
     }
 
@@ -185,7 +208,7 @@ impl Out {
     /// is the one thing `PLAN.md` §7 forbids.
     pub fn error(&self, text: impl AsRef<str>) {
         let style = self.palette.error();
-        astyle_eprintln!("{style}{ERROR_PREFIX}{style:#} {}", text.as_ref());
+        self.stderr_line(&format!("{style}{ERROR_PREFIX}{style:#} {}", text.as_ref()));
     }
 
     /// A pre-formatted line of stderr, verbatim: no prefix, no styling, and not
@@ -229,8 +252,23 @@ impl Out {
             } else {
                 SUCCESS_MARK_ASCII
             };
-            astyle_eprintln!("{style}{mark}{style:#} {}", text.as_ref());
+            self.stderr_line(&format!("{style}{mark}{style:#} {}", text.as_ref()));
         }
+    }
+
+    /// A blank separator line on stderr.
+    ///
+    /// Exposed for [`super::summary`], which draws the end-of-run report and is
+    /// the one renderer outside this file that writes to stderr directly. It
+    /// goes through [`Out::stderr_line`] like everything else so the report
+    /// obeys this run's `--color` rather than re-deciding it.
+    pub fn blank_stderr_line(&self) {
+        self.stderr_line("");
+    }
+
+    /// One already-styled report row on stderr. See [`Out::blank_stderr_line`].
+    pub fn stderr_row(&self, text: &str) {
+        self.stderr_line(text);
     }
 
     /// The end-of-run report.

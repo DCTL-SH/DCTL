@@ -28,6 +28,8 @@ use clap::Args;
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::output::Units;
+use crate::output::color::Palette;
+use crate::output::paint;
 
 use super::listing::emit::Emitter;
 use super::listing::render::{modtime_column, row, size_column};
@@ -64,7 +66,7 @@ pub async fn run(ctx: &Ctx, args: &LslArgs) -> Result<()> {
         let units = ctx.out.units();
         stream
             .try_for_each(|entry| {
-                ctx.out.line(line(entry, units))?;
+                ctx.out.line(line(entry, units, ctx.out.palette()))?;
                 Ok(())
             })
             .await?;
@@ -76,11 +78,16 @@ pub async fn run(ctx: &Ctx, args: &LslArgs) -> Result<()> {
 }
 
 /// One text line: size, modification time, then the path.
-fn line(entry: &Entry, units: Units) -> String {
+///
+/// Painted after the columns are measured, for the reason
+/// [`crate::output::paint`] gives: escapes are zero-width on screen and are not
+/// zero-length in a `String`, so padding has to happen first or every column
+/// after the first one shifts.
+fn line(entry: &Entry, units: Units, palette: &Palette) -> String {
     row(&[
-        &size_column(entry.size(), units),
-        &modtime_column(entry.modified_unix()),
-        entry.relative(),
+        &paint::number(palette, &size_column(entry.size(), units)),
+        &paint::time(palette, &modtime_column(entry.modified_unix())),
+        &paint::path(palette, entry.relative()),
     ])
 }
 
@@ -108,14 +115,18 @@ mod tests {
 
     #[test]
     fn a_line_carries_size_time_and_path_in_that_order() {
-        let rendered = line(&at("2024/a.jpg", 1024, Some(1_704_067_200)), Units::Binary);
+        let rendered = line(
+            &at("2024/a.jpg", 1024, Some(1_704_067_200)),
+            Units::Binary,
+            &Palette::plain(),
+        );
         assert_eq!(rendered, "  1.00 KiB 2024-01-01T00:00:00Z 2024/a.jpg");
     }
 
     #[test]
     fn an_unknown_time_keeps_the_columns_aligned() {
-        let known = line(&at("a", 1, Some(0)), Units::Binary);
-        let unknown = line(&at("a", 1, None), Units::Binary);
+        let known = line(&at("a", 1, Some(0)), Units::Binary, &Palette::plain());
+        let unknown = line(&at("a", 1, None), Units::Binary, &Palette::plain());
         assert_eq!(known.chars().count(), unknown.chars().count());
         assert!(unknown.contains(UNKNOWN_VALUE));
         // Never the epoch: "unknown" and "1970" are different claims.
@@ -138,7 +149,7 @@ mod tests {
         // A run spanning several centuries still aligns, which is what makes
         // `cut -c` and `sort -k` over an `lsl` listing meaningful.
         for seconds in [0, 1_704_067_200, 4_102_444_800, -2_203_891_200] {
-            let rendered = line(&at("a", 1, Some(seconds)), Units::Binary);
+            let rendered = line(&at("a", 1, Some(seconds)), Units::Binary, &Palette::plain());
             let column = time_column(&rendered);
             assert_eq!(
                 column.chars().count(),
@@ -152,8 +163,16 @@ mod tests {
     #[test]
     fn the_rendering_is_lexicographically_sortable_by_time() {
         // The property RFC 3339 buys and rclone's local-time format does not.
-        let early = time_column(&line(&at("z.txt", 1, Some(0)), Units::Binary));
-        let late = time_column(&line(&at("a.txt", 1, Some(1_704_067_200)), Units::Binary));
+        let early = time_column(&line(
+            &at("z.txt", 1, Some(0)),
+            Units::Binary,
+            &Palette::plain(),
+        ));
+        let late = time_column(&line(
+            &at("a.txt", 1, Some(1_704_067_200)),
+            Units::Binary,
+            &Palette::plain(),
+        ));
         assert!(early < late, "{early:?} should sort before {late:?}");
     }
 

@@ -159,6 +159,27 @@ impl Palette {
         self.style(Style::new().fg_color(Some(Color::Ansi(AnsiColor::Cyan))))
     }
 
+    /// A directory, as distinguished from a file in the same listing.
+    ///
+    /// A whole style rather than `path().bold()` at the call site, and the
+    /// distinction is not cosmetic: [`Palette::style`] returns
+    /// [`Style::new()`] when styling is off, and `.bold()` applied to *that*
+    /// produces a real bold sequence — so a `--color never` run would emit
+    /// escapes for every directory it listed. Every attribute a semantic style
+    /// carries has to be inside the `self.style(…)` call, which is what having
+    /// the name here enforces.
+    ///
+    /// Bold on top of the path colour, because `lsd` and `tree` output is read
+    /// in CI logs and over `ssh -T` where hue does not survive and weight does.
+    #[must_use]
+    pub fn directory(&self) -> Style {
+        self.style(
+            Style::new()
+                .fg_color(Some(Color::Ansi(AnsiColor::Cyan)))
+                .bold(),
+        )
+    }
+
     /// A byte count, rate, or other measured quantity.
     #[must_use]
     pub fn number(&self) -> Style {
@@ -202,6 +223,40 @@ mod tests {
         // A default Style renders as nothing at all.
         assert_eq!(format!("{}", plain.error()), "");
         assert_eq!(format!("{}", plain.success()), "");
+    }
+
+    #[test]
+    fn every_semantic_style_is_empty_when_styling_is_off() {
+        // The rule the `directory` style was written to obey, asserted over the
+        // whole palette rather than over the one that broke it. Composing an
+        // attribute onto the result of `style()` — `path().bold()` — silently
+        // defeats the disabled case, and this fails the moment any accessor
+        // starts doing that.
+        let plain = Palette::plain();
+        let styles = [
+            ("success", plain.success()),
+            ("error", plain.error()),
+            ("warn", plain.warn()),
+            ("dim", plain.dim()),
+            ("header", plain.header()),
+            ("path", plain.path()),
+            ("directory", plain.directory()),
+            ("number", plain.number()),
+            ("hash", plain.hash()),
+        ];
+        for (name, style) in styles {
+            assert_eq!(format!("{style}"), "", "{name} styled a plain palette");
+            assert_eq!(format!("{style:#}"), "", "{name} reset a plain palette");
+        }
+    }
+
+    #[test]
+    fn a_directory_is_distinguishable_from_a_file_when_styling_is_on() {
+        let colored = Palette::new(true);
+        assert_ne!(
+            format!("{}", colored.directory()),
+            format!("{}", colored.path())
+        );
     }
 
     #[test]

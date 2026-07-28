@@ -124,6 +124,7 @@ pub async fn run(ctx: &Ctx, args: &TreeArgs) -> Result<()> {
     let counts = tree.render(
         Glyphs::resolve(ctx.globals.ascii),
         args.dirs_only,
+        ctx.out.palette(),
         &mut emit,
     )?;
 
