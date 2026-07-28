@@ -3584,3 +3584,96 @@ fn a_single_letter_remote_is_a_remote_and_never_a_directory_named_r_colon() {
         "nothing may be created under a directory literally named 'r:'"
     );
 }
+
+/// A run that finds nothing to do must still say so in the format it was asked
+/// for.
+///
+/// The hole: `copy`, `sync` and `move` return from their `plan.is_noop()` branch
+/// *before* `report::outcome`, and the only thing that branch emits is
+/// `ctx.out.info(...)`, which the JSON formats suppress. So a second, unchanged
+/// run produced **zero bytes on stdout and zero on stderr** and exited 0:
+///
+/// ```text
+/// $ dctl --json sync src dst | wc -c     # first run
+/// 505
+/// $ dctl --json sync src dst | wc -c     # second run, nothing to do
+/// 0
+/// ```
+///
+/// This was unreachable in practice until `sync` became incremental: before
+/// that every run had work to do, so the empty branch was never the steady
+/// state. Now it is the steady state — a nightly
+/// `dctl --json sync ... > run.json` writes an empty file on every healthy
+/// night, and a consumer cannot tell that from the binary failing to start.
+/// "Nothing needed doing" is a result, and a result document is how this tool
+/// reports one.
+#[test]
+fn a_no_op_transfer_still_renders_its_result_document_under_json() {
+    for verb in ["copy", "sync", "move"] {
+        let sandbox = Sandbox::new();
+        sandbox.write("src/a.txt", b"contents");
+        // First run: real work, and it is reported.
+        sandbox
+            .dctl()
+            .args(["--json", "copy", "src", "dst"])
+            .assert()
+            .success();
+
+        // Second run through the verb under test: nothing left to do.
+        let quiet = sandbox
+            .dctl()
+            .args(["--json", verb, "src", "dst"])
+            .assert()
+            .success();
+        let stdout = String::from_utf8_lossy(&quiet.get_output().stdout).into_owned();
+        assert!(
+            !stdout.trim().is_empty(),
+            "dctl --json {verb} with nothing to do wrote nothing at all to stdout"
+        );
+        let document: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|error| {
+            panic!(
+                "{verb}: {error}
+{stdout}"
+            )
+        });
+        assert_eq!(
+            document["result"]["files"], 0,
+            "{verb}: the document must say that no file moved:
+{stdout}"
+        );
+        assert_eq!(
+            document["result"]["bytes"], 0,
+            "{verb}: and that no bytes moved:
+{stdout}"
+        );
+    }
+}
+
+/// A no-op run must not be silent in *any* format.
+///
+/// The stronger statement of the test above, and the one that matches
+/// `PLAN.md` §7: whatever the format, a successful run says something. Text
+/// already printed its statistics block; the JSON formats printed nothing at
+/// all, which is the one outcome a tool that refuses to lie must never have.
+#[test]
+fn no_successful_transfer_exits_silently_on_both_streams() {
+    for format in ["text", "json", "json-lines"] {
+        let sandbox = Sandbox::new();
+        sandbox.write("src/a.txt", b"contents");
+        sandbox
+            .dctl()
+            .args(["--format", format, "sync", "src", "dst"])
+            .assert()
+            .success();
+        let second = sandbox
+            .dctl()
+            .args(["--format", format, "sync", "src", "dst"])
+            .assert()
+            .success();
+        let output = second.get_output();
+        assert!(
+            !output.stdout.is_empty() || !output.stderr.is_empty(),
+            "--format={format}: exit 0 with nothing on either stream"
+        );
+    }
+}

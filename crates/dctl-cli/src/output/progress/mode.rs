@@ -32,11 +32,26 @@ impl Mode {
     /// 1. `--quiet` wins over everything. A user who asked for silence gets it
     ///    even if they also passed `--progress`, because the alternative is a
     ///    tool that talks after being told not to.
-    /// 2. `--progress` forces bars on, which is what makes bars available inside
-    ///    a `script`/PTY wrapper or a CI job that renders ANSI but does not look
-    ///    like a terminal to `isatty`.
-    /// 3. Otherwise bars appear only when stderr really is a terminal; anything
-    ///    redirected falls back to [`Mode::Plain`].
+    /// 2. Bars appear only when stderr really is a terminal. A `script`/PTY
+    ///    wrapper counts, because it *is* one; a pipe or a file does not, and
+    ///    there `--progress` cannot conjure bars — [`Mode::Bars`] draws through a
+    ///    terminal handle and renders nothing without one.
+    /// 3. `--progress` therefore cannot force bars where they cannot be drawn.
+    ///    It used to try, and the cost was measured: selecting [`Mode::Bars`]
+    ///    off a terminal drew nothing *and* stopped the ticker, which runs only
+    ///    in [`Mode::Plain`]. `--bwlimit 1M --stats 1` on 10 MiB wrote 1675 bytes
+    ///    of status to a redirected stderr without `-P` and 170 bytes with it.
+    ///    The flag that exists to keep progress on a redirected run was the only
+    ///    way to turn it off.
+    ///
+    /// What survives is a guarantee rather than a change of behaviour:
+    /// `--progress` promises that progress is not switched off, and off a
+    /// terminal that is the periodic plain line. It is honest and it is
+    /// harmless, but it is not yet *measurable* in the sense
+    /// [`crate::cli::reach`] requires — see HANDOVER §11.2. Making it so means
+    /// either drawing bars into a pipe (which the [`Mode::Plain`] doc argues
+    /// against) or refusing the flag when stderr is not a terminal, and the
+    /// refusal table takes only the flags as input, never the environment.
     ///
     /// Note that the terminal test is on **stderr**, not stdout: progress is
     /// written to stderr precisely so `dctl cat … | ffplay -` can keep its bars
@@ -45,9 +60,13 @@ impl Mode {
     pub const fn resolve(force_progress: bool, quiet: bool, stderr_is_terminal: bool) -> Self {
         if quiet {
             Self::Quiet
-        } else if force_progress || stderr_is_terminal {
+        } else if stderr_is_terminal {
             Self::Bars
         } else {
+            // `force_progress` deliberately does not reach here. Off a terminal
+            // the only rendering that produces anything is the plain periodic
+            // line, so honouring `--progress` means choosing it.
+            let _ = force_progress;
             Self::Plain
         }
     }
@@ -72,8 +91,9 @@ mod tests {
     fn mode_resolution_respects_precedence() {
         // --quiet beats everything.
         assert_eq!(Mode::resolve(true, true, true), Mode::Quiet);
-        // --progress forces bars even when piped.
-        assert_eq!(Mode::resolve(true, false, false), Mode::Bars);
+        // --progress cannot force bars through a pipe: nothing would be drawn,
+        // and the periodic line would stop with it.
+        assert_eq!(Mode::resolve(true, false, false), Mode::Plain);
         // Bars on a terminal, plain lines when redirected.
         assert_eq!(Mode::resolve(false, false, true), Mode::Bars);
         assert_eq!(Mode::resolve(false, false, false), Mode::Plain);
@@ -88,6 +108,43 @@ mod tests {
                     Mode::resolve(force_progress, true, is_terminal),
                     Mode::Quiet,
                     "--quiet must win (force={force_progress}, tty={is_terminal})"
+                );
+            }
+        }
+    }
+
+    /// `--progress` must never leave a run with *less* progress than it had.
+    ///
+    /// Measured on the release binary, 10 MiB paced to 1 MiB/s with
+    /// `--stats 1`, stderr redirected to a file:
+    ///
+    /// ```text
+    /// without -P : 1675 bytes, 10 periodic status lines
+    /// with    -P :  170 bytes,  0 periodic status lines
+    /// ```
+    ///
+    /// [`Mode::Bars`] draws through a terminal handle, so off a terminal it
+    /// renders nothing at all — and selecting it also stops the ticker, which
+    /// only runs in [`Mode::Plain`]. The flag whose whole purpose is progress on
+    /// a redirected run was the only way to remove it.
+    ///
+    /// The rule this asserts is the weakest one that forbids that: forcing
+    /// progress may never select a mode that renders less than the mode the same
+    /// run would have chosen on its own.
+    #[test]
+    fn forcing_progress_never_shows_less_than_not_forcing_it() {
+        for is_terminal in [false, true] {
+            let unforced = Mode::resolve(false, false, is_terminal);
+            let forced = Mode::resolve(true, false, is_terminal);
+            assert_ne!(
+                forced,
+                Mode::Quiet,
+                "--progress must never silence a run (tty={is_terminal})"
+            );
+            if !is_terminal {
+                assert_eq!(
+                    forced, unforced,
+                    "off a terminal, bars draw nothing and suppress the periodic                      line, so forcing them is strictly worse than not"
                 );
             }
         }

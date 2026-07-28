@@ -400,7 +400,13 @@ pub struct GlobalArgs {
     #[arg(long, global = true, help_heading = "Output")]
     pub ascii: bool,
 
-    /// Show live progress bars, even when output is redirected.
+    /// Keep progress on. Bars need a terminal; redirected, that is the periodic
+    /// status line rather than bars.
+    ///
+    /// The old wording promised "live progress bars, even when output is
+    /// redirected" and the opposite happened: forcing bars off a terminal drew
+    /// nothing and stopped the periodic line as well, so `-P` was the only way
+    /// to make a redirected run quieter. See [`crate::output::ProgressMode`].
     #[arg(short = 'P', long, global = true, help_heading = "Output")]
     pub progress: bool,
 

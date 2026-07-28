@@ -98,7 +98,21 @@ pub async fn run(ctx: &Ctx, args: &CopyArgs) -> Result<()> {
         ctx.out
             .info("nothing to transfer: the destination is up to date");
         execute::account_for_skips(ctx, &prepared.plan);
-        return Ok(());
+        // The result document, in the active format. `return Ok(())` here was
+        // the whole of the output under `--json`: this branch emits only
+        // `info`, which the JSON formats suppress, so a run with nothing to do
+        // wrote zero bytes to either stream and exited 0. Since `sync` became
+        // incremental that is the steady state of every scheduled run, and an
+        // empty file is indistinguishable from a binary that never started.
+        // `outcome` returns immediately in text mode, so the human view is
+        // unchanged.
+        return report::outcome(
+            ctx,
+            TRANSFER_COMMAND_COPY,
+            &prepared.plan,
+            &prepared.source,
+            &prepared.dest,
+        );
     }
 
     execute::account_for_skips(ctx, &prepared.plan);
