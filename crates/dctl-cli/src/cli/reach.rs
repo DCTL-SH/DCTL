@@ -221,6 +221,8 @@ pub const FLAGS: &[Flag] = &[
     Flag::honoured("--min-age", "min_age"),
     Flag::honoured("--max-age", "max_age"),
     Flag::honoured("--max-depth", "max_depth"),
+    // ── Traversal ────────────────────────────────────────────────────────
+    Flag::honoured("--links", "links"),
     // ── Output ───────────────────────────────────────────────────────────
     Flag::honoured("--format", "format"),
     Flag::honoured("--json", "json"),

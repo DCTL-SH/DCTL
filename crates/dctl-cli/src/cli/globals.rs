@@ -10,6 +10,8 @@
 use std::path::PathBuf;
 
 use clap::Args;
+use clap::builder::TypedValueParser as _;
+use dctl_store::{LINK_POLICY_CHOICES, LinkPolicy};
 
 use crate::constants;
 use crate::limits::ByteLimit;
@@ -400,6 +402,37 @@ pub struct GlobalArgs {
         help_heading = "Filtering"
     )]
     pub max_depth: i32,
+
+    // ── Traversal ────────────────────────────────────────────────────────
+    /// What to do with symbolic links found inside a tree.
+    ///
+    /// Never followed by default, and never passed over in silence: the count is
+    /// always reported and `-v` names each one. The root a command is pointed at
+    /// is a different question and is always resolved.
+    //
+    // Everything below is for a reader of this file rather than of `--help`, so
+    // it is a comment and not part of the doc string.
+    //
+    // The possible values come from the storage layer's own list rather than
+    // being restated here, so a fourth policy cannot appear in `--help` and be
+    // unparseable, or parse and be undocumented.
+    //
+    // Its own heading, and not "Filtering". A filter selects among the things a
+    // walk found; this decides what the walk finds at all. The distinction is
+    // load-bearing rather than tidy: `dctl replicate` refuses every flag under
+    // "Filtering" — a filtered replica is a vault with dangling references — and
+    // it *honours* this one, because a store on `local:` or `sftp:` is walked by
+    // the same code as any other tree.
+    #[arg(
+        long,
+        global = true,
+        value_name = "MODE",
+        default_value_t = LinkPolicy::default(),
+        value_parser = clap::builder::PossibleValuesParser::new(LINK_POLICY_CHOICES)
+            .try_map(|choice| choice.parse::<LinkPolicy>()),
+        help_heading = "Traversal"
+    )]
+    pub links: LinkPolicy,
 
     // ── Output ───────────────────────────────────────────────────────────
     /// Output format for structured results.

@@ -2077,14 +2077,21 @@ pub const MIN_MODIFY_WINDOW_SECS: u64 = 1;
 pub const MODIFY_WINDOW_TOO_SMALL_HINT: &str = "Use --modify-window 1 or wider, or --checksum to compare contents instead \
      of times.";
 
-/// Whether a local directory walk follows symbolic links.
+/// What to say after reporting links a walk passed over.
 ///
-/// It does not. A link pointing at one of its own ancestors turns a walk into an
-/// infinite loop, and a link pointing outside the transfer root would copy data
-/// the user never named — silently, and past whatever `--exclude` they wrote.
-/// Links are counted and reported rather than followed, so their presence is
-/// never hidden.
-pub const WALK_FOLLOW_SYMLINKS: bool = false;
+/// It names both ways forward, because they answer different worries: an
+/// operator whose data lives on a mounted volume wants `follow`, and one who is
+/// afraid of pulling `/etc` into an archive wants `in-tree`. A hint that offered
+/// only the first would push the second into turning the guard off entirely.
+pub const LINKS_SKIPPED_HINT: &str = "Use --links follow to store what they point at, or --links in-tree to follow only \
+     the ones whose targets stay inside the tree. Run with -v to see their names.";
+
+/// What to say when a link a run was told to follow leads nowhere.
+///
+/// Not a hint about flags: the remedy is on the filesystem, not on the command
+/// line, and pointing at `--links skip` here would suggest hiding the problem.
+pub const LINKS_BROKEN_HINT: &str = "Those paths were asked for and could not be stored. Repair or remove the links, \
+     then run again.";
 
 /// Column headers of the transfer plan table.
 ///
@@ -5598,12 +5605,23 @@ mod tests {
     }
 
     #[test]
-    fn walks_never_follow_symlinks() {
-        // A self-referential link would loop forever and an outward link would
-        // copy data the user never named. Both are worse than a skipped link.
-        const {
-            assert!(!WALK_FOLLOW_SYMLINKS);
+    fn the_link_messages_name_the_flag_that_changes_the_answer() {
+        // A run that says what it did not do, without saying how to make it do
+        // it, is the silence this feature exists to remove wearing a sentence.
+        assert!(LINKS_SKIPPED_HINT.contains("--links"));
+        for choice in dctl_store::LINK_POLICY_CHOICES {
+            if choice == "skip" {
+                continue; // already the default; naming it would suggest a change that is not one
+            }
+            assert!(
+                LINKS_SKIPPED_HINT.contains(choice),
+                "the hint omits '{choice}'"
+            );
         }
+        // The broken-link message must not offer a flag: the remedy is on the
+        // filesystem, and suggesting `--links skip` would be suggesting a way
+        // to stop hearing about missing data.
+        assert!(!LINKS_BROKEN_HINT.contains("--links"));
     }
 
     #[test]

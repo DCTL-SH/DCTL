@@ -3912,3 +3912,302 @@ fn log_source_stamps_every_record_even_when_a_log_file_is_open() {
         "a record carried a source location without --log-source:\n{plain}"
     );
 }
+
+// ── 21. symbolic links: the canonical layout, end to end ──────────────────────
+
+/// `/srv` with the data on another volume and linked into place.
+///
+/// Returns the sandbox and the path to stand in for `/srv`. Everything lives
+/// inside the sandbox, so `data -> …/mnt/bigdisk/data` is an absolute link to a
+/// directory the test owns and no real `/mnt` is involved.
+#[cfg(unix)]
+fn canonical_layout() -> (Sandbox, PathBuf) {
+    let sandbox = Sandbox::new();
+    sandbox.write("mnt/bigdisk/data/report.csv", b"rows,and,rows");
+    sandbox.write("mnt/bigdisk/data/nested/deep.txt", b"deep");
+    let srv = sandbox.dir("srv");
+    sandbox.write("srv/readme.txt", b"on the system disk");
+    std::os::unix::fs::symlink(sandbox.path("mnt/bigdisk/data"), srv.join("data"))
+        .expect("create the canonical symlink");
+    (sandbox, srv)
+}
+
+#[cfg(unix)]
+#[test]
+fn copying_a_tree_whose_data_is_a_symlink_says_so_instead_of_exiting_quietly() {
+    // `HANDOVER.md` §11.2's last data-destroying defect, driven through the
+    // shipped binary. `/srv/data -> /mnt/bigdisk/data` is the canonical layout
+    // of every machine with a small system disk, and pointing DCTL at `/srv`
+    // copied `readme.txt`, said `Errors: 0`, and exited 0 — the operator found
+    // out on restore day.
+    //
+    // The default still does not follow the link. What it may never do again is
+    // pass over it in silence, so the assertion is on *stderr*: the count, and
+    // the flag that changes the answer.
+    let (sandbox, srv) = canonical_layout();
+    let store = sandbox.dir("store");
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", store.display()))
+        .assert()
+        .success();
+
+    let assertion = sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(&srv)
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+
+    assert!(
+        stderr.contains("skipped 1 symbolic link"),
+        "the run said nothing about the link that held the whole dataset:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("--links follow"),
+        "the warning must name the flag that stores it:\n{stderr}"
+    );
+    // And the omission is real, so the warning is not decoration.
+    assert!(sandbox.exists("store/readme.txt"));
+    assert!(!sandbox.exists("store/data/report.csv"));
+}
+
+#[cfg(unix)]
+#[test]
+fn following_the_link_stores_the_tree_behind_it() {
+    // The other half: the flag the warning names actually works, and the bytes
+    // land under the link's own name — `data/report.csv`, which is where a
+    // restore has to put them back.
+    let (sandbox, srv) = canonical_layout();
+    let store = sandbox.dir("store");
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", store.display()))
+        .assert()
+        .success();
+
+    sandbox
+        .dctl()
+        .args(["--no-ask-password", "--links", "follow"])
+        .arg("copy")
+        .arg(&srv)
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success();
+
+    assert_eq!(sandbox.read("store/data/report.csv"), b"rows,and,rows");
+    assert_eq!(sandbox.read("store/data/nested/deep.txt"), b"deep");
+    assert_eq!(sandbox.read("store/readme.txt"), b"on the system disk");
+}
+
+#[cfg(unix)]
+#[test]
+fn listing_the_same_tree_reports_the_same_link() {
+    // The read-side half of the defect, and the reason it matters: an operator
+    // checks with `ls` before deciding what is safe to delete from the source.
+    // `dctl ls /srv` printed one file and nothing else — indistinguishable from
+    // a tree that really does hold one file.
+    let (sandbox, srv) = canonical_layout();
+
+    let listing = sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("ls")
+        .arg(&srv)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&listing.get_output().stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&listing.get_output().stderr).into_owned();
+
+    assert!(stdout.contains("readme.txt"));
+    assert!(
+        !stdout.contains("report.csv"),
+        "the default did not follow, so the target is not listed:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("skipped 1 symbolic link"),
+        "`ls` must say what it passed over:\n{stderr}"
+    );
+
+    // …and `--links follow` shows the tree, on stdout, where a listing belongs.
+    let followed = sandbox
+        .dctl()
+        .args(["--no-ask-password", "--links", "follow"])
+        .arg("ls")
+        .arg(&srv)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&followed.get_output().stdout).into_owned();
+    assert!(stdout.contains("data/report.csv"), "{stdout}");
+    assert!(stdout.contains("data/nested/deep.txt"), "{stdout}");
+}
+
+#[cfg(unix)]
+#[test]
+fn verbose_names_the_links_a_run_passed_over() {
+    // "skipped 1" is enough to stop an operator; the name is what tells them
+    // *which* directory is missing from the backup.
+    let (sandbox, srv) = canonical_layout();
+
+    let assertion = sandbox
+        .dctl()
+        .args(["--no-ask-password", "-v"])
+        .arg("ls")
+        .arg(&srv)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("data: not followed"),
+        "-v must name the link and say what happened to it:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_symlink_cycle_terminates_rather_than_filling_the_disk() {
+    // `HANDOVER.md` §11.3 item 1 names loop protection as the reason this fix
+    // had not been attempted. A link at its own ancestor is the oldest way to
+    // make a backup tool run until the disk fills; the run must finish, list the
+    // real file once, and say which link closed the loop.
+    let sandbox = Sandbox::new();
+    let root = sandbox.dir("tree");
+    sandbox.write("tree/inner/a.txt", b"a");
+    std::os::unix::fs::symlink(&root, root.join("inner/loop")).expect("create the loop");
+
+    let assertion = sandbox
+        .dctl()
+        .args(["--no-ask-password", "--links", "follow", "-v"])
+        .arg("ls")
+        .arg(&root)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assertion.get_output().stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+
+    assert_eq!(
+        stdout.lines().filter(|line| line.contains("a.txt")).count(),
+        1,
+        "the file must appear exactly once:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("points at a directory it is already inside"),
+        "the cycle must be named, not merely survived:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_link_out_of_the_tree_is_followed_or_refused_by_policy_and_never_in_silence() {
+    // "An operator syncing /srv must not silently pull in /etc." Following one
+    // is available, because the canonical layout *is* out of tree; doing it
+    // quietly is not, and `--links in-tree` refuses it outright.
+    let sandbox = Sandbox::new();
+    sandbox.write("outside/passwd", b"root:x:0:0");
+    let root = sandbox.dir("srv");
+    std::os::unix::fs::symlink(sandbox.path("outside"), root.join("etc"))
+        .expect("create the outward link");
+
+    let followed = sandbox
+        .dctl()
+        .args(["--no-ask-password", "--links", "follow", "-v"])
+        .arg("ls")
+        .arg(&root)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&followed.get_output().stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&followed.get_output().stderr).into_owned();
+    assert!(stdout.contains("etc/passwd"), "{stdout}");
+    assert!(
+        stderr.contains("etc: followed"),
+        "a followed link must be named at -v, so pulling in /etc is never silent:\n{stderr}"
+    );
+
+    let confined = sandbox
+        .dctl()
+        .args(["--no-ask-password", "--links", "in-tree"])
+        .arg("ls")
+        .arg(&root)
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&confined.get_output().stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&confined.get_output().stderr).into_owned();
+    assert!(
+        !stdout.contains("passwd"),
+        "in-tree must not leave the tree:\n{stdout}"
+    );
+    assert!(stderr.contains("skipped 1 symbolic link"), "{stderr}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_broken_link_is_named_and_counted_without_stopping_the_run() {
+    // A dangling link must not abort a backup of 200 000 other files. It must
+    // also not pass unnoticed: the operator asked for it and did not get it, so
+    // it is an error the exit code reflects — the same answer rclone gives
+    // (`backend/local/local.go:741` fails the sync on one).
+    let sandbox = Sandbox::new();
+    let root = sandbox.dir("tree");
+    sandbox.write("tree/good.txt", b"kept");
+    std::os::unix::fs::symlink(sandbox.path("tree/gone.txt"), root.join("stale.txt"))
+        .expect("create the dangling link");
+    let store = sandbox.dir("store");
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", store.display()))
+        .assert()
+        .success();
+
+    let assertion = sandbox
+        .dctl()
+        .args(["--no-ask-password", "--links", "follow", "-v"])
+        .arg("copy")
+        .arg(&root)
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+
+    // The rest of the tree still arrives — that is the "without stopping" half.
+    assert_eq!(sandbox.read("store/good.txt"), b"kept");
+    assert!(
+        stderr.contains("point at nothing"),
+        "the dangling link must be reported:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("stale.txt: points at nothing"),
+        "-v must name it:\n{stderr}"
+    );
+    assert_ne!(
+        assertion.get_output().status.code(),
+        Some(0),
+        "a file that was asked for and not stored is not a clean run"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tree_with_no_links_says_nothing_about_them() {
+    // The property that keeps the warning worth reading. A line printed on every
+    // run is a line nobody reads on the run that has one.
+    let sandbox = Sandbox::new();
+    sandbox.write("tree/a.txt", b"a");
+
+    let assertion = sandbox
+        .dctl()
+        .args(["--no-ask-password", "-v"])
+        .arg("ls")
+        .arg(sandbox.path("tree"))
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("symbolic link"),
+        "an ordinary tree must produce no link report at all:\n{stderr}"
+    );
+}

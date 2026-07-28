@@ -77,6 +77,17 @@ impl Stream {
         self.pages.sizes()
     }
 
+    /// What the walk behind this stream did about the symbolic links it met.
+    ///
+    /// Unfiltered on purpose. A link the walk passed over produced no entry, so
+    /// no `--include` was ever asked about it; reporting only the links that
+    /// "matched" would mean reporting none of them, which is the silence being
+    /// removed. The filter decides what is listed, never what is disclosed.
+    #[must_use]
+    pub fn links(&self) -> dctl_store::LinkReport {
+        self.pages.links()
+    }
+
     /// Call `visit` for every entry in scope, in path order.
     ///
     /// Stops at the first error from either the source or the visitor, and

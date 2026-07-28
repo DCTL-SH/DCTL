@@ -9,6 +9,7 @@ mod key_path;
 mod read;
 mod remove;
 pub(crate) mod root;
+mod tree;
 mod verified_write;
 mod walk;
 
@@ -20,6 +21,7 @@ use bytes::Bytes;
 use crate::backend::Backend;
 use crate::checksum::ContentHash;
 use crate::error::Result;
+use crate::links::LinkPolicy;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
 
@@ -27,6 +29,15 @@ use crate::modified::SourceModified;
 #[derive(Clone, Debug)]
 pub struct LocalFs {
     root: PathBuf,
+    /// What the tree walk does with the symbolic links it finds.
+    ///
+    /// Held on the backend rather than passed to
+    /// [`list_page`](Backend::list_page), because it is a property of the run
+    /// and not of one request: a paged listing whose second page followed links
+    /// its first page had skipped would produce a listing no walk ever saw. See
+    /// [`crate::links`] for the policy itself and for why the default is to skip
+    /// and say so.
+    links: LinkPolicy,
     /// What `root` was when this backend was built, or [`None`] if there was
     /// nothing there yet.
     ///
@@ -43,7 +54,30 @@ impl LocalFs {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         let root = root.into();
         let opened_as = root::identify(&root);
-        Self { root, opened_as }
+        Self {
+            root,
+            links: LinkPolicy::default(),
+            opened_as,
+        }
+    }
+
+    /// The same backend, walking symbolic links under `policy`.
+    ///
+    /// A builder rather than a second constructor: the root is what makes a
+    /// backend, the link policy is what a run asks of it, and every one of the
+    /// sixty-odd places that build a `LocalFs` for a test or an internal
+    /// bookkeeping read wants the default. Only the CLI, which has the flag,
+    /// says otherwise.
+    #[must_use]
+    pub fn with_links(mut self, policy: LinkPolicy) -> Self {
+        self.links = policy;
+        self
+    }
+
+    /// What this backend's listing does with symbolic links.
+    #[must_use]
+    pub const fn links(&self) -> LinkPolicy {
+        self.links
     }
 
     /// Refuse a write whose store root is no longer the one this backend opened.

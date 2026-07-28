@@ -355,6 +355,7 @@ pub(super) fn page(
     prefix: &str,
     cursor: Option<&str>,
     page_size: usize,
+    links: crate::links::LinkReport,
 ) -> Page {
     found.retain(|(key, _, _)| key.starts_with(prefix));
     found.sort_by(|a, b| a.0.cmp(&b.0));
@@ -377,12 +378,17 @@ pub(super) fn page(
     } else {
         None
     };
-    Page { items, next_cursor }
+    Page {
+        items,
+        next_cursor,
+        links,
+    }
 }
 
 #[cfg(test)]
 mod page_tests {
     use super::*;
+    use crate::links::LinkReport;
 
     fn found(keys: &[&str]) -> Vec<(String, u64, Option<i64>)> {
         keys.iter()
@@ -412,7 +418,7 @@ mod page_tests {
         let mut cursor: Option<String> = None;
         let mut pages = 0;
         loop {
-            let page = page(found(&all), "", cursor.as_deref(), 2);
+            let page = page(found(&all), "", cursor.as_deref(), 2, LinkReport::default());
             seen.extend(keys(&page));
             pages += 1;
             assert!(pages < 10, "the walk did not terminate: {seen:?}");
@@ -430,7 +436,7 @@ mod page_tests {
         // The listing is what a transfer compares against, so an entry that
         // dropped its modification time would make `sync` re-transfer that file
         // on every run.
-        let page = page(found(&["a", "b"]), "", None, 10);
+        let page = page(found(&["a", "b"]), "", None, 10, LinkReport::default());
         assert_eq!(page.items[1].size, 1);
         assert_eq!(page.items[1].modified_unix, Some(1));
     }
@@ -439,7 +445,13 @@ mod page_tests {
     fn the_prefix_filters_exactly_rather_than_by_directory() {
         // `p/00` and `p/000` live in the same directory, so the walk brings back
         // both and only this can tell them apart.
-        let page = page(found(&["p/00", "p/000", "p/01", "q/00"]), "p/00", None, 10);
+        let page = page(
+            found(&["p/00", "p/000", "p/01", "q/00"]),
+            "p/00",
+            None,
+            10,
+            LinkReport::default(),
+        );
         assert_eq!(keys(&page), vec!["p/00", "p/000"]);
     }
 
@@ -448,23 +460,26 @@ mod page_tests {
         // A cursor that is always `Some` makes the caller loop forever; one that
         // is always `None` lists the first page of a million objects and reports
         // success over the rest.
-        assert_eq!(page(found(&["a", "b"]), "", None, 2).next_cursor, None);
         assert_eq!(
-            page(found(&["a", "b", "c"]), "", None, 2).next_cursor,
+            page(found(&["a", "b"]), "", None, 2, LinkReport::default()).next_cursor,
+            None
+        );
+        assert_eq!(
+            page(found(&["a", "b", "c"]), "", None, 2, LinkReport::default()).next_cursor,
             Some("b".to_string())
         );
     }
 
     #[test]
     fn a_cursor_past_the_end_yields_an_empty_final_page() {
-        let page = page(found(&["a", "b"]), "", Some("z"), 2);
+        let page = page(found(&["a", "b"]), "", Some("z"), 2, LinkReport::default());
         assert!(page.items.is_empty());
         assert_eq!(page.next_cursor, None);
     }
 
     #[test]
     fn an_empty_walk_is_an_empty_page() {
-        let page = page(Vec::new(), "anything/", None, 10);
+        let page = page(Vec::new(), "anything/", None, 10, LinkReport::default());
         assert!(page.items.is_empty());
         assert_eq!(page.next_cursor, None);
     }
@@ -472,7 +487,7 @@ mod page_tests {
     #[test]
     fn a_page_is_sorted_however_the_walk_found_things() {
         // The cursor is a position in an order; readdir has none.
-        let page = page(found(&["c", "a", "b"]), "", None, 10);
+        let page = page(found(&["c", "a", "b"]), "", None, 10, LinkReport::default());
         assert_eq!(keys(&page), vec!["a", "b", "c"]);
     }
 }

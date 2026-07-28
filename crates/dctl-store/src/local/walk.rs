@@ -1,8 +1,17 @@
 //! Metadata, existence, and paginated tree listing.
-
-use std::path::Path;
+//!
+//! # Why `head` and `exists` resolve a link and the listing does not
+//!
+//! They are answering different questions. A key handed to [`head`] is a path
+//! *somebody named*; a link met inside [`list_page`]'s walk is one the walk
+//! found. DCTL applies that distinction everywhere — a root the operator typed
+//! is always resolved, links discovered below it obey
+//! [`LinkPolicy`](crate::links::LinkPolicy) — and conflating the two is how a
+//! symlinked source root produced an empty listing with `exists = true`, which
+//! `sync --force` read as permission to delete a destination.
 
 use crate::error::{Result, StoreError};
+use crate::links::LinkReport;
 use crate::model::{ObjectKey, ObjectMeta, Page};
 
 use super::LocalFs;
@@ -36,7 +45,8 @@ pub(super) async fn exists(fs: &LocalFs, key: &ObjectKey) -> Result<bool> {
 }
 
 pub(super) async fn list_page(fs: &LocalFs, prefix: &str, cursor: Option<String>) -> Result<Page> {
-    let mut keys = collect_keys(fs.root()).await?;
+    let walked = super::tree::collect(fs.root(), fs.links()).await?;
+    let mut keys = walked.keys;
     keys.retain(|k| k.starts_with(prefix));
     keys.sort();
 
@@ -62,44 +72,24 @@ pub(super) async fn list_page(fs: &LocalFs, prefix: &str, cursor: Option<String>
     } else {
         None
     };
-    Ok(Page { items, next_cursor })
-}
 
-/// Iteratively walk `root`, returning forward-slash-relative keys of regular
-/// files (skipping in-flight staging files). Iterative (stack-based) to avoid
-/// async recursion.
-async fn collect_keys(root: &Path) -> Result<Vec<String>> {
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
+    // The report describes the *walk*, and this backend re-walks the whole tree
+    // for every page (`HANDOVER.md` §9.3 item 10). Attaching it to each page
+    // would therefore multiply one tree's links by the number of pages and tell
+    // the operator a number that is simply wrong. It rides on the first page —
+    // the one request every listing makes — and the continuations carry an empty
+    // report, which merges into the total without changing it.
+    let links = if cursor.is_none() {
+        walked.links
+    } else {
+        LinkReport::default()
+    };
 
-    while let Some(dir) = stack.pop() {
-        let mut entries = match tokio::fs::read_dir(&dir).await {
-            Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => return Err(e.into()),
-        };
-        while let Some(entry) = entries.next_entry().await? {
-            let file_type = entry.file_type().await?;
-            let path = entry.path();
-            if file_type.is_dir() {
-                stack.push(path);
-            } else if file_type.is_file() {
-                // One rule, one implementation, in `crate::staging`: a prefix
-                // test on the file's own name. The substring test this replaced
-                // hid `report.tmp.2024.csv` from every listing, so `copy` said
-                // `Files: 5 / 5, Errors: 0` and left it behind.
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if crate::staging::is_staging_name(name) {
-                        continue; // an in-flight verified write, never committed
-                    }
-                }
-                if let Ok(rel) = path.strip_prefix(root) {
-                    out.push(rel.to_string_lossy().replace('\\', "/"));
-                }
-            }
-        }
-    }
-    Ok(out)
+    Ok(Page {
+        items,
+        next_cursor,
+        links,
+    })
 }
 
 fn modified_unix(md: &std::fs::Metadata) -> Option<i64> {

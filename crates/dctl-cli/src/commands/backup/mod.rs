@@ -43,6 +43,7 @@ pub mod store;
 use std::path::PathBuf;
 
 use clap::Args;
+use dctl_store::LinkPolicy;
 
 use crate::constants::PLAN_ACTION_STORE;
 use crate::ctx::Ctx;
@@ -84,6 +85,13 @@ pub struct BackupArgs {
     pub snapshot_name: Option<String>,
 
     /// Store what symbolic links point at, rather than skipping them.
+    ///
+    /// The older spelling of the global `--links follow`, kept because scripts
+    /// carry it. It is resolved against `--links` in one place
+    /// ([`link_policy`]) and the two are refused together when they disagree,
+    /// rather than one silently winning — a run that followed links because of
+    /// an argument the operator thought they had overridden is the shape of
+    /// surprise this whole area exists to remove.
     #[arg(long)]
     pub follow_symlinks: bool,
 
@@ -91,6 +99,37 @@ pub struct BackupArgs {
     /// platform.
     #[arg(long)]
     pub strict_names: bool,
+}
+
+/// The link policy this run walks under, from the global flag and the older
+/// per-command boolean.
+///
+/// Two spellings of one decision, resolved once. They are refused together when
+/// they disagree rather than one quietly winning: `--links skip
+/// --follow-symlinks` is a contradiction, and picking either reading would mean
+/// a backup that stored — or omitted — a tree the operator believed they had
+/// decided about. Agreeing spellings are accepted, because `--links follow
+/// --follow-symlinks` says one thing twice.
+///
+/// # Errors
+/// [`ExitCode::Usage`] when the two disagree.
+fn link_policy(ctx: &Ctx, args: &BackupArgs) -> Result<LinkPolicy> {
+    if !args.follow_symlinks {
+        return Ok(ctx.globals.links);
+    }
+    if ctx.globals.links == LinkPolicy::Skip {
+        // The default, which nobody can have meant to assert alongside the flag
+        // that turns it off.
+        return Ok(LinkPolicy::Follow);
+    }
+    if ctx.globals.links == LinkPolicy::Follow {
+        return Ok(LinkPolicy::Follow);
+    }
+    Err(CliError::usage(format!(
+        "--follow-symlinks contradicts --links {}",
+        ctx.globals.links
+    ))
+    .with_hint("--follow-symlinks is the older spelling of --links follow. Give one of them."))
 }
 
 pub async fn run(ctx: &Ctx, args: &BackupArgs) -> Result<()> {
@@ -114,16 +153,17 @@ pub async fn run(ctx: &Ctx, args: &BackupArgs) -> Result<()> {
     // would suggest it can be restored as one.
     store::refuse_unsupported_snapshot(ctx, args.snapshot)?;
 
-    let scan = scan::walk(&args.source, &selection, args.follow_symlinks);
+    let scan = scan::walk(&args.source, &selection, link_policy(ctx, args)?);
     for problem in &scan.problems {
         // Counted, not swallowed: the run's exit code reflects them.
         ctx.stats.error();
         ctx.out
             .warn(format!("{}: {}", problem.path, problem.detail));
     }
-    for link in &scan.skipped_links {
-        ctx.out.info(format!("skipped symbolic link {link}"));
-    }
+    // One implementation of "say what happened to the links", shared with the
+    // transfer and listing families so an operator who checks with `ls` and then
+    // runs `backup` is told the same thing about the same tree.
+    crate::links::report(ctx, &scan.links);
 
     // Names are checked for *any* platform: this tree may be restored anywhere.
     let mut findings = preflight::inspect(&scan.logical_paths(), None, Audience::AnyPlatform);
@@ -239,7 +279,7 @@ fn summarise(
             "{} files ({}), {} skipped links, no name problems",
             scan.files.len(),
             size::bytes(scan.total_bytes(), ctx.out.units()),
-            scan.skipped_links.len()
+            scan.links.skipped()
         ));
         return Ok(());
     }
@@ -285,7 +325,6 @@ mod tests {
 
     use super::*;
     use crate::cli::globals::GlobalArgs;
-    use crate::constants::WALK_FOLLOW_SYMLINKS;
     use clap::{CommandFactory, Parser};
 
     #[derive(Parser, Debug)]
@@ -361,10 +400,52 @@ mod tests {
 
     #[test]
     fn links_are_skipped_unless_asked_for() {
-        // The default matches the walk's documented policy constant.
-        assert_eq!(
-            parse(&["/tmp/s", "vault:"]).backup.follow_symlinks,
-            WALK_FOLLOW_SYMLINKS
+        // Both spellings default to the storage layer's own default, so the
+        // flag surface and the walk cannot disagree about what "nothing said"
+        // means.
+        let parsed = parse(&["/tmp/s", "vault:"]);
+        assert!(!parsed.backup.follow_symlinks);
+        assert_eq!(parsed.globals.links, LinkPolicy::default());
+        assert_eq!(LinkPolicy::default(), LinkPolicy::Skip);
+    }
+
+    #[test]
+    fn the_two_spellings_of_one_decision_are_resolved_in_one_place() {
+        // `--follow-symlinks` predates `--links` and scripts carry it.
+        let (ctx, args) = setup(&["/tmp/src", "vault:", "--follow-symlinks"]);
+        assert_eq!(link_policy(&ctx, &args).unwrap(), LinkPolicy::Follow);
+
+        let (ctx, args) = setup(&["/tmp/src", "vault:", "--links", "in-tree"]);
+        assert_eq!(link_policy(&ctx, &args).unwrap(), LinkPolicy::InTree);
+
+        // Saying the same thing twice is not a contradiction.
+        let (ctx, args) = setup(&[
+            "/tmp/src",
+            "vault:",
+            "--links",
+            "follow",
+            "--follow-symlinks",
+        ]);
+        assert_eq!(link_policy(&ctx, &args).unwrap(), LinkPolicy::Follow);
+    }
+
+    #[test]
+    fn two_spellings_that_disagree_are_refused_rather_than_ranked() {
+        // Picking a winner here would mean a backup that stored — or omitted —
+        // a whole tree on the strength of a precedence rule nobody wrote down.
+        let (ctx, args) = setup(&[
+            "/tmp/src",
+            "vault:",
+            "--links",
+            "in-tree",
+            "--follow-symlinks",
+        ]);
+        let error = link_policy(&ctx, &args).unwrap_err();
+        assert_eq!(error.code(), ExitCode::Usage);
+        assert!(
+            error.message().contains("--follow-symlinks"),
+            "{}",
+            error.message()
         );
     }
 

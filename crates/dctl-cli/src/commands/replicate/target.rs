@@ -48,7 +48,7 @@
 
 use std::sync::Arc;
 
-use dctl_store::Backend;
+use dctl_store::{Backend, LinkPolicy};
 
 use crate::commands::config::settings;
 use crate::config::{Config, RemoteDef};
@@ -165,7 +165,7 @@ impl Store {
 /// store, or a vault remote. [`ExitCode::FatalError`] for an unresolvable
 /// remote, missing credentials, or a location that is neither declared a store
 /// nor holds a vault's envelope.
-pub async fn open(config: &Config, spec: &str, side: Side) -> Result<Store> {
+pub async fn open(config: &Config, spec: &str, side: Side, links: LinkPolicy) -> Result<Store> {
     let parsed = RemoteSpec::parse(spec)?;
     refuse_subpath(&parsed, spec, side)?;
 
@@ -180,7 +180,7 @@ pub async fn open(config: &Config, spec: &str, side: Side) -> Result<Store> {
     }
 
     let resolved = resolve(&parsed, &settings::catalog(config))?;
-    let backend = registry::build(&resolved)?;
+    let backend = registry::build(&resolved, links)?;
     let standing = admit(&parsed, config, &backend, spec, side).await?;
 
     Ok(Store {
@@ -351,7 +351,9 @@ mod tests {
         // would have failed with something else entirely.
         let config = vault_pair();
         for side in [Side::Source, Side::Destination] {
-            let error = open(&config, "archive:", side).await.unwrap_err();
+            let error = open(&config, "archive:", side, LinkPolicy::default())
+                .await
+                .unwrap_err();
             assert_eq!(error.code(), ExitCode::Usage);
             assert!(error.message().contains("decrypts"), "{}", error.message());
             // The remediation has to be the exact argument that works.
@@ -408,9 +410,14 @@ mod tests {
             }),
         );
 
-        let store = open(&config, "offsite-store:", Side::Destination)
-            .await
-            .unwrap();
+        let store = open(
+            &config,
+            "offsite-store:",
+            Side::Destination,
+            LinkPolicy::default(),
+        )
+        .await
+        .unwrap();
         assert_eq!(store.standing, Standing::Declared);
         assert!(
             !absent.exists(),
@@ -428,6 +435,7 @@ mod tests {
             &Config::default(),
             &format!("local:{}", store.display()),
             Side::Source,
+            LinkPolicy::default(),
         )
         .await
         .unwrap();
@@ -447,6 +455,7 @@ mod tests {
             &Config::default(),
             &format!("local:{}", empty.display()),
             Side::Destination,
+            LinkPolicy::default(),
         )
         .await
         .unwrap_err();
@@ -469,9 +478,14 @@ mod tests {
     #[tokio::test]
     async fn a_path_inside_a_store_is_refused_as_a_filter_in_disguise() {
         let config = vault_pair();
-        let error = open(&config, "archive-store:photos", Side::Source)
-            .await
-            .unwrap_err();
+        let error = open(
+            &config,
+            "archive-store:photos",
+            Side::Source,
+            LinkPolicy::default(),
+        )
+        .await
+        .unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
         assert!(
             error.hint().unwrap_or_default().contains("partial replica"),
@@ -500,10 +514,22 @@ mod tests {
             );
         }
 
-        let source = open(&config, "primary-store:", Side::Source).await.unwrap();
-        let destination = open(&config, "offsite-store:", Side::Destination)
-            .await
-            .unwrap();
+        let source = open(
+            &config,
+            "primary-store:",
+            Side::Source,
+            LinkPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let destination = open(
+            &config,
+            "offsite-store:",
+            Side::Destination,
+            LinkPolicy::default(),
+        )
+        .await
+        .unwrap();
 
         let error = refuse_same_place(&source, &destination).unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);

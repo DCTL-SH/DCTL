@@ -359,3 +359,177 @@ async fn sftp_full_round_trip() {
         listed.len()
     );
 }
+
+/// The canonical layout, over the wire: `/srv/data -> /mnt/bigdisk/data`.
+///
+/// `HANDOVER.md` §9.3 item 1 named this as the single most valuable remaining
+/// fix and named sftp first, because the layout it describes is what a hosted
+/// server looks like: a small root filesystem and the data on a mounted volume,
+/// linked into place. A `SSH_FXP_READDIR` entry carries `lstat` attributes, so
+/// the link's type was neither *file* nor *directory*, the arm that matched
+/// those two dropped it, and `dctl copy sftp-host:/srv ./restore` listed an
+/// empty tree and exited 0.
+///
+/// Only a real server can answer the questions here: that `SSH_FXP_STAT` really
+/// traverses, that `SSH_FXP_REALPATH` returns a path the cycle guard can
+/// compare, and that a link created by the remote host's own `ln -s` behaves the
+/// way the walk assumes. The pure parts — the policy, the verdicts, the
+/// confinement comparison — are proved by `cargo test --workspace` in
+/// `dctl_store::links` and `sftp::tree`.
+#[tokio::test]
+#[ignore = "needs a live ssh-config host in DCTL_SFTP_HOST, reachable by the system ssh \
+            (including any ProxyCommand its config names)"]
+async fn sftp_symlink_policy_over_the_wire() {
+    use dctl_store::LinkPolicy;
+
+    let host = gated::require("sftp_symlink_policy_over_the_wire", SFTP_VARS).swap_remove(0);
+    let run = format!("links-{}", std::process::id());
+    let base = format!("{}/{run}", base_from_env());
+
+    // Build the layout with the remote host's own shell: the backend writes
+    // objects and never links, and a test that used DCTL to create its own input
+    // would be checking the walk against itself.
+    //
+    //   <base>/srv/readme.txt          an ordinary file beside the link
+    //   <base>/srv/data -> …/bigdisk   the canonical directory link
+    //   <base>/srv/alias.txt -> readme a link to a file
+    //   <base>/srv/stale.txt -> gone   a dangling link
+    //   <base>/srv/loop -> <base>/srv  a link at its own ancestor
+    //   <base>/srv/outside -> <base>/elsewhere   a link out of the tree
+    let script = format!(
+        "set -e; \
+         mkdir -p {base}/bigdisk/nested {base}/srv {base}/elsewhere; \
+         printf rows > {base}/bigdisk/report.csv; \
+         printf deep > {base}/bigdisk/nested/deep.txt; \
+         printf sys  > {base}/srv/readme.txt; \
+         printf out  > {base}/elsewhere/secret.txt; \
+         ln -sfn {base}/bigdisk        {base}/srv/data; \
+         ln -sfn {base}/srv/readme.txt {base}/srv/alias.txt; \
+         ln -sfn {base}/srv/gone.txt   {base}/srv/stale.txt; \
+         ln -sfn {base}/srv            {base}/srv/loop; \
+         ln -sfn {base}/elsewhere      {base}/srv/outside"
+    );
+    let status = std::process::Command::new("ssh")
+        .arg(&host)
+        .arg(&script)
+        .status()
+        .expect("spawn the layout ssh");
+    assert!(status.success(), "could not build the remote layout");
+
+    let srv = format!("{base}/srv");
+    let keys = |page: &dctl_store::Page| {
+        let mut out: Vec<String> = page
+            .items
+            .iter()
+            .map(|item| item.key.as_str().to_string())
+            .collect();
+        out.sort();
+        out
+    };
+
+    // ── the default: nothing followed, everything counted ────────────────
+    let skipping = SftpBackend::connect(SftpConfig::new(host.clone(), srv.clone()))
+        .await
+        .expect("connect for the default policy");
+    let page = skipping.list_page("", None).await.expect("list");
+    assert_eq!(
+        keys(&page),
+        ["readme.txt"],
+        "the default must not follow, and must not invent"
+    );
+    assert_eq!(
+        page.links.skipped(),
+        5,
+        "five links, all counted: {:?}",
+        page.links.notes()
+    );
+    assert_eq!(
+        page.links.broken(),
+        0,
+        "nothing looked behind them, so nothing may call one broken"
+    );
+    assert!(
+        page.links.notes().iter().any(|note| note.path == "data"),
+        "the link holding the whole dataset must be named: {:?}",
+        page.links.notes()
+    );
+    drop(skipping);
+
+    // ── --links follow: the tree behind the link arrives, and it terminates ──
+    let following = SftpBackend::connect(
+        SftpConfig::new(host.clone(), srv.clone()).with_links(LinkPolicy::Follow),
+    )
+    .await
+    .expect("connect for the following policy");
+    let page = following.list_page("", None).await.expect("list");
+    assert_eq!(
+        keys(&page),
+        [
+            "alias.txt",
+            "data/nested/deep.txt",
+            "data/report.csv",
+            "outside/secret.txt",
+            "readme.txt",
+        ],
+        "the canonical layout, and the file link beside it"
+    );
+    assert_eq!(
+        page.links.followed(),
+        3,
+        "the directory link, the file link and the outward one — `nested/` is an \
+         ordinary directory and not a link: {:?}",
+        page.links.notes()
+    );
+    assert_eq!(page.links.broken(), 1, "the dangling link is reported");
+    assert_eq!(
+        page.links.skipped(),
+        1,
+        "the cycle is refused, not followed: {:?}",
+        page.links.notes()
+    );
+    assert!(
+        page.links
+            .notes()
+            .iter()
+            .any(|note| note.path == "loop" && note.verdict == dctl_store::LinkVerdict::Cycle),
+        "the loop must be named as one: {:?}",
+        page.links.notes()
+    );
+    drop(following);
+
+    // ── --links in-tree: the outward link is refused by name ─────────────
+    let confined = SftpBackend::connect(
+        SftpConfig::new(host.clone(), srv.clone()).with_links(LinkPolicy::InTree),
+    )
+    .await
+    .expect("connect for the confined policy");
+    let page = confined.list_page("", None).await.expect("list");
+    assert!(
+        !keys(&page).iter().any(|key| key.contains("secret")),
+        "in-tree must not leave the tree: {:?}",
+        keys(&page)
+    );
+    assert!(
+        !keys(&page).iter().any(|key| key.starts_with("data/")),
+        "the canonical link is out of tree too, and in-tree says so rather than \
+         following it quietly: {:?}",
+        keys(&page)
+    );
+    assert!(
+        page.links.notes().iter().any(
+            |note| note.path == "outside" && note.verdict == dctl_store::LinkVerdict::OutOfTree
+        ),
+        "the outward link must be named as one: {:?}",
+        page.links.notes()
+    );
+    drop(confined);
+
+    let status = std::process::Command::new("ssh")
+        .arg(&host)
+        .arg(format!("rm -rf -- {base}"))
+        .status()
+        .expect("spawn cleanup ssh");
+    assert!(status.success(), "remote scratch cleanup failed");
+
+    eprintln!("sftp_symlink_policy_over_the_wire: OK");
+}

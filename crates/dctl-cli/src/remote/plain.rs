@@ -119,7 +119,7 @@ impl PlainRemote {
         let path = config::resolve_path(ctx.globals.config.as_deref());
         let configured = config::load_or_default(&path)?;
         let resolved = resolve::resolve(spec, &configured)?;
-        let backend = registry::build(&resolved)?;
+        let backend = registry::build(&resolved, ctx.globals.links)?;
         Ok(Self { resolved, backend })
     }
 

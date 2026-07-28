@@ -50,6 +50,7 @@
 pub mod base;
 mod ops;
 mod path;
+mod tree;
 mod write;
 
 use std::path::Path;
@@ -61,11 +62,11 @@ use openssh::{KnownHosts, Session};
 use openssh_sftp_client::error::SftpErrorKind;
 use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
-use tokio_stream::StreamExt as _;
 
 use crate::backend::Backend;
 use crate::checksum::ContentHash;
 use crate::error::{Result, StoreError};
+use crate::links::{LinkPolicy, LinkReport};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
 
@@ -92,6 +93,12 @@ pub struct SftpConfig {
     pub host: String,
     /// Remote base directory for objects. `~/…` is home-relative; `/…` is absolute.
     pub base: String,
+    /// What the listing walk does with the symbolic links it finds.
+    ///
+    /// `/srv/data -> /mnt/bigdisk/data` is the canonical layout on exactly the
+    /// kind of host this backend reaches, and the walk used to drop it without a
+    /// word. See [`crate::links`].
+    pub links: LinkPolicy,
 }
 
 impl SftpConfig {
@@ -102,7 +109,15 @@ impl SftpConfig {
         Self {
             host: host.into(),
             base: base.into(),
+            links: LinkPolicy::default(),
         }
+    }
+
+    /// The same config, walking symbolic links under `policy`.
+    #[must_use]
+    pub fn with_links(mut self, policy: LinkPolicy) -> Self {
+        self.links = policy;
+        self
     }
 }
 
@@ -119,6 +134,10 @@ pub struct SftpBackend {
     sftp: Sftp,
     /// Normalized remote base (see [`path::normalize_base`]).
     base: String,
+    /// What this backend's listing does with symbolic links. Fixed for the
+    /// backend's lifetime rather than passed per request, so a paged listing
+    /// cannot follow on page two what it skipped on page one.
+    links: LinkPolicy,
 }
 
 impl SftpBackend {
@@ -143,6 +162,7 @@ impl SftpBackend {
             session,
             sftp,
             base: normalize_base(&cfg.base),
+            links: cfg.links,
         })
     }
 }
@@ -335,68 +355,32 @@ impl Backend for SftpBackend {
     async fn list_page(&self, prefix: &str, cursor: Option<String>) -> Result<Page> {
         // Collect every object key under `base/<prefix-dir>` via a recursive
         // readdir (SFTP has no native recursive list), then filter by the full
-        // `prefix`, sort, and page by cursor — mirroring the local backend.
-        let mut found: Vec<(String, u64, Option<i64>)> = Vec::new();
-
+        // `prefix`, sort, and page by cursor — mirroring the local backend. The
+        // walk itself, and what it does about symbolic links, is [`tree`].
         let key_root = prefix_dir(prefix).to_string();
         let open_root = {
             let j = join(&self.base, &key_root);
             if j.is_empty() { ".".to_string() } else { j }
         };
-        // Stack of (path to open on the wire, key-space path relative to base).
-        let mut stack = vec![(open_root, key_root)];
-        let mut fs = self.sftp.fs();
+        let walked = tree::collect(&self.sftp, open_root, key_root, self.links).await?;
 
-        while let Some((open_dir, key_dir)) = stack.pop() {
-            let dir = match fs.open_dir(&open_dir).await {
-                Ok(d) => d,
-                Err(e) => match map_sftp_err(&open_dir, e) {
-                    // A missing directory (e.g. the prefix has no objects) is an
-                    // empty listing, not an error.
-                    StoreError::NotFound(_) => continue,
-                    other => return Err(other),
-                },
-            };
-            let mut rd = Box::pin(dir.read_dir());
-            while let Some(item) = rd.next().await {
-                let entry = item.map_err(|e| map_sftp_err(&open_dir, e))?;
-                let name = entry.filename().to_string_lossy().into_owned();
-                if name == "." || name == ".." {
-                    continue;
-                }
-                let open_child = if open_dir == "." {
-                    name.clone()
-                } else {
-                    format!("{open_dir}/{name}")
-                };
-                let key_child = if key_dir.is_empty() {
-                    name.clone()
-                } else {
-                    format!("{key_dir}/{name}")
-                };
-                match entry.file_type() {
-                    Some(ft) if ft.is_dir() => stack.push((open_child, key_child)),
-                    Some(ft) if ft.is_file() => {
-                        // One rule, one implementation, in `crate::staging`.
-                        // The substring test this replaced hid every object
-                        // whose name contained `.tmp.` from `ls`, `size`,
-                        // `scrub`, `copy`, `sync` and `purge` alike.
-                        if crate::staging::is_staging_name(&name) {
-                            continue; // an in-flight verified write, never committed
-                        }
-                        let md = entry.metadata();
-                        found.push((
-                            key_child,
-                            md.len().unwrap_or(0),
-                            md.modified().map(|t| t.as_duration().as_secs() as i64),
-                        ));
-                    }
-                    _ => {} // symlink/other: not an object
-                }
-            }
-        }
+        // First page only. This backend re-walks the whole subtree per call
+        // (`HANDOVER.md` §9.3 item 10), so attaching the report to every page
+        // would multiply one tree's links by the page count and report a number
+        // that was never true.
+        let links = if cursor.is_none() {
+            walked.links
+        } else {
+            LinkReport::default()
+        };
 
-        Ok(path::page(found, prefix, cursor.as_deref(), PAGE_SIZE))
+        Ok(path::page(
+            walked.found,
+            prefix,
+            cursor.as_deref(),
+            PAGE_SIZE,
+            links,
+        ))
     }
     // `prepare_upload` keeps the trait default: SFTP has no presigned/delegated
     // upload, so it returns a clear "unsupported" error.

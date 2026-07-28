@@ -57,10 +57,20 @@ pub struct ObjectMeta {
 
 /// One page of a listing — pagination keeps listings constant-memory even for
 /// millions of objects. `next_cursor == None` means the listing is exhausted.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct Page {
     pub items: Vec<ObjectMeta>,
     pub next_cursor: Option<String>,
+    /// What the walk behind this page did about the symbolic links it met.
+    ///
+    /// Empty for every provider that has no such thing to report — an object
+    /// store holds keys and bytes and nothing that could be a link — and
+    /// populated by the two backends that walk a real filesystem, `local:` and
+    /// `sftp:`. It travels *with the page* rather than being fetched separately
+    /// because a listing that had to ask a second question to learn what it had
+    /// skipped is a listing whose callers will forget to ask; the silence that
+    /// followed is the defect [`crate::links`] exists to remove.
+    pub links: crate::links::LinkReport,
 }
 
 /// Result of a verified put: the backend-confirmed size and content hash.

@@ -98,6 +98,21 @@ pub async fn open(ctx: &Ctx, target: &Target, filter: Filter) -> Result<Stream> 
     Ok(Stream::new(source::open(ctx, target).await?, filter))
 }
 
+/// Say on stderr what the listing's walk did about the symbolic links it met.
+///
+/// Called by all six verbs after the stream is drained, next to
+/// [`report_empty`] and for the same reason it exists: an operator reads a
+/// listing to decide what is safe to delete from the source, and `dctl ls /srv`
+/// printing nothing at all — because the one directory under it was a link —
+/// was the read-side half of the defect that made `copy` store nothing and exit
+/// 0.
+///
+/// Always stderr, never stdout: `dctl ls | wc -l` must still count objects, and
+/// a JSON consumer must still receive a document and nothing else.
+pub fn report_links(ctx: &Ctx, stream: &Stream) {
+    crate::links::report(ctx, &stream.links());
+}
+
 /// Say on stderr why a listing came back empty, when the reason is the filters.
 ///
 /// Only ever a note, never data: `dctl ls | wc -l` must still see zero lines,

@@ -66,6 +66,19 @@ pub trait Pages: Send {
     /// the same source that produced the entries. A basis looked up a second
     /// time is a basis that can end up describing a different listing.
     fn sizes(&self) -> source::Sizes;
+
+    /// What the walk behind this listing did about the symbolic links it met.
+    ///
+    /// Read *after* the listing is drained, because the answer is about the
+    /// whole walk. The six verbs report it identically — a directory `ls` shows
+    /// and `copy` then omits is a data-loss-shaped bug, and the operator checks
+    /// with `ls` before deciding what is safe to delete from the source.
+    ///
+    /// The provided default is "nothing to say", which is the truth for the
+    /// in-memory pager the renderers' own tests drive.
+    fn links(&self) -> dctl_store::LinkReport {
+        dctl_store::LinkReport::default()
+    }
 }
 
 /// A page cursor over the binary's one read abstraction.
@@ -119,6 +132,10 @@ impl Pages for Streamed {
 
     fn sizes(&self) -> source::Sizes {
         self.source.sizes()
+    }
+
+    fn links(&self) -> dctl_store::LinkReport {
+        self.entries.links()
     }
 }
 

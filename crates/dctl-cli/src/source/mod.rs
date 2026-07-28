@@ -141,6 +141,24 @@ pub trait Entries: Send {
     /// Whatever the index or the provider reported. A failure part-way through
     /// is an error and never a short listing.
     async fn next(&mut self) -> Result<Option<Entry>>;
+
+    /// What the walk behind this cursor did about the symbolic links it met.
+    ///
+    /// Meaningful once the cursor is exhausted, and empty for every source that
+    /// walks no filesystem — a sealed vault lists an index, and an index holds
+    /// paths rather than directory entries.
+    ///
+    /// A method on the cursor rather than a field on each entry, because a
+    /// skipped link produced *no entry*: that is the whole defect. Anything that
+    /// travelled with the entries would therefore have travelled with nothing,
+    /// which is how the omission stayed invisible through five commands.
+    ///
+    /// The provided default is "nothing to say", so a source that genuinely has
+    /// none does not have to state it — and a source that walks a tree cannot
+    /// forget, because the two backends that do are the two that override.
+    fn links(&self) -> dctl_store::LinkReport {
+        dctl_store::LinkReport::default()
+    }
 }
 
 /// Something objects can be listed from and read out of.

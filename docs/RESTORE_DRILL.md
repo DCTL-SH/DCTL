@@ -238,6 +238,36 @@ out loud when it cannot run the case.
 
 ---
 
+## A symbolic link comes back as a copy
+
+The other thing that does not come back the way it went in, and for a reason of
+the same kind: a vault is keyed by logical path. It has records for paths that
+hold bytes, and no record type for *this path is a link to that one*. rclone has
+one — `-l`/`--links`, which writes the target into a `.rclonelink` file — and
+DCTL deliberately does not.
+
+So `srv/data -> /mnt/bigdisk/data`, backed up with `--links follow`, restores as
+a **real directory** `srv/data` holding real files. Three consequences an
+operator has to plan for:
+
+* A restore needs space for the **data**, not for a link. Two links to one 400 GB
+  directory restore as 800 GB.
+* The layout is not reproduced. A machine restored from `/srv` gets a real
+  `/srv/data`; putting the volume back on `/mnt/bigdisk` and re-creating the link
+  is a manual step.
+* A tree backed up under the **default** policy holds no record of the link at
+  all, so a restore produces nothing at that path — not an empty directory, and
+  not a dangling link. That is why every run says `skipped N symbolic link(s)` at
+  the time: the warning is the only notice there will ever be.
+
+Both halves are asserted rather than written down.
+`tests/restore_drill/links.rs` backs the same tree up twice — once with `--links
+follow`, once with the default — restores both, and checks with
+`symlink_metadata` (the only call that does not traverse) that what came back is
+a directory and not a link, and that the skipped path is absent entirely.
+
+---
+
 ## What a rebuilt index knows
 
 `dctl index rebuild` reads two bounded things per file: the encrypted `n/*` name

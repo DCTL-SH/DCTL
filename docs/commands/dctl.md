@@ -511,6 +511,19 @@ Commands that cannot yet honour the pattern filters **refuse** them rather than
 ignoring them — see the note in [dctl sync](dctl_sync.md), where a dropped
 `--exclude` deletes the files the rule was written to protect.
 
+### Traversal
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--links <MODE>` | `skip` | What to do with symbolic links found inside a tree: `skip`, `follow`, or `in-tree`. |
+
+Not a filter, and deliberately its own group: a filter selects among the things a
+walk found, this decides what the walk finds at all — which is why `dctl
+replicate` refuses every flag above and honours this one. A skipped link is
+always counted on stderr and named at `-v`; a tree with no links says nothing.
+See [GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md#--links-skipfollowin-tree), including
+what a followed link looks like on restore.
+
 ### Output
 
 | Flag | Default | Description |

@@ -23,6 +23,7 @@
 //! | [`local`] | the drill against a local store — runs on every `cargo test` |
 //! | [`b2`] | the same drill against a real bucket — `#[ignore]`, and a failure rather than a skip when asked for without credentials |
 //! | [`normalisation`] | the collision at the sharp edge of the NFC rule, which this drill found |
+//! | [`links`] | what comes back where a followed symbolic link used to be |
 //!
 //! ## The one difference between what goes in and what comes out
 //!
@@ -47,5 +48,7 @@ mod harness;
 mod manifest;
 
 mod b2;
+#[cfg(unix)]
+mod links;
 mod local;
 mod normalisation;

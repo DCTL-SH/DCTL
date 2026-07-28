@@ -15,6 +15,7 @@ pub mod backend;
 pub mod checksum;
 pub mod durable;
 pub mod error;
+pub mod links;
 pub mod local;
 pub mod model;
 pub mod modified;
@@ -28,6 +29,9 @@ mod tls;
 pub use backend::{Backend, UploadTicket};
 pub use checksum::{ContentHash, HashAlgo, Hasher};
 pub use error::{Result, StoreError};
+pub use links::{
+    LINK_POLICY_CHOICES, LinkNote, LinkPolicy, LinkReport, LinkVerdict, UnknownLinkPolicy,
+};
 pub use local::LocalFs;
 pub use model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 pub use modified::SourceModified;

@@ -535,10 +535,22 @@ mod tests {
             std::fs::write(path, body).unwrap();
         }
 
-        let source = open(&config, "primary-store:", Side::Source).await.unwrap();
-        let destination = open(&config, "offsite-store:", Side::Destination)
-            .await
-            .unwrap();
+        let source = open(
+            &config,
+            "primary-store:",
+            Side::Source,
+            dctl_store::LinkPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let destination = open(
+            &config,
+            "offsite-store:",
+            Side::Destination,
+            dctl_store::LinkPolicy::default(),
+        )
+        .await
+        .unwrap();
         (config, source_dir, dest_dir, source, destination)
     }
 

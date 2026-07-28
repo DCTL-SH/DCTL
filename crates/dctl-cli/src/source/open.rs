@@ -76,7 +76,11 @@ pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Box<dyn Source>> {
         { crate::logging::fields::REMOTE } = %spec,
         "opening the plain view"
     );
-    Ok(Box::new(PlainSource::open(&config, spec)?))
+    Ok(Box::new(PlainSource::open(
+        &config,
+        spec,
+        ctx.globals.links,
+    )?))
 }
 
 /// Whether `spec` names a configured vault wrapper.

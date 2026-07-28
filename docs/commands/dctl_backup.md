@@ -110,10 +110,18 @@ so the run exits **6** (`partial_failure`) even though it produced a plan. Entri
 are sorted, so two scans of an unchanged tree produce byte-identical output and
 plans can be diffed between runs.
 
-Symbolic links are **skipped** by default and reported. `--follow-symlinks`
-stores what they point at instead, and the walk then remembers the canonical path
-of every directory it enters — a symlink pointing at its own ancestor is the
-oldest way to make a backup tool run until the disk fills.
+Symbolic links are **skipped** by default and reported: the count is always
+printed and `-v` names each link with what happened to it. `--links follow`
+stores what they point at instead — `--follow-symlinks` is the older spelling of
+the same thing, and giving both is refused when they disagree — and `--links
+in-tree` follows only the links whose targets stay under the scan root. When
+links are followed the walk remembers the identity of every directory on the path
+from the root down to the one it is reading, so a link pointing at its own
+ancestor is reported as a cycle rather than making the walk run until the disk
+fills. A link that leads nowhere is counted as an error and named; the rest of
+the tree is still stored. See
+[GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md#--links-skipfollowin-tree), including what a
+followed link looks like on restore.
 
 **Filters are all honoured, through one engine.** `--include`, `--exclude`,
 `--filter-from`, `--files-from`, `--min-size`, `--max-size` and `--max-depth` are
@@ -298,6 +306,7 @@ $ echo $?
       --snapshot             Record this run as a snapshot, so it can be restored as one point in time
       --snapshot-name <NAME> Name the snapshot. Without this, one is generated from the start time
       --follow-symlinks      Store what symbolic links point at, rather than skipping them
+                             (the older spelling of the global --links follow)
       --strict-names         Refuse to store any name that could not be restored on every supported platform
 ```
 

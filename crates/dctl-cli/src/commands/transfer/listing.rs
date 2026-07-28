@@ -46,11 +46,15 @@
 //! here is bounded by the filters, and is the same shape the engine consumes.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use dctl_store::links::{
+    Ancestors, LinkPolicy, LinkReport, LinkTarget, LinkVerdict, decide, local_dir_id,
+};
+
 use crate::cli::GlobalArgs;
-use crate::constants::WALK_FOLLOW_SYMLINKS;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -91,6 +95,13 @@ pub struct ListOptions {
     /// `copy` read its whole source tree. The vault records the source's time
     /// now, so the substitution and the flag it set are both gone.
     pub hash_contents: bool,
+    /// What the local walk does with the symbolic links it finds.
+    ///
+    /// Carried on the options beside the filters, and for the same reason: the
+    /// two sides of a diff must have been enumerated under identical rules. A
+    /// `sync` whose source followed links and whose destination did not would
+    /// see the followed files as destination *extras* and delete them.
+    pub links: LinkPolicy,
 }
 
 impl ListOptions {
@@ -106,6 +117,7 @@ impl ListOptions {
             filter: FilterSet::from_globals(globals)?,
             include_empty_dirs,
             hash_contents: globals.checksum,
+            links: globals.links,
         })
     }
 
@@ -179,9 +191,11 @@ pub struct Listing {
     pub is_single_file: bool,
     /// Whether the endpoint exists at all.
     pub exists: bool,
-    /// Symbolic links passed over. Reported rather than hidden — see
-    /// [`WALK_FOLLOW_SYMLINKS`].
-    pub symlinks_skipped: u64,
+    /// What the walk did about every symbolic link it met: counts, and a bounded
+    /// sample of names. Reported rather than hidden — see [`crate::links`] for
+    /// why silence here was the one defect that destroyed data without saying
+    /// so.
+    pub links: LinkReport,
     /// Entries with no logical path: a name that is not valid UTF-8, or one
     /// containing a character another platform reads as a separator (see
     /// [`crate::platform::path`]). They cannot be stored under a name the user
@@ -203,8 +217,8 @@ pub struct Listing {
 impl Listing {
     /// Whether anything at all was skipped and therefore deserves a warning.
     #[must_use]
-    pub const fn has_omissions(&self) -> bool {
-        self.symlinks_skipped > 0 || self.unrepresentable_skipped > 0
+    pub fn has_omissions(&self) -> bool {
+        crate::links::needs_saying(&self.links) || self.unrepresentable_skipped > 0
     }
 }
 
@@ -325,6 +339,14 @@ async fn walk_remote(
         }
     }
 
+    // Taken from the exhausted cursor, because a skipped link produced no
+    // object for the loop above to have seen. `local:` and `sftp:` are remotes
+    // like any other here, and they are exactly the two that walk a filesystem:
+    // `dctl copy local:/srv b2:archive` reaches this function and not the local
+    // walk below, which is why the report has to travel with the listing rather
+    // than being produced by whichever code path happened to enumerate.
+    listing.links = cursor.links();
+
     // Deterministic order, matching the local walk, so a plan printed twice is
     // byte-identical whichever side produced it.
     listing.entries.sort_by(|a, b| a.path.cmp(&b.path));
@@ -438,12 +460,10 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
     // The link a walk *starts from* is not the links it *finds*, and applying
     // one rule to both was a data-loss path.
     //
-    // [`WALK_FOLLOW_SYMLINKS`] exists for two reasons, and neither reaches the
-    // root: a link pointing at one of its own ancestors turns a walk into an
-    // infinite loop, and a link pointing outside the transfer root copies data
-    // the user never named. The root is entered exactly once, and it *is* what
-    // the user named — `/data -> /mnt/disk/data` is an ordinary layout, not an
-    // escape from a tree.
+    // `--links` decides the links a walk *finds*, and never reaches the root:
+    // the root is entered exactly once and it *is* what the user named, so
+    // `/data -> /mnt/disk/data` typed as the source is an ordinary layout and
+    // not an escape from a tree. See `dctl_store::links` for the policy itself.
     //
     // Refusing it produced an empty listing with `exists = true`, so `dctl copy`
     // stored nothing and printed `Files: 0 / 0  Errors: 0` with exit 0, and
@@ -496,10 +516,29 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
         return Ok(listing);
     }
 
-    // (directory, its logical path relative to the root)
-    let mut stack = vec![(root.to_path_buf(), String::new())];
+    // Resolved once, and only when something will ask: `in-tree` is the only
+    // policy that needs to know where a link landed.
+    let confine = if options.links.confined() {
+        fs::canonicalize(root).ok()
+    } else {
+        None
+    };
 
-    while let Some((directory, prefix)) = stack.pop() {
+    // (directory, its logical path relative to the root, the chain above it)
+    //
+    // The chain is `None` unless links are followed. With nothing to follow
+    // there is no cycle to close, so an ordinary walk builds no chain and pays
+    // nothing for the guard.
+    let mut stack: Vec<(PathBuf, String, Option<Arc<Ancestors>>)> = vec![(
+        root.to_path_buf(),
+        String::new(),
+        options
+            .links
+            .follows()
+            .then(|| Ancestors::root(local_dir_id(&metadata, root))),
+    )];
+
+    while let Some((directory, prefix, ancestors)) = stack.pop() {
         let children = fs::read_dir(&directory).map_err(|error| {
             CliError::from(error).with_hint(format!("Could not read {}", directory.display()))
         })?;
@@ -533,14 +572,37 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
                 }
             };
 
-            if metadata.file_type().is_symlink() && !WALK_FOLLOW_SYMLINKS {
-                listing.symlinks_skipped += 1;
-                continue;
-            }
+            // The two questions this walk asks about an entry — what is it, and
+            // may it be entered — are the same two for a link and for anything
+            // else. What differs is that a link's answer has to be *fetched*,
+            // and that skipping one is a fact the run has to report.
+            let metadata = if metadata.file_type().is_symlink() {
+                match resolve_link(
+                    &mut listing.links,
+                    options.links,
+                    confine.as_deref(),
+                    ancestors.as_ref(),
+                    &child.path(),
+                    &path,
+                ) {
+                    Some(resolved) => resolved,
+                    None => continue,
+                }
+            } else {
+                metadata
+            };
 
             if metadata.is_dir() {
                 if options.may_descend(&path) {
-                    stack.push((child.path(), path));
+                    let child_path = child.path();
+                    // The metadata in hand, never a second `stat`: for a plain
+                    // directory it is the one already read, and for a followed
+                    // link it is the target's, which is the identity a cycle is
+                    // detected against.
+                    let chain = ancestors
+                        .as_ref()
+                        .map(|chain| chain.child(local_dir_id(&metadata, &child_path)));
+                    stack.push((child_path, path, chain));
                 }
             } else if metadata.is_file()
                 && options.accepts_file(&path, metadata.len(), local_modified(&metadata))
@@ -568,6 +630,64 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
     listing.entries.sort_by(|a, b| a.path.cmp(&b.path));
     listing.collisions = collisions.finish();
     Ok(listing)
+}
+
+/// Decide one symbolic link, returning the target's metadata when it is to be
+/// followed and [`None`] when it is not.
+///
+/// Every `None` has first been *recorded*: the count is what a run reports and
+/// the reason is what `-v` prints, so there is no path out of this function that
+/// drops an entry without saying so. That was the defect.
+fn resolve_link(
+    report: &mut LinkReport,
+    policy: LinkPolicy,
+    confine: Option<&Path>,
+    ancestors: Option<&Arc<Ancestors>>,
+    native: &Path,
+    logical: &str,
+) -> Option<fs::Metadata> {
+    if !policy.follows() {
+        report.observe(logical, decide(policy, LinkTarget::Unread));
+        return None;
+    }
+
+    // The one look behind the link: `metadata` traverses where
+    // `symlink_metadata` above deliberately did not.
+    let Ok(target) = fs::metadata(native) else {
+        // Includes `ELOOP` from a link that points at itself, which the
+        // filesystem refuses to resolve before this walk can.
+        report.observe(logical, decide(policy, LinkTarget::Missing));
+        return None;
+    };
+
+    let landed = match confine {
+        None => LinkTarget::Inside,
+        Some(base) => match fs::canonicalize(native) {
+            Ok(resolved) if resolved.starts_with(base) => LinkTarget::Inside,
+            Ok(_) => LinkTarget::Outside,
+            Err(_) => LinkTarget::Missing,
+        },
+    };
+
+    let verdict = decide(policy, landed);
+    if !verdict.followed() {
+        report.observe(logical, verdict);
+        return None;
+    }
+
+    if target.is_dir() {
+        let id = local_dir_id(&target, native);
+        if ancestors.is_some_and(|chain| chain.contains(&id)) {
+            report.observe(logical, LinkVerdict::Cycle);
+            return None;
+        }
+    } else if !target.is_file() {
+        report.observe(logical, LinkVerdict::NotStorable);
+        return None;
+    }
+
+    report.observe(logical, LinkVerdict::Followed);
+    Some(target)
 }
 
 /// Build a file entry from filesystem metadata.
@@ -816,7 +936,7 @@ mod tests {
         let listing = source(&ctx(&[]), &endpoint, &ListOptions::default())
             .await
             .unwrap();
-        assert_eq!(listing.symlinks_skipped, 1);
+        assert_eq!(listing.links.skipped(), 1);
         assert!(listing.has_omissions());
         assert_eq!(paths(&listing), ["a.txt", "sub/b.txt", "sub/deep/c.txt"]);
     }
@@ -840,7 +960,8 @@ mod tests {
 
         assert!(listing.exists);
         assert_eq!(
-            listing.symlinks_skipped, 0,
+            listing.links.skipped(),
+            0,
             "the root was followed, so nothing was skipped"
         );
         assert!(!listing.has_omissions());

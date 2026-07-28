@@ -445,16 +445,16 @@ fn nested(inner: &RemoteSpec, outer: &RemoteSpec, which: &str, relation: &str) -
 /// On stderr and unconditional (short of `--quiet`): a skipped symlink or an
 /// unrepresentable filename is data the user asked for and did not get, and
 /// finding that out from a restore is far too late.
+///
+/// The symbolic-link half is delegated to [`crate::links`] rather than worded
+/// here, because the listing family and `backup` have to say the same thing
+/// about the same tree — an operator who checks with `ls` and then runs `copy`
+/// must not be told two different stories.
 fn warn_about_omissions(ctx: &Ctx, listing: &Listing) {
     if !listing.has_omissions() {
         return;
     }
-    if listing.symlinks_skipped > 0 {
-        ctx.out.warn(format!(
-            "skipped {} symbolic link(s): links are never followed",
-            listing.symlinks_skipped
-        ));
-    }
+    crate::links::report(ctx, &listing.links);
     if listing.unrepresentable_skipped > 0 {
         ctx.out.warn(format!(
             "skipped {} entr(y/ies) whose names have no logical path: not valid UTF-8, \

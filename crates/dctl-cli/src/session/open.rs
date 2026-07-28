@@ -268,7 +268,10 @@ fn build_backend(ctx: &Ctx, spec: &RemoteSpec) -> Result<(Arc<dyn Backend>, bool
     let storage = storage_remote(&config, spec)?;
     let declared_vault = declares_a_vault(&config, spec, &storage);
     let resolved = crate::remote::resolve::resolve(&storage, &config)?;
-    Ok((crate::remote::registry::build(&resolved)?, declared_vault))
+    Ok((
+        crate::remote::registry::build(&resolved, ctx.globals.links)?,
+        declared_vault,
+    ))
 }
 
 /// Whether the configuration already states that a vault lives here.

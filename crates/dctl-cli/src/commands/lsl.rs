@@ -70,6 +70,7 @@ pub async fn run(ctx: &Ctx, args: &LslArgs) -> Result<()> {
             .await?;
     }
 
+    listing::report_links(ctx, &stream);
     listing::report_empty(ctx, &stream, &target);
     Ok(())
 }

@@ -122,7 +122,7 @@ impl Medium {
             "removing from the plain view"
         );
         let resolved = crate::remote::resolve::resolve(&spec, &config)?;
-        let backend = crate::remote::registry::build(&resolved)?;
+        let backend = crate::remote::registry::build(&resolved, ctx.globals.links)?;
         Ok(Self::Plain {
             source: PlainSource::new(Arc::clone(&backend)),
             backend,
@@ -252,7 +252,7 @@ impl Medium {
             Self::Vault { storage, .. } => {
                 let config = load(ctx)?;
                 let resolved = crate::remote::resolve::resolve(storage, &config)?;
-                crate::remote::registry::build(&resolved)
+                crate::remote::registry::build(&resolved, ctx.globals.links)
             }
         }
     }

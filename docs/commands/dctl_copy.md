@@ -729,6 +729,7 @@ the full list. The ones that change what this command does:
 | `-P`, `--progress`, `--stats` | Per-file bars showing the real pipeline stage — a row at `verify` has been written but is not yet counted as stored. |
 | `--transfers`, `--bwlimit`, `--retries`, `--low-level-retries` | Parsed and **not consulted**. Files move one at a time, unshaped and unretried. |
 | `--immutable` | **Honoured at plan time.** Any `update` in the plan fails the run with exit **7** before anything moves, naming the paths; a missing destination is an addition and still copies. Refused with `--no-traverse` (exit **1**), which never lists the destination. |
+| `--links` | **Honoured.** `skip` (the default) passes over every symbolic link in the source tree, counting it and naming it at `-v`; `follow` stores what they point at; `in-tree` follows only those that stay under the source root. See [GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md#--links-skipfollowin-tree). |
 | `-q`, `--quiet` | Suppresses the summary and the skipped-symlink warnings. Errors are still printed. |
 
 `--force` and `--interactive` have no effect on `copy`: it is not destructive

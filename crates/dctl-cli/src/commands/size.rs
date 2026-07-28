@@ -160,6 +160,8 @@ pub async fn run(ctx: &Ctx, args: &SizeArgs) -> Result<()> {
         })
         .await?;
 
+    listing::report_links(ctx, &stream);
+
     if ctx.out.is_json() {
         ctx.out.json(&totals)?;
     } else {

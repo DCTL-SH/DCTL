@@ -102,6 +102,7 @@ pub async fn run(ctx: &Ctx, args: &LsdArgs) -> Result<()> {
         aggregator.finish(&mut emit)?;
     }
 
+    listing::report_links(ctx, &stream);
     if shown == 0 {
         report_empty(ctx, &stream, &target);
     }

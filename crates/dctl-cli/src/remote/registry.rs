@@ -36,7 +36,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use dctl_store::b2::{B2Backend, B2Credentials};
-use dctl_store::{Backend, LocalFs, R2Backend, S3Backend, S3Config, SftpBackend, SftpConfig};
+use dctl_store::{
+    Backend, LinkPolicy, LocalFs, R2Backend, S3Backend, S3Config, SftpBackend, SftpConfig,
+};
 
 use crate::constants::{
     ENV_B2_APP_KEY, ENV_B2_KEY_ID, ENV_R2_ACCESS_KEY, ENV_R2_ACCOUNT_ID, ENV_R2_SECRET_KEY,
@@ -140,7 +142,15 @@ impl Target {
 /// reads the environment and opens connections. Commands that only need to
 /// *name* a remote — `--dry-run`, error messages, completion — never reach here
 /// and therefore never demand credentials for a run that will not connect.
-pub fn build(resolved: &Resolved) -> Result<Arc<dyn Backend>> {
+///
+/// `links` is the run's `--links` policy. It is a parameter rather than
+/// something the backend reads for itself because it belongs to the
+/// *invocation*: a config file describes a place, and what to do about the
+/// symbolic links found there is a decision the operator makes at the command
+/// line. Only the two backends that walk a real filesystem can use it; passing
+/// it to the object stores would be offering a dial that does nothing, which is
+/// the class of defect `HANDOVER.md` §11.3 item 10 already tracks.
+pub fn build(resolved: &Resolved, links: LinkPolicy) -> Result<Arc<dyn Backend>> {
     let target = resolved.target();
 
     tracing::debug!(
@@ -150,7 +160,7 @@ pub fn build(resolved: &Resolved) -> Result<Arc<dyn Backend>> {
     );
 
     match target {
-        Target::Local { root } => Ok(Arc::new(LocalFs::new(root.clone()))),
+        Target::Local { root } => Ok(Arc::new(LocalFs::new(root.clone()).with_links(links))),
 
         Target::B2 { bucket } => {
             let key_id = env_required(ENV_B2_KEY_ID)?;
@@ -193,7 +203,7 @@ pub fn build(resolved: &Resolved) -> Result<Arc<dyn Backend>> {
         // user's own config, which is the whole reason a cloudflared-proxied host
         // works. This is also the one arm that opens a connection to build, so it
         // is the one that bridges to the async `connect` — see [`connect_sftp`].
-        Target::Sftp { host, base } => connect_sftp(host, base),
+        Target::Sftp { host, base } => connect_sftp(host, base, links),
     }
 }
 
@@ -215,12 +225,12 @@ pub fn build(resolved: &Resolved) -> Result<Arc<dyn Backend>> {
 /// for the backend's lifetime. [`Handle::try_current`](tokio::runtime::Handle::try_current)
 /// is used rather than `current` so the "not on a runtime" case is a typed error
 /// rather than a panic, keeping this lib code panic-free.
-fn connect_sftp(host: &str, base: &str) -> Result<Arc<dyn Backend>> {
+fn connect_sftp(host: &str, base: &str, links: LinkPolicy) -> Result<Arc<dyn Backend>> {
     let handle = tokio::runtime::Handle::try_current().map_err(|_| {
         CliError::fatal("the sftp backend must be built inside the async runtime")
             .with_hint("This is an internal error. Please report the command that produced it.")
     })?;
-    let config = SftpConfig::new(host, base);
+    let config = SftpConfig::new(host, base).with_links(links);
     let backend = tokio::task::block_in_place(|| handle.block_on(SftpBackend::connect(config)))?;
     Ok(Arc::new(backend))
 }
@@ -246,10 +256,10 @@ fn connect_sftp(host: &str, base: &str) -> Result<Arc<dyn Backend>> {
 /// was meant therefore builds a filesystem backend rooted at `./b2` and reports
 /// no error at all. A caller that already holds a [`RemoteSpec`] must resolve
 /// that value directly rather than reconstructing text for this entry point.
-pub fn build_backend(spec: &str) -> Result<Arc<dyn Backend>> {
+pub fn build_backend(spec: &str, links: LinkPolicy) -> Result<Arc<dyn Backend>> {
     let parsed = RemoteSpec::parse(spec)?;
     let resolved = super::resolve::resolve(&parsed, &())?;
-    build(&resolved)
+    build(&resolved, links)
 }
 
 /// Take a setting the config pinned, or fall back to its environment variable.
@@ -322,7 +332,7 @@ mod tests {
         // The only provider that must work on a machine with no environment set
         // up at all — `dctl copy a b` between two directories.
         let resolved = Resolved::new(PROVIDER_LOCAL, local_target(), String::new());
-        let backend = build(&resolved).unwrap();
+        let backend = build(&resolved, LinkPolicy::default()).unwrap();
         assert_eq!(backend.name(), PROVIDER_LOCAL);
     }
 
@@ -422,10 +432,12 @@ mod tests {
     fn the_config_free_entry_point_still_builds_a_local_backend() {
         // What `dctl init` uses: a vault has to be creatable on a machine whose
         // config file does not exist yet.
-        let backend = build_backend("/srv/data").unwrap();
+        let backend = build_backend("/srv/data", LinkPolicy::default()).unwrap();
         assert_eq!(backend.name(), PROVIDER_LOCAL);
         assert_eq!(
-            build_backend("local:/srv/data").unwrap().name(),
+            build_backend("local:/srv/data", LinkPolicy::default())
+                .unwrap()
+                .name(),
             PROVIDER_LOCAL
         );
     }
@@ -435,7 +447,7 @@ mod tests {
         // It has no catalog to look one up in, so failing is the only honest
         // answer; silently treating `vault:` as a directory would create the
         // vault in the working directory and report success.
-        assert!(build_backend("vault:photos").is_err());
+        assert!(build_backend("vault:photos", LinkPolicy::default()).is_err());
     }
 
     #[test]

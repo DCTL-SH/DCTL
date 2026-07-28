@@ -37,6 +37,7 @@ mod error;
 mod exit;
 mod filter;
 mod limits;
+mod links;
 mod logging;
 // The read-only FUSE filesystem, on the two platforms that have a FUSE layer.
 // Target-gated in one place rather than inside every file it contains: on

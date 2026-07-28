@@ -32,7 +32,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dctl_store::{Backend, ByteRange, ObjectKey, ObjectMeta, StoreError};
+use dctl_store::{Backend, ByteRange, LinkPolicy, LinkReport, ObjectKey, ObjectMeta, StoreError};
 use zeroize::Zeroizing;
 
 use crate::config::Config;
@@ -62,9 +62,9 @@ impl PlainSource {
     /// [`ExitCode::FatalError`](crate::exit::ExitCode::FatalError) for a remote
     /// the configuration and the provider shorthands both fail to explain, or
     /// for one whose settings are incomplete.
-    pub fn open(config: &Config, spec: &RemoteSpec) -> Result<Self> {
+    pub fn open(config: &Config, spec: &RemoteSpec, links: LinkPolicy) -> Result<Self> {
         let resolved = crate::remote::resolve::resolve(spec, config)?;
-        Ok(Self::new(crate::remote::registry::build(&resolved)?))
+        Ok(Self::new(crate::remote::registry::build(&resolved, links)?))
     }
 
     /// Read an already-built backend.
@@ -87,6 +87,7 @@ impl Source for PlainSource {
             cursor: None,
             exhausted: false,
             page: VecDeque::new(),
+            links: LinkReport::default(),
         }))
     }
 
@@ -216,6 +217,12 @@ struct Paged {
     /// The current page, drained from the front. This — and nothing larger — is
     /// the memory a listing of any store costs.
     page: VecDeque<Entry>,
+    /// What every page fetched so far said about the symbolic links its walk
+    /// met. Merged rather than replaced, because a backend is free to report
+    /// per page; both of the two that report anything put the whole walk on the
+    /// first page and leave the continuations empty, and merging an empty report
+    /// changes nothing.
+    links: LinkReport,
 }
 
 impl Paged {
@@ -236,6 +243,8 @@ impl Paged {
         // command that hangs is harder to diagnose than one that stops early —
         // so the listing ends here rather than looping on a broken pager.
         let stalled = page.items.is_empty() && page.next_cursor == self.cursor;
+
+        self.links.merge(&page.links);
 
         self.page = page
             .items
@@ -266,6 +275,10 @@ impl Entries for Paged {
             }
             self.fetch().await?;
         }
+    }
+
+    fn links(&self) -> LinkReport {
+        self.links.clone()
     }
 }
 
@@ -542,7 +555,7 @@ mod tests {
         // source with no config file anywhere in sight.
         let root = TempDir::new().unwrap();
         let spec = RemoteSpec::Local(root.path().to_path_buf());
-        assert!(PlainSource::open(&Config::default(), &spec).is_ok());
+        assert!(PlainSource::open(&Config::default(), &spec, LinkPolicy::default()).is_ok());
         let _: &Path = root.path();
     }
 
@@ -552,7 +565,7 @@ mod tests {
             remote: "nosuchremote".into(),
             path: String::new(),
         };
-        let error = PlainSource::open(&Config::default(), &spec)
+        let error = PlainSource::open(&Config::default(), &spec, LinkPolicy::default())
             .err()
             .expect("an unconfigured remote cannot be built");
         assert_eq!(error.code(), crate::exit::ExitCode::FatalError);

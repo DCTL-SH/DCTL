@@ -195,10 +195,22 @@ mod tests {
         declared(&mut config, "primary-store", &dir.path().join("a"));
         declared(&mut config, "offsite-store", &dir.path().join("b"));
 
-        let source = open(&config, "primary-store:", Side::Source).await.unwrap();
-        let destination = open(&config, "offsite-store:", Side::Destination)
-            .await
-            .unwrap();
+        let source = open(
+            &config,
+            "primary-store:",
+            Side::Source,
+            dctl_store::LinkPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let destination = open(
+            &config,
+            "offsite-store:",
+            Side::Destination,
+            dctl_store::LinkPolicy::default(),
+        )
+        .await
+        .unwrap();
 
         Report::new(
             "replicate",

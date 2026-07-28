@@ -667,6 +667,10 @@ impl S3Client {
         Ok(Page {
             items,
             next_cursor: listing.next_token,
+            // An object store holds keys, not filesystem entries: there is
+            // nothing here that could be a symbolic link, so there is nothing
+            // to report about one.
+            ..Page::default()
         })
     }
 

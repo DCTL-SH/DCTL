@@ -36,6 +36,8 @@ pub(super) async fn list_page(
     Ok(Page {
         items,
         next_cursor: resp.next_file_name,
+        // No filesystem, no links. See `crate::links`.
+        ..Page::default()
     })
 }
 

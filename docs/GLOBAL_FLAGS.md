@@ -760,6 +760,72 @@ directories properly instead of reporting them all as empty.
 
 ---
 
+## Traversal
+
+| Flag | Short | Value | Default | Repeatable |
+|------|-------|-------|---------|------------|
+| `--links` | | `skip` \| `follow` \| `in-tree` | `skip` | no |
+
+Its own group, and deliberately not part of *Filtering*. A filter selects among
+the things a walk found; this decides what the walk finds at all. `dctl
+replicate` refuses every filtering flag — a filtered replica of a vault's object
+store is a store with dangling references — and **honours** this one, because a
+store on `local:` or `sftp:` is walked by the same code as any other tree.
+
+### `--links skip|follow|in-tree`
+
+What a walk does with the symbolic links it finds **inside** a tree. The root a
+command is pointed at is a different question and is always resolved: `dctl ls
+/srv/data` and `dctl backup /var/log/current vault:` name a path a person chose,
+and refusing to look through it produced an empty listing that `sync --force`
+read as permission to delete a destination.
+
+| Value | What happens |
+|-------|--------------|
+| `skip` (default) | Nothing behind a link is read. Every link is counted, and `-v` names each one with the reason. |
+| `follow` | A link is followed wherever it points, including out of the tree — which is the canonical layout, `/srv/data -> /mnt/bigdisk/data`. |
+| `in-tree` | A link is followed only while its target stays under the walk root. One that would leave is reported and not followed. |
+
+**The default skips, and says so.** Following by default would change what every
+existing backup contains on its next run, and `sync` deletes on the difference —
+so a machine whose links happened not to resolve one night would lose those files
+at the destination. It would also let one link named `etc -> /etc` pull a
+machine's whole configuration into an archive the operator believes holds
+photographs, past every `--exclude` they wrote. rclone settled the same way: its
+local backend ignores symlinks unless `-L`/`--copy-links` is given, and logs one
+line per link it passes over.
+
+What the default may not be is quiet, and that is the change. Every run prints
+`skipped N symbolic link(s)` on stderr, with the flag that stores them; `-v`
+names each link and what happened to it. A tree with no links prints nothing.
+
+**It cannot loop.** When links are followed, the walk remembers the identity of
+every directory on the path from the root down to the one it is reading —
+`(st_dev, st_ino)` on Unix, the canonical path over SFTP, which carries no inode.
+A link whose target is already on that path is reported as a cycle and not
+followed. It is the *ancestors* and not "everywhere the walk has been", because
+two links to one directory are two legitimate names for it: a global set would
+walk the first and silently drop the second, which is the same class of loss.
+
+**A broken link is counted and named, and it fails the run.** Under a policy that
+follows, a link with nothing behind it is a path that was asked for and not
+stored, so it raises the error count and the exit code (**6**, `partial_failure`)
+while the rest of the tree still transfers. Under `skip` nothing looks behind a
+link, so nothing can call one broken.
+
+**On restore, a followed link comes back as a copy.** A vault is keyed by logical
+path and has no record type for "this path is a link to that one", so
+`srv/data -> /mnt/bigdisk/data` backed up with `--links follow` restores as a
+real directory holding real files. Two links to one 400 GB directory restore as
+800 GB. A link skipped by the default restores as nothing at all, because nothing
+about it was ever stored. `tests/restore_drill/links.rs` proves both halves.
+
+`dctl backup --follow-symlinks` is the older spelling of `--links follow` and
+still works. Giving both is accepted when they agree and refused (exit **1**)
+when they do not, rather than one silently winning.
+
+---
+
 ## Output
 
 | Flag | Short | Value | Default | Environment |

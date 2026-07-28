@@ -112,7 +112,13 @@ vault a path exists exactly while an object is stored under it — the same stan
 rather than an unread one. That is why the check applies only to local targets.
 
 The existence check resolves symbolic links, so `dctl ls /data` where
-`/data -> /mnt/disk/data` lists the tree it points at.
+`/data -> /mnt/disk/data` lists the tree it points at. That is the root the
+operator typed. A link found **inside** the tree is a different question and is
+answered by `--links`, which passes over one by default and always says so:
+`dctl ls /srv` where the only thing under `/srv` is `data -> /mnt/bigdisk/data`
+prints nothing on stdout and `skipped 1 symbolic link(s)` on stderr, naming the
+flag that lists it. `-v` names the link itself. Silence there was the read-side
+half of the defect that made `dctl copy /srv` store nothing and exit 0.
 
 When a listing legitimately comes back empty, `ls` says so on stderr — and
 distinguishes the two reasons, because "the directory is empty" sends a user
