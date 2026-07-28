@@ -1,5 +1,19 @@
-//! Typed storage errors. Transient vs permanent classification lives in the
-//! higher retry layer; this enumerates what a backend can report.
+//! Typed storage errors, and enough structure for the retry layer to classify
+//! them without reading their words.
+//!
+//! Three of the variants below exist for [`crate::retry`] and are worth a line
+//! each. [`StoreError::Provider`] is "the provider answered, and refused" and
+//! carries the status, the provider's own error code and any `Retry-After`;
+//! [`StoreError::Transport`] is "nothing answered", which is the case retrying
+//! exists for; [`StoreError::Retried`] records that a layer already tried again,
+//! and how many times, so the message an operator finally reads describes work
+//! that really happened.
+//!
+//! [`StoreError::Backend`] stays for everything nobody has classified, and it is
+//! deliberately treated as **permanent**: guessing "temporary" for an unknown
+//! failure turns a clear error into a slow one. Anything worth retrying should
+//! be raised as one of the two structured variants at the site that knows what
+//! it saw.
 
 use thiserror::Error;
 
@@ -56,6 +70,58 @@ pub enum StoreError {
     /// this exists to stop reporting as a success.
     #[error("the store root {root} {detail}; nothing was written into it")]
     RootChanged { root: String, detail: &'static str },
+
+    /// The provider answered the request, and refused it.
+    ///
+    /// Its own variant rather than a formatted [`StoreError::Backend`] because
+    /// the retry layer has to decide from *what happened*. A rule spelled
+    /// `message.contains("503")` works until somebody rewords the message, and
+    /// then stops firing silently and in the direction of not retrying. The
+    /// rendering is unchanged — `s3 error 503: SlowDown` — so an operator reads
+    /// exactly what they read before.
+    #[error("{backend} error {status}: {code}")]
+    Provider {
+        /// The backend that made the request, as [`crate::Backend::name`] spells it.
+        backend: &'static str,
+        /// The HTTP status the provider answered with.
+        status: u16,
+        /// The provider's own error code from the response body, or `?` when it
+        /// sent none.
+        code: String,
+        /// The `Retry-After` the server sent, in whole seconds, when it sent one.
+        retry_after_secs: Option<u64>,
+    },
+
+    /// Nothing answered: the request may never have reached the provider.
+    ///
+    /// A connect that did not complete, a read that timed out, a connection
+    /// reset mid-body. Distinct from [`StoreError::Provider`] because the two
+    /// send an operator to opposite places — one is the network path, the other
+    /// is the account — and because only one of them is a request the provider
+    /// has certainly seen.
+    #[error("{backend}: {detail}")]
+    Transport {
+        /// The backend that made the request.
+        backend: &'static str,
+        /// What the transport reported.
+        detail: String,
+    },
+
+    /// A failure a retry layer already tried again, and how many times.
+    ///
+    /// Wraps rather than replaces, so the exit code, the message and the type an
+    /// operator acts on stay the provider's own. Attached **only** when more
+    /// than one attempt was really made — see [`crate::retry::driver`]. This is
+    /// what makes the CLI's hint a report rather than a claim: every backend
+    /// failure used to arrive saying *"Retries were exhausted"* over a run that
+    /// had made exactly one attempt.
+    #[error("{source}")]
+    Retried {
+        /// Attempts made, the first one included.
+        attempts: u32,
+        /// What failed.
+        source: Box<StoreError>,
+    },
 }
 
 impl StoreError {
@@ -76,6 +142,49 @@ impl StoreError {
             StoreError::Backend(_) => 2006,
             StoreError::ShortWrite { .. } => 2007,
             StoreError::RootChanged { .. } => 2008,
+            StoreError::Provider { .. } => 2009,
+            StoreError::Transport { .. } => 2010,
+            // Delegated, never its own number. A retry record describes how
+            // often something was attempted, not what went wrong, and a script
+            // branching on the exit code must see the same number whether or not
+            // the failure happened to be retried.
+            StoreError::Retried { source, .. } => source.code(),
+        }
+    }
+
+    /// How many attempts a retry layer made, when one made any.
+    ///
+    /// [`None`] means *no retry layer reported anything*, which is not the same
+    /// as one attempt and must not be worded as though it were. The CLI's hint
+    /// reads this: with a number it says how many attempts were made, and
+    /// without one it says nothing about retrying at all.
+    #[must_use]
+    pub const fn attempts(&self) -> Option<u32> {
+        match self {
+            Self::Retried { attempts, .. } => Some(*attempts),
+            _ => None,
+        }
+    }
+
+    /// The failure itself, with any retry record peeled off.
+    ///
+    /// So a caller classifying an error — the CLI's exit-code mapping, a
+    /// `matches!` in a test — sees the provider's own variant whether or not the
+    /// operation happened to be retried.
+    #[must_use]
+    pub fn cause(&self) -> &Self {
+        match self {
+            Self::Retried { source, .. } => source.cause(),
+            other => other,
+        }
+    }
+
+    /// [`StoreError::cause`], taking ownership.
+    #[must_use]
+    pub fn into_cause(self) -> Self {
+        match self {
+            Self::Retried { source, .. } => source.into_cause(),
+            other => other,
         }
     }
 }
@@ -127,6 +236,51 @@ mod tests {
     }
 
     #[test]
+    fn a_retry_record_reports_the_wrapped_failures_code_and_not_its_own() {
+        // A script branching on the exit code must see the same number whether
+        // or not the operation was retried: how often DCTL asked is not what
+        // went wrong.
+        let inner = StoreError::Provider {
+            backend: "s3",
+            status: 503,
+            code: "SlowDown".to_string(),
+            retry_after_secs: None,
+        };
+        let wrapped = StoreError::Retried {
+            attempts: 6,
+            source: Box::new(inner),
+        };
+        assert_eq!(wrapped.code(), 2009);
+        assert_eq!(wrapped.attempts(), Some(6));
+        assert!(matches!(wrapped.cause(), StoreError::Provider { .. }));
+        // And the message is the provider's, unchanged, so the sentence an
+        // operator reads is the one the provider sent.
+        assert_eq!(wrapped.to_string(), "s3 error 503: SlowDown");
+    }
+
+    #[test]
+    fn an_unretried_failure_makes_no_claim_about_retrying() {
+        // The defect this whole field exists for: the hint said "Retries were
+        // exhausted" over a run that made one attempt. `None` is how the CLI
+        // knows to say nothing.
+        assert_eq!(StoreError::Backend("x".into()).attempts(), None);
+        assert_eq!(StoreError::NotFound("k".into()).attempts(), None);
+    }
+
+    #[test]
+    fn a_provider_failure_reads_the_way_it_always_did() {
+        // The rendering is a contract: `HANDOVER.md` quotes it, `tests/s3_mock.rs`
+        // asserts on it, and an operator greps for it.
+        let error = StoreError::Provider {
+            backend: "s3",
+            status: 403,
+            code: "InvalidAccessKeyId".to_string(),
+            retry_after_secs: None,
+        };
+        assert_eq!(error.to_string(), "s3 error 403: InvalidAccessKeyId");
+    }
+
+    #[test]
     fn codes_are_unique_and_in_domain() {
         let codes = [
             StoreError::NotFound(String::new()).code(),
@@ -142,6 +296,23 @@ mod tests {
             StoreError::ShortWrite {
                 expected: 0,
                 actual: 0,
+            }
+            .code(),
+            StoreError::RootChanged {
+                root: String::new(),
+                detail: "changed",
+            }
+            .code(),
+            StoreError::Provider {
+                backend: "s3",
+                status: 500,
+                code: String::new(),
+                retry_after_secs: None,
+            }
+            .code(),
+            StoreError::Transport {
+                backend: "s3",
+                detail: String::new(),
             }
             .code(),
         ];

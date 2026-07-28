@@ -96,6 +96,11 @@ impl std::error::Error for CliError {}
 /// might not be intact" gets its own loud code rather than the generic bucket.
 impl From<StoreError> for CliError {
     fn from(error: StoreError) -> Self {
+        // How many attempts a retry layer really made, before the record is
+        // peeled off so every arm below classifies the provider's own failure
+        // rather than the wrapper around it. See `dctl_store::StoreError::cause`.
+        let attempts = error.attempts();
+        let error = error.into_cause();
         match error {
             StoreError::NotFound(ref key) => Self::new(ExitCode::FileNotFound, error.to_string())
                 .with_hint(format!("No object stored under '{key}'.")),
@@ -144,10 +149,18 @@ impl From<StoreError> for CliError {
 
             StoreError::Io(_) => Self::new(ExitCode::Uncategorised, error.to_string()),
 
-            // Network/provider failures are the retryable class; by the time one
-            // reaches here the retry budget is already spent.
-            StoreError::Backend(_) => Self::new(ExitCode::TemporaryError, error.to_string())
-                .with_hint("Retries were exhausted. Check connectivity and provider status."),
+            // Network and provider failures. The hint is worded from what the
+            // retry layer actually did, and this is the sentence that made it
+            // necessary: every one of these used to arrive saying "Retries were
+            // exhausted" over a run that had attempted the request exactly once
+            // — a message describing work that did not happen, which is the
+            // class `PLAN.md` §6 forbids and the worse kind of false, because it
+            // tells an operator the tool already did the thing they would
+            // otherwise go and do. See `dctl_store::retry`.
+            StoreError::Backend(_) | StoreError::Provider { .. } | StoreError::Transport { .. } => {
+                Self::new(ExitCode::TemporaryError, error.to_string())
+                    .with_hint(retry_hint(attempts))
+            }
 
             // Fatal, and fatal is the point: every remaining file would be
             // written into the same wrong place, and the run that this replaced
@@ -161,8 +174,42 @@ impl From<StoreError> for CliError {
                      still mounted — and run the command again; it will resume from \
                      what is genuinely there.",
                 ),
+
+            // `into_cause` above removes this variant before the match, so it is
+            // unreachable in practice. It is written out rather than swallowed by
+            // a wildcard because a wildcard here is how the next variant added to
+            // `StoreError` would silently inherit somebody else's exit code.
+            StoreError::Retried { .. } => Self::new(ExitCode::TemporaryError, error.to_string())
+                .with_hint(retry_hint(attempts)),
         }
     }
+}
+
+/// What to tell an operator about retrying, given what was actually attempted.
+///
+/// Three states, and the distinction between the last two is the whole reason
+/// this function exists rather than a constant:
+///
+/// * **More than one attempt** — say how many, and that they are spent. That is
+///   a report.
+/// * **Exactly one** — say that the failure was classified as one another
+///   attempt could not change. That is also a report, and it is the sentence
+///   that used to be a lie.
+/// * **No record at all** — say nothing about retrying. An error that never
+///   passed through the retry layer has no attempt count, and inventing one
+///   would be the same misreport in a quieter voice.
+fn retry_hint(attempts: Option<u32>) -> String {
+    let preamble = match attempts {
+        Some(made) if made > 1 => format!("{made} attempts were made and the failure persisted. "),
+        Some(_) => "This failure was classified as one another attempt could not \
+                    change, so it was attempted once. "
+            .to_string(),
+        None => String::new(),
+    };
+    format!(
+        "{preamble}Check connectivity and provider status, then run the command \
+         again; it will resume from what is genuinely there."
+    )
 }
 
 /// Classify a core/vault failure.
@@ -299,12 +346,17 @@ impl CliError {
             StoreError::ChecksumMismatch { .. } => ExitCode::ChecksumMismatch,
             StoreError::ShortWrite { .. } => ExitCode::FatalError,
             StoreError::InvalidKey(_) | StoreError::RangeOutOfBounds { .. } => ExitCode::Usage,
-            StoreError::Backend(_) => ExitCode::TemporaryError,
+            StoreError::Backend(_) | StoreError::Provider { .. } | StoreError::Transport { .. } => {
+                ExitCode::TemporaryError
+            }
             StoreError::RootChanged { .. } => ExitCode::FatalError,
             StoreError::Io(source) if dctl_store::durable::is_out_of_space(source) => {
                 ExitCode::FatalError
             }
             StoreError::Io(_) => ExitCode::Uncategorised,
+            // The wrapped failure decides, exactly as it does in the owning
+            // mapping: a retried write that ran out of space is still exit 7.
+            StoreError::Retried { source, .. } => Self::from_store_code(source),
         }
     }
 }
@@ -357,7 +409,111 @@ mod tests {
                 root: "/srv/vault".into(),
                 detail: "has been removed",
             },
+            StoreError::Provider {
+                backend: "s3",
+                status: 503,
+                code: "SlowDown".into(),
+                retry_after_secs: Some(3),
+            },
+            StoreError::Transport {
+                backend: "sftp",
+                detail: "connection reset".into(),
+            },
+            // A retry record over a failure whose code is *not* the temporary
+            // one, so a mapping that answered from the wrapper instead of from
+            // what it wraps is caught rather than accidentally right.
+            StoreError::Retried {
+                attempts: 6,
+                source: Box::new(StoreError::Io(std::io::Error::from(
+                    std::io::ErrorKind::StorageFull,
+                ))),
+            },
         ]
+    }
+
+    #[test]
+    fn a_failure_that_was_never_retried_makes_no_claim_about_retrying() {
+        // The defect, in one assertion. `HANDOVER.md` §11.2: "the hint still
+        // says *Retries were exhausted* on an sftp connection failure where none
+        // were attempted" — a message describing work that did not happen, which
+        // is the class `PLAN.md` §6 forbids outright.
+        let err = CliError::from(StoreError::Transport {
+            backend: "sftp",
+            detail: "connection reset by peer".into(),
+        });
+        let hint = err.hint().unwrap_or_default();
+        assert!(
+            !hint.to_lowercase().contains("exhaust"),
+            "an unretried failure claimed exhausted retries: {hint}"
+        );
+        assert!(
+            !hint.contains("attempts were made"),
+            "an unretried failure claimed attempts: {hint}"
+        );
+        // It still has to say something useful, or the fix would be silence.
+        assert!(hint.contains("connectivity"), "{hint}");
+    }
+
+    #[test]
+    fn a_failure_that_was_retried_says_how_many_times() {
+        let err = CliError::from(StoreError::Retried {
+            attempts: 6,
+            source: Box::new(StoreError::Provider {
+                backend: "b2",
+                status: 503,
+                code: "service_unavailable".into(),
+                retry_after_secs: None,
+            }),
+        });
+        let hint = err.hint().unwrap_or_default();
+        assert!(
+            hint.contains('6'),
+            "the count must reach the operator: {hint}"
+        );
+        assert!(hint.contains("attempts were made"), "{hint}");
+        // The message stays the provider's own: how often DCTL asked is not what
+        // went wrong.
+        assert_eq!(err.message(), "b2 error 503: service_unavailable");
+        assert_eq!(err.code(), ExitCode::TemporaryError);
+    }
+
+    #[test]
+    fn a_failure_attempted_exactly_once_says_so_rather_than_nothing() {
+        // The middle state, and the one a single boolean would have collapsed:
+        // "the retry layer looked at this and decided another attempt could not
+        // help" is a different fact from "no retry layer ever saw it", and an
+        // operator deciding whether to re-run needs the difference.
+        let err = CliError::from(StoreError::Retried {
+            attempts: 1,
+            source: Box::new(StoreError::Provider {
+                backend: "s3",
+                status: 403,
+                code: "AccessDenied".into(),
+                retry_after_secs: None,
+            }),
+        });
+        let hint = err.hint().unwrap_or_default();
+        assert!(hint.contains("attempted once"), "{hint}");
+        assert!(!hint.contains("attempts were made"), "{hint}");
+    }
+
+    #[test]
+    fn a_retried_failure_keeps_the_exit_code_of_what_it_wraps() {
+        // A script branching on the exit code must see the same number whether
+        // or not the operation happened to be retried. A full disk is exit 7
+        // either way.
+        let full = StoreError::Io(std::io::Error::from(std::io::ErrorKind::StorageFull));
+        let plain = CliError::from(StoreError::Io(std::io::Error::from(
+            std::io::ErrorKind::StorageFull,
+        )))
+        .code();
+        let retried = CliError::from(StoreError::Retried {
+            attempts: 3,
+            source: Box::new(full),
+        })
+        .code();
+        assert_eq!(plain, retried);
+        assert_eq!(retried, ExitCode::FatalError);
     }
 
     #[test]

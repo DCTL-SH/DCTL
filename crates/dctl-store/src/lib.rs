@@ -5,6 +5,11 @@
 //! (for streaming huge media) and **verified writes** (never reports success
 //! unless the stored bytes match the expected content hash). Encryption lives one
 //! layer up (`dctl-crypto`); this layer is content-agnostic.
+//!
+//! [`retry`] wraps any of them. It is a decorator rather than five copies of a
+//! schedule, because retrying used to exist for B2 alone while every other
+//! provider's first failure was final — and every one of those failures still
+//! reached the operator claiming that retries had been exhausted.
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 // Inline unit tests may use unwrap/expect; library code may not.
@@ -21,10 +26,13 @@ pub mod meter;
 pub mod model;
 pub mod modified;
 pub mod r2;
+pub mod retry;
 pub mod s3;
 pub mod sftp;
 pub mod staging;
 mod streaming;
+#[cfg(test)]
+pub(crate) mod testing;
 mod tls;
 
 pub use backend::{Backend, UploadTicket};
@@ -38,6 +46,7 @@ pub use meter::{Meter, Unmetered, unmetered};
 pub use model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 pub use modified::SourceModified;
 pub use r2::R2Backend;
+pub use retry::{RetryPolicy, Retrying};
 pub use s3::{S3Backend, S3Config};
 pub use sftp::base::Base as SftpBase;
 pub use sftp::{SftpBackend, SftpConfig};

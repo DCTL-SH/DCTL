@@ -218,7 +218,7 @@ where
                         status = failed.observed.status,
                         "b2 request will not be retried"
                     );
-                    return Err(failed.error);
+                    return Err(record(failed.error, number));
                 }
                 Verdict::After(delay) => {
                     // WARN, not DEBUG. A retried request is the difference
@@ -240,6 +240,25 @@ where
                 }
             },
         }
+    }
+}
+
+/// Attach the attempt count to a failure, and only when there is one to attach.
+///
+/// Two things depend on it. The operator's hint is worded from this number
+/// rather than from an assumption, so a failure that was tried once no longer
+/// arrives claiming that retries were exhausted. And the operation-level layer
+/// above ([`crate::retry`]) reads it and declines to spend a second budget on
+/// the same failure — six attempts under six would otherwise be thirty-six, and
+/// the number finally reported would be the product of two schedules instead of
+/// a fact.
+fn record(error: StoreError, attempts: u32) -> StoreError {
+    if attempts <= 1 {
+        return error;
+    }
+    StoreError::Retried {
+        attempts,
+        source: Box::new(error),
     }
 }
 
@@ -420,5 +439,32 @@ mod tests {
             "a permanent failure must be attempted exactly once"
         );
         assert!(error.to_string().contains("bad_auth_token"));
+        assert_eq!(
+            error.attempts(),
+            None,
+            "one attempt is not a retry, and must not be reported as one"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_request_reports_the_attempts_it_really_made() {
+        // The half the hint depends on. Without this the operation-level layer
+        // above would spend a second budget on the same failure, and the
+        // operator would be told a number that is the product of two schedules.
+        let error = run("test", |_| async {
+            Err::<(), _>(Attempt {
+                observed: Observed {
+                    status: Some(503),
+                    code: None,
+                    retry_after: Some(Duration::ZERO),
+                },
+                error: StoreError::Backend("busy".into()),
+            })
+        })
+        .await
+        .expect_err("permanently busy");
+
+        assert_eq!(error.attempts(), Some(RETRY_MAX_ATTEMPTS));
+        assert!(error.to_string().contains("busy"), "{error}");
     }
 }

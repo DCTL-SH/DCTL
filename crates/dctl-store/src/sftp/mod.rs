@@ -429,12 +429,37 @@ impl Backend for SftpBackend {
     // upload, so it returns a clear "unsupported" error.
 }
 
-/// Map an [`openssh_sftp_client`] error to a [`StoreError`], distinguishing a
-/// missing file/dir (→ [`StoreError::NotFound`]) from transient/transport failures
-/// (→ [`StoreError::Io`] / [`StoreError::Backend`]).
+/// Map an [`openssh_sftp_client`] error to a [`StoreError`], classified so that
+/// [`crate::retry`] can decide from the shape rather than from the words.
+///
+/// Three outcomes, and each one is a different answer to "would another attempt
+/// differ?".
+///
+/// * **The object is not there** — [`StoreError::NotFound`], for the protocol's
+///   `NoSuchFile` and for a local `ErrorKind::NotFound`. Nothing to retry.
+/// * **The request met an I/O fault** — [`StoreError::Io`], carrying the errno,
+///   which is what decides it: a reset connection or an `EAGAIN` on the link is
+///   retried, a permission denial is not
+///   (`crate::retry::observed`, following `fs/fserrors/retriable_errors.go`).
+/// * **The session itself is gone** — every remaining variant of
+///   [`SftpError`] means the multiplexed `ssh` session or the remote
+///   `sftp-server` has died, and **this backend cannot re-dial one**. So it is
+///   reported as terminal, with a message that says the run has to be started
+///   again, rather than being spent five times into a socket that is not there.
+///   rclone re-dials from a connection pool (`backend/sftp/sftp.go`); DCTL does
+///   not, and classifying this as temporary would buy nothing but a slower way
+///   to report the same failure — the exact shape of claim `HANDOVER.md` §11.2
+///   already records against the old hint.
+///
+/// The protocol's other server-side codes — `PermDenied`, `Failure`,
+/// `BadMessage`, `OpUnsupported` — are statements about the request and are
+/// equally true next time, so they take the same terminal path.
 fn map_sftp_err(key: &str, e: SftpError) -> StoreError {
     match e {
         SftpError::SftpError(SftpErrorKind::NoSuchFile, _) => StoreError::NotFound(key.to_string()),
+        SftpError::SftpError(kind, message) => {
+            StoreError::Backend(format!("sftp server reported {kind:?}: {message}"))
+        }
         SftpError::IOError(io) => {
             if io.kind() == std::io::ErrorKind::NotFound {
                 StoreError::NotFound(key.to_string())
@@ -442,7 +467,10 @@ fn map_sftp_err(key: &str, e: SftpError) -> StoreError {
                 StoreError::Io(io)
             }
         }
-        other => StoreError::Backend(other.to_string()),
+        other => StoreError::Backend(format!(
+            "the sftp session to this host is no longer usable ({other}); run the \
+             command again to open a new one"
+        )),
     }
 }
 

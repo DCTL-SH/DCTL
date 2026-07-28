@@ -45,6 +45,16 @@ use super::config::S3Config;
 use super::constants::{
     H_SRC_MODIFIED, LIST_PAGE_SIZE, MAX_PART_SIZE, MIN_PART_SIZE, PRESIGN_TTL_SECS, S3_SERVICE,
 };
+
+/// The name every failure from this client is attributed to.
+///
+/// One string for both providers that use it. `R2Backend` reports `"r2"` from
+/// [`Backend::name`](crate::Backend::name) — which is what selects its retry
+/// schedule and what an operator sees in a log field — while the protocol error
+/// keeps saying `s3`, because the protocol *is* S3 and a message reading
+/// `r2 error 503` would send a reader to Cloudflare's error catalogue for a code
+/// that is in Amazon's.
+const S3_BACKEND_NAME: &str = "s3";
 use super::sigv4;
 use super::xml;
 
@@ -173,17 +183,41 @@ impl S3Client {
         if let Some(b) = body {
             req = req.body(b);
         }
-        req.send()
-            .await
-            .map_err(|e| StoreError::Backend(e.to_string()))
+        // `Transport`, not `Backend`: nothing answered, so the request may never
+        // have reached the provider — which is the case `crate::retry` exists
+        // for, and which a formatted string could only have expressed by being
+        // searched for later. See `crate::error` for why the classification
+        // lives in the type.
+        req.send().await.map_err(|e| StoreError::Transport {
+            backend: S3_BACKEND_NAME,
+            detail: e.to_string(),
+        })
     }
 
+    /// Turn a refused response into the error an operator reads and the retry
+    /// layer classifies.
+    ///
+    /// The rendering is unchanged — `s3 error 503: SlowDown` — because
+    /// `HANDOVER.md` quotes it and scripts grep for it. What is new is that the
+    /// status, the code and any `Retry-After` survive as *fields*, so a `503
+    /// SlowDown` is retried because it is a 503 and not because somebody matched
+    /// on the message.
     async fn error(resp: reqwest::Response) -> StoreError {
         let status = resp.status().as_u16();
+        let retry_after_secs = resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok());
         let body = resp.bytes().await.unwrap_or_default();
         let text = String::from_utf8_lossy(&body);
         let code = xml::extract_tag(&text, "Code").unwrap_or_else(|| "?".to_string());
-        StoreError::Backend(format!("s3 error {status}: {code}"))
+        StoreError::Provider {
+            backend: S3_BACKEND_NAME,
+            status,
+            code,
+            retry_after_secs,
+        }
     }
 
     // ---- operations ----------------------------------------------------------

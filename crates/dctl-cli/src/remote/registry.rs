@@ -209,7 +209,12 @@ pub fn build(
         // is the one that bridges to the async `connect` — see [`connect_sftp`].
         Target::Sftp { host, base } => Built::Sftp(connect_sftp(host, base, links)?),
     };
-    Ok(built.metered(meter))
+    // Metered, then made to try again. The order matters and is not arbitrary: a
+    // retried request really did cross the link on every attempt, so the meter
+    // has to sit *underneath* the retry layer and be charged once per attempt.
+    // Wrapping the other way round would let a run that is retrying sprint past
+    // its `--bwlimit`, which is the opposite of what a limiter is for.
+    Ok(dctl_store::Retrying::wrap(built.metered(meter)))
 }
 
 /// A backend that has been constructed but not yet told who is watching it.

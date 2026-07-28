@@ -65,6 +65,9 @@ representative numbers below and that codes are unique within a crate; a
 | 2005 | `STORE_IO` | Underlying I/O failure. | Transient |
 | 2006 | `STORE_BACKEND` | Backend-specific failure (network, auth, quota, provider error). | Transient |
 | 2007 | `STORE_SHORT_WRITE` | Fewer bytes reached the destination than were written to it. Deliberately **not** `2002`: a file shorter than what was sent is a write that stopped (full filesystem, exhausted quota), not content that changed, and the two send an operator to opposite places. | Transient |
+| 2008 | `STORE_ROOT_CHANGED` | The store root is not the directory this backend was opened on — removed, or replaced by a different one, while the run was using it. Its own code because the errno is not what the operator needs and there may not be one: the characteristic case is a root a write re-created, which reports nothing at all. | Transient |
+| 2009 | `STORE_PROVIDER` | The provider answered the request and refused it, carrying the status, the provider's own error code and any `Retry-After`. Distinct from `2006` because the retry layer decides from those fields rather than from the message text — a rule that read `"503"` out of a string would stop firing the first time somebody reworded it. | Transient |
+| 2010 | `STORE_TRANSPORT` | Nothing answered: a connect that did not complete, a read that timed out, a connection reset mid-body. Distinct from `2009` because only one of the two is a request the provider has certainly seen, and the two send an operator to different places — the network path, or the account. | Transient |
 
 ## `3xxx` — index (`dctl_index::IndexError`)
 

@@ -149,9 +149,17 @@ fn store_kind(e: &dctl_store::StoreError) -> ErrorKind {
         // remedy is to put the volume back and run it again. Emphatically not
         // `Integrity` — an app must not tell somebody their data may be damaged
         // because a disk was unplugged mid-run.
-        S::ShortWrite { .. } | S::Io(_) | S::Backend(_) | S::RootChanged { .. } => {
-            ErrorKind::Transient
-        }
+        S::ShortWrite { .. }
+        | S::Io(_)
+        | S::Backend(_)
+        | S::RootChanged { .. }
+        | S::Provider { .. }
+        | S::Transport { .. } => ErrorKind::Transient,
+        // A retry record says how often something was attempted, never what went
+        // wrong, so the classification is the wrapped failure's. An FFI consumer
+        // branching on this must see the same kind whether or not the operation
+        // happened to be retried.
+        S::Retried { source, .. } => store_kind(source),
     }
 }
 

@@ -21,9 +21,26 @@ mod support;
 
 use bytes::Bytes;
 use dctl_store::{
-    Backend, ByteRange, ContentHash, HashAlgo, ObjectKey, R2Backend, S3Backend, S3Config,
-    SourceModified, StoreError,
+    Backend, ByteRange, ContentHash, HashAlgo, ObjectKey, R2Backend, RetryPolicy, Retrying,
+    S3Backend, S3Config, SourceModified, StoreError,
 };
+use std::sync::Arc;
+use std::time::Duration;
+
+/// The real network schedule, with the waiting taken out.
+///
+/// The delays themselves are asserted exactly in `dctl_store::retry::classify`,
+/// which is a pure function and needs no server. Making this suite sleep for
+/// fifteen seconds per exhausted-budget test would buy a second, slower copy of
+/// that assertion — so what is exercised here is the part only a server can
+/// answer: how many requests really left the client, and what arrived.
+fn impatient() -> RetryPolicy {
+    RetryPolicy {
+        first_backoff: Duration::ZERO,
+        max_backoff: Duration::ZERO,
+        ..RetryPolicy::network()
+    }
+}
 
 use support::mock_s3::{ACCESS_KEY, BUCKET, MockS3, REGION, SECRET_KEY};
 
@@ -648,16 +665,57 @@ async fn a_provider_error_is_reported_with_its_status_and_its_code() {
 }
 
 #[tokio::test]
-async fn a_retryable_status_is_not_retried_and_that_is_a_known_gap() {
-    // Not an aspiration — a measurement. B2 has `b2/retry.rs`; the S3 family has
-    // nothing, so a 503 SlowDown, which is the one error AWS documents as
-    // "retry with backoff", fails the transfer on the first response. This test
-    // pins the *current* behaviour so that adding a retry layer is a visible
-    // change rather than a silent one, and `HANDOVER.md` §11.3 carries it as an
-    // open item rather than as a claim that S3 retries.
+async fn a_slow_down_is_retried_until_the_write_succeeds() {
+    // The fault this whole layer exists for, driven for real rather than argued
+    // about. `503 SlowDown` is the one error AWS documents as "retry with
+    // backoff", and until `dctl_store::retry` existed it failed a DCTL write on
+    // the **first** response with exactly one request made — because retrying
+    // was B2's alone.
+    //
+    // Asserted on the request the server actually saw, not on `Ok(())`: a
+    // wrapper that swallowed the failure and reported success without sending a
+    // second `PUT` would satisfy the return value and nothing else.
     let mock = MockS3::start().await;
-    let s3 = backend(&mock);
+    let s3 = Retrying::with_policy(Arc::new(backend(&mock)), impatient());
     mock.script(503, "<Error><Code>SlowDown</Code></Error>");
+    mock.script(503, "<Error><Code>SlowDown</Code></Error>");
+
+    let data = Bytes::from_static(b"x");
+    s3.put(
+        &key("k"),
+        data.clone(),
+        &hash(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("the third attempt is not throttled");
+
+    let state = mock.state();
+    assert_eq!(
+        state.count("PUT"),
+        3,
+        "two refusals and the write that stuck"
+    );
+    assert_eq!(
+        state.objects.get("k").map(|o| o.body.clone()),
+        Some(data.to_vec()),
+        "the object that landed is the one that was asked for"
+    );
+}
+
+#[tokio::test]
+async fn an_exhausted_budget_reports_the_attempts_it_really_made() {
+    // The other half, and the one `HANDOVER.md` §11.2 is actually about: when
+    // retrying does not help, the failure that reaches the operator has to carry
+    // the number of attempts rather than a claim about them. Every backend error
+    // used to arrive with the hint "Retries were exhausted" over a run that had
+    // made exactly one.
+    let mock = MockS3::start().await;
+    let policy = impatient();
+    let s3 = Retrying::with_policy(Arc::new(backend(&mock)), policy);
+    for _ in 0..policy.max_attempts {
+        mock.script(503, "<Error><Code>SlowDown</Code></Error>");
+    }
 
     let data = Bytes::from_static(b"x");
     let error = s3
@@ -668,13 +726,112 @@ async fn a_retryable_status_is_not_retried_and_that_is_a_known_gap() {
             SourceModified::unknown(),
         )
         .await
-        .expect_err("a 503 fails the write today");
+        .expect_err("a permanently throttled endpoint cannot be written to");
+
+    assert_eq!(mock.state().count("PUT"), policy.max_attempts as usize);
+    assert_eq!(error.attempts(), Some(policy.max_attempts));
     assert!(error.to_string().contains("SlowDown"), "{error}");
+}
+
+#[tokio::test]
+async fn a_wrong_key_is_refused_once_and_never_retried() {
+    // The direction that matters more than the retry itself. A `403` is a stable
+    // fact, and classifying it as temporary is what makes a permanently wrong
+    // credential produce an exit code telling a scheduler to back off and try
+    // again — forever.
+    let mock = MockS3::start().await;
+    let policy = impatient();
+    let s3 = Retrying::with_policy(Arc::new(backend(&mock)), policy);
+    mock.script(403, "<Error><Code>InvalidAccessKeyId</Code></Error>");
+
+    let data = Bytes::from_static(b"x");
+    let error = s3
+        .put(
+            &key("k"),
+            data.clone(),
+            &hash(&data),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("a wrong key cannot succeed");
+
+    assert_eq!(mock.state().count("PUT"), 1, "a wrong key is not a wait");
     assert_eq!(
-        mock.state().count("PUT"),
-        1,
-        "exactly one attempt: there is no request-level retry on the S3 path"
+        error.attempts(),
+        None,
+        "nothing was retried, so nothing may be claimed"
     );
+    assert!(error.to_string().contains("InvalidAccessKeyId"), "{error}");
+}
+
+#[tokio::test]
+async fn a_read_is_retried_as_well_as_a_write() {
+    // A wrapper that covered `put` and forwarded the rest would pass every
+    // assertion above. The read path is the one a restore depends on.
+    let mock = MockS3::start().await;
+    let s3 = Retrying::with_policy(Arc::new(backend(&mock)), impatient());
+    mock.seed("k", b"restored");
+    mock.script(500, "<Error><Code>InternalError</Code></Error>");
+
+    let body = s3
+        .get(&key("k"))
+        .await
+        .expect("the retry reaches the object");
+    assert_eq!(body, Bytes::from_static(b"restored"));
+    assert_eq!(mock.state().count("GET"), 2);
+}
+
+#[tokio::test]
+async fn a_server_that_names_a_wait_is_obeyed_and_not_argued_with() {
+    // `Retry-After` wins over the client's schedule: waiting less than a
+    // throttling server asked for is how being rate-limited becomes being
+    // blocked. One second, because the assertion is that the wait *happened*.
+    let mock = MockS3::start().await;
+    let s3 = Retrying::with_policy(Arc::new(backend(&mock)), impatient());
+    mock.script_with_headers(
+        503,
+        "<Error><Code>SlowDown</Code></Error>",
+        &[("Retry-After", "1")],
+    );
+
+    let started = std::time::Instant::now();
+    let data = Bytes::from_static(b"x");
+    s3.put(
+        &key("k"),
+        data.clone(),
+        &hash(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("the second attempt succeeds");
+    assert!(
+        started.elapsed() >= std::time::Duration::from_millis(900),
+        "the server asked for a second and waited {:?}",
+        started.elapsed()
+    );
+}
+
+#[tokio::test]
+async fn the_error_a_provider_returns_still_reads_the_way_it_always_did() {
+    // The rendering is a contract: `HANDOVER.md` quotes it and scripts grep for
+    // it. Structuring the error so the retry layer can classify it must not have
+    // changed one character of what an operator sees.
+    let mock = MockS3::start().await;
+    let s3 = backend(&mock);
+    mock.script(400, "<Error><Code>InvalidArgument</Code></Error>");
+
+    let data = Bytes::from_static(b"x");
+    let error = s3
+        .put(
+            &key("k"),
+            data.clone(),
+            &hash(&data),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("a 400 is refused");
+    assert_eq!(error.to_string(), "s3 error 400: InvalidArgument");
+    assert_eq!(mock.state().count("PUT"), 1, "a 400 is not a wait");
 }
 
 // ── R2 ───────────────────────────────────────────────────────────────────────

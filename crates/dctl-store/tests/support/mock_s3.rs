@@ -96,6 +96,13 @@ impl Seen {
 pub struct Scripted {
     pub status: u16,
     pub body: String,
+    /// Headers sent with it.
+    ///
+    /// Exists for `Retry-After`, which is the one header whose *presence*
+    /// changes what the client does rather than what it reports — a retry layer
+    /// that ignored it would pass every other assertion in the suite while
+    /// turning a throttled client into a blocked one.
+    pub headers: Vec<(String, String)>,
 }
 
 /// One response: status, body **bytes**, and any extra headers.
@@ -210,6 +217,11 @@ impl MockS3 {
 
     /// Queue a response to give instead of the real answer, once.
     pub fn script(&self, status: u16, body: &str) {
+        self.script_with_headers(status, body, &[]);
+    }
+
+    /// The same, carrying headers — `Retry-After` above all.
+    pub fn script_with_headers(&self, status: u16, body: &str, headers: &[(&str, &str)]) {
         self.state
             .lock()
             .expect("the mock state is not poisoned")
@@ -217,6 +229,10 @@ impl MockS3 {
             .push(Scripted {
                 status,
                 body: body.to_string(),
+                headers: headers
+                    .iter()
+                    .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+                    .collect(),
             });
     }
 
@@ -331,7 +347,13 @@ async fn serve(mut stream: TcpStream, state: Arc<Mutex<State>>) -> std::io::Resu
         }
     };
     if let Some(scripted) = scripted {
-        return respond(&mut stream, scripted.status, scripted.body.as_bytes(), &[]).await;
+        return respond(
+            &mut stream,
+            scripted.status,
+            scripted.body.as_bytes(),
+            &scripted.headers,
+        )
+        .await;
     }
 
     let (status, response, extra) = handle(&state, &method, &path, &query, &headers, body);
