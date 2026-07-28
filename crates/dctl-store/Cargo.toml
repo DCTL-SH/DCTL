@@ -34,3 +34,7 @@ tokio-stream = "0.1"
 bytes = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true }
+# Test-only. `tests/write_failure.rs` imposes RLIMIT_FSIZE to provoke the
+# deferred write failure that used to surface as a checksum mismatch; the
+# library itself is `#![forbid(unsafe_code)]` and links no libc.
+libc = { workspace = true }

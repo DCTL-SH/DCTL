@@ -281,9 +281,15 @@ fn target_from_entry(name: &str, entry: &RemoteEntry) -> Result<Target> {
         // Both are required and neither has an environment fall-back: an sftp
         // remote holds no credential, and a host or base left unset is a broken
         // remote, not one the environment can complete.
+        //
+        // The base is re-read through the one rule rather than taken as written,
+        // so a configuration carrying the old ambiguous spelling — `base=store`,
+        // which meant `$HOME/store` here and `/store` through the shorthand — is
+        // diagnosed on the way in instead of silently addressing one of the two.
+        // The message names the one-character fix.
         PROVIDER_SFTP => Ok(Target::Sftp {
             host: required(name, entry, CONFIG_KEY_HOST)?.to_string(),
-            base: required(name, entry, CONFIG_KEY_BASE)?.to_string(),
+            base: crate::remote::sftp_base::from_setting(required(name, entry, CONFIG_KEY_BASE)?)?,
         }),
 
         // A legal `type` that is deliberately not a provider. Diagnosed on its
@@ -341,33 +347,16 @@ fn shorthand(name: &str, path: &str) -> Result<Resolved> {
     // through a named remote (`dctl config create NAME sftp host=… base=…`), where
     // the two are separate settings and unambiguous. This is the form
     // `dctl init --base sftp:host/dir` and a headless `DCTL_REMOTE` use.
+    //
+    // The split is [`crate::remote::sftp_base`]'s, not a second copy of it: this
+    // path and `dctl init`'s used to be two implementations of "where does the
+    // host stop", and they disagreed about whether the separating slash belonged
+    // to the base — which is exactly how one string came to name two directories.
     if name == PROVIDER_SFTP {
-        let (host, base) = path.split_once(PATH_SEPARATOR).unwrap_or((path, ""));
-        if host.is_empty() {
-            return Err(
-                CliError::fatal(format!("'{name}' needs a host")).with_hint(format!(
-                    "Write it as '{name}:HOST/BASE-DIR', where HOST is an \
-                     ~/.ssh/config alias or user@host — for example \
-                     '{name}:lsx-001/dctl-store'."
-                )),
-            );
-        }
-        if base.is_empty() {
-            return Err(
-                CliError::fatal(format!("'{name}:{host}' needs a base directory")).with_hint(
-                    format!(
-                        "Write it as '{name}:{host}/BASE-DIR' — the remote directory \
-                         the objects go under, for example '{name}:{host}/dctl-store'."
-                    ),
-                ),
-            );
-        }
+        let (host, base) = crate::remote::sftp_base::from_spec(&format!("{name}:{path}"), path)?;
         return Ok(Resolved::new(
             name,
-            Target::Sftp {
-                host: host.to_string(),
-                base: base.to_string(),
-            },
+            Target::Sftp { host, base },
             String::new(),
         ));
     }

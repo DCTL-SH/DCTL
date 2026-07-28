@@ -82,6 +82,117 @@ async fn wrong_password_fails_to_unlock() {
 }
 
 #[tokio::test]
+async fn a_store_with_no_envelope_is_not_a_vault_rather_than_a_wrong_password() {
+    // §16.2 at its root. A plain object store has no envelope by definition, and
+    // every store failure — including "there is no such object" — used to be
+    // mapped to `CoreError::Unlock`, whose whole message is about a secret:
+    // "unlock failed: wrong password or corrupted envelope". The CLI then
+    // advised restoring `system/envelope.bin` from a replica, for a location
+    // where no such object has ever existed.
+    let e = env();
+    // Deliberately populated: a plain store with real objects in it, so the
+    // answer cannot be excused as "the location is empty".
+    e.backend
+        .put(
+            &ObjectKey::new("notes.txt"),
+            Bytes::from_static(b"not sealed"),
+            &ContentHash::blake3(b"not sealed"),
+            dctl_store::SourceModified::unknown(),
+        )
+        .await
+        .unwrap();
+
+    let Err(error) =
+        Vault::unlock(e.backend.clone(), &e.index_path, UnlockKey::Password("pw")).await
+    else {
+        panic!("there is no vault here to unlock");
+    };
+
+    match &error {
+        CoreError::NoVault(key) => assert!(
+            key.contains("envelope"),
+            "the message must name what is missing: {key}"
+        ),
+        other => panic!("a store with no envelope was reported as: {other}"),
+    }
+    let rendered = error.to_string();
+    assert!(
+        !rendered.contains("password"),
+        "no password was involved: {rendered}"
+    );
+    // And an app branching on the FFI signal must not re-prompt for a secret
+    // that cannot help.
+    assert_ne!(error.kind(), ErrorKind::Auth);
+}
+
+#[tokio::test]
+async fn a_store_that_cannot_be_read_is_reported_as_that_rather_than_as_a_bad_password() {
+    // The other half of the same defect, and the more insidious one: a
+    // permission error, a dead connection or a wrong endpoint all reached the
+    // operator as "wrong password or corrupted envelope" — so the first thing
+    // they did about a network problem was retype a secret.
+    struct Unreadable;
+
+    #[async_trait::async_trait]
+    impl Backend for Unreadable {
+        fn name(&self) -> &'static str {
+            "unreadable"
+        }
+        async fn put(
+            &self,
+            _: &ObjectKey,
+            _: Bytes,
+            _: &ContentHash,
+            _: dctl_store::SourceModified,
+        ) -> Result<PutOutcome, StoreError> {
+            unimplemented!()
+        }
+        async fn get(&self, _: &ObjectKey) -> Result<Bytes, StoreError> {
+            Err(StoreError::Backend("403 forbidden".into()))
+        }
+        async fn get_range(&self, _: &ObjectKey, _: ByteRange) -> Result<Bytes, StoreError> {
+            Err(StoreError::Backend("403 forbidden".into()))
+        }
+        async fn head(&self, _: &ObjectKey) -> Result<ObjectMeta, StoreError> {
+            Err(StoreError::Backend("403 forbidden".into()))
+        }
+        async fn exists(&self, _: &ObjectKey) -> Result<bool, StoreError> {
+            Err(StoreError::Backend("403 forbidden".into()))
+        }
+        async fn delete(&self, _: &ObjectKey) -> Result<(), StoreError> {
+            unimplemented!()
+        }
+        async fn list_page(&self, _: &str, _: Option<String>) -> Result<Page, StoreError> {
+            Err(StoreError::Backend("403 forbidden".into()))
+        }
+    }
+
+    let index = TempDir::new().unwrap();
+    let backend: Arc<dyn Backend> = Arc::new(Unreadable);
+    let Err(error) = Vault::unlock(
+        backend,
+        &index.path().join("vault.redb"),
+        UnlockKey::Password("pw"),
+    )
+    .await
+    else {
+        panic!("a store that refuses to be read cannot yield a vault");
+    };
+
+    match &error {
+        CoreError::Store(StoreError::Backend(detail)) => {
+            assert!(detail.contains("403"), "the cause must survive: {detail}");
+        }
+        other => panic!("an unreadable store was reported as: {other}"),
+    }
+    assert!(
+        !error.to_string().contains("password"),
+        "{}",
+        error.to_string()
+    );
+}
+
+#[tokio::test]
 async fn put_overwrites_same_path() {
     let e = env();
     let vault = init_vault(e.backend.clone(), &e.index_path, "pw")

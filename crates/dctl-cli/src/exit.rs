@@ -58,7 +58,18 @@ pub enum ExitCode {
     TemporaryError = 5,
     /// Less serious errors: the run finished but some files failed.
     PartialFailure = 6,
-    /// Fatal error — the run cannot continue (bad config, disk full).
+    /// Fatal error — the run cannot continue.
+    ///
+    /// Three families reach it, and the middle one only started to once
+    /// something read the errno. A **bad configuration**, a **destination with
+    /// no room** (`ENOSPC`/`EDQUOT`/`EFBIG`/`EROFS`, plus a short write that
+    /// reported nothing), and a **location that is not a vault**. All three
+    /// share the property [`crate::commands::transfer::pipeline::is_fatal`]
+    /// selects on: every remaining file in the run fails identically, so
+    /// grinding through them produces ten million copies of one message.
+    ///
+    /// A full disk used to arrive as exit 2 "uncategorised" and, worse, as exit
+    /// 20 "checksum mismatch" — see `docs/EXIT_CODES.md` §20.
     FatalError = 7,
     /// `--max-transfer` limit was reached.
     TransferLimitExceeded = 8,
@@ -157,7 +168,7 @@ impl ExitCode {
             Self::FileNotFound => "File not found",
             Self::TemporaryError => "Temporary error; retries exhausted",
             Self::PartialFailure => "Some files failed to transfer",
-            Self::FatalError => "Fatal error; cannot continue",
+            Self::FatalError => "Fatal error; cannot continue (bad config, disk full, not a vault)",
             Self::TransferLimitExceeded => "--max-transfer limit reached",
             Self::NoFilesTransferred => "Succeeded, but the run did no work",
             Self::DurationLimitExceeded => "--max-duration limit reached",

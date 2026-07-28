@@ -64,6 +64,7 @@ representative numbers below and that codes are unique within a crate; a
 | 2004 | `STORE_RANGE_OUT_OF_BOUNDS` | A requested read range starts beyond the object's size. | Usage |
 | 2005 | `STORE_IO` | Underlying I/O failure. | Transient |
 | 2006 | `STORE_BACKEND` | Backend-specific failure (network, auth, quota, provider error). | Transient |
+| 2007 | `STORE_SHORT_WRITE` | Fewer bytes reached the destination than were written to it. Deliberately **not** `2002`: a file shorter than what was sent is a write that stopped (full filesystem, exhausted quota), not content that changed, and the two send an operator to opposite places. | Transient |
 
 ## `3xxx` — index (`dctl_index::IndexError`)
 
@@ -80,14 +81,15 @@ representative numbers below and that codes are unique within a crate; a
 `3xxx`). Only `CoreError`'s own variants live here. Sub-ranges are reserved so
 related conditions cluster:
 
-- `41xx` = unlock / auth
+- `41xx` = unlock / auth / whether a vault is there at all
 - `42xx` = not-found
 - `43xx` = integrity
 - `44xx` = config *(reserved — no variant yet)*
 
 | Code | Symbolic name | Meaning | Kind |
 |---|---|---|---|
-| 4101 | `CORE_UNLOCK` | Wrong password/factor, or the envelope is missing/corrupted. | Auth |
+| 4101 | `CORE_UNLOCK` | The envelope is present and either unreadable or opened by no slot this secret holds. One answer for both, so an attacker holding the envelope cannot learn whether a password was close. | Auth |
+| 4102 | `CORE_NO_VAULT` | There is **no envelope object** at this location — a plain object store, not a vault. Split out of `4101` because no password is involved and none can help; a plain remote has no envelope by definition, and reporting the unlock wording sent operators to check a secret and restore a file that cannot exist there. Leaks nothing `4101` protects: there is no password to be close to. | NotFound |
 | 4201 | `CORE_NOT_FOUND` | No index record for the given logical path. | NotFound |
 | 4301 | `CORE_INTEGRITY` | A stored object failed its integrity check on read. | Integrity |
 

@@ -4,9 +4,30 @@ use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum CoreError {
-    /// Wrong password/factor, or the envelope is missing/corrupted.
+    /// Wrong password/factor, or the envelope is present and unreadable.
+    ///
+    /// One answer for both, deliberately: telling somebody holding the envelope
+    /// *which* of them happened tells them whether a password was close. What it
+    /// no longer covers is the case where there is no envelope at all — see
+    /// [`CoreError::NoVault`], which is a fact about the location and not about
+    /// any secret.
     #[error("unlock failed: wrong password or corrupted envelope")]
     Unlock,
+
+    /// There is no vault at this location — the envelope object is not there.
+    ///
+    /// Split out of [`CoreError::Unlock`] because the two send a reader to
+    /// opposite places and only one of them is about a secret. A plain remote
+    /// has no envelope **by definition**, so every command that opens a vault
+    /// used to greet one with *"wrong password or corrupted envelope"* and a
+    /// remedy naming `system/envelope.bin` — a file that cannot exist there —
+    /// which is `docs/HANDOVER.md` §16.2.
+    ///
+    /// It leaks nothing that the constant answer above protects. There is no
+    /// password to be close to: an attacker who can ask this question can
+    /// already list the store and see for themselves that no envelope is in it.
+    #[error("no vault at this location: '{0}' is not there")]
+    NoVault(String),
 
     /// No index record for the given logical path.
     #[error("not found in vault: {0}")]
@@ -64,6 +85,7 @@ impl CoreError {
     pub fn code(&self) -> u32 {
         match self {
             CoreError::Unlock => 4101,
+            CoreError::NoVault(_) => 4102,
             CoreError::NotFound(_) => 4201,
             CoreError::Integrity(_) => 4301,
             CoreError::Crypto(e) => e.code(),
@@ -80,6 +102,10 @@ impl CoreError {
     pub fn kind(&self) -> ErrorKind {
         match self {
             CoreError::Unlock => ErrorKind::Auth,
+            // Not `Auth`. An app that re-prompts for a password here would ask
+            // for a secret that cannot help: there is nothing at this location
+            // for any secret to open.
+            CoreError::NoVault(_) => ErrorKind::NotFound,
             CoreError::NotFound(_) => ErrorKind::NotFound,
             CoreError::Integrity(_) => ErrorKind::Integrity,
             CoreError::Crypto(e) => crypto_kind(e),
@@ -104,13 +130,21 @@ fn crypto_kind(e: &dctl_crypto::CryptoError) -> ErrorKind {
 /// Classify a store-layer error, honoring the transient-vs-permanent split:
 /// I/O and backend/network faults are retriable; key/range misuse is usage;
 /// a checksum mismatch is an integrity failure; a missing object is NotFound.
+///
+/// A **short write** is deliberately not [`ErrorKind::Integrity`]. The two look
+/// alike from here — both are a verified write refusing to commit — but the FFI
+/// consumers of this signal branch on it, and `Integrity` is the one that makes
+/// an app tell somebody their data may be damaged. Fewer bytes arriving than
+/// were sent says nothing about the bytes; it says the destination ran out of
+/// room, which is transient in the only sense that matters: free some and it
+/// works.
 fn store_kind(e: &dctl_store::StoreError) -> ErrorKind {
     use dctl_store::StoreError as S;
     match e {
         S::NotFound(_) => ErrorKind::NotFound,
         S::ChecksumMismatch { .. } => ErrorKind::Integrity,
         S::InvalidKey(_) | S::RangeOutOfBounds { .. } => ErrorKind::Usage,
-        S::Io(_) | S::Backend(_) => ErrorKind::Transient,
+        S::ShortWrite { .. } | S::Io(_) | S::Backend(_) => ErrorKind::Transient,
     }
 }
 

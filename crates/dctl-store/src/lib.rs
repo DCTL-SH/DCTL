@@ -13,6 +13,7 @@
 pub mod b2;
 pub mod backend;
 pub mod checksum;
+pub mod durable;
 pub mod error;
 pub mod local;
 pub mod model;
@@ -32,5 +33,6 @@ pub use model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 pub use modified::SourceModified;
 pub use r2::R2Backend;
 pub use s3::{S3Backend, S3Config};
+pub use sftp::base::Base as SftpBase;
 pub use sftp::{SftpBackend, SftpConfig};
 pub use staging::{STAGING_NAME_PREFIX, is_staging_name};

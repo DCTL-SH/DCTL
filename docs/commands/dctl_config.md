@@ -301,13 +301,33 @@ each provider accepts are exactly the keys the file accepts:
 | `b2` | `bucket` (required), `endpoint`, `chunk_size`, `verify`, `require_vault` |
 | `s3` | `bucket` (required), `endpoint`, `region`, `chunk_size`, `verify`, `require_vault` |
 | `r2` | `bucket` (required), `account`, `endpoint`, `chunk_size`, `verify`, `require_vault` |
+| `sftp` | `host` (required), `base` (required), `chunk_size`, `verify`, `require_vault` |
 | `vault` | `base` (required), `base_path`, `chunk_size`, `verify` |
 
 `verify` is the per-remote verification strength — `checksum`, `sample` or
 `strict` — spelled exactly as the `--verify` flag spells it, because the
-cost/assurance trade-off belongs to the destination. `base` is a bare remote
-**name**, never a `name:path` spec; the subdirectory inside it is `base_path`.
-Anything else is refused with the offending key named.
+cost/assurance trade-off belongs to the destination. On a `vault` remote, `base`
+is a bare remote **name**, never a `name:path` spec; the subdirectory inside it
+is `base_path`. Anything else is refused with the offending key named.
+
+On an `sftp` remote, `base` is a **directory on the server**, and it has to say
+where: `base=/srv/dctl-store` is absolute, and `base=~/dctl-store` is under the
+SSH login directory. Those are the only two spellings — a bare relative
+`base=dctl-store` is refused, and the refusal names both. It has to be, because
+that spelling meant two different things depending on which command wrote it:
+through `dctl config create` it was `$HOME/dctl-store`, and through
+`dctl init --base sftp:HOST/dctl-store` the separator was eaten and the result
+read as `/dctl-store` in every message while the objects went to `$HOME`. Both
+commands now take the same text and write the same canonical value, and a
+configuration still carrying the old spelling fails loudly with the
+one-character fix rather than quietly picking one. `dctl init --base
+sftp:HOST/PATH` keeps the separating slash, so
+`--base sftp:lsx-001/srv/dctl-store` is `/srv/dctl-store` and
+`--base sftp:lsx-001/~/dctl-store` is `~/dctl-store`.
+
+`host` is a destination `ssh` itself understands — a `Host` alias from
+`~/.ssh/config`, or `user@host[:port]`. It is not a credential: the user, port,
+identity file and any `ProxyCommand` come from your own ssh config.
 
 `require_vault = true` marks a location as a **vault's object store**, and
 `dctl init` sets it on the store remote it creates. It says one thing: no

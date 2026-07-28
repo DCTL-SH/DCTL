@@ -184,7 +184,7 @@ pub fn merge(existing: &RemoteDef, assignments: &BTreeMap<String, String>) -> Re
 /// Turn a raw TOML table into a remote, reporting failure the way the file
 /// format would.
 fn deserialize(table: toml::Table) -> Result<RemoteDef> {
-    Value::Table(table)
+    let remote: RemoteDef = Value::Table(table)
         .try_into()
         .map_err(|error: toml::de::Error| {
             CliError::new(ExitCode::Usage, format!("not a usable remote: {error}")).with_hint(
@@ -195,7 +195,27 @@ fn deserialize(table: toml::Table) -> Result<RemoteDef> {
                     constants::CONFIG_REMOTE_TYPE_KEY
                 ),
             )
-        })
+        })?;
+    canonicalise(remote)
+}
+
+/// Put a remote's settings into the spelling the file should carry.
+///
+/// One provider needs it. An sftp `base` written as a bare relative path meant
+/// `$HOME/…` here and `/…` through `dctl init --base sftp:HOST/…`
+/// (`docs/HANDOVER.md` §16.3), so the one rule
+/// ([`crate::remote::sftp_base`]) is applied at the moment the value is written
+/// rather than at the moment it is used. Two things follow: the file always says
+/// which of the two it means, and a remote that cannot say is refused *before*
+/// it exists instead of after somebody has pointed a backup at it.
+fn canonicalise(remote: RemoteDef) -> Result<RemoteDef> {
+    match remote {
+        RemoteDef::Sftp(mut def) => {
+            def.base = crate::remote::sftp_base::from_setting(&def.base)?;
+            Ok(RemoteDef::Sftp(def))
+        }
+        other => Ok(other),
+    }
 }
 
 /// Interpret a command-line value as the TOML scalar a user meant.

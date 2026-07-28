@@ -16,6 +16,23 @@
 //! by then have replaced, and a failure at that point would leave a committed
 //! object carrying the wrong time — which is invisible until the next `sync`
 //! re-transfers it and nothing on either stream says why.
+//!
+//! ## Why the read-back is not allowed to be the first thing that notices
+//!
+//! Every step below that can fail is asked what went wrong, in the order the
+//! steps happen, and the read-back verification is *last*. That ordering is the
+//! fix for `docs/HANDOVER.md` §16.1, where it was the other way round: the
+//! `tokio::fs::File` write path swallowed an `ENOSPC` (see [`crate::durable`]),
+//! the read-back found a file that was empty, and DCTL told the operator
+//! **`checksum mismatch: expected … got …`** with a hint blaming the provider or
+//! the network for corrupting data. It was a full disk on the machine they were
+//! sitting at.
+//!
+//! A hash comparison is only capable of one sentence — "these bytes are not
+//! those bytes" — so it must never be the thing that diagnoses an I/O failure.
+//! It is the last resort, after the write has been asked directly and after the
+//! length has been checked, and by then a differing hash really does mean what
+//! it says.
 
 use std::path::{Path, PathBuf};
 
@@ -50,6 +67,20 @@ fn stamp(path: &Path, modified: SourceModified) -> std::io::Result<()> {
         .set_times(std::fs::FileTimes::new().set_modified(when))
 }
 
+/// Write `data` into the staging file and put it on stable storage.
+///
+/// The two steps after `write_all` are [`crate::durable::finish`], and the
+/// reason they are a named call rather than a bare `sync_all` is the whole of
+/// that module's documentation: a `tokio::fs::File` defers its write errors, and
+/// `sync_all` on its own consumes one without returning it. This function used
+/// to be three inline lines ending in `file.sync_all().await?`, and an `ENOSPC`
+/// went straight through it.
+async fn write_staging(tmp: &Path, data: &[u8]) -> std::io::Result<()> {
+    let mut file = tokio::fs::File::create(tmp).await?;
+    file.write_all(data).await?;
+    crate::durable::finish(&mut file).await
+}
+
 pub(super) async fn put(
     fs: &LocalFs,
     key: &ObjectKey,
@@ -73,21 +104,34 @@ pub(super) async fn put(
     }
     let tmp = temp_path(&dest);
 
-    // Write the temp file and flush it to stable storage.
-    {
-        let mut file = tokio::fs::File::create(&tmp).await?;
-        file.write_all(&data).await?;
-        file.sync_all().await?;
+    // Write the temp file and put it on stable storage, asking the write itself
+    // what went wrong. The staging file is removed on the way out: a write that
+    // ran out of space and left its half-written temp behind has taken the space
+    // the retry needs, and a full disk stays full for reasons DCTL created.
+    if let Err(e) = write_staging(&tmp, &data).await {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(e.into());
     }
 
     // Read back exactly what hit the disk and verify before committing.
-    let on_disk = match tokio::fs::read(&tmp).await {
-        Ok(bytes) => ContentHash::compute(expected.algo, &bytes),
+    let bytes = match tokio::fs::read(&tmp).await {
+        Ok(bytes) => bytes,
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp).await;
             return Err(e.into());
         }
     };
+    // Length before content. A file that is shorter than what was written is a
+    // write that stopped, not a file that was altered, and the two have opposite
+    // remedies — see the module docs.
+    if bytes.len() != data.len() {
+        let _ = tokio::fs::remove_file(&tmp).await;
+        return Err(StoreError::ShortWrite {
+            expected: data.len() as u64,
+            actual: bytes.len() as u64,
+        });
+    }
+    let on_disk = ContentHash::compute(expected.algo, &bytes);
     if !on_disk.matches(expected) {
         let _ = tokio::fs::remove_file(&tmp).await;
         return Err(StoreError::ChecksumMismatch {
@@ -159,10 +203,16 @@ fn put_from_path_blocking(
     let tmp = temp_path(dest);
 
     // Stream source → temp (buffered, constant memory) and flush to stable storage.
-    if let Err(e) = stream_copy_to_temp(source, &tmp) {
-        let _ = std::fs::remove_file(&tmp);
-        return Err(e.into());
-    }
+    // `std::fs` is synchronous, so a failed write is returned by the call that
+    // made it — there is no deferred error to surface here, unlike the buffered
+    // `put` above.
+    let written = match stream_copy_to_temp(source, &tmp) {
+        Ok(n) => n,
+        Err(e) => {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
+    };
 
     // Read back exactly what hit the disk and hash it — still constant memory.
     let (on_disk, size) = match hash_file(&tmp, expected.algo) {
@@ -172,6 +222,16 @@ fn put_from_path_blocking(
             return Err(e.into());
         }
     };
+    // Length before content, for the reason in the module docs: a short file is
+    // a write that stopped, and calling that a checksum mismatch points the
+    // operator at their data instead of at their disk.
+    if size != written {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(StoreError::ShortWrite {
+            expected: written,
+            actual: size,
+        });
+    }
     if !on_disk.matches(expected) {
         let _ = std::fs::remove_file(&tmp);
         return Err(StoreError::ChecksumMismatch {
@@ -201,17 +261,21 @@ fn put_from_path_blocking(
 }
 
 /// Buffered copy of `source` → `tmp`, flushed and fsynced. Constant memory.
-fn stream_copy_to_temp(source: &Path, tmp: &Path) -> std::io::Result<()> {
+///
+/// Returns the number of bytes handed to the filesystem, so the caller can hold
+/// the file that came back to that number rather than inferring a failure from
+/// its hash.
+fn stream_copy_to_temp(source: &Path, tmp: &Path) -> std::io::Result<u64> {
     let mut reader =
         std::io::BufReader::with_capacity(STREAM_BUF_LEN, std::fs::File::open(source)?);
     let writer = std::io::BufWriter::with_capacity(STREAM_BUF_LEN, std::fs::File::create(tmp)?);
     let mut writer = writer;
-    std::io::copy(&mut reader, &mut writer)?;
+    let written = std::io::copy(&mut reader, &mut writer)?;
     let file = writer
         .into_inner()
         .map_err(std::io::IntoInnerError::into_error)?;
     file.sync_all()?;
-    Ok(())
+    Ok(written)
 }
 
 /// Stream `path` through a [`Hasher`], returning its digest and byte count. Constant memory.

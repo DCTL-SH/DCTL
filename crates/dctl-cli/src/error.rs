@@ -108,11 +108,39 @@ impl From<StoreError> for CliError {
                 )
             }
 
+            // Distinct from a mismatch on purpose, with a distinct remedy. The
+            // bytes are not in question: fewer of them arrived than were sent,
+            // which is a destination that ran out of room or went away, not one
+            // that changed the content. See `dctl_store::StoreError::ShortWrite`.
+            StoreError::ShortWrite { .. } => Self::new(ExitCode::FatalError, error.to_string())
+                .with_hint(
+                    "The destination accepted the write and then did not have all \
+                     the bytes. Nothing was committed and the source is untouched. \
+                     Check free space and quota on the destination filesystem \
+                     (`df -h`, `quota`) before suspecting the data.",
+                ),
+
             StoreError::InvalidKey(_) => Self::new(ExitCode::Usage, error.to_string())
                 .with_hint("Object keys must be relative, NUL-free, and free of '..' components."),
 
             StoreError::RangeOutOfBounds { .. } => Self::new(ExitCode::Usage, error.to_string())
                 .with_hint("The requested offset is past the end of the object."),
+
+            // A full filesystem is exit 7 — the code whose published definition
+            // already names "disk full" — and it stops the run, because
+            // `transfer::pipeline::is_fatal` is right that every remaining file
+            // will fail identically. It reached here as exit 2 "uncategorised"
+            // for as long as nothing read the errno, so a run against a full
+            // disk ground through ten thousand files to produce ten thousand
+            // copies of the same line.
+            StoreError::Io(ref source) if dctl_store::durable::is_out_of_space(source) => {
+                Self::new(ExitCode::FatalError, error.to_string()).with_hint(
+                    "The destination has no room for the object: the filesystem is \
+                     full, a quota is exhausted, or it is mounted read-only. Nothing \
+                     was committed and the source is untouched. `df -h` on the \
+                     destination is the first thing to look at.",
+                )
+            }
 
             StoreError::Io(_) => Self::new(ExitCode::Uncategorised, error.to_string()),
 
@@ -181,6 +209,30 @@ impl From<CoreError> for CliError {
                 ),
             ),
 
+            // The message the previous arm must never be allowed to give.
+            //
+            // A plain remote has no envelope, because a plain remote is not a
+            // vault; nothing DCTL can do to it will produce one, and no password
+            // opens it. Reporting the *unlock* wording here sent an operator to
+            // check a secret that was never involved and to restore a file that
+            // cannot exist at that address — a diagnosis that costs more than
+            // none, because it is confident and wrong.
+            //
+            // Exit 7 rather than 22: the vault is not locked, and a script that
+            // branches on 22 to re-prompt for a password would loop forever on a
+            // location where no password can help.
+            CoreError::NoVault(ref key) => Self::new(ExitCode::FatalError, error.to_string())
+                .with_hint(format!(
+                    "A vault keeps its key envelope at '{key}', and this is a plain \
+                     object store with no such object in it — so no password is \
+                     involved and none will help. If you meant a vault that does \
+                     exist, `dctl config list` shows the configured remotes. If a \
+                     vault really was here, the envelope is the one object nothing \
+                     else can rebuild: restore it from a replica of the store \
+                     (`dctl replicate` copies it) before writing anything to this \
+                     location.",
+                )),
+
             CoreError::NotFound(ref path) => Self::new(ExitCode::FileNotFound, error.to_string())
                 .with_hint(format!("'{path}' is not in the vault index. Try `dctl ls`.")),
 
@@ -223,12 +275,21 @@ impl From<std::io::Error> for CliError {
 
 impl CliError {
     /// Exit code for a borrowed `StoreError` (used when downcasting a chain).
+    ///
+    /// Must agree with the owning `From<StoreError>` above, arm for arm — the
+    /// same failure reaching the operator by two routes with two codes is the
+    /// misreport this module exists to prevent. `agrees_with_the_owning_mapping`
+    /// asserts it over every variant.
     fn from_store_code(error: &StoreError) -> ExitCode {
         match error {
             StoreError::NotFound(_) => ExitCode::FileNotFound,
             StoreError::ChecksumMismatch { .. } => ExitCode::ChecksumMismatch,
+            StoreError::ShortWrite { .. } => ExitCode::FatalError,
             StoreError::InvalidKey(_) | StoreError::RangeOutOfBounds { .. } => ExitCode::Usage,
             StoreError::Backend(_) => ExitCode::TemporaryError,
+            StoreError::Io(source) if dctl_store::durable::is_out_of_space(source) => {
+                ExitCode::FatalError
+            }
             StoreError::Io(_) => ExitCode::Uncategorised,
         }
     }
@@ -256,6 +317,91 @@ mod tests {
     fn missing_object_is_file_not_found() {
         let err = CliError::from(StoreError::NotFound("k".into()));
         assert_eq!(err.code(), ExitCode::FileNotFound);
+    }
+
+    /// Every `StoreError` shape, so the two mappings below can be held to each
+    /// other without either of them growing a variant the other has not seen.
+    fn every_store_error() -> Vec<StoreError> {
+        vec![
+            StoreError::NotFound("k".into()),
+            StoreError::ChecksumMismatch {
+                expected: "aa".into(),
+                actual: "bb".into(),
+            },
+            StoreError::ShortWrite {
+                expected: 10,
+                actual: 4,
+            },
+            StoreError::InvalidKey("k".into()),
+            StoreError::RangeOutOfBounds { size: 1 },
+            StoreError::Io(std::io::Error::from(std::io::ErrorKind::StorageFull)),
+            StoreError::Io(std::io::Error::from(std::io::ErrorKind::QuotaExceeded)),
+            StoreError::Io(std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem)),
+            StoreError::Io(std::io::Error::other("device")),
+            StoreError::Backend("503".into()),
+        ]
+    }
+
+    #[test]
+    fn a_full_filesystem_is_the_disk_full_code_and_sends_the_operator_to_df() {
+        // §16.1. A full disk used to arrive as exit 2, "an error not otherwise
+        // categorised", with no hint — while exit 7's published definition
+        // already read "Fatal error — the run cannot continue (bad config, disk
+        // full)" and `transfer::pipeline::is_fatal` already said a full disk
+        // should stop the run. Nothing read the errno, so neither happened.
+        for kind in [
+            std::io::ErrorKind::StorageFull,
+            std::io::ErrorKind::QuotaExceeded,
+            std::io::ErrorKind::FileTooLarge,
+            std::io::ErrorKind::ReadOnlyFilesystem,
+        ] {
+            let err = CliError::from(StoreError::Io(std::io::Error::from(kind)));
+            assert_eq!(err.code(), ExitCode::FatalError, "{kind:?}");
+            let hint = err.hint().unwrap_or_default();
+            assert!(hint.contains("df"), "{kind:?}: {hint}");
+            assert!(
+                !hint.to_lowercase().contains("corrupt"),
+                "a full disk must not be described as corruption: {hint}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_device_error_is_still_uncategorised_rather_than_blamed_on_free_space() {
+        // The other half of the same rule: `df` is the wrong advice for an EIO,
+        // and a hint that gave it would waste the same hour in the other
+        // direction.
+        let err = CliError::from(StoreError::Io(std::io::Error::other("device failure")));
+        assert_eq!(err.code(), ExitCode::Uncategorised);
+    }
+
+    #[test]
+    fn a_short_write_is_never_reported_as_a_checksum_mismatch() {
+        // The defect in one assertion: a destination that took the bytes and did
+        // not keep them is a write that stopped, and telling the operator their
+        // checksums disagree sends them hunting bit-rot in good data.
+        let err = CliError::from(StoreError::ShortWrite {
+            expected: 200_000,
+            actual: 4_096,
+        });
+        assert_ne!(err.code(), ExitCode::ChecksumMismatch);
+        assert_eq!(err.code(), ExitCode::FatalError);
+        assert!(!err.message().contains("checksum"), "{}", err.message());
+        let hint = err.hint().unwrap_or_default();
+        assert!(hint.contains("df"), "{hint}");
+        assert!(
+            !hint.contains("corrupting data"),
+            "the provider is not the suspect here: {hint}"
+        );
+    }
+
+    #[test]
+    fn the_two_store_mappings_agree_on_every_variant() {
+        for error in every_store_error() {
+            let borrowed = CliError::from_store_code(&error);
+            let owned = CliError::from(error).code();
+            assert_eq!(borrowed, owned, "the two routes disagree");
+        }
     }
 
     #[test]

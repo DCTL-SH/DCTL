@@ -40,5 +40,6 @@ pub mod password;
 pub mod phrase;
 pub mod secret;
 pub mod store;
+pub mod vault_present;
 
-pub use open::{Session, open};
+pub use open::{Session, open, open_with};

@@ -733,6 +733,7 @@ dependencies = [
  "bytes",
  "hex",
  "hmac",
+ "libc",
  "openssh",
  "openssh-sftp-client",
  "quick-xml",

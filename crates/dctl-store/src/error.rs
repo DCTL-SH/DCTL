@@ -14,6 +14,23 @@ pub enum StoreError {
     #[error("checksum mismatch: expected {expected}, got {actual}")]
     ChecksumMismatch { expected: String, actual: String },
 
+    /// Fewer bytes reached the destination than were written to it.
+    ///
+    /// Kept apart from [`StoreError::ChecksumMismatch`] because the two send an
+    /// operator to opposite places. A hash that differs over the *same* number
+    /// of bytes is corruption: something changed the content. A file that is
+    /// simply shorter than what was written is a write that stopped — a full
+    /// filesystem, an exhausted quota, a device that went away — and the remedy
+    /// is `df`, not a hunt for bit-rot.
+    ///
+    /// This is the backstop, not the diagnosis. The write path surfaces the real
+    /// errno first ([`crate::durable`]); this fires only when the destination
+    /// accepted every byte without complaint and then did not have them, which
+    /// is a lying filesystem or a concurrent truncation. Reporting *that* as a
+    /// checksum mismatch is what `docs/HANDOVER.md` §16.1 is about.
+    #[error("short write: {expected} bytes were written, {actual} landed")]
+    ShortWrite { expected: u64, actual: u64 },
+
     /// The object key is malformed or unsafe (e.g. path traversal).
     #[error("invalid object key: {0}")]
     InvalidKey(String),
@@ -47,6 +64,7 @@ impl StoreError {
             StoreError::RangeOutOfBounds { .. } => 2004,
             StoreError::Io(_) => 2005,
             StoreError::Backend(_) => 2006,
+            StoreError::ShortWrite { .. } => 2007,
         }
     }
 }
@@ -69,6 +87,32 @@ mod tests {
             2002
         );
         assert_eq!(StoreError::Backend(String::new()).code(), 2006);
+        assert_eq!(
+            StoreError::ShortWrite {
+                expected: 0,
+                actual: 0
+            }
+            .code(),
+            2007
+        );
+    }
+
+    #[test]
+    fn a_short_write_says_how_short_rather_than_naming_two_hashes() {
+        // The whole reason the variant exists. An operator reading this has to
+        // be able to tell "the disk is full" from "the bytes came back wrong",
+        // and the numbers are what does it.
+        let message = StoreError::ShortWrite {
+            expected: 200_000,
+            actual: 4_096,
+        }
+        .to_string();
+        assert!(message.contains("200000"), "{message}");
+        assert!(message.contains("4096"), "{message}");
+        assert!(
+            !message.contains("checksum"),
+            "a short write is not a checksum failure: {message}"
+        );
     }
 
     #[test]
@@ -84,6 +128,11 @@ mod tests {
             StoreError::RangeOutOfBounds { size: 0 }.code(),
             StoreError::Io(std::io::Error::other("x")).code(),
             StoreError::Backend(String::new()).code(),
+            StoreError::ShortWrite {
+                expected: 0,
+                actual: 0,
+            }
+            .code(),
         ];
         // Every store code lives in the 2xxx domain and is never 0 (success).
         assert!(codes.iter().all(|c| (2001..3000).contains(c)));

@@ -73,6 +73,24 @@ use super::report::Report;
 /// The verb this module implements, used in messages that name the command.
 const VERB: &str = "index rebuild";
 
+/// What `index rebuild` means for a remote that is not a vault.
+///
+/// The generic refusal ([`crate::session::vault_present`]) says there is no
+/// envelope here and no password involved. This says the rest, and it is the
+/// half an operator running *this* command needs: DCTL indexes vaults and only
+/// vaults, so on a plain remote there is no index, nothing to rebuild, and
+/// nothing missing. A listing of a plain remote is read from the backend every
+/// time it is asked for.
+///
+/// It matters more here than for any other verb because `index rebuild` is where
+/// three of this binary's own error hints send people. Somebody arriving from one
+/// of those is already looking for damage, and the answer they need is that
+/// there is none to find.
+const NOT_A_VAULT: &str = "A plain remote has no index: DCTL indexes vaults, and a plain \
+                           remote's listings are read from the backend on every command, so \
+                           there is nothing here to rebuild and nothing missing. \
+                           `index rebuild` applies only to a vault.";
+
 /// Arguments to `dctl index rebuild`.
 #[derive(Args, Debug)]
 pub struct RebuildArgs {
@@ -86,8 +104,9 @@ pub struct RebuildArgs {
 /// # Errors
 /// [`CliError::usage`] for a malformed target, a local path, or a target
 /// carrying a path — a rebuild is whole-vault and a partial one would leave the
-/// index describing two different points in time. Otherwise whatever
-/// [`session::open`] reported (an unresolvable remote, a vault that will not
+/// index describing two different points in time. [`ExitCode::FatalError`] with
+/// [`NOT_A_VAULT`] when the remote holds no vault. Otherwise whatever
+/// [`session::open_with`] reported (an unresolvable remote, a vault that will not
 /// unlock) or whatever the scan itself hit.
 pub async fn run(ctx: &Ctx, args: &RebuildArgs) -> Result<()> {
     let command = command_name(VERB);
@@ -129,7 +148,10 @@ pub async fn run(ctx: &Ctx, args: &RebuildArgs) -> Result<()> {
     // the honest description of a rebuild that produced a degraded index.
     ctx.out.info(constants::INDEX_REBUILD_NOTICE);
 
-    let session = session::open(ctx, &target.spec()).await?;
+    // `open_with` rather than `open`: this verb has something specific to say
+    // about a plain remote, and it is the verb most likely to be pointed at one.
+    // See [`NOT_A_VAULT`].
+    let session = session::open_with(ctx, &target.spec(), Some(NOT_A_VAULT)).await?;
     let rebuilt = session.vault.rebuild_index().await.map_err(CliError::from);
 
     // A rebuild replaces the whole local index, so it is a change to stored
@@ -247,6 +269,95 @@ mod tests {
         let error = run(&ctx, &args).await.unwrap_err();
         assert_eq!(error.code(), ExitCode::FatalError);
         assert!(error.message().contains("nosuchremote"));
+    }
+
+    #[tokio::test]
+    async fn a_plain_remote_is_told_it_is_not_a_vault_rather_than_blamed_for_its_password() {
+        // §16.2, end to end through the real command. Before this, the run
+        // prompted for a vault password and then failed at exit 22 with
+        //
+        //   unlock failed: wrong password or corrupted envelope
+        //   … the envelope itself may be damaged; it is stored as
+        //   'system/envelope.bin' … restoring that one object from a replica …
+        //
+        // against a remote that has no envelope, cannot have one, and never had
+        // a password. Every assertion below names one thing that message got
+        // wrong.
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = dir.path().join("plain");
+        std::fs::create_dir_all(&store).unwrap();
+        // A real file in it, so this is a *populated* plain remote rather than
+        // an empty directory that might be excused as "nothing here".
+        std::fs::write(store.join("notes.txt"), b"not sealed").unwrap();
+
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.plainstore]\ntype = \"local\"\npath = {:?}\n",
+                store.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let config = config.to_string_lossy().into_owned();
+        let index_path = dir.path().join("index.redb").to_string_lossy().into_owned();
+        // `--no-ask-password` is deliberate: if the refusal came *after* the
+        // secret was acquired this would fail as VaultLocked instead, and the
+        // whole point is that nobody is asked for a password they cannot use.
+        let (ctx, args) = parse(&[
+            "index",
+            "rebuild",
+            "plainstore:",
+            "--config",
+            &config,
+            "--index",
+            &index_path,
+            "--no-ask-password",
+        ]);
+
+        let error = run(&ctx, &args).await.unwrap_err();
+
+        assert_ne!(
+            error.code(),
+            ExitCode::VaultLocked,
+            "a plain remote is not a locked vault: {}",
+            error.message()
+        );
+        assert_eq!(error.code(), ExitCode::FatalError);
+
+        let message = error.message();
+        assert!(message.contains("not a vault"), "{message}");
+        assert!(
+            !message.contains("password"),
+            "the message must not raise a password: {message}"
+        );
+
+        let hint = error.hint().expect("a refusal must say what is going on");
+        assert!(
+            hint.starts_with("A plain remote has no index"),
+            "the verb must answer for itself: {hint}"
+        );
+        assert!(
+            hint.contains("nothing here to rebuild"),
+            "and say that nothing is missing: {hint}"
+        );
+        assert!(
+            !hint.contains("Check the password"),
+            "nobody should be sent to check a password: {hint}"
+        );
+        assert!(
+            !hint.contains("recovery phrase"),
+            "nor to transcribe twenty-four words: {hint}"
+        );
+        // The `system/envelope.bin` remedy may still be named — an envelope
+        // really is unrebuildable — but only as "if a vault was here", never as
+        // the diagnosis. What must not survive is the old ordering, where a file
+        // that cannot exist at this address was the thing to go and restore.
+        assert!(
+            hint.contains("plain object store"),
+            "the location has to be described correctly first: {hint}"
+        );
     }
 
     #[tokio::test]

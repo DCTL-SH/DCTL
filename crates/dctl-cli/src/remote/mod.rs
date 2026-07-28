@@ -72,6 +72,7 @@ pub mod place;
 pub mod plain;
 pub mod registry;
 pub mod resolve;
+pub mod sftp_base;
 pub mod spec;
 
 pub use place::Place;

@@ -102,11 +102,26 @@ impl Vault {
     /// a string.
     ///
     /// # Errors
-    /// [`CoreError::Unlock`] when the envelope is missing, unparseable, or holds
-    /// no slot this secret opens. Deliberately one error for all three: telling
-    /// an attacker with the envelope which of them happened would say whether a
-    /// given password was close, and the operator's next step ("check the
-    /// secret, then check the envelope") is the same either way.
+    /// [`CoreError::Unlock`] when the envelope is there and either unparseable
+    /// or holding no slot this secret opens. One error for both, deliberately:
+    /// telling an attacker with the envelope which of them happened would say
+    /// whether a given password was close, and the operator's next step ("check
+    /// the secret, then check the envelope") is the same either way.
+    ///
+    /// [`CoreError::NoVault`] when there is **no envelope object**, and the
+    /// underlying [`CoreError::Store`] error when the store could not be read at
+    /// all. Neither used to be distinguished, and folding them in was not
+    /// caution — it was a wrong answer. A plain remote has no envelope by
+    /// definition, so `dctl index rebuild` on one reported *"wrong password or
+    /// corrupted envelope"* and advised restoring `system/envelope.bin` from a
+    /// replica: a file that cannot be there, a password that was never involved,
+    /// and an operator sent to look for both (`docs/HANDOVER.md` §16.2). A
+    /// permission error or a dead connection produced the same sentence.
+    ///
+    /// The constant-answer property is untouched. It protects a password from
+    /// being probed against an envelope that exists; these two answers are about
+    /// whether the store has one and whether it can be read, which anyone who
+    /// can reach the store can see without asking DCTL.
     pub async fn unlock(
         backend: Arc<dyn Backend>,
         index_path: &Path,
@@ -115,7 +130,12 @@ impl Vault {
         let bytes = backend
             .get(&ObjectKey::new(layout::ENVELOPE_OBJECT_KEY))
             .await
-            .map_err(|_| CoreError::Unlock)?;
+            .map_err(|source| match source {
+                dctl_store::StoreError::NotFound(_) => {
+                    CoreError::NoVault(layout::ENVELOPE_OBJECT_KEY.to_string())
+                }
+                other => CoreError::Store(other),
+            })?;
         let env = envelope::parse(&bytes).map_err(|_| CoreError::Unlock)?;
 
         let mut recovered: Option<Zeroizing<[u8; 32]>> = None;

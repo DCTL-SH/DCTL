@@ -1103,14 +1103,13 @@ async fn fill(staging: &std::path::Path, bytes: &[u8], modified: Modified) -> Re
     let mut file = tokio::fs::File::create(staging).await?;
     file.write_all(bytes).await?;
 
-    // Explicit, and not redundant with the `sync_all` below. `tokio::fs::File`
-    // performs writes on the blocking pool and stashes a failure from the last
-    // one in `last_write_err`; that error is surfaced by `poll_flush` and
-    // *swallowed* by `complete_inflight`, which is what both `sync_all` and
-    // `into_std` call. Without this line a write that failed after the final
-    // `write_all` returned would be dropped on the floor, and the rename below
-    // would publish a truncated file as a successful transfer.
-    file.flush().await?;
+    // Explicit, and not redundant with the `sync_all` below: `sync_all`
+    // *consumes* the error a deferred write left behind without returning it.
+    // The mechanism, and the full disk that was reported as a checksum mismatch
+    // because the storage layer was missing this same call, are in
+    // `dctl_store::durable` — which is where this used to be an inline comment
+    // that the layer three functions away never read.
+    dctl_store::durable::surface_write_errors(&mut file).await?;
 
     // The open handle rather than the path, so the time lands on the inode that
     // is about to be renamed into place — see `platform::times`.

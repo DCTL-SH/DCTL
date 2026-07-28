@@ -43,6 +43,7 @@
 //! answer. Storing a wrapped value instead would give the file a confident,
 //! fabricated date that every later run would believe.
 
+pub mod base;
 mod path;
 
 use std::path::Path;
@@ -197,16 +198,31 @@ impl SftpBackend {
             .map_err(|e| map_sftp_err(remote, e))
     }
 
-    /// Best-effort durability: fsync the handle when the server advertises the
-    /// `fsync@openssh.com` extension, otherwise a no-op.
-    async fn fsync_best_effort(file: &mut File) {
+    /// Durability where the server offers it: fsync the handle, tolerating only
+    /// a server that does not implement `fsync@openssh.com`.
+    ///
+    /// The tolerance is for a **missing capability**, and nothing else. It used
+    /// to swallow every error the fsync could return, `tracing::debug!` them and
+    /// carry on to the rename — so a server whose filesystem filled up between
+    /// the last write and the flush published the object anyway and DCTL
+    /// reported a successful transfer. That is the same defect as
+    /// `docs/HANDOVER.md` §16.1 with the failure hidden one layer further down:
+    /// an I/O error that nothing read, and a verdict reached without it.
+    ///
+    /// "Best effort" is an honest description of doing less when the server
+    /// cannot do more. It is not a licence to ignore the server saying no.
+    ///
+    /// # Errors
+    /// Whatever the fsync reported, other than [`SftpError::UnsupportedExtension`].
+    async fn fsync_or_fail(remote: &str, file: &mut File) -> Result<()> {
         match file.sync_all().await {
-            Ok(()) => {}
+            Ok(()) => Ok(()),
             // Server lacks the fsync extension — durability is best-effort here.
-            Err(SftpError::UnsupportedExtension(_)) => {}
-            Err(e) => {
-                tracing::debug!("sftp fsync failed (ignored, best-effort): {e}");
+            Err(SftpError::UnsupportedExtension(_)) => {
+                tracing::debug!("sftp server has no fsync extension; write is not forced to disk");
+                Ok(())
             }
+            Err(e) => Err(map_sftp_err(remote, e)),
         }
     }
 
@@ -259,7 +275,11 @@ impl Backend for SftpBackend {
             self.remove_quiet(&tmp).await;
             return Err(map_sftp_err(&tmp, e));
         }
-        Self::fsync_best_effort(&mut file).await;
+        if let Err(e) = Self::fsync_or_fail(&tmp, &mut file).await {
+            drop(file);
+            self.remove_quiet(&tmp).await;
+            return Err(e);
+        }
         if let Err(e) = file.close().await {
             self.remove_quiet(&tmp).await;
             return Err(map_sftp_err(&tmp, e));
@@ -331,7 +351,11 @@ impl Backend for SftpBackend {
             });
         }
 
-        Self::fsync_best_effort(&mut file).await;
+        if let Err(e) = Self::fsync_or_fail(&tmp, &mut file).await {
+            drop(file);
+            self.remove_quiet(&tmp).await;
+            return Err(e);
+        }
         if let Err(e) = file.close().await {
             self.remove_quiet(&tmp).await;
             return Err(map_sftp_err(&tmp, e));

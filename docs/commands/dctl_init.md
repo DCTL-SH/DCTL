@@ -214,7 +214,8 @@ rules every other command uses: a bare path, a Windows drive path
 (`C:\vaults\main`) and a UNC path (`\\server\share\vault`) are all local on every
 platform, and `local:` is the explicit escape hatch for a directory whose own
 name would otherwise parse as a remote. Beyond that, the provider shorthands
-`b2:`, `s3:` and `r2:` name a bucket. Provider credentials come from the
+`b2:`, `s3:` and `r2:` name a bucket, and `sftp:HOST/PATH` names a directory on
+an SSH host (see below). Provider credentials come from the
 environment (`DCTL_B2_KEY_ID`, `DCTL_B2_APP_KEY`, and the S3/R2 equivalents),
 never from the configuration file.
 
@@ -224,6 +225,23 @@ resolved to an existing section would make that promise conditional — sometime
 two remotes appear, sometimes one, depending on what the file happened to
 contain, and a reader of the command could not tell which. To wrap a remote that
 is already configured, use `dctl config create NAME vault base=EXISTING`.
+
+**An sftp base says where on the server it is.** `--base sftp:HOST/PATH` splits
+at the first `/`, and that slash belongs to `PATH` — so
+`--base sftp:lsx-001/srv/dctl-store` is the **absolute** directory
+`/srv/dctl-store`, exactly as `dctl config create NAME sftp host=lsx-001
+base=/srv/dctl-store` writes it. A directory under the SSH login directory is
+`--base sftp:lsx-001/~/dctl-store`, which writes `base = "~/dctl-store"`. Every
+base is stored in one of those two self-describing spellings, so
+`dctl config show` always says which one you have.
+
+This used to be two different things depending on which command wrote it:
+`base=/srv/dctl-store` was absolute and `--base sftp:h/srv/dctl-store` was
+`$HOME/srv/dctl-store`, with `init` reporting the vault on the path you typed
+while the envelope went somewhere else. A bare relative base — `base=dctl-store`
+— is the spelling that meant both, and is now refused by both commands with the
+one-character fix in the message. An existing configuration carrying one fails
+loudly rather than being silently reinterpreted.
 
 **A base naming a subdirectory is refused.** `--base s3:archive/vaults/a` fails
 with exit 1. The engine writes a vault's envelope to a fixed key at the root of

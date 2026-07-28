@@ -36,8 +36,8 @@ use std::path::Path;
 
 use crate::config::RemoteDef;
 use crate::constants::{
-    CONFIG_KEY_BASE, CONFIG_KEY_BUCKET, CONFIG_KEY_HOST, CONFIG_KEY_PATH, PATH_SEPARATOR,
-    PROVIDER_B2, PROVIDER_LOCAL, PROVIDER_R2, PROVIDER_S3, PROVIDER_SFTP, REMOTE_SEPARATOR,
+    CONFIG_KEY_BUCKET, CONFIG_KEY_PATH, PATH_SEPARATOR, PROVIDER_B2, PROVIDER_LOCAL, PROVIDER_R2,
+    PROVIDER_S3, PROVIDER_SFTP, REMOTE_SEPARATOR,
 };
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -176,46 +176,26 @@ impl BaseLocation {
     /// [`BaseLocation::base_path`] stays `None` and [`refuse_subdirectory`] has
     /// nothing to catch.
     ///
+    /// The split is [`crate::remote::sftp_base`]'s, and that is the fix for
+    /// `docs/HANDOVER.md` §16.3. This function used to do its own
+    /// `split_once('/')`, which threw the separator away — so `--base
+    /// sftp:h/srv/vault` wrote `base = "srv/vault"`, the backend resolved it
+    /// against the SSH login directory, and the vault was created in
+    /// `$HOME/srv/vault` while this command reported it on `sftp:h/srv/vault`.
+    /// `dctl config create NAME sftp host=h base=/srv/vault` meant the other one.
+    ///
     /// [`refuse_subdirectory`]: BaseLocation::refuse_subdirectory
     fn sftp(spec: &str, path: &str) -> Result<Self> {
-        let (host, base) = path.split_once(PATH_SEPARATOR).unwrap_or((path, ""));
-        if host.is_empty() {
-            return Err(CliError::new(
-                ExitCode::Usage,
-                format!("'{spec}' names no ssh host to store the vault on"),
-            )
-            .with_hint(format!(
-                "Write it as 'sftp{REMOTE_SEPARATOR}HOST/BASE-DIR' — for example \
-                 'sftp{REMOTE_SEPARATOR}lsx-001/dctl-store'. HOST is an \
-                 ~/.ssh/config alias or user@host, and all of its connection \
-                 details come from your ssh config."
-            )));
-        }
-        if base.is_empty() {
-            return Err(CliError::new(
-                ExitCode::Usage,
-                format!("'{spec}' names no base directory on '{host}'"),
-            )
-            .with_hint(format!(
-                "Write it as 'sftp{REMOTE_SEPARATOR}{host}/BASE-DIR' — the remote \
-                 directory the ciphertext objects go under, for example \
-                 'sftp{REMOTE_SEPARATOR}{host}/dctl-store'."
-            )));
-        }
+        let (host, base) = crate::remote::sftp_base::from_spec(spec, path)?;
 
         Ok(Self {
             spec: spec.to_string(),
             store: settings::build(
                 PROVIDER_SFTP,
-                &[
-                    (CONFIG_KEY_HOST.to_string(), host.to_string()),
-                    (CONFIG_KEY_BASE.to_string(), base.to_string()),
-                ]
-                .into_iter()
-                .collect(),
+                &crate::remote::sftp_base::settings(&host, &base),
             )?,
             base_path: None,
-            container: host.to_string(),
+            container: host.clone(),
         })
     }
 

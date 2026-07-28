@@ -45,7 +45,7 @@ Slugs and descriptions below are taken verbatim from `ExitCode::slug()` and
 | 4 | `file_not_found` | File not found |
 | 5 | `temporary_error` | Temporary error; retries exhausted |
 | 6 | `partial_failure` | Some files failed to transfer |
-| 7 | `fatal_error` | Fatal error; cannot continue |
+| 7 | `fatal_error` | Fatal error; cannot continue (bad config, disk full, not a vault) |
 | 8 | `transfer_limit_exceeded` | `--max-transfer` limit reached |
 | 9 | `no_files_transferred` | Succeeded, but the run did no work |
 | 10 | `duration_limit_exceeded` | `--max-duration` limit reached |
@@ -96,6 +96,17 @@ it persists, the provider or the network path is corrupting data in flight, and
 that is a fault to find before you push more bytes through it. Do **not** work
 around it by disabling verification; the code firing is the system doing its job.
 Check the run's log for the `path` field to see which object failed.
+
+**What this code is *not*, since it once was.** A **full disk** used to arrive
+here. The write path swallowed the `ENOSPC` — `tokio::fs::File` defers write
+errors and `sync_all` consumes one without returning it — so the first thing to
+notice the failure was the read-back hash comparison, and a hash comparison can
+only ever say "these bytes are not those bytes". Operators were told their backup
+found a checksum mismatch and sent hunting bit-rot in undamaged data; the fix was
+`df`. A destination that runs out of room now reports its errno and exits **7**,
+and a destination that takes every byte and then does not have them is
+`STORE_SHORT_WRITE` (`2007`), also exit 7. Code 20 now means only what it says:
+the same number of bytes came back, and they were different bytes.
 
 ## 21 — `integrity_failure`
 

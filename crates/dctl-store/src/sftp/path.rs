@@ -19,7 +19,7 @@ use crate::model::ObjectKey;
 /// directory *named* `~`. An **absolute** `base` (leading `/`) is kept verbatim.
 /// Redundant slashes are collapsed and a trailing slash is trimmed.
 #[must_use]
-pub(super) fn normalize_base(base: &str) -> String {
+pub(crate) fn normalize_base(base: &str) -> String {
     let mut b = base.trim();
     // Strip a leading `~` (both `~/foo` and bare `~`) so the path becomes
     // home-relative; the server resolves relative paths against $HOME.

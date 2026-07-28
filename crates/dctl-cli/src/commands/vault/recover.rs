@@ -51,6 +51,16 @@ const VERB: &str = "vault recover";
 /// What the user is told did not happen when `--key-file` is refused here.
 const NOTHING_HAPPENED: &str = "The vault was not opened and no key material was changed.";
 
+/// What `vault recover` means for a remote that is not a vault.
+///
+/// A recovery phrase is a key slot in an envelope. Where there is no envelope
+/// there is no slot, so no phrase — right, wrong or beautifully transcribed —
+/// can open the location, and reading twenty-four words into a terminal to
+/// discover that is the most expensive way DCTL has of saying nothing.
+const NOT_A_VAULT: &str = "A recovery phrase opens a key slot in a vault's envelope, so there is \
+                           nothing here for one to open and no words worth transcribing. \
+                           `vault recover` applies only to a vault.";
+
 /// Said after a successful recovery, because the alternative belief destroys the
 /// backup.
 ///
@@ -154,6 +164,16 @@ pub async fn run(ctx: &Ctx, args: &RecoverArgs) -> Result<()> {
     // `Prepared` is what makes the ordering structural rather than remembered.
     let spec = target.spec();
     let prepared = session::open::prepare(ctx, &spec)?;
+
+    // And the same ordering rule for the same reason, one step further: whether
+    // there is a vault at this location at all is answerable without any secret,
+    // so it is answered first. Asking for twenty-four transcribed words and then
+    // reporting "wrong password or corrupted envelope" — which is what a plain
+    // remote used to get (`docs/HANDOVER.md` §16.2) — is the single most
+    // expensive wrong diagnosis this binary can produce.
+    prepared
+        .require_vault(ctx, &spec, Some(NOT_A_VAULT))
+        .await?;
 
     let phrase = session::phrase::acquire_required(&ctx.globals)?;
     ctx.out.info(format!(

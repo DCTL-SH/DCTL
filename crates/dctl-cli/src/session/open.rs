@@ -11,7 +11,7 @@ use crate::error::Result;
 use crate::logging::fields;
 use crate::remote::RemoteSpec;
 
-use super::{factor, index, secret};
+use super::{factor, index, secret, vault_present};
 
 /// What the user is told did not happen when `--key-file` is refused here.
 ///
@@ -70,7 +70,32 @@ impl std::fmt::Debug for Session {
 /// [`ExitCode::FatalError`]: crate::exit::ExitCode::FatalError
 /// [`ExitCode::VaultLocked`]: crate::exit::ExitCode::VaultLocked
 pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Session> {
+    open_with(ctx, spec, None).await
+}
+
+/// [`open`], with a sentence the caller adds to the refusal when the location
+/// turns out not to be a vault at all.
+///
+/// The generic refusal says what is true of every command — there is no
+/// envelope here, no password is involved. What it cannot say is what *this*
+/// verb means for a plain remote, and for some verbs that is the whole question:
+/// `dctl index rebuild` is the command three of DCTL's own hints send people to,
+/// and an operator who runs it against a plain remote needs to be told that a
+/// plain remote has no index rather than left to infer it.
+///
+/// # Errors
+/// As [`open`].
+pub async fn open_with(ctx: &Ctx, spec: &RemoteSpec, not_a_vault: Option<&str>) -> Result<Session> {
     let prepared = prepare(ctx, spec)?;
+
+    // Before the secret, which is this module's ordering rule and matters most
+    // here of anywhere. Asking for a password — or for twenty-four transcribed
+    // words — and *then* discovering the location was never a vault spends the
+    // most expensive thing the tool asks for on a question that was answerable
+    // without it. It is also what stops the answer being "wrong password":
+    // `docs/HANDOVER.md` §16.2 is that failure, where a plain remote was told
+    // its password was wrong and its `system/envelope.bin` needed restoring.
+    prepared.require_vault(ctx, spec, not_a_vault).await?;
 
     // Acquired after the preparation so a typo in the remote name fails before
     // the user is asked for a secret. Being prompted for a password and *then*
@@ -104,6 +129,13 @@ pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Session> {
 pub struct Prepared {
     backend: Arc<dyn Backend>,
     index: PathBuf,
+    /// Whether the configuration already says this location holds a vault.
+    ///
+    /// Computed here because this is where the configuration is in hand, and
+    /// carried so [`Prepared::require_vault`] can answer without a second load
+    /// and without a network round trip. `dctl init` and `dctl config import`
+    /// both write the declaration, so the ordinary case costs nothing.
+    declared_vault: bool,
 }
 
 /// Do everything an unlock needs doing before a secret is worth asking for.
@@ -134,7 +166,7 @@ pub fn prepare(ctx: &Ctx, spec: &RemoteSpec) -> Result<Prepared> {
     // reported — a misspelled remote is a typo, a discarded factor is not.
     factor::refuse_if_present(&ctx.globals, "unlocking a vault", NOTHING_HAPPENED)?;
 
-    let backend = build_backend(ctx, spec)?;
+    let (backend, declared_vault) = build_backend(ctx, spec)?;
 
     // After the remote has resolved, so a typo does not leave a directory
     // behind, and before the secret is acquired, which is this module's ordering
@@ -145,7 +177,33 @@ pub fn prepare(ctx: &Ctx, spec: &RemoteSpec) -> Result<Prepared> {
     let index = index::path(ctx);
     index::ensure_directory(&index)?;
 
-    Ok(Prepared { backend, index })
+    Ok(Prepared {
+        backend,
+        index,
+        declared_vault,
+    })
+}
+
+impl Prepared {
+    /// Refuse a location that holds no vault, before any secret is asked for.
+    ///
+    /// Delegates the decision to [`vault_present`]; the declaration this type
+    /// carried out of [`prepare`] is what keeps the ordinary case free of a
+    /// round trip.
+    ///
+    /// # Errors
+    /// [`ExitCode::FatalError`] when the store holds no envelope, or whatever
+    /// the probe itself failed with.
+    ///
+    /// [`ExitCode::FatalError`]: crate::exit::ExitCode::FatalError
+    pub async fn require_vault(
+        &self,
+        ctx: &Ctx,
+        spec: &RemoteSpec,
+        not_a_vault: Option<&str>,
+    ) -> Result<()> {
+        vault_present::require(ctx, &self.backend, spec, self.declared_vault, not_a_vault).await
+    }
 }
 
 impl Prepared {
@@ -199,13 +257,41 @@ impl Prepared {
 /// A missing config is not fatal: `load_or_default` yields an empty one, which
 /// is the headless case `PLAN.md` §14 requires to keep working from environment
 /// variables alone.
-fn build_backend(ctx: &Ctx, spec: &RemoteSpec) -> Result<Arc<dyn Backend>> {
+/// Returns the backend and whether the configuration *declares* this location a
+/// vault's object store — the second is read here because this is the only place
+/// the configuration is loaded, and re-loading it to answer one boolean is how
+/// two answers to the same question start to disagree.
+fn build_backend(ctx: &Ctx, spec: &RemoteSpec) -> Result<(Arc<dyn Backend>, bool)> {
     let path = crate::config::resolve_path(ctx.globals.config.as_deref());
     let config = crate::config::load_or_default(&path)?;
 
     let storage = storage_remote(&config, spec)?;
+    let declared_vault = declares_a_vault(&config, spec, &storage);
     let resolved = crate::remote::resolve::resolve(&storage, &config)?;
-    crate::remote::registry::build(&resolved)
+    Ok((crate::remote::registry::build(&resolved)?, declared_vault))
+}
+
+/// Whether the configuration already states that a vault lives here.
+///
+/// Two ways of saying it, and both count, because `dctl init` writes both: the
+/// sealed remote is `type = "vault"`, and the store it wraps carries
+/// `require_vault = true`. Either is the operator's own declaration, and a
+/// declaration is worth more than a probe — it is the reason the ordinary
+/// backup job pays nothing for this check.
+fn declares_a_vault(
+    config: &crate::config::Config,
+    spec: &RemoteSpec,
+    storage: &RemoteSpec,
+) -> bool {
+    use crate::config::RemoteDef;
+
+    let names_a_vault = |candidate: &RemoteSpec| match candidate {
+        RemoteSpec::Named { remote, .. } => config.get(remote),
+        RemoteSpec::Local(_) => None,
+    };
+
+    names_a_vault(spec).is_some_and(RemoteDef::is_vault)
+        || names_a_vault(storage).is_some_and(RemoteDef::require_vault)
 }
 
 /// The spec whose backend actually holds bytes.
