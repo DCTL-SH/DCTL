@@ -95,6 +95,19 @@ pub enum ExitCode {
     /// The operation was cancelled (Ctrl-C / SIGTERM). In-flight work was rolled
     /// back or left resumable; nothing was reported as successful.
     Cancelled = 25,
+    /// The audit chain verified, but it does not end at the head the caller
+    /// anchored with `--expect-head`: records were removed from the end, the
+    /// chain diverged, or the anchor is older than the log.
+    ///
+    /// **Deliberately not 24.** A chain hash detects every edit made *inside* a
+    /// log and none made to its end, so these are two different findings with
+    /// two different remedies: 24 says the links failed, 26 says the links held
+    /// and the log is not the one you left. Folding the second into the first
+    /// would put the common benign case — an anchor that is simply older than
+    /// the log — behind the code operators are told to treat as a security
+    /// event, which is how a loud code gets ignored. This module's own rule is
+    /// that a new condition gets a new number.
+    AuditHeadMismatch = 26,
 }
 
 impl ExitCode {
@@ -126,6 +139,7 @@ impl ExitCode {
             Self::IndexError => "index_error",
             Self::AuditChainBroken => "audit_chain_broken",
             Self::Cancelled => "cancelled",
+            Self::AuditHeadMismatch => "audit_head_mismatch",
         }
     }
 
@@ -153,6 +167,7 @@ impl ExitCode {
             Self::IndexError => "Encrypted index or journal error",
             Self::AuditChainBroken => "Audit log hash chain verification failed",
             Self::Cancelled => "Operation cancelled",
+            Self::AuditHeadMismatch => "Audit log head does not match the expected anchor",
         }
     }
 
@@ -177,6 +192,7 @@ impl ExitCode {
             Self::IndexError,
             Self::AuditChainBroken,
             Self::Cancelled,
+            Self::AuditHeadMismatch,
         ]
     }
 }
@@ -196,6 +212,24 @@ mod tests {
         assert_eq!(ExitCode::IntegrityFailure.as_i32(), 21);
         assert_eq!(ExitCode::VaultLocked.as_i32(), 22);
         assert_eq!(ExitCode::AuditChainBroken.as_i32(), 24);
+        assert_eq!(ExitCode::AuditHeadMismatch.as_i32(), 26);
+    }
+
+    #[test]
+    fn a_head_mismatch_is_not_a_broken_chain() {
+        // Two findings, two numbers. A chain whose links all hold but which no
+        // longer ends where it was anchored is not the same event as a chain
+        // whose links failed, and a script that pages on 24 must not be woken by
+        // a stale anchor.
+        assert_ne!(
+            ExitCode::AuditHeadMismatch.as_i32(),
+            ExitCode::AuditChainBroken.as_i32()
+        );
+        assert_ne!(
+            ExitCode::AuditHeadMismatch.slug(),
+            ExitCode::AuditChainBroken.slug()
+        );
+        assert_ne!(ExitCode::AuditHeadMismatch.as_i32(), 0);
     }
 
     #[test]

@@ -22,6 +22,11 @@
 //! * [`record`] — one entry, and [`record::Entry`], the only way to build one.
 //! * [`redaction`] — the mandatory scrub every field passes through first.
 //! * [`chain`] — how an entry's hash is computed, and how a chain is walked.
+//! * [`anchor`] — the head hash kept *outside* the log, which is the only thing
+//!   that can attest to the chain's **length**. The chain detects every edit
+//!   made inside it and none made to its end; [`anchor`] is the half that closes
+//!   that, and it is deliberately a separate module because it answers a
+//!   different question from a different place — one the writer cannot reach.
 //! * [`serialize`] — the on-disk encoding and its framing rules.
 //! * [`mod@write`] — the append path: open, append one entry, fsync.
 //! * [`sink`] — the run's one handle: where the log is, when it is opened, and
@@ -40,6 +45,7 @@
 //! the tool that produced the evidence is not tamper-evidence at all, and the
 //! same twenty-year-decodability discipline governs `docs/FORMAT.md`.
 
+pub mod anchor;
 pub mod chain;
 // A test and nothing else; see the layout note above.
 #[cfg(test)]

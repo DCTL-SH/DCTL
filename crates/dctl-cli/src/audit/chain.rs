@@ -68,15 +68,24 @@
 //! answer, because the alternative is a product that invalidates its customers'
 //! evidence at every release.
 //!
-//! ## What this cannot detect
+//! ## What this cannot detect, and the module that can
 //!
 //! Truncation of the tail. Removing the last *n* records leaves a chain that
-//! verifies perfectly, because nothing inside the log attests to its own length.
-//! Detecting that needs an anchor kept somewhere the writer cannot reach — the
-//! encrypted remote mirror §7 mentions, or a periodically published head hash,
-//! which is why [`Verified`] reports the head rather than only a verdict. Saying
-//! so here is deliberate: an evidence tool that overstates what it proves is
-//! worse than one that proves less.
+//! verifies perfectly, because nothing inside the log attests to its own length
+//! — and the records an attacker most wants gone are the most recent ones. No
+//! amount of care in this module changes that: everything it checks lives inside
+//! the file, and whoever can cut the tail can cut whatever the tail said about
+//! itself.
+//!
+//! [`super::anchor`] is the half that closes it, by comparing the chain against
+//! a value recorded somewhere the writer cannot reach. That is why [`Verified`]
+//! reports the record count and the head rather than only a verdict: those two
+//! numbers *are* the anchor. `dctl audit head` prints one and `dctl audit verify
+//! --expect-head` checks one, at exit 26.
+//!
+//! Saying so here is deliberate: an evidence tool that overstates what it proves
+//! is worse than one that proves less, and a `verify` with no anchor is making a
+//! claim about content, not about length.
 
 use std::fmt;
 

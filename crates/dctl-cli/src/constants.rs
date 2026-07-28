@@ -2790,6 +2790,41 @@ pub const AUDIT_VERDICT_INTACT: &str = "intact";
 /// never instead of it.
 pub const AUDIT_VERDICT_BROKEN: &str = "broken";
 
+/// Verdict printed when the chain verified but does not end where
+/// `--expect-head` said it should.
+///
+/// A **third** word, not a shade of the other two, because the two states it
+/// separates are genuinely different: the chain is internally sound, and it is
+/// not the chain the caller anchored. Folding it into `broken` would say the
+/// links failed when they did not; folding it into `intact` is the defect this
+/// exists to fix — a log with its tail cut off must never report `intact`.
+///
+/// Hyphenated to match the kebab-case `kind` tags the `--json` document already
+/// carries, and still one shell-comparable token:
+/// `[ "$(dctl audit verify --expect-head "$a")" = intact ]`.
+pub const AUDIT_VERDICT_HEAD_MISMATCH: &str = "head-mismatch";
+
+/// Note shown after an unanchored `dctl audit verify` succeeds.
+///
+/// `intact` on its own is a claim about **content**, never about **length**: the
+/// chain detects every edit made inside the log and none made to its end. An
+/// operator who reads the one word as both has exactly the belief this command
+/// must not create, so the limit is stated where the verdict is given rather than
+/// left in the manual. Shown at `-v`, alongside the record count, because it is
+/// a note about what was proved and not a warning that anything is wrong.
+pub const AUDIT_WITHOUT_ANCHOR_NOTE: &str = "no --expect-head was given, so this attests to the chain's content and not \
+     its length: records removed from the end leave a shorter chain that still \
+     verifies. `dctl audit head` prints the anchor that closes that.";
+
+/// Separator between the record count and the head hash in an audit anchor.
+///
+/// A colon, so the whole anchor is one word a shell will not split, one token a
+/// human can paste into a ticket, and one string a script can `diff` — while
+/// still carrying the length that makes a truncation *countable*. A bare head
+/// hash can say only that something is wrong; `9:37b6…` can say that two records
+/// were removed. See [`crate::audit::anchor`].
+pub const AUDIT_ANCHOR_SEPARATOR: char = ':';
+
 /// Feature name reported when a restore is asked for an earlier point in time.
 ///
 /// Refused rather than approximated. A `--at 2d` that quietly planned *today's*
@@ -5702,12 +5737,36 @@ mod tests {
     }
 
     #[test]
-    fn the_two_audit_verdicts_are_distinct_and_lower_case() {
-        // They are compared by scripts, so case has to be stable.
-        assert_ne!(AUDIT_VERDICT_INTACT, AUDIT_VERDICT_BROKEN);
-        for verdict in [AUDIT_VERDICT_INTACT, AUDIT_VERDICT_BROKEN] {
+    fn the_three_audit_verdicts_are_distinct_and_lower_case() {
+        // They are compared by scripts, so case has to be stable — and they must
+        // stay three distinct words. A truncated log reporting the same word as
+        // an intact one is the whole defect `head-mismatch` exists to close.
+        let verdicts = [
+            AUDIT_VERDICT_INTACT,
+            AUDIT_VERDICT_BROKEN,
+            AUDIT_VERDICT_HEAD_MISMATCH,
+        ];
+        let mut unique = verdicts.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(unique.len(), verdicts.len(), "two verdicts collided");
+        for verdict in verdicts {
             assert_eq!(verdict, verdict.to_lowercase());
+            assert!(!verdict.is_empty());
+            // One shell word: a verdict a shell would split into two is not one
+            // a `[ "$(…)" = … ]` test can compare.
+            assert!(!verdict.contains(char::is_whitespace), "{verdict}");
         }
+    }
+
+    #[test]
+    fn an_anchor_is_one_shell_word() {
+        // The separator has to be something a shell will not split on and a
+        // human will not lose to a line wrap, or the anchor stops being one
+        // token that can be pasted into a ticket.
+        assert!(!AUDIT_ANCHOR_SEPARATOR.is_whitespace());
+        assert!(!AUDIT_ANCHOR_SEPARATOR.is_ascii_hexdigit());
+        assert!(AUDIT_ANCHOR_SEPARATOR.is_ascii());
     }
 
     #[test]

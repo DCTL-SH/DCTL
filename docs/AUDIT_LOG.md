@@ -34,12 +34,21 @@ previous entry, so the sequence can be **extended but not rewritten**:
 * deleting an entry leaves a gap in the dense index sequence;
 * reordering entries breaks both.
 
-**What it does not prove: length.** Removing entries from the *end* leaves a
-chain that verifies perfectly, because nothing inside the log attests to how many
-records it should have. Detecting that requires an anchor kept somewhere the
-writer cannot reach — an encrypted remote mirror, a periodically published head
-hash, a witness signature. This is stated here rather than buried, because an
-evidence tool that overstates what it proves is worse than one that proves less.
+**The chain alone does not prove length.** Removing entries from the *end*
+leaves a chain that verifies perfectly, because nothing inside the log attests to
+how many records it should have — and the entries an attacker most wants gone are
+the most recent ones. No mechanism inside the file can close that: whoever can
+truncate the file can also remove anything the file says about its own length.
+The only thing that can is a value recorded where the writer cannot reach it.
+
+That value is the **anchor**, and §10 is the mechanism and the operating
+procedure for it: `dctl audit head` prints one, `dctl audit verify --expect-head`
+checks one, and a mismatch is exit **26** with the number of missing records when
+it is knowable. **Length is proved by §4 and §10 together, never by §4 alone.**
+
+This is stated at the top rather than buried, because an evidence tool that
+overstates what it proves is worse than one that proves less — and an unanchored
+`dctl audit verify` that reports `intact` is making the narrower claim.
 
 ### File layout
 
@@ -303,8 +312,14 @@ An **empty** log verifies, with the genesis link as its head. That is the claim
 "nothing has been appended", which is not the same claim as "nothing happened" —
 see §1.
 
-The **head** — the last record's `hash` — is the value to compare against any
-anchor kept outside the log. It is the only way to detect truncation.
+**A chain that verifies is not a chain that is complete.** The walk above proves
+that no record was edited, removed from the middle, reordered or inserted. It
+proves nothing about how many records there should be. Whatever this algorithm
+concludes, a verifier must report the **head** — the last record's `hash`, or the
+genesis link for an empty chain — and the **record count** alongside it, because
+those two numbers are the whole of what §10 compares. A verifier that printed
+only a verdict would leave its user with no way to detect the one attack the
+chain cannot see.
 
 A line that will not parse as JSON is a **chain failure**, not a formatting
 inconvenience: it is indistinguishable from a line somebody edited badly, and
@@ -491,7 +506,15 @@ Both scripts implement §4 exactly, **including the per-record version rule of
 
 ```
 intact: 4 records, head 37b656508f9217e841bf0963e2fa72225506687d1f1ecb4b34af60e98a2b35c7
+anchor 4:37b656508f9217e841bf0963e2fa72225506687d1f1ecb4b34af60e98a2b35c7
 ```
+
+The second line is the **anchor** of §10, in the same spelling `dctl audit head`
+prints and `dctl audit verify --expect-head` accepts. A third-party verifier
+emits it for the same reason DCTL does: the first line is a claim about content
+and the second is what makes a claim about *length* possible later. An auditor
+who runs one of these scripts on an evidence bundle and keeps the anchor can
+detect, months afterwards, that the bundle they were given has been shortened.
 
 ### 8.1 Python
 
@@ -568,7 +591,10 @@ def main(path):
                          f"content hashes to {computed}, record carries {r['hash']}")
             prev = r["hash"]
             position += 1
+    # Content, then length. The second line is the anchor to keep somewhere the
+    # writer cannot reach; nothing inside the log can attest to its own size.
     print(f"intact: {position} records, head {prev}")
+    print(f"anchor {position}:{prev}")
 
 
 if __name__ == "__main__":
@@ -621,7 +647,10 @@ while IFS= read -r line; do
   position=$((position + 1))
 done < "$1"
 
+# Content, then length. The second line is the anchor to keep somewhere the
+# writer cannot reach; nothing inside the log can attest to its own size.
 echo "intact: $position records, head $prev"
+echo "anchor $position:$prev"
 ```
 
 ---
@@ -757,13 +786,17 @@ exactly" is not.
 
 | Command | What it does with this format |
 |---------|-------------------------------|
-| `dctl audit verify` | Walks the chain per §4 and names the record where it breaks. |
+| `dctl audit verify` | Walks the chain per §4 and names the record where it breaks. With `--expect-head` it also checks the chain's **length** against an anchor, per §10. |
+| `dctl audit head` | Prints the anchor of §10 — the value to keep outside the log. |
 | `dctl audit list` | Renders the records, with filters. |
 | `dctl audit export` | Writes the chain out byte-for-byte re-verifiable. |
 
-All three **walk the whole chain and exit 24 (`audit_chain_broken`) if it is
+All four **walk the whole chain and exit 24 (`audit_chain_broken`) if it is
 broken** — a `list` that printed forged rows and exited 0 would put those rows on
-screen with an implicit clean bill of health.
+screen with an implicit clean bill of health. `head` differs in what it does
+*after* noticing: it prints nothing at all, because its output is not evidence to
+read but a value somebody will trust later, and an anchor taken from a broken
+chain attests to the break.
 
 `dctl audit list --direction out` is the egress query: everything that left the
 remote, with the byte count beside it. A v1 record never matches it, because a v1
@@ -775,6 +808,196 @@ a real answer. An **absent** one is exit 4 (`file_not_found`), because it far mo
 often means the reader was pointed somewhere the writer never wrote — a different
 `--index`, a different machine — than that nothing ever happened, and "0 records,
 chain intact" would be a clean bill of health for a chain nobody looked at.
+
+---
+
+## 10. The anchor: proving length (normative)
+
+§4 proves that no record was **altered**. This section is how a log proves how
+many records it should **have**. The two are separate mechanisms because they
+have to be: everything §4 checks lives inside the file, and truncation is the one
+attack whose evidence an attacker deletes along with the records.
+
+### 10.1 What an anchor is
+
+```
+<records>:<head>
+
+9:37b656508f9217e841bf0963e2fa72225506687d1f1ecb4b34af60e98a2b35c7
+```
+
+Two values that a verifier already computes (§4): how many records the chain held,
+and the hash it ended on. Joined by a colon so the whole thing is **one shell
+word**, one line, one token to paste into a ticket and one string for a script to
+`diff`.
+
+A **bare `<head>`** is also a conforming anchor, and a reader must accept it. It
+is what somebody gets from `dctl audit verify --json | jq -r .head`, and refusing
+it would turn a weaker anchor into a usage error. It is weaker in exactly one
+way, stated in §10.3.
+
+The genesis link (§2) is the head of an empty chain, so `0:000…0` is the anchor
+of a vault that has recorded nothing yet. That is a real anchor and worth taking:
+without it, the very first operation a vault performs is the one no anchor covers.
+
+### 10.2 Comparing an anchor against a chain (normative algorithm)
+
+**Walk the chain per §4 first.** An anchor comparison against records whose links
+were never checked would report "the log ends where you left it" about a log
+forged in the middle, which is a worse answer than either check alone. If §4
+fails, report *that* and stop: it is the more specific finding, and it names a
+record position an anchor comparison cannot.
+
+Let `n` be the number of records, and define `head_after(k)` as the genesis link
+for `k = 0` and the `k`-th record's `hash` otherwise — `None` when `k > n`.
+
+1. If the anchor's head equals `head_after(n)`, **the chain ends where the anchor
+   says**. Report a match. The head is the evidence and it decides the verdict; a
+   record count that disagreed with a matching head could only be a typo or a
+   BLAKE3 collision, and failing an otherwise exact match on it helps nobody.
+2. Otherwise, if the anchor carries a count `k`:
+   * `head_after(k)` is `None` (`k > n`) → **`truncated`**. Exactly `k - n`
+     records have been removed from the end.
+   * `head_after(k)` equals the anchor's head → **`advanced`**. The anchored
+     history is intact and `n - k` records were appended after it. **Not
+     tampering** — see §10.3.
+   * otherwise → **`diverged`**. Something else is at the anchored position:
+     history at or before the anchor was rewritten, or this is a different chain.
+3. Otherwise (a bare head, no count), search for a `k` in `n-1 … 0` with
+   `head_after(k)` equal to the anchor's head. Searching downwards because an
+   anchor is usually recent.
+   * found → **`advanced`**, with `n - k` appended.
+   * not found → **`absent`**. Records were removed from the end, or this is a
+     different chain, **and which of the two cannot be determined** — a head hash
+     carries no length, so there is nothing to subtract. Say so; do not guess.
+
+DCTL reports all four at exit **26** (`audit_head_mismatch`) and the stdout
+verdict `head-mismatch`, with the kind and the counts in `--json`. 26 rather than
+24 because the two findings are different: 24 says the links failed, 26 says the
+links held and this is not the chain you left. Collapsing them would put the
+common benign case — `advanced` — behind the code operators are told to treat as
+a security event, which is how a loud code comes to be ignored.
+
+### 10.3 Why `advanced` is not an alarm, and why it is not silence either
+
+A log in service grows between anchors. If every append were reported as
+tampering the check would be failing constantly on a healthy system, operators
+would stop passing the flag, and a defence nobody runs is not a defence.
+
+So `advanced` says what it is: nothing was removed, `n - k` records were appended
+that your anchor does not cover, take a fresh one. It is still a **non-zero
+exit**, because the caller asserted the chain ended at a particular head and it
+does not — and because those uncovered records are worth a glance before they are
+anchored. `dctl audit list` shows them.
+
+The bare-head anchor's one weakness lives here too. Against a counted anchor a
+truncation is `truncated` with an exact figure; against a bare one the same
+truncation is `absent`, which is a refusal and a correct one, but cannot say how
+much history is gone. That is why `dctl audit head` prints the counted form.
+
+### 10.4 Where an operator keeps the anchor (operating procedure)
+
+A mechanism nobody knows how to operate is not a defence, so this is written as a
+procedure rather than as a flag reference.
+
+**The one rule: the anchor must live somewhere the machine that writes the log
+cannot rewrite.** An anchor stored beside `audit.jsonl` — or anywhere the same
+account, the same host or the same credential can reach — is truncated in the
+same command as the log. That is the whole of the requirement; everything below
+is a way of satisfying it.
+
+Three tiers, in increasing order of what they survive:
+
+1. **Append-only to another host.** The DCTL machine holds a credential that can
+   only *add* lines somewhere else — a remote syslog collector, an
+   append-restricted bucket, an SSH key forced to a `cat >> anchors` command.
+   Survives an attacker who takes the DCTL host and nothing else, which is the
+   overwhelmingly common case.
+2. **Into a system that already ingests security events** — the SIEM, the
+   ticketing system, the compliance mailbox. Same protection as tier 1, plus the
+   provenance an auditor already trusts, plus somebody else's retention policy.
+3. **Published where a third party timestamps it** — a commit in a repository
+   hosted elsewhere, a message to an archived list, a transparency log. Survives
+   an attacker who takes your whole estate, and lets you prove *when* the anchor
+   was taken rather than only what it said.
+
+Tier 1 is the floor. Nothing below tier 1 is an anchor.
+
+**How often.** After every run that writes to the log, or on a fixed schedule.
+The interval is the exposure: an attacker who compromises the host can remove any
+record written after the last anchor without this check seeing it. Hourly is a
+reasonable default for a vault in constant use; per-run is better and is usually
+one line in the same script that ran DCTL.
+
+**Taking one** — the append-only tier, in the shape it goes in a backup script:
+
+```sh
+dctl backup /srv/data vault:nightly || exit
+printf '%s %s\n' "$(date -u +%FT%TZ)" "$(dctl audit head)" \
+  | ssh anchor-host 'cat >> /var/lib/dctl-anchors/prod'
+```
+
+`dctl audit head` exits 24 without printing anything if the chain is broken, so a
+`set -e` script stops before it records an anchor for a forgery.
+
+**Checking one:**
+
+```sh
+anchor=$(ssh anchor-host 'tail -n1 /var/lib/dctl-anchors/prod' | awk '{print $NF}')
+dctl audit verify --expect-head "$anchor"
+```
+
+| Exit | Verdict | What it means | What to do |
+|-----:|---------|---------------|------------|
+| 0 | `intact` | The chain verifies **and** ends at the anchor. | Nothing. |
+| 24 | `broken` | A record was edited, removed from the middle, reordered or inserted. | Keep the file. §4's report names the record. Escalate. |
+| 26 | `head-mismatch`, kind `advanced` | The log grew since the anchor. Nothing removed. | Read the new records, then re-anchor. |
+| 26 | `head-mismatch`, kind `truncated` | Records were removed from the end, and the message says how many. | **Incident.** Do not re-anchor and do not delete the log. |
+| 26 | `head-mismatch`, kind `diverged` | The anchored position holds a different record. | **Incident.** Either history was rewritten, or this is not the log you think. |
+| 26 | `head-mismatch`, kind `absent` | The anchored head is nowhere in the chain, and the anchor carried no count. | **Incident.** Use the counted anchor next time so the loss can be measured. |
+
+**On an incident, do not re-anchor.** A fresh anchor taken from a shortened log
+makes the shortened log the new baseline and destroys the only evidence that
+anything was removed. Keep the file, keep the old anchor, and compare against any
+mirrored or offline copy.
+
+**What this still does not prove: authorship.** The chain is unkeyed, so anybody
+who can write the file can *append* correctly linked records to it. An anchor
+proves that nothing before it was removed or rewritten; it says nothing about who
+wrote what came after. Detecting forged appends needs a signature over the head,
+which is a different mechanism and is not claimed here.
+
+### 10.5 Why there is no in-log anchor record
+
+A periodic **anchor record** — a record inside the chain that commits to the head
+at some earlier index — is the obvious way to avoid needing external storage. It
+is rejected, and the argument is short enough to check.
+
+Such a record at index `k` would attest to `head_after(k)`, which is precisely
+`records[k].prev`. **Every record in the chain already commits to its
+predecessor's head.** An anchor record therefore adds no information that §4 does
+not already have; it is a second copy of a value the chain carries by
+construction.
+
+Against truncation it is worse than useless, because it cannot be positioned to
+help. A tail truncation removes records from index `n-1` downwards, so any anchor
+record that *survives* the truncation is at an index below the cut, and everything
+it attests to is still true of the shortened chain. Any anchor record that would
+have contradicted the shortened chain is at an index above the cut, and has been
+removed along with it. There is no interval, however short, at which this
+changes: the attacker chooses where to cut *after* seeing where the anchors are.
+
+The same argument disposes of a record carrying a running count, a length, a
+Merkle root over everything before it, or a signature the writer can produce. All
+of them are inside the region the attacker controls, and all of them are removed
+by the same `head -n -2`.
+
+**The property that actually closes the gap is not "committed" but "out of
+reach".** That is why §10.4 is about where a value is kept and not about what is
+written into the log. The one variant worth naming as future work is a head hash
+pushed into the *encrypted remote* — a different trust domain, a different
+credential, and therefore genuinely external — which is a replication feature
+rather than a log format change, and is not in this build.
 
 ## See also
 

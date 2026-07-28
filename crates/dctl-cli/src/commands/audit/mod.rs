@@ -6,9 +6,10 @@
 //! the indices; reordering breaks both. What the chain buys is the ability to
 //! *prove* what happened, and to detect an attempt to change the story.
 //!
-//! Three verbs, one rule between them:
+//! Four verbs, one rule between them:
 //!
 //! * [`verify`] — walk the chain and report the exact record where it fails.
+//! * [`head`] — print the anchor to keep somewhere the writer cannot reach.
 //! * [`list`] — show what the log says happened, with filters.
 //! * [`export`] — hand the chain to someone else, byte-for-byte re-verifiable.
 //!
@@ -17,7 +18,25 @@
 //! rows on screen with an implicit clean bill of health; an `export` that
 //! silently copied a broken chain into an evidence bundle would be worse. The
 //! output is still produced — an investigator needs it — and the exit code says
-//! what it is.
+//! what it is. [`head`] is the one exception, and in the same spirit: it prints
+//! *nothing* from a broken chain, because its output is not evidence to read but
+//! a value to be trusted later, and an anchor taken from a forgery attests to
+//! the forgery.
+//!
+//! ## The one thing a walk cannot prove, and the verb that closes it
+//!
+//! A hash chain detects every edit made **inside** a log and none made to its
+//! **end**. Drop the last two records and what remains is a shorter chain whose
+//! every link still holds — and the records an attacker most wants gone are the
+//! most recent ones. Nothing inside a log can fix that; only a value recorded
+//! where the writer cannot reach it can.
+//!
+//! [`head`] produces that value and `verify --expect-head` checks it, at exit
+//! code 26 rather than 24, because "the links failed" and "the links held and
+//! this is not the chain you left" are different findings. The operating
+//! procedure — where an operator is supposed to keep the anchor, and how often
+//! — is `docs/AUDIT_LOG.md` §10, because a defence nobody knows how to operate
+//! is not a defence.
 //!
 //! ## The format is not defined here
 //!
@@ -43,6 +62,7 @@
 pub use crate::audit::{chain, record};
 
 pub mod export;
+pub mod head;
 pub mod list;
 pub mod source;
 pub mod verify;
@@ -61,7 +81,7 @@ pub struct AuditArgs {
 
 /// The audit verbs.
 ///
-/// A subcommand is required rather than defaulting to `verify`: the three do
+/// A subcommand is required rather than defaulting to `verify`: the four do
 /// very different things, and a bare `dctl audit` that silently *verified*
 /// would be a command whose most important behaviour is invisible in the
 /// scripts that call it.
@@ -69,6 +89,10 @@ pub struct AuditArgs {
 pub enum AuditCommand {
     /// Walk the hash chain and report where it breaks. Exits 24 on a break.
     Verify(verify::VerifyArgs),
+
+    /// Print the anchor to keep outside the log — the only defence against
+    /// records being removed from the end.
+    Head(head::HeadArgs),
 
     /// Show recorded operations, newest last.
     List(list::ListArgs),
@@ -80,6 +104,7 @@ pub enum AuditCommand {
 pub async fn run(ctx: &Ctx, args: &AuditArgs) -> Result<()> {
     match &args.command {
         AuditCommand::Verify(args) => verify::run(ctx, args).await,
+        AuditCommand::Head(args) => head::run(ctx, args).await,
         AuditCommand::List(args) => list::run(ctx, args).await,
         AuditCommand::Export(args) => export::run(ctx, args).await,
     }
@@ -120,6 +145,9 @@ mod tests {
         let Wrapper::Audit(args) = parse(&["audit", "verify"]).audit;
         assert!(matches!(args.command, AuditCommand::Verify(_)));
 
+        let Wrapper::Audit(args) = parse(&["audit", "head"]).audit;
+        assert!(matches!(args.command, AuditCommand::Head(_)));
+
         let Wrapper::Audit(args) = parse(&["audit", "list", "--op", "copy"]).audit;
         let AuditCommand::List(list) = args.command else {
             panic!("expected list");
@@ -147,11 +175,64 @@ mod tests {
     fn every_verb_accepts_an_explicit_log_path() {
         // Verification has to work on a chain written somewhere else — that is
         // how a mirrored copy gets checked.
-        for verb in ["verify", "list", "export"] {
+        for verb in ["verify", "head", "list", "export"] {
             assert!(
                 Harness::try_parse_from(["dctl", "audit", verb, "--audit-log", "/tmp/a.jsonl"])
                     .is_ok(),
                 "{verb} should accept --audit-log"
+            );
+        }
+    }
+
+    #[test]
+    fn the_anchor_pair_is_wired_end_to_end_in_the_parser() {
+        // `head` prints an anchor and `verify --expect-head` takes one; a build
+        // in which either half is missing has a documented procedure that cannot
+        // be run.
+        let Wrapper::Audit(args) = parse(&[
+            "audit",
+            "verify",
+            "--expect-head",
+            "9:37b656508f9217e841bf0963e2fa72225506687d1f1ecb4b34af60e98a2b35c7",
+        ])
+        .audit;
+        let AuditCommand::Verify(verify) = args.command else {
+            panic!("expected verify");
+        };
+        let anchor = verify
+            .expect_head
+            .expect("--expect-head reaches the command");
+        assert_eq!(
+            anchor.to_string(),
+            "9:37b656508f9217e841bf0963e2fa72225506687d1f1ecb4b34af60e98a2b35c7"
+        );
+
+        // A bare hash is the other accepted spelling.
+        let Wrapper::Audit(args) = parse(&[
+            "audit",
+            "verify",
+            "--expect-head",
+            "37b656508f9217e841bf0963e2fa72225506687d1f1ecb4b34af60e98a2b35c7",
+        ])
+        .audit;
+        let AuditCommand::Verify(verify) = args.command else {
+            panic!("expected verify");
+        };
+        assert_eq!(
+            verify.expect_head.expect("bare hash").to_string(),
+            "37b656508f9217e841bf0963e2fa72225506687d1f1ecb4b34af60e98a2b35c7"
+        );
+    }
+
+    #[test]
+    fn an_unusable_anchor_is_a_usage_error_rather_than_a_silent_pass() {
+        // The failure that would matter: a value the flag could not read being
+        // ignored, so the command verifies the chain, says `intact`, exits 0 and
+        // never compares anything at all.
+        for bad in ["", "abc", "not-a-hash", "1:2:3"] {
+            assert!(
+                Harness::try_parse_from(["dctl", "audit", "verify", "--expect-head", bad]).is_err(),
+                "--expect-head {bad:?} must not parse"
             );
         }
     }

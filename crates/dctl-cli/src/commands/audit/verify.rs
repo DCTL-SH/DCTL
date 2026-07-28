@@ -10,13 +10,38 @@
 //! consumer that only gets a non-zero exit knows something is wrong; one that
 //! also gets the record position knows where to look, and losing that because
 //! the command failed would be exactly the wrong trade for a security event.
+//!
+//! ## `--expect-head`: the half the chain cannot do
+//!
+//! A walk proves that nothing was altered *inside* the log. It cannot prove that
+//! nothing was removed from the **end** — drop the last two records and what
+//! remains is a shorter chain whose every link still holds. The records an
+//! attacker most wants gone are the most recent ones, so that is not a corner
+//! case, it is the case.
+//!
+//! `--expect-head` takes the anchor `dctl audit head` printed, and asserts that
+//! the chain **still ends there**. A disagreement is
+//! [`ExitCode::AuditHeadMismatch`] (26) and the verdict word
+//! [`AUDIT_VERDICT_HEAD_MISMATCH`] — never `intact`, which is the whole point:
+//! a log with its tail cut off must not report the same word as a whole one.
+//!
+//! The two codes stay separate because the two findings are. 24 says the links
+//! failed; 26 says the links held and this is not the chain you left. They call
+//! for different first moves, and a script that pages on 24 should not be woken
+//! by an anchor that is merely older than the log — which is one of the four
+//! shapes [`crate::audit::anchor::Mismatch`] separates, and the one that keeps
+//! the flag usable on a vault still in service.
 
 use std::path::PathBuf;
 
 use clap::Args;
 use serde::Serialize;
 
-use crate::constants::{AUDIT_VERDICT_BROKEN, AUDIT_VERDICT_INTACT};
+use crate::audit::anchor::{self, Anchor, Mismatch};
+use crate::constants::{
+    AUDIT_VERDICT_BROKEN, AUDIT_VERDICT_HEAD_MISMATCH, AUDIT_VERDICT_INTACT,
+    AUDIT_WITHOUT_ANCHOR_NOTE,
+};
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -31,51 +56,60 @@ pub struct VerifyArgs {
     /// Chain to verify. Defaults to the log beside the configured index.
     #[arg(long, value_name = "PATH")]
     pub audit_log: Option<PathBuf>,
+
+    /// Anchor the chain must end at, as `dctl audit head` printed it.
+    ///
+    /// Without this the chain is checked for edits and **not** for length: a
+    /// truncated log passes, because nothing inside a log attests to its own
+    /// size. Takes `<records>:<hash>` or a bare `<hash>`.
+    #[arg(long, value_name = "ANCHOR", value_parser = Anchor::parse)]
+    pub expect_head: Option<Anchor>,
 }
 
 /// The verdict, in the shape a machine consumer reads.
 #[derive(Debug, Serialize)]
 struct Verdict<'a> {
-    /// [`AUDIT_VERDICT_INTACT`] or [`AUDIT_VERDICT_BROKEN`].
+    /// [`AUDIT_VERDICT_INTACT`], [`AUDIT_VERDICT_BROKEN`] or
+    /// [`AUDIT_VERDICT_HEAD_MISMATCH`].
     verdict: &'static str,
     /// The file that was walked.
     log: String,
     /// How many records were read.
     records: usize,
-    /// Head hash, present only when the chain held.
+    /// Head hash, present whenever the chain itself held — including on a head
+    /// mismatch, where it is the value the caller needs in order to see what the
+    /// log ends at now.
     #[serde(skip_serializing_if = "Option::is_none")]
     head: Option<&'a str>,
-    /// Where it failed, present only when it did.
+    /// The anchor the caller asserted, present only when one was given.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    expected_head: Option<&'a Anchor>,
+    /// Where the chain failed, present only when it did.
     #[serde(skip_serializing_if = "Option::is_none")]
     broken_at: Option<&'a Break>,
+    /// How the head differed from the anchor, present only when it did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    head_mismatch: Option<&'a Mismatch>,
 }
 
 pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     let log = source::load(&ctx.globals, args.audit_log.as_deref())?;
-    report(ctx, &log, chain::verify(&log.records))
+    report(
+        ctx,
+        &log,
+        chain::verify(&log.records),
+        args.expect_head.as_ref(),
+    )
 }
 
 /// Emit the verdict, then fail if it was a failure.
-fn report(ctx: &Ctx, log: &Log, outcome: std::result::Result<Verified, Break>) -> Result<()> {
-    match outcome {
-        Ok(verified) => {
-            emit(
-                ctx,
-                &Verdict {
-                    verdict: AUDIT_VERDICT_INTACT,
-                    log: log.path.display().to_string(),
-                    records: verified.records,
-                    head: Some(verified.head.as_str()),
-                    broken_at: None,
-                },
-            )?;
-            ctx.out.info(format!(
-                "{} records verified, head {}",
-                verified.records, verified.head
-            ));
-            Ok(())
-        }
-
+fn report(
+    ctx: &Ctx,
+    log: &Log,
+    outcome: std::result::Result<Verified, Break>,
+    expected: Option<&Anchor>,
+) -> Result<()> {
+    let verified = match outcome {
         Err(broken) => {
             emit(
                 ctx,
@@ -84,19 +118,71 @@ fn report(ctx: &Ctx, log: &Log, outcome: std::result::Result<Verified, Break>) -
                     log: log.path.display().to_string(),
                     records: log.records.len(),
                     head: None,
+                    expected_head: expected,
                     broken_at: Some(&broken),
+                    head_mismatch: None,
                 },
             )?;
-            Err(break_error(log, &broken))
+            return Err(break_error(log, &broken));
         }
-    }
+        Ok(verified) => verified,
+    };
+
+    // The links held. Whether the chain is the *whole* chain is a separate
+    // question, and one only an anchor can answer.
+    let mismatch = expected.and_then(|anchor| {
+        anchor::compare(anchor, &verified, &log.records)
+            .err()
+            .map(|mismatch| (anchor, mismatch))
+    });
+
+    let Some((anchor, mismatch)) = mismatch else {
+        emit(
+            ctx,
+            &Verdict {
+                verdict: AUDIT_VERDICT_INTACT,
+                log: log.path.display().to_string(),
+                records: verified.records,
+                head: Some(verified.head.as_str()),
+                expected_head: expected,
+                broken_at: None,
+                head_mismatch: None,
+            },
+        )?;
+        ctx.out.info(format!(
+            "{} records verified, head {}",
+            verified.records, verified.head
+        ));
+        if expected.is_none() {
+            // Said out loud rather than left to the manual. `intact` without an
+            // anchor is a claim about content, not about length, and an operator
+            // who reads it as both has the one belief this command must not
+            // create.
+            ctx.out.info(AUDIT_WITHOUT_ANCHOR_NOTE);
+        }
+        return Ok(());
+    };
+
+    emit(
+        ctx,
+        &Verdict {
+            verdict: AUDIT_VERDICT_HEAD_MISMATCH,
+            log: log.path.display().to_string(),
+            records: verified.records,
+            head: Some(verified.head.as_str()),
+            expected_head: Some(anchor),
+            broken_at: None,
+            head_mismatch: Some(&mismatch),
+        },
+    )?;
+    Err(head_mismatch_error(log, anchor, &verified, &mismatch))
 }
 
 /// The one place a chain break becomes an error, so its code and its wording
 /// cannot drift between callers.
 ///
-/// Shared with `list` and `export`: whichever subcommand notices a break must
-/// exit 24, because a listing of a forged log that exits 0 is worse than no
+/// Shared with `head`, `list` and `export`: whichever subcommand notices a break
+/// must exit 24, because a listing of a forged log that exits 0 is worse than no
 /// listing at all.
 pub fn break_error(log: &Log, broken: &Break) -> CliError {
     CliError::new(
@@ -110,11 +196,36 @@ pub fn break_error(log: &Log, broken: &Break) -> CliError {
     )
 }
 
+/// The chain held; it is not the chain the caller anchored.
+///
+/// Names the file, what the anchor said, what the log says now, and what the
+/// difference is in plain words — `TRUNCATION`, `DIVERGENCE`, or a stale anchor
+/// — because an exit code alone tells an investigator nothing about how much
+/// history is gone.
+fn head_mismatch_error(
+    log: &Log,
+    anchor: &Anchor,
+    verified: &Verified,
+    mismatch: &Mismatch,
+) -> CliError {
+    CliError::new(
+        ExitCode::AuditHeadMismatch,
+        format!(
+            "{}: {mismatch}. Anchored {anchor}; the chain verifies and now ends \
+             at {}:{}",
+            log.path.display(),
+            verified.records,
+            verified.head
+        ),
+    )
+    .with_hint(mismatch.hint())
+}
+
 /// Write the verdict in whichever format was asked for.
 ///
 /// Text gets the bare word, because that is what a shell test compares; both
 /// JSON formats get the whole document, since a machine that asked for structure
-/// wants the head hash and the break position too.
+/// wants the head hash and the break or mismatch detail too.
 fn emit(ctx: &Ctx, verdict: &Verdict<'_>) -> Result<()> {
     match ctx.out.format() {
         Format::Text => ctx.out.line(verdict.verdict)?,
@@ -169,13 +280,21 @@ mod tests {
         }
     }
 
+    /// Run the whole report path over a chain, the way `run` does.
+    fn check(records: Vec<AuditRecord>, expected: Option<&str>) -> Result<()> {
+        let log = log(records);
+        let outcome = chain::verify(&log.records);
+        let anchor = expected.map(|raw| Anchor::parse(raw).expect("a well-formed anchor"));
+        report(&ctx(&[]), &log, outcome, anchor.as_ref())
+    }
+
     #[test]
     fn an_intact_chain_succeeds_in_every_format() {
         for args in [vec![], vec!["--json"], vec!["--format", "json-lines"]] {
             let ctx = ctx(&args);
             let log = log(sealed_chain(3));
             let outcome = chain::verify(&log.records);
-            assert!(report(&ctx, &log, outcome).is_ok(), "{args:?}");
+            assert!(report(&ctx, &log, outcome, None).is_ok(), "{args:?}");
         }
     }
 
@@ -185,9 +304,7 @@ mod tests {
         let mut records = sealed_chain(4);
         records[2].op = "forged".into();
 
-        let log = log(records);
-        let outcome = chain::verify(&log.records);
-        let error = report(&ctx(&[]), &log, outcome).unwrap_err();
+        let error = check(records, None).unwrap_err();
         assert_eq!(error.code(), ExitCode::AuditChainBroken);
         assert_eq!(error.code().as_i32(), 24);
     }
@@ -207,18 +324,132 @@ mod tests {
     }
 
     #[test]
+    fn dropping_the_last_two_records_no_longer_reports_intact() {
+        // THE defect. Before `--expect-head` this exact forgery — the classic
+        // and complete break of a hash chain — verified perfectly and exited 0.
+        let full = sealed_chain(9);
+        let anchor = format!("9:{}", full[8].hash);
+
+        // Unanchored, it still passes, and that is honest: the links do hold.
+        check(full[..7].to_vec(), None).expect("the shorter chain is internally sound");
+
+        // Anchored, it is caught, counted and refused.
+        let error = check(full[..7].to_vec(), Some(&anchor)).unwrap_err();
+        assert_eq!(error.code(), ExitCode::AuditHeadMismatch);
+        assert_eq!(error.code().as_i32(), 26);
+        assert!(
+            error.message().contains("TRUNCATION"),
+            "{}",
+            error.message()
+        );
+        assert!(
+            error.message().contains("2 records have been removed"),
+            "{}",
+            error.message()
+        );
+        assert!(error.hint().unwrap().contains("Do not delete"));
+    }
+
+    #[test]
+    fn a_matching_anchor_verifies_and_exits_zero() {
+        let records = sealed_chain(5);
+        let head = records[4].hash.clone();
+        check(records.clone(), Some(&format!("5:{head}"))).expect("counted anchor");
+        check(records, Some(&head)).expect("bare anchor");
+    }
+
+    #[test]
+    fn a_stale_anchor_is_refused_but_says_nothing_was_removed() {
+        // The case that decides whether operators keep passing the flag. It must
+        // not read as an attack, and it must not be silent either: records the
+        // anchor does not cover were appended, and that is worth knowing.
+        let records = sealed_chain(9);
+        let error = check(records.clone(), Some(&format!("6:{}", records[5].hash))).unwrap_err();
+
+        assert_eq!(error.code(), ExitCode::AuditHeadMismatch);
+        assert!(
+            error.message().contains("Nothing was removed"),
+            "{}",
+            error.message()
+        );
+        assert!(
+            !error.message().contains("TRUNCATION"),
+            "{}",
+            error.message()
+        );
+        assert!(error.hint().unwrap().contains("No records were removed"));
+    }
+
+    #[test]
+    fn a_head_mismatch_is_never_the_word_intact() {
+        // The title of the defect, asserted on the bytes that reach stdout
+        // rather than on an exit code: a cron whose whole test is
+        // `[ "$(dctl audit verify …)" = intact ]` must fail on a truncated log.
+        let full = sealed_chain(9);
+        let verified = chain::verify(&full[..7]).unwrap();
+        let anchor = Anchor::parse(&format!("9:{}", full[8].hash)).unwrap();
+        let mismatch = anchor::compare(&anchor, &verified, &full[..7]).unwrap_err();
+
+        let verdict = Verdict {
+            verdict: AUDIT_VERDICT_HEAD_MISMATCH,
+            log: "/tmp/a.jsonl".into(),
+            records: 7,
+            head: Some(&verified.head),
+            expected_head: Some(&anchor),
+            broken_at: None,
+            head_mismatch: Some(&mismatch),
+        };
+        assert_ne!(verdict.verdict, AUDIT_VERDICT_INTACT);
+
+        let json = serde_json::to_string(&verdict).unwrap();
+        assert!(json.contains("\"verdict\":\"head-mismatch\""), "{json}");
+        assert!(json.contains("\"kind\":\"truncated\""), "{json}");
+        assert!(json.contains("\"missing\":2"), "{json}");
+        // The head the log has *now* stays in the document: an operator needs it
+        // to see what the chain ends at before deciding anything.
+        assert!(json.contains("\"head\""), "{json}");
+        assert!(json.contains("\"expected_head\":\"9:"), "{json}");
+    }
+
+    #[test]
+    fn a_broken_chain_outranks_a_head_mismatch() {
+        // Both are wrong at once: the anchor cannot match a chain whose links
+        // failed. 24 is the more specific and more serious finding, and it names
+        // a record position that 26 cannot.
+        let mut records = sealed_chain(6);
+        records[2].path = "forged.jpg".into();
+        let error = check(records, Some(&format!("6:{}", "ab".repeat(32)))).unwrap_err();
+        assert_eq!(error.code(), ExitCode::AuditChainBroken);
+    }
+
+    #[test]
+    fn the_flag_takes_both_spellings_and_refuses_a_third() {
+        // The parser is the flag's contract: what `dctl audit head` prints, and
+        // the bare hash somebody pasted out of `--json`.
+        assert!(Anchor::parse(&"ab".repeat(32)).is_ok());
+        assert!(Anchor::parse(&format!("12:{}", "ab".repeat(32))).is_ok());
+
+        let error = Anchor::parse("head").unwrap_err();
+        assert!(error.contains("dctl audit head"), "{error}");
+    }
+
+    #[test]
     fn the_verdict_document_carries_the_head_or_the_break_but_never_both() {
         let intact = Verdict {
             verdict: AUDIT_VERDICT_INTACT,
             log: "/tmp/a.jsonl".into(),
             records: 2,
             head: Some("ab"),
+            expected_head: None,
             broken_at: None,
+            head_mismatch: None,
         };
         let json = serde_json::to_string(&intact).unwrap();
         assert!(json.contains("\"verdict\":\"intact\""), "{json}");
         assert!(json.contains("\"head\":\"ab\""), "{json}");
         assert!(!json.contains("broken_at"), "{json}");
+        assert!(!json.contains("expected_head"), "{json}");
+        assert!(!json.contains("head_mismatch"), "{json}");
 
         let mut records = sealed_chain(3);
         records[1].size += 1;
@@ -228,7 +459,9 @@ mod tests {
             log: "/tmp/a.jsonl".into(),
             records: 3,
             head: None,
+            expected_head: None,
             broken_at: Some(&broken),
+            head_mismatch: None,
         };
         let json = serde_json::to_string(&failed).unwrap();
         assert!(json.contains("\"verdict\":\"broken\""), "{json}");
@@ -239,9 +472,23 @@ mod tests {
     #[test]
     fn an_empty_chain_is_reported_as_intact_with_no_records() {
         // Honest: nothing has been appended. The module docs are explicit that
-        // this is not a claim that nothing happened.
+        // this is not a claim that nothing happened — and a genesis anchor is
+        // what turns it into a claim about length too.
         let log = log(Vec::new());
         let verified = chain::verify(&log.records).unwrap();
         assert_eq!(verified.records, 0);
+
+        check(Vec::new(), Some(AUDIT_CHAIN_GENESIS_PREV))
+            .expect("a fresh vault anchors at genesis");
+
+        // And a wiped log is caught against an anchor that covered records.
+        let records = sealed_chain(12);
+        let error = check(Vec::new(), Some(&format!("12:{}", records[11].hash))).unwrap_err();
+        assert_eq!(error.code(), ExitCode::AuditHeadMismatch);
+        assert!(
+            error.message().contains("12 records have been removed"),
+            "{}",
+            error.message()
+        );
     }
 }

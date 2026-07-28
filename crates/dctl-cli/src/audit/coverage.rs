@@ -192,7 +192,10 @@ pub const COVERAGE: &[(&str, Recording)] = &[
         "audit",
         Recording::Exempt(
             "Reads the log. A verifier that appended to the thing it verifies \
-             would change the head every time anyone looked at it.",
+             would change the head every time anyone looked at it — and since \
+             `audit head` hands that head out as the anchor an operator keeps, \
+             an appending verifier would invalidate its own answer between the \
+             two halves of the check.",
         ),
     ),
     // Behavioural cover:

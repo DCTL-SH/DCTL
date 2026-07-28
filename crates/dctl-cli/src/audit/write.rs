@@ -144,15 +144,17 @@ impl Writer {
 
     /// The hash the next record will link to.
     ///
-    /// Worth publishing: comparing it against an anchor kept outside the log is
-    /// the only way to detect that records were removed from the end, which the
-    /// chain itself cannot see (see [`super::chain`]).
-    ///
-    /// No command consults it yet, and inventing a caller to satisfy the lint
-    /// would be worse than saying so: the anchor DCTL would compare it against
-    /// does not exist. The tests do use it — it is how they assert that two runs
-    /// continue one chain rather than starting two — so the accessor stays and
-    /// the allow is narrowed to the non-test build.
+    /// Comparing a head against an anchor kept outside the log is the only way
+    /// to detect that records were removed from the end, and that mechanism now
+    /// ships — [`super::anchor`], `dctl audit head`, `dctl audit verify
+    /// --expect-head`. It reads the head off the *file*, through
+    /// `commands::audit::source` and [`super::chain::verify`], rather than off
+    /// this cache: an anchor must attest to a chain somebody walked, and a value
+    /// this writer is carrying in memory has not been walked. So there is still
+    /// no production caller here, and inventing one would be a second answer to
+    /// a question that already has one. The tests do use it — it is how they
+    /// assert that two runs continue one chain rather than starting two — so the
+    /// accessor stays and the allow is narrowed to the non-test build.
     #[cfg_attr(not(test), allow(dead_code))]
     #[must_use]
     pub fn head(&self) -> &str {

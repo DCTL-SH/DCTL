@@ -13,9 +13,10 @@ changes its hash, which orphans the entry after it; deleting one leaves a gap in
 the indices; reordering breaks both. `dctl audit` is how you check, read and hand
 over that chain.
 
-There are three verbs, and one rule that binds them:
+There are four verbs, and one rule that binds them:
 
 * `verify` — walk the chain and report the exact record where it fails.
+* `head` — print the anchor to keep somewhere the writer cannot reach.
 * `list` — show what the log says happened, with filters.
 * `export` — hand the chain to somebody else, byte-for-byte re-verifiable.
 
@@ -65,14 +66,20 @@ make two different records serialise to the same bytes. Hex comparison is
 case-insensitive, because a conforming writer may legitimately choose either
 spelling.
 
-**What this cannot detect: truncation of the tail.** Removing the last *n*
-records leaves a chain that verifies perfectly, because nothing inside the log
-attests to its own length. Detecting that needs an anchor kept somewhere the
-writer cannot reach — the encrypted remote mirror §7 mentions, or a periodically
-published head hash. `verify` prints the head hash for exactly that purpose;
-compare it against a value you recorded elsewhere. An evidence tool that
-overstates what it proves is worse than one that proves less, so this limit is
-stated rather than glossed.
+**What the chain alone cannot detect: truncation of the tail.** Removing the last
+*n* records leaves a chain that verifies perfectly, because nothing inside the log
+attests to its own length — and the records an attacker most wants gone are the
+most recent ones. Nothing written *into* the log can close that: whoever can cut
+the tail can cut anything the tail said about itself.
+
+`dctl audit head` and `dctl audit verify --expect-head` are the mechanism that
+does. `head` prints an **anchor** — one token, `<records>:<head>` — which you keep
+somewhere this machine cannot rewrite; `--expect-head` asserts the chain still
+ends there and exits **26** with the number of missing records when it does not.
+An unanchored `verify` that says `intact` is making a claim about **content, not
+length**, and says so at `-v`. The operating procedure — where to keep the
+anchor, how often to take one, and what each exit code means — is
+[`../AUDIT_LOG.md`](../AUDIT_LOG.md) §10.
 
 **A line that will not parse is treated as tampering**, not as a formatting
 inconvenience — reported with its line number, at exit **24**. A line that is not
@@ -87,7 +94,7 @@ next to the encrypted index — `--index /data/vaults/one.redb` puts it at
 independent chains instead of interleaving them into one that describes neither.
 With no `--index`, it falls back to the platform data directory —
 `~/.dctl/audit/` — the same directory tree the index and config live in, so a
-single backup of `~/.dctl` captures all of it.
+single backup of `~/.dctl` captures all of it. The
 file is named `audit.jsonl` in every case, and it is line-delimited JSON: one
 record per line, which is what makes the break report's line number meaningful.
 
@@ -138,6 +145,7 @@ and every verb works on it exactly as it does on the local one.
 
 ```
 dctl audit verify [flags]
+dctl audit head [flags]
 dctl audit list [flags]
 dctl audit export [flags]
 ```
@@ -153,12 +161,64 @@ dctl audit verify --audit-log /srv/vaults/prod/audit.jsonl
 intact
 ```
 
-Record the head hash somewhere the writer cannot reach. This is the only defence
-against tail truncation: nothing inside the log attests to its own length, so an
-anchor kept outside it is what makes a missing tail detectable.
+Take an anchor and keep it somewhere this machine cannot rewrite. This is the
+only defence against tail truncation: nothing inside the log attests to its own
+length, so an anchor kept outside it is what makes a missing tail detectable.
 
 ```
-dctl audit verify --json | jq -r '.head' >> /mnt/wormstore/dctl-heads.txt
+dctl audit head
+9:37b656508f9217e841bf0963e2fa72225506687d1f1ecb4b34af60e98a2b35c7
+```
+
+One token: the record count, a colon, and the head hash. The count is what lets
+the next comparison say *how many* records went missing rather than only that
+something did. Wire it into whatever already ran DCTL — the credential the DCTL
+host holds for the anchor store should be able to **append and nothing else**:
+
+```
+dctl backup /srv/data vault:nightly || exit
+printf '%s %s\n' "$(date -u +%FT%TZ)" "$(dctl audit head)" \
+  | ssh anchor-host 'cat >> /var/lib/dctl-anchors/prod'
+```
+
+Then check the log against the last anchor you took. This is the pair that turns
+`intact` from a claim about content into a claim about the whole history:
+
+```
+dctl audit verify --expect-head 9:37b656508f9217e841bf0963e2fa72225506687d1f1ecb4b34af60e98a2b35c7
+intact
+```
+
+Somebody trimmed the log. The chain still verifies — every remaining link holds,
+which is exactly why this needed an anchor — and the anchor says how much is
+gone:
+
+```
+dctl audit verify --expect-head 9:37b656508f9217e841bf0963e2fa72225506687d1f1ecb4b34af60e98a2b35c7
+head-mismatch
+error: /srv/vaults/prod/audit.jsonl: TRUNCATION: the anchor says this chain held 9
+  records; it holds 7. 2 records have been removed from the end. Anchored
+  9:37b65650…; the chain verifies and now ends at 7:0b91ee77…
+  hint: Records this log once held are not in it now. Do not delete this copy and
+  do not re-anchor it: keep it as evidence, compare it against any mirrored or
+  offline copy, and treat every operation it no longer accounts for as unattested.
+  A chain that verifies is not a chain that is complete.
+$ echo $?
+26
+```
+
+The same command on a log that simply moved on. Nothing was removed, so the
+wording and the remedy are different even though the exit code is the same — read
+the new records, then take a fresh anchor:
+
+```
+dctl audit verify --expect-head 6:4c9d4e83a75f5df8e35de5a83378568e45fc26417fcd1749ca2b2cf7f8e036a8
+head-mismatch
+error: /srv/vaults/prod/audit.jsonl: the chain does not end at the anchored head —
+  it still contains it, after 6 records, and has grown to 9: 3 records were appended
+  since the anchor was taken. Nothing was removed; the anchor is stale.
+$ echo $?
+26
 ```
 
 See what a chain says happened to one tree over one day. The window is half-open
@@ -250,9 +310,59 @@ verbs below.
 ### dctl audit verify
 
 ```
-  -h, --help               help for verify
-      --audit-log <PATH>   Chain to verify. Defaults to the log beside the configured index
+  -h, --help                    help for verify
+      --audit-log <PATH>        Chain to verify. Defaults to the log beside the configured index
+      --expect-head <ANCHOR>    Anchor the chain must end at, as `dctl audit head` printed it
 ```
+
+`--expect-head` is what makes `verify` a check on the log's **length** as well as
+its content. Without it the chain is checked for edits only, and a truncated log
+passes — honestly, because every remaining link really does hold.
+
+It takes either spelling of an anchor: the counted `<records>:<hash>` that
+`dctl audit head` prints, or a bare `<hash>` (what `verify --json | jq -r .head`
+gives). The counted form is strictly better and is the one to keep: with it a
+truncation is reported as *"2 records have been removed from the end"*; with a
+bare hash the same truncation is refused but cannot be counted, because a hash
+carries no length. Anything that is neither is a **usage error** (exit 1) rather
+than an anchor that quietly matches nothing.
+
+A mismatch is exit **26** and the stdout verdict `head-mismatch` — never
+`intact`. `--json` carries a `head_mismatch.kind` naming which of four things
+happened, because they call for different responses:
+
+| `kind` | meaning | what to do |
+|--------|---------|------------|
+| `advanced` | The anchored head is still in the chain; records were appended after it. **Nothing was removed.** | Read the new records, then re-anchor. |
+| `truncated` | The chain is shorter than the anchor says it was. The message carries the exact count. | Incident. Do not re-anchor. |
+| `diverged` | The anchored position holds a record that is not the anchored one. | Incident: history was rewritten, or this is a different chain. |
+| `absent` | The anchored head is nowhere in the chain, and the anchor carried no count. | Incident, and switch to counted anchors so the loss can be measured. |
+
+`advanced` is a non-zero exit and not an alarm, on purpose. A vault in service
+appends records between anchors; reporting that as tampering would fail the check
+constantly on a healthy system, and a defence operators switch off is not a
+defence.
+
+### dctl audit head
+
+```
+  -h, --help               help for head
+      --audit-log <PATH>   Chain to read. Defaults to the log beside the configured index
+```
+
+Prints one line: the **anchor**, `<records>:<head>`. One shell word, safe to
+paste into a ticket and to `diff` in a script. `--json` gives the same value plus
+its two parts separately (`records`, `head`, `anchor`), so a pipeline that stores
+one of them does not have to split a string.
+
+An empty log anchors at `0:` followed by the genesis link, which is a real anchor
+and worth taking: without it, the first operation a vault ever performs is the one
+no anchor covers.
+
+**A broken chain produces no anchor at all** — nothing on stdout, exit 24. Unlike
+`list` and `export`, there is nothing here an investigator needs to read; there is
+only a value somebody would later trust, and an anchor taken from a forgery
+attests to the forgery. Run `dctl audit verify` for the diagnosis.
 
 ### dctl audit list
 
@@ -307,9 +417,10 @@ no path filters beyond its own `--op`/`--path`/`--since`/`--until`. See
 [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
 
 `--format` changes each verb differently. For `verify`, text prints the bare word
-`intact` or `broken` (what a shell test compares) while `--json` and
-`--format json-lines` emit the whole verdict document with the head hash or the
-break position. For `list`, text is an aligned table showing only a 12-character
+`intact`, `broken` or `head-mismatch` (what a shell test compares) while `--json`
+and `--format json-lines` emit the whole verdict document with the head hash, the
+break position or the head-mismatch kind and counts. For `head`, text is the bare
+anchor and `--json` is the anchor plus its parts. For `list`, text is an aligned table showing only a 12-character
 hash *prefix* — it is there to tell adjacent rows apart, not to let anyone
 believe a row was checked by looking at it — `--json` is one array, and
 `--format json-lines` is one record per line. For `export`, text and
@@ -320,18 +431,24 @@ array document instead.
 
 | Code | Name | When |
 |-----:|------|------|
-| 0 | `success` | The chain verified. |
-| 1 | `usage` | No verb given, an unknown flag, an unparseable `--since`/`--until`, a `--direction` outside `in`/`out`/`internal`, a `--path` containing `..`, or `--interactive` with no terminal to prompt on. |
+| 0 | `success` | The chain verified, and — if `--expect-head` was given — it ends where the anchor says. |
+| 1 | `usage` | No verb given, an unknown flag, an unparseable `--since`/`--until`, a `--direction` outside `in`/`out`/`internal`, a `--path` containing `..`, an `--expect-head` that is neither a 64-hex head hash nor `<records>:<hash>`, or `--interactive` with no terminal to prompt on. An `--expect-head` the flag could not read is refused rather than ignored: ignoring it would verify the chain, print `intact`, exit 0 and compare nothing. |
 | 2 | `uncategorised` | An I/O error other than "not found" or "permission denied" while reading the log or writing `--output`, or a serialisation failure while encoding an export. |
 | 4 | `file_not_found` | A component of the `--output` path does not exist. |
 | 4 | `file_not_found` | **No log file at the resolved path**, including when the path came from an explicit `--audit-log`. The message names the path that was looked for. |
 | 7 | `fatal_error` | The log exists but could not be read — permission, or a device error. |
-| 24 | `audit_chain_broken` | **The chain failed.** Returned by all three verbs, after their output has been produced. Also returned when a line in the log is not a parseable record, since that is indistinguishable from tampering. |
+| 24 | `audit_chain_broken` | **The chain failed.** Returned by all four verbs, after their output has been produced — except `head`, which produces none. Also returned when a line in the log is not a parseable record, since that is indistinguishable from tampering. |
 | 25 | `cancelled` | An `--interactive` overwrite of `--output` was declined, or Ctrl-C / SIGTERM. |
+| 26 | `audit_head_mismatch` | **The chain verified and does not end at `--expect-head`.** Records were removed from the end, history diverged, or the anchor is older than the log. `--json` carries the `kind` and the counts. |
 
-Exit **24** is the code to branch on. It means one thing and only one thing: the
-tamper-evident log no longer proves what it claims. Nothing else in DCTL returns
-it. Codes 0–10 mirror rclone's taxonomy; 20+ are DCTL's own. See
+Exit **24** and exit **26** are the two to branch on, and they are separate on
+purpose. 24 means the links failed: the log no longer proves what it claims. 26
+means the links held and this is not the chain you anchored — which is the only
+way tail truncation is ever visible, and which also covers the benign case of an
+anchor that is simply older than the log. Folding 26 into 24 would put a routine
+"take a fresh anchor" behind the code operators are told to treat as a security
+event, and that is how a loud code comes to be ignored. Codes 0–10 mirror
+rclone's taxonomy; 20+ are DCTL's own. See
 [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 
 ## See also

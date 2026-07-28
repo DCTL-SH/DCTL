@@ -72,7 +72,12 @@ pub const fn is_worth_repeating(error: &CliError) -> bool {
         | ExitCode::IntegrityFailure
         | ExitCode::VaultLocked
         | ExitCode::IndexError
-        | ExitCode::AuditChainBroken => false,
+        | ExitCode::AuditChainBroken
+        // An anchor that does not match the log will not match it on a second
+        // look either, and this code is produced by `dctl audit verify` rather
+        // than by any transfer — repeating a file on the strength of it would be
+        // retrying somebody else's finding.
+        | ExitCode::AuditHeadMismatch => false,
 
         // The run was stopped deliberately. Repeating either of these would be
         // working around the operator rather than for them.

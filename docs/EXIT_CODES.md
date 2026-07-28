@@ -22,7 +22,8 @@ are the ones rclone publishes.
 **20+ are DCTL-specific.** They cover failures rclone has no concept of, because
 rclone has no vault: a verified write refusing to commit, AEAD authentication
 failing on read, the encrypted index or write-ahead journal being unreadable,
-and the tamper-evident audit log failing its hash chain. Folding any of these
+the tamper-evident audit log failing its hash chain, and that log no longer
+ending where it was anchored. Folding any of these
 into 2 (`uncategorised`) or 7 (`fatal_error`) would tell an operator that
 something went wrong while hiding the only thing that matters — whether the data
 is intact.
@@ -54,6 +55,7 @@ Slugs and descriptions below are taken verbatim from `ExitCode::slug()` and
 | 23 | `index_error` | Encrypted index or journal error |
 | 24 | `audit_chain_broken` | Audit log hash chain verification failed |
 | 25 | `cancelled` | Operation cancelled |
+| 26 | `audit_head_mismatch` | Audit log head does not match the expected anchor |
 
 The same table is written once in the code, as `ExitCode::slug` and
 `ExitCode::describe` in `crates/dctl-cli/src/exit.rs`. This page is kept in step
@@ -241,6 +243,47 @@ and needs no remediation; the reason it gets its own code at all is so a wrapper
 script can distinguish "the operator stopped it" from "it finished", which exit 0
 would hide and exit 1 would misreport as a usage error.
 
+## 26 — `audit_head_mismatch`
+
+**Audit log head does not match the expected anchor**
+
+**Trigger.** `dctl audit verify --expect-head <anchor>` walked the chain, found
+every link sound, and found that the chain does not end at the head the caller
+anchored. Raised in one place
+(`commands::audit::verify::head_mismatch_error`), and produced by that flag and
+nothing else.
+
+**Why it is not 24.** A hash chain detects every edit made *inside* a log and
+none made to its **end**: drop the last two records and what remains is a shorter
+chain whose every link still holds. 24 says the links failed. 26 says the links
+held and this is not the chain you left — a different finding, with a different
+first move, and the only way tail truncation is ever visible. It also covers the
+routine case of an anchor that is simply older than the log, which must not be
+reported behind the code operators are told to page on.
+
+**State of the data.** *Unknown, and possibly less of it than you have a record
+of.* Like 24, this says nothing about whether your objects are intact. It says
+the account of what happened to them is not the account you last saw.
+
+**What to do — read the `kind` first.** `--json` carries
+`head_mismatch.kind`, and the four are not the same event:
+
+| `kind` | What happened | What to do |
+|--------|---------------|------------|
+| `advanced` | The anchored head is **still in the chain**; records were appended after it. Nothing was removed. | Not an incident. Read the new records with `dctl audit list`, then take a fresh anchor with `dctl audit head`. |
+| `truncated` | The chain is **shorter** than the anchor says it was; the message carries the exact number missing. | **Incident.** |
+| `diverged` | The anchored position holds a record that is not the one anchored: history at or before the anchor was rewritten, or this is a different chain. | **Incident.** |
+| `absent` | The anchored head is nowhere in the chain, and the anchor carried no record count, so the loss cannot be measured. | **Incident** — and switch to the counted anchor `dctl audit head` prints, so the next answer carries a number. |
+
+On any of the three incident kinds: **do not re-anchor, and do not delete the
+log.** A fresh anchor taken from a shortened log makes the shortened log the new
+baseline and destroys the only evidence that anything was removed. Keep the file,
+keep the old anchor, and compare against any mirrored or offline copy.
+
+Where an operator is supposed to keep the anchor, and how often to take one, is
+[`AUDIT_LOG.md`](AUDIT_LOG.md) §10 — written as an operating procedure, because a
+defence nobody knows how to run is not a defence.
+
 ---
 
 # How each layer's errors map onto codes
@@ -354,7 +397,7 @@ errors helps nobody. Everything else is counted and the run continues.
 # Branching on the codes in a backup script
 
 The distinction that matters operationally is **retry later** (5 — transient, the
-system is fine) versus **stop and investigate** (20, 21, 24 — the system is
+system is fine) versus **stop and investigate** (20, 21, 24, 26 — the system is
 telling you something about your data's integrity that will not improve by
 running the command again).
 
@@ -364,6 +407,13 @@ running the command again).
 set -uo pipefail   # NOT -e: we need to inspect the code ourselves.
 
 LOG=/var/log/dctl/backup.log
+
+# The audit anchor lives on another host, and this host's key there can only
+# append. An anchor kept locally is truncated by the same command as the log it
+# is supposed to protect (AUDIT_LOG.md section 10.4).
+anchor_take()  { printf '%s %s\n' "$(date -u +%FT%TZ)" "$(dctl audit head)" \
+                   | ssh anchor-host 'cat >> /var/lib/dctl-anchors/prod'; }
+anchor_last()  { ssh anchor-host 'tail -n1 /var/lib/dctl-anchors/prod' | awk '{print $NF}'; }
 
 dctl sync /srv/data vault:data --log-file "$LOG" --log-format json
 code=$?
@@ -412,6 +462,28 @@ Restore from another copy, then scrub the dataset."
     page-oncall "dctl 24 audit_chain_broken: DO NOT DELETE THE LOG. \
 Preserve it, compare against the offline mirror, treat later entries as unattested."
     exit $code
+    ;;
+
+  26) # the chain verifies but does not end where we anchored it.
+    # `advanced` is the log having grown since the last anchor and is routine;
+    # the other three kinds mean history is missing. Read the kind, do not
+    # re-anchor on an incident — a fresh anchor makes the short log the baseline.
+    kind=$(dctl audit verify --json --expect-head "$(anchor_last)" \
+             | jq -r '.head_mismatch.kind')
+    case $kind in
+      advanced)
+        dctl audit list --limit 50      # the records the old anchor did not cover
+        anchor_take                     # then, and only then, move the baseline
+        logger -t dctl "dctl 26 advanced: log grew since the last anchor"
+        exit 0
+        ;;
+      *)
+        page-oncall "dctl 26 audit_head_mismatch ($kind): DO NOT DELETE THE LOG \
+AND DO NOT RE-ANCHOR. Records are missing from the end. Preserve the log and the \
+anchor, compare against the offline mirror."
+        exit $code
+        ;;
+    esac
     ;;
 
   22) # wrong password/factor, or a damaged envelope. Nothing was touched.
