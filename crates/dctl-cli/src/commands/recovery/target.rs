@@ -7,18 +7,28 @@
 //! anything ambiguous rather than guessing, and it is the only place in the
 //! family that interprets user path syntax.
 //!
-//! The disambiguation rules are the ones documented in [`crate::platform::path`]:
-//! a single character before the colon is a Windows drive letter, a
-//! `\\`-prefixed string is a UNC share, and both are *local* paths that neither
-//! side of a recovery accepts as a vault. A remote name is therefore at least
-//! [`MIN_REMOTE_NAME_LEN`] characters, which is what makes `C:\data`
-//! unambiguous on every platform rather than only on Windows.
+//! The disambiguation rules are the ones documented in [`crate::platform::path`]
+//! and applied the way [`crate::remote::RemoteSpec::classify`] applies them: a
+//! `\\`-prefixed string is a UNC share on every platform, and a single letter
+//! before the colon is a Windows drive **only where drives exist**. Both are
+//! *local* paths that neither side of a recovery accepts as a vault.
+//!
+//! That platform condition used to be missing here, and this is the family where
+//! it mattered most. `dctl restore r: /out` and `dctl backup ./tree r:snap` — a
+//! remote called `r`, which `dctl config create` will happily make and every
+//! other command addresses — were refused on Linux with "'r:' is a local path,
+//! not a vault". The command an operator reaches for when everything else is
+//! gone told them their vault was a directory. `HANDOVER.md` §18.1 recorded the
+//! drift as closed across five command families; this one and the byte-stream
+//! family ([`crate::commands::pipeline::spec`]) were not among them.
 
 use std::fmt;
 
 use serde::Serialize;
 
-use crate::constants::{MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, REMOTE_SEPARATOR};
+use crate::constants::{
+    DRIVE_LETTERS_EXIST, MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, REMOTE_SEPARATOR,
+};
 use crate::error::{CliError, Result};
 use crate::platform::path;
 
@@ -44,6 +54,19 @@ impl Target {
     /// the remote, uses a remote name short enough to be a drive letter, or
     /// tries to escape its root with `..`.
     pub fn parse(spec: &str) -> Result<Self> {
+        Self::classify(spec, DRIVE_LETTERS_EXIST)
+    }
+
+    /// [`Target::parse`] with the platform supplied.
+    ///
+    /// `drive_letters` is [`DRIVE_LETTERS_EXIST`] in production, and is a
+    /// parameter for the reason [`crate::remote::RemoteSpec::classify`] takes
+    /// one: a rule that depends on the platform has to be assertable from either
+    /// kind of machine, or half of it is never run.
+    ///
+    /// # Errors
+    /// As [`Target::parse`].
+    pub fn classify(spec: &str, drive_letters: bool) -> Result<Self> {
         let spec = spec.trim();
         if spec.is_empty() {
             return Err(CliError::usage("no vault given").with_hint(
@@ -54,7 +77,9 @@ impl Target {
         // Local paths are rejected before the colon split, because `C:\data`
         // *does* contain a colon and would otherwise parse as a remote called
         // `C` — which is how a backup ends up writing to a vault nobody named.
-        if path::looks_like_unc(spec) || path::looks_like_windows_drive(spec) {
+        // The drive-letter half is asked only where drives exist; off Windows a
+        // one-letter name is an ordinary remote.
+        if path::looks_like_unc(spec) || (drive_letters && path::looks_like_windows_drive(spec)) {
             return Err(
                 CliError::usage(format!("'{spec}' is a local path, not a vault")).with_hint(
                     "A recovery has one local side and one vault side. The vault is \
@@ -71,12 +96,13 @@ impl Target {
             );
         };
 
-        if remote.len() < MIN_REMOTE_NAME_LEN {
+        if remote.chars().count() < MIN_REMOTE_NAME_LEN {
             return Err(
                 CliError::usage(format!("'{remote}' is too short to be a remote name")).with_hint(
                     format!(
-                        "Remote names are at least {MIN_REMOTE_NAME_LEN} characters, so a \
-                 one-letter prefix is always a Windows drive.",
+                        "Remote names are at least {MIN_REMOTE_NAME_LEN} character(s). A \
+                         one-letter name is a Windows drive only on Windows; everywhere \
+                         else it is an ordinary remote.",
                     ),
                 ),
             );
@@ -198,12 +224,26 @@ mod tests {
     }
 
     #[test]
-    fn a_drive_letter_is_never_a_remote() {
+    fn a_drive_letter_is_never_a_remote_where_drives_exist() {
+        // Renamed from `a_drive_letter_is_never_a_remote`, which asserted the
+        // rule unconditionally and is the reason this family kept the old rule
+        // through an audit that reported it closed: the defect had a green test
+        // sitting on top of it.
         for spec in [r"C:\data", "c:/data", r"\\server\share"] {
-            let error = Target::parse(spec).unwrap_err();
+            let error = Target::classify(spec, true).unwrap_err();
             assert_eq!(error.code(), ExitCode::Usage);
             assert!(error.hint().is_some());
         }
+
+        // A UNC share is local wherever it is written; a drive letter is not a
+        // drive on a machine with no drives.
+        let unc = Target::classify(r"\\server\share", false).unwrap_err();
+        assert_eq!(unc.code(), ExitCode::Usage);
+        assert_eq!(
+            Target::classify("c:/data", false).unwrap().remote,
+            "c",
+            "off Windows a one-letter name is an ordinary remote"
+        );
     }
 
     #[test]
@@ -243,5 +283,57 @@ mod tests {
         // At the root there is no prefix to strip.
         let root = Target::parse("vault:").unwrap();
         assert_eq!(root.relative("photos/2024/a.jpg"), "photos/2024/a.jpg");
+    }
+
+    #[test]
+    fn a_one_character_remote_is_a_vault_everywhere_a_drive_letter_cannot_exist() {
+        // The defect this pins, measured on the release binary before it was
+        // fixed: `dctl config create r local path=/srv/x` succeeds, `dctl ls r:`
+        // lists it, `dctl copy ./tree r:t` writes into it — and then
+        //
+        //     $ dctl restore r: /out
+        //     error: 'r:' is a local path, not a vault
+        //     $ dctl backup ./tree r:snap
+        //     error: 'r:bk' is a local path, not a vault
+        //
+        // One binary, one remote, two readings — and the family that disagreed
+        // is the one an operator reaches for when everything else is gone.
+        // `HANDOVER.md` §18.1 recorded this drift as closed; it was closed in
+        // five command families and not in this one.
+        //
+        // Asserted through `classify` rather than `parse` so both platforms are
+        // exercised from either kind of machine. A test that only called `parse`
+        // would assert whichever half this build compiles and leave the other to
+        // drift, which is the shape of the original defect.
+        let off_windows = Target::classify("r:photos", false).expect("a remote off Windows");
+        assert_eq!(off_windows.remote, "r");
+        assert_eq!(off_windows.path, "photos");
+
+        let bare = Target::classify("r:", false).expect("the whole remote off Windows");
+        assert_eq!(bare.remote, "r");
+        assert!(bare.is_root());
+
+        // …and on a platform that really has drives, `r:` is still a drive.
+        let on_windows = Target::classify("r:photos", true).expect_err("a drive on Windows");
+        assert_eq!(on_windows.code(), ExitCode::Usage);
+        assert!(
+            on_windows.message().contains("is a local path"),
+            "expected the drive-letter refusal, got: {}",
+            on_windows.message()
+        );
+
+        // A UNC share is local on every platform, drives or no drives.
+        for drives in [false, true] {
+            let unc = Target::classify(r"\\server\share", drives).expect_err("a UNC share");
+            assert!(unc.message().contains("is a local path"));
+        }
+
+        // A two-character name never depended on the platform and still does not.
+        for drives in [false, true] {
+            assert_eq!(
+                Target::classify("rr:photos", drives).expect("a remote").remote,
+                "rr"
+            );
+        }
     }
 }

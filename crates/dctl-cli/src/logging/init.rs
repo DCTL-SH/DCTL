@@ -109,6 +109,15 @@ pub fn init(config: &LogConfig) -> Result<(), LogInitError> {
                 )
                 .try_init();
         }
+        // `show_source` is applied to **every** layer in these two arms, and
+        // that is the fix rather than the decoration. Both used to build their
+        // layers without it, so `--log-file` silently switched `--log-source`
+        // off — on the file it was asked for *and* on stderr, which had been
+        // working a moment earlier. The unattended run that most needs a source
+        // location is exactly the one that carries `--log-file`, so the flag was
+        // honoured only where nobody was going to need it. Adding a layer here
+        // means adding these two calls; the test that pins it asserts on the
+        // records in both destinations, not on the field being read.
         (true, Some(file)) => {
             let _ = tracing_subscriber::registry()
                 .with(filter)
@@ -116,13 +125,17 @@ pub fn init(config: &LogConfig) -> Result<(), LogInitError> {
                     tracing_subscriber::fmt::layer()
                         .json()
                         .with_current_span(true)
-                        .with_writer(std::io::stderr),
+                        .with_writer(std::io::stderr)
+                        .with_file(config.show_source)
+                        .with_line_number(config.show_source),
                 )
                 .with(
                     tracing_subscriber::fmt::layer()
                         .json()
                         .with_current_span(true)
-                        .with_writer(file),
+                        .with_writer(file)
+                        .with_file(config.show_source)
+                        .with_line_number(config.show_source),
                 )
                 .try_init();
         }
@@ -133,14 +146,18 @@ pub fn init(config: &LogConfig) -> Result<(), LogInitError> {
                     tracing_subscriber::fmt::layer()
                         .with_ansi(console_color)
                         .with_target(false)
-                        .with_writer(std::io::stderr),
+                        .with_writer(std::io::stderr)
+                        .with_file(config.show_source)
+                        .with_line_number(config.show_source),
                 )
                 .with(
                     // A file never gets ANSI escapes.
                     tracing_subscriber::fmt::layer()
                         .with_ansi(false)
                         .with_target(false)
-                        .with_writer(file),
+                        .with_writer(file)
+                        .with_file(config.show_source)
+                        .with_line_number(config.show_source),
                 )
                 .try_init();
         }

@@ -144,7 +144,14 @@ fn store_kind(e: &dctl_store::StoreError) -> ErrorKind {
         S::NotFound(_) => ErrorKind::NotFound,
         S::ChecksumMismatch { .. } => ErrorKind::Integrity,
         S::InvalidKey(_) | S::RangeOutOfBounds { .. } => ErrorKind::Usage,
-        S::ShortWrite { .. } | S::Io(_) | S::Backend(_) => ErrorKind::Transient,
+        // A store that moved or vanished is transient in the same practical
+        // sense a short write is: nothing about the bytes is in doubt, and the
+        // remedy is to put the volume back and run it again. Emphatically not
+        // `Integrity` — an app must not tell somebody their data may be damaged
+        // because a disk was unplugged mid-run.
+        S::ShortWrite { .. } | S::Io(_) | S::Backend(_) | S::RootChanged { .. } => {
+            ErrorKind::Transient
+        }
     }
 }
 

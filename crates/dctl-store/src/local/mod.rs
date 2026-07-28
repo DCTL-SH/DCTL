@@ -8,6 +8,7 @@
 mod key_path;
 mod read;
 mod remove;
+pub(crate) mod root;
 mod verified_write;
 mod walk;
 
@@ -26,12 +27,32 @@ use crate::modified::SourceModified;
 #[derive(Clone, Debug)]
 pub struct LocalFs {
     root: PathBuf,
+    /// What `root` was when this backend was built, or [`None`] if there was
+    /// nothing there yet.
+    ///
+    /// Recorded once, at construction, because that is the moment the caller
+    /// decided this directory *is* the store — for a vault it is the moment its
+    /// `system/envelope.bin` was read out of it. Every write then checks that it
+    /// is still writing into the same directory; see [`root`] for the run that
+    /// reported `Files: 25 / 25, Errors: 0` into a replacement.
+    opened_as: Option<root::RootId>,
 }
 
 impl LocalFs {
     #[must_use]
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self { root: root.into() }
+        let root = root.into();
+        let opened_as = root::identify(&root);
+        Self { root, opened_as }
+    }
+
+    /// Refuse a write whose store root is no longer the one this backend opened.
+    ///
+    /// # Errors
+    /// [`StoreError::RootChanged`] when the recorded root has been removed or
+    /// replaced.
+    pub(crate) fn require_same_root(&self) -> Result<()> {
+        root::check(&self.root, self.opened_as)
     }
 
     #[must_use]

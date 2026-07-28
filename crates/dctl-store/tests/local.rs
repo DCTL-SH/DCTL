@@ -516,3 +516,98 @@ async fn a_name_at_the_filesystem_limit_is_storable() {
     assert_eq!(fs.get(&key).await.unwrap(), body);
     assert_eq!(fs.list_page("", None).await.unwrap().items.len(), 1);
 }
+
+#[tokio::test]
+async fn a_store_that_moves_out_from_under_a_run_is_a_failure_and_not_a_reported_success() {
+    // Measured on the release binary before this guard existed. A `dctl copy` of
+    // 25 files into a vault, with the vault's object store renamed away three
+    // seconds in:
+    //
+    //      Transferred: 9.54 MiB / 9.54 MiB, 100%, 2.71 MiB/s
+    //         Verified: 9.54 MiB checksum-matched
+    //            Files: 25 / 25
+    //           Errors: 0
+    //
+    // Exit 0, and not one of those objects was in a vault. `create_dir_all`
+    // re-created the store path, every write landed in the new empty directory,
+    // and the post-write read-back passed because it re-read the same wrong
+    // place. The next command exited 7: "no vault at this location".
+    //
+    // Work reported as done that did not happen — `PLAN.md` §6 — and the
+    // write-side twin of the unmounted-volume defect the read side already
+    // guards.
+    //
+    // Asserted here rather than against the binary, and that is not a
+    // convenience: the property is about one *process* whose store changes
+    // underneath it, and a store legitimately replaced *between* two runs is
+    // simply a different store, which this must not refuse. One `LocalFs` across
+    // the rename is exactly the run being described, with no sleep and no race.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("store");
+    std::fs::create_dir(&root).unwrap();
+
+    let fs = LocalFs::new(&root);
+    let first = ObjectKey::new("a.bin");
+    let data = Bytes::from_static(b"the first object, written while the store was there");
+    fs.put(&first, data.clone(), &blake3(&data), SourceModified::unknown())
+        .await
+        .expect("a write into the store as opened");
+
+    // The store moves away, and something else takes its place — which is what
+    // `create_dir_all` does, and why "is a directory there?" is the wrong
+    // question.
+    std::fs::rename(&root, dir.path().join("store-moved")).unwrap();
+    std::fs::create_dir(&root).unwrap();
+
+    let second = ObjectKey::new("b.bin");
+    let more = Bytes::from_static(b"bytes that must not land in a directory nobody named");
+    let error = fs
+        .put(&second, more.clone(), &blake3(&more), SourceModified::unknown())
+        .await
+        .expect_err("a write into a replaced store must fail");
+    match &error {
+        StoreError::RootChanged { root: named, .. } => {
+            assert!(named.contains("store"), "the refusal names no root: {named}");
+        }
+        other => panic!("expected RootChanged, got {other}"),
+    }
+
+    // The streaming path is separate code and takes the same guard.
+    let source = dir.path().join("source.bin");
+    std::fs::write(&source, &more).unwrap();
+    let streamed = fs
+        .put_from_path(&second, &source, &blake3(&more), SourceModified::unknown())
+        .await
+        .expect_err("a streamed write into a replaced store must fail");
+    assert!(matches!(streamed, StoreError::RootChanged { .. }));
+
+    // The bytes, not the counter: nothing landed in the replacement.
+    let landed: Vec<_> = std::fs::read_dir(&root)
+        .unwrap()
+        .filter_map(std::result::Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert!(
+        landed.is_empty(),
+        "objects were written into the directory that replaced the store: {landed:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_root_that_did_not_exist_yet_is_still_created_by_the_first_write() {
+    // The other half of the rule, and the one that decides it has no false
+    // positives: `dctl config create backup local path=/srv/new` names a
+    // directory that does not exist, and the first transfer through it has
+    // always created one. A guard that refused here would break the ordinary
+    // case in order to catch the rare one.
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("not-yet");
+    let fs = LocalFs::new(&root);
+
+    let key = ObjectKey::new("nested/first.bin");
+    let data = Bytes::from_static(b"the write that creates the store");
+    fs.put(&key, data.clone(), &blake3(&data), SourceModified::unknown())
+        .await
+        .expect("the first write creates the root");
+    assert_eq!(fs.get(&key).await.unwrap(), data);
+}

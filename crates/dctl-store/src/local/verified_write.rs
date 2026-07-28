@@ -88,6 +88,13 @@ pub(super) async fn put(
     expected: &ContentHash,
     modified: SourceModified,
 ) -> Result<PutOutcome> {
+    // Before anything else: the store this write was addressed to must still be
+    // the store this backend opened. `create_dir_all` below will happily
+    // re-create a root that was renamed away, and every stage after it —
+    // including the read-back — then agrees with itself about a directory that
+    // belongs to nobody. See `super::root`.
+    fs.require_same_root()?;
+
     let dest = fs.resolve(key)?;
 
     // Guard: the in-hand bytes must match the caller's declared hash.
@@ -181,6 +188,11 @@ pub(super) async fn put_from_path(
     expected: &ContentHash,
     modified: SourceModified,
 ) -> Result<PutOutcome> {
+    // The same guard as `put`, on the streaming path, for the same reason: a
+    // large-file transfer is the one most likely to still be running when
+    // somebody moves the disk.
+    fs.require_same_root()?;
+
     let dest = fs.resolve(key)?;
     let source = source.to_path_buf();
     let expected = expected.clone();

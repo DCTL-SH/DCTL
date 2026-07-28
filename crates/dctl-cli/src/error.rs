@@ -148,6 +148,19 @@ impl From<StoreError> for CliError {
             // reaches here the retry budget is already spent.
             StoreError::Backend(_) => Self::new(ExitCode::TemporaryError, error.to_string())
                 .with_hint("Retries were exhausted. Check connectivity and provider status."),
+
+            // Fatal, and fatal is the point: every remaining file would be
+            // written into the same wrong place, and the run that this replaced
+            // reported all of them as stored. See `dctl_store::local::root`.
+            StoreError::RootChanged { .. } => Self::new(ExitCode::FatalError, error.to_string())
+                .with_hint(
+                    "The store moved or was removed while the run was using it, so \
+                     anything written after that point would have gone into a \
+                     different directory. Put the store back where the \
+                     configuration says it is — check that the volume holding it is \
+                     still mounted — and run the command again; it will resume from \
+                     what is genuinely there.",
+                ),
         }
     }
 }
@@ -287,6 +300,7 @@ impl CliError {
             StoreError::ShortWrite { .. } => ExitCode::FatalError,
             StoreError::InvalidKey(_) | StoreError::RangeOutOfBounds { .. } => ExitCode::Usage,
             StoreError::Backend(_) => ExitCode::TemporaryError,
+            StoreError::RootChanged { .. } => ExitCode::FatalError,
             StoreError::Io(source) if dctl_store::durable::is_out_of_space(source) => {
                 ExitCode::FatalError
             }
@@ -339,6 +353,10 @@ mod tests {
             StoreError::Io(std::io::Error::from(std::io::ErrorKind::ReadOnlyFilesystem)),
             StoreError::Io(std::io::Error::other("device")),
             StoreError::Backend("503".into()),
+            StoreError::RootChanged {
+                root: "/srv/vault".into(),
+                detail: "has been removed",
+            },
         ]
     }
 

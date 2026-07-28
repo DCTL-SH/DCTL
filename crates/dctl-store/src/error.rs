@@ -46,6 +46,19 @@ pub enum StoreError {
     /// Backend-specific failure (network, auth, quota, provider error).
     #[error("backend error: {0}")]
     Backend(String),
+
+    /// The store's root directory is not the one this backend was opened on.
+    ///
+    /// Its own variant rather than an [`StoreError::Io`], because the errno is
+    /// not what the operator needs to know and there may not be one: the
+    /// characteristic case is a root that a write *re-created*, so the write
+    /// itself reports nothing at all. See [`crate::local::root`] for the run
+    /// this exists to stop reporting as a success.
+    #[error("the store root {root} {detail}; nothing was written into it")]
+    RootChanged {
+        root: String,
+        detail: &'static str,
+    },
 }
 
 impl StoreError {
@@ -65,6 +78,7 @@ impl StoreError {
             StoreError::Io(_) => 2005,
             StoreError::Backend(_) => 2006,
             StoreError::ShortWrite { .. } => 2007,
+            StoreError::RootChanged { .. } => 2008,
         }
     }
 }

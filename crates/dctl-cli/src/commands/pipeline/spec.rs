@@ -9,11 +9,23 @@
 //! most pipe-shaped commands in the tool the only ones that cannot appear in a
 //! local pipeline.
 //!
-//! The disambiguation rules are the ones in [`crate::platform::path`]: a single
-//! character before the colon is a drive letter, a `\\`-prefixed string is a UNC
-//! share, and a remote name is at least [`MIN_REMOTE_NAME_LEN`] characters and
-//! contains no path separator. Anything that fails those tests is a local path
-//! rather than an error, because for this family "local" is a valid answer.
+//! The disambiguation rules are the ones in [`crate::platform::path`], applied
+//! the way [`crate::remote::RemoteSpec::classify`] applies them: a `\\`-prefixed
+//! string is a UNC share, a single letter before the colon is a drive **on a
+//! platform that has drives**, and a remote name is at least
+//! [`MIN_REMOTE_NAME_LEN`] characters and contains no path separator. Anything
+//! that fails those tests is a local path rather than an error, because for this
+//! family "local" is a valid answer.
+//!
+//! The platform condition is the part that was missing, and it was not cosmetic.
+//! This module tested the drive-letter *shape* unconditionally, so on Linux
+//! `dctl cat r:notes.md` — a perfectly ordinary remote called `r` — was read as
+//! a local file literally named `r:notes.md` and reported "No such file or
+//! directory", while `dctl ls r:` listed the remote happily. `rcat` was worse: it
+//! created its staging file beside the *local* path, so a stream written to a
+//! configured remote failed on a directory the operator never named.
+//! `HANDOVER.md` §18.1 recorded this drift as closed across five command
+//! families; this one and the recovery family were not among them.
 //!
 //! The two halves are normalised differently, and that asymmetry is deliberate.
 //! A **remote** path is a logical vault path, so it is cleaned and NFC-normalised
@@ -26,7 +38,9 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::constants::{MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, REMOTE_SEPARATOR};
+use crate::constants::{
+    DRIVE_LETTERS_EXIST, MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, REMOTE_SEPARATOR,
+};
 use crate::error::{CliError, Result};
 use crate::platform::path;
 
@@ -51,6 +65,20 @@ impl ObjectSpec {
     /// remote whose name contains a path separator, or tries to escape the vault
     /// root with `..`.
     pub fn parse(spec: &str) -> Result<Self> {
+        Self::classify(spec, DRIVE_LETTERS_EXIST)
+    }
+
+    /// [`ObjectSpec::parse`] with the platform supplied.
+    ///
+    /// `drive_letters` is [`DRIVE_LETTERS_EXIST`] in production. It is a
+    /// parameter for the same reason [`crate::remote::RemoteSpec::classify`]
+    /// takes one: both answers have to be reachable from a test run on either
+    /// kind of machine, or the platform-dependent half of the rule is asserted
+    /// on exactly one platform and drifts on the other.
+    ///
+    /// # Errors
+    /// As [`ObjectSpec::parse`].
+    pub fn classify(spec: &str, drive_letters: bool) -> Result<Self> {
         if spec.trim().is_empty() {
             return Err(CliError::usage("no object given").with_hint(
                 "Name the object, for example 'vault:notes/today.md' or a local path.",
@@ -58,8 +86,11 @@ impl ObjectSpec {
         }
 
         // Checked before the colon split, because `C:\data` *does* contain a
-        // colon and would otherwise parse as a remote named `C`.
-        if path::looks_like_unc(spec) || path::looks_like_windows_drive(spec) {
+        // colon and would otherwise parse as a remote named `C`. A UNC share is
+        // local on every platform; a drive letter is local only where drives
+        // exist, which off Windows is nowhere — so `r:notes.md` is the remote
+        // `r` there, exactly as `dctl ls r:` already reads it.
+        if path::looks_like_unc(spec) || (drive_letters && path::looks_like_windows_drive(spec)) {
             return Ok(Self::local(spec));
         }
 
@@ -67,9 +98,9 @@ impl ObjectSpec {
             return Ok(Self::local(spec));
         };
 
-        // A name too short to be a remote is a drive letter, and a name carrying
-        // a separator is a directory whose own name contains a colon. Both are
-        // local paths — the colon told us nothing.
+        // A name shorter than a remote name can be, or one carrying a separator
+        // — a directory whose own name contains a colon. Both are local paths;
+        // the colon told us nothing.
         if remote.chars().count() < MIN_REMOTE_NAME_LEN {
             return Ok(Self::local(spec));
         }
@@ -202,6 +233,9 @@ mod tests {
     #[test]
     fn local_paths_are_accepted_rather_than_refused() {
         // The documented path model: bare, drive-letter and UNC paths are local.
+        // The drive-letter rows are asserted on a platform that has drives,
+        // because that is the only place they are local — off Windows `c:/data`
+        // names the remote `c`, exactly as `dctl ls c:` reads it.
         for spec in [
             "report.pdf",
             "/tmp/x",
@@ -209,18 +243,43 @@ mod tests {
             "c:/data",
             r"\\srv\s\f",
         ] {
-            let parsed = ObjectSpec::parse(spec).unwrap();
+            let parsed = ObjectSpec::classify(spec, true).unwrap();
             assert!(parsed.is_local(), "'{spec}' was not treated as local");
             assert_eq!(parsed.path(), spec);
             assert_eq!(parsed.remote(), None);
         }
+
+        // The rows that are local on every platform stay local where drives do
+        // not exist, so the change above did not quietly make an ordinary file
+        // path into a remote.
+        for spec in ["report.pdf", "/tmp/x", r"\\srv\s\f"] {
+            assert!(
+                ObjectSpec::classify(spec, false).unwrap().is_local(),
+                "'{spec}' stopped being a local path off Windows"
+            );
+        }
     }
 
     #[test]
-    fn a_one_character_prefix_is_always_a_drive_letter() {
-        // The rule that keeps `C:\data` unambiguous on Linux too.
-        assert!(ObjectSpec::parse("x:y").unwrap().is_local());
-        assert_eq!(ObjectSpec::parse("xy:z").unwrap().remote(), Some("xy"));
+    fn a_one_character_prefix_is_a_drive_letter_only_where_drives_exist() {
+        // This test used to be called `a_one_character_prefix_is_always_a_drive_
+        // letter` and asserted exactly that, which is why the drift survived an
+        // audit that claimed to have closed it: the defective rule had a passing
+        // test standing over it. rclone settles the same ambiguity at
+        // classification time (`fs/fspath/path.go:163` consults
+        // `driveletter.IsDriveLetter`, a compiled-in `false` off Windows), and
+        // `remote::spec` has agreed with that since §18.1. This family did not.
+        assert!(ObjectSpec::classify("x:y", true).unwrap().is_local());
+        assert_eq!(
+            ObjectSpec::classify("x:y", false).unwrap().remote(),
+            Some("x")
+        );
+        for drives in [false, true] {
+            assert_eq!(
+                ObjectSpec::classify("xy:z", drives).unwrap().remote(),
+                Some("xy")
+            );
+        }
     }
 
     #[test]
@@ -268,5 +327,51 @@ mod tests {
     fn a_local_specification_yields_a_native_path() {
         let spec = ObjectSpec::parse("dir/file.bin").unwrap();
         assert_eq!(spec.local_path(), PathBuf::from("dir/file.bin"));
+    }
+
+    #[test]
+    fn a_one_character_remote_is_an_object_everywhere_a_drive_letter_cannot_exist() {
+        // The byte-stream half of the same drift, and the worse half, because
+        // this family's wrong answer is silent rather than a refusal. Measured
+        // on the release binary before the fix, against a configured remote `r`:
+        //
+        //     $ dctl cat r:t/a.txt
+        //     error: r:t/a.txt: No such file or directory (os error 2)
+        //     $ echo hi | dctl rcat r:t/b.txt
+        //     error: r:t/.dctl-staging.1762882.0: No such file or directory
+        //
+        // `cat` looked for a local file literally named `r:t/a.txt`, and `rcat`
+        // tried to stage beside it — so a stream written to a remote failed on a
+        // directory nobody named, while `dctl ls r:` listed that remote happily.
+        //
+        // Both platforms are asserted from either kind of machine, for the same
+        // reason `Target::classify` takes the parameter.
+        let remote = ObjectSpec::classify("r:notes/today.md", false).unwrap();
+        assert_eq!(remote.remote(), Some("r"));
+        assert_eq!(remote.path(), "notes/today.md");
+        assert!(!remote.is_local());
+
+        let bare = ObjectSpec::classify("r:", false).unwrap();
+        assert_eq!(bare.remote(), Some("r"));
+        assert!(bare.is_bare_remote());
+
+        // On a platform with drives it is a drive, and a local path is a valid
+        // answer for this family rather than an error.
+        let drive = ObjectSpec::classify("r:notes/today.md", true).unwrap();
+        assert!(drive.is_local());
+        assert_eq!(drive.path(), "r:notes/today.md");
+
+        // A UNC share is local wherever it is written.
+        for drives in [false, true] {
+            assert!(ObjectSpec::classify(r"\\server\share\f.bin", drives).unwrap().is_local());
+        }
+
+        // Two characters never depended on the platform.
+        for drives in [false, true] {
+            assert_eq!(
+                ObjectSpec::classify("rr:notes.md", drives).unwrap().remote(),
+                Some("rr")
+            );
+        }
     }
 }

@@ -3819,3 +3819,96 @@ fn progress_restores_the_display_under_json_without_polluting_it() {
     serde_json::from_str::<serde_json::Value>(stdout.trim())
         .unwrap_or_else(|e| panic!("stdout must still be one JSON document ({e}):\n{stdout}"));
 }
+
+#[test]
+fn log_source_stamps_every_record_even_when_a_log_file_is_open() {
+    // `--log-source` was honoured in exactly one configuration: an interactive
+    // run with no `--log-file`. Adding the flag an unattended job always has —
+    // the file it will actually be asked for when something goes wrong —
+    // silently switched `--log-source` off on *both* streams, because the two
+    // `Some(file)` arms of `logging::init` built their layers without
+    // `.with_file()`/`.with_line_number()` at all.
+    //
+    // Measured on the release binary before the fix, over one `copy`:
+    //
+    //     --log-source                 : 1 record on stderr carries `.rs:LINE`
+    //     --log-source --log-file X    : 0 on stderr, 0 in X
+    //
+    // No warning, no error. A support engineer asks for `--log-source
+    // --log-file` and gets a file with no source locations in it, which is the
+    // silent-partial-success class `PLAN.md` §7 forbids.
+    //
+    // The assertion is on the *records*, not on the flag being read: a flag
+    // whose only witness is that some code mentions the field is exactly what
+    // §13.3's guard admits it cannot catch.
+    const PAYLOAD: &[u8] = b"a record worth locating in the source";
+
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", PAYLOAD);
+    let root = sandbox.dir("store");
+    let log = sandbox.path("run.log");
+
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", root.display()))
+        .assert()
+        .success();
+
+    let run = sandbox
+        .dctl()
+        .args(["--log-level", "info", "--log-source", "--log-file"])
+        .arg(&log)
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success();
+
+    let stderr = String::from_utf8_lossy(&run.get_output().stderr).into_owned();
+    let file = String::from_utf8(sandbox.read("run.log")).expect("the log file is text");
+
+    // The per-file INFO record has to be there at all, or the rest asserts
+    // nothing: a log with no records trivially has no records missing a source
+    // location.
+    assert!(
+        file.contains("file finished"),
+        "the log file holds no per-file record to locate:\n{file}"
+    );
+
+    let located = |text: &str| text.lines().filter(|line| line.contains(".rs:")).count();
+    assert!(
+        located(&file) > 0,
+        "--log-source stamped no record in --log-file:\n{file}"
+    );
+    assert!(
+        located(&stderr) > 0,
+        "--log-source stamped no record on stderr once --log-file was open:\n{stderr}"
+    );
+
+    // …and the flag is still what decides it: the same run without it carries
+    // no source location anywhere, so the assertion above is not passing on
+    // something the formatter prints unconditionally.
+    let plain_log = sandbox.path("plain.log");
+    sandbox
+        .dctl()
+        .args(["--log-level", "info", "--log-file"])
+        .arg(&plain_log)
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:again"))
+        .assert()
+        .success();
+    let plain = String::from_utf8(sandbox.read("plain.log")).expect("the log file is text");
+    assert!(
+        plain.contains("file finished"),
+        "the control run wrote no records:\n{plain}"
+    );
+    assert_eq!(
+        located(&plain),
+        0,
+        "a record carried a source location without --log-source:\n{plain}"
+    );
+}

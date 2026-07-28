@@ -50,21 +50,79 @@ const OBJECT_LEN: usize = 256 * 1024;
 /// space, for the live half of this file.
 const FULL_FS_DIR: &str = "DCTL_FULL_FS_DIR";
 
-/// Cap this process's file size and stop `SIGXFSZ` from killing it.
+/// Cap this process's file size for as long as the returned guard lives, and
+/// stop `SIGXFSZ` from killing it.
 ///
 /// Ignoring the signal is what turns "the process dies" into "the write returns
 /// `EFBIG`", which is the failure a full filesystem produces and the one under
 /// test.
+///
+/// # Why this is a guard, and why the hard limit is left alone
+///
+/// The first version set `rlim_cur` **and** `rlim_max` to 64 KiB and never put
+/// them back. `RLIMIT_FSIZE` is per *process*, not per test, so the ceiling
+/// outlived the test and applied to everything the test binary did afterwards —
+/// including libtest writing its own results to the inherited stdout.
+///
+/// Against a terminal or a pipe that is invisible: neither is a file, so the
+/// limit does not apply. Redirect the run to a file, which is how anybody
+/// captures a gate, and the binary dies as soon as libtest's output crosses
+/// 64 KiB into an already-larger log:
+///
+/// ```text
+/// $ cargo test --workspace --no-fail-fast > gate.txt 2>&1
+/// error: test failed, to rerun pass `-p dctl-store --test write_failure`
+/// $ cargo test --workspace --no-fail-fast | tail          # same tree, passes
+/// ```
+///
+/// A gate whose result depends on whether its output was redirected is not a
+/// gate, and this project quotes that gate in every report it writes. Lowering
+/// `rlim_max` also made it irreversible for an unprivileged process, so the
+/// damage could not be undone even deliberately.
+///
+/// So: only the soft limit moves, the hard limit is untouched, and [`Drop`] puts
+/// the soft limit back — on the panicking path too, which is the one a failing
+/// assertion takes.
 #[cfg(unix)]
-fn cap_file_size(bytes: u64) {
-    // SAFETY: both calls are plain libc with no memory involved. `signal` sets a
-    // disposition and `setrlimit` reads one fully-initialised `rlimit`. This is
-    // a test binary; the library itself is `#![forbid(unsafe_code)]`.
+struct FileSizeCap {
+    previous: libc::rlimit,
+}
+
+#[cfg(unix)]
+impl Drop for FileSizeCap {
+    fn drop(&mut self) {
+        // SAFETY: a plain libc call over a fully-initialised `rlimit` read out
+        // of the kernel a moment ago.
+        unsafe {
+            libc::setrlimit(libc::RLIMIT_FSIZE, &raw const self.previous);
+        }
+    }
+}
+
+#[cfg(unix)]
+#[must_use = "the cap is lifted when the guard is dropped"]
+fn cap_file_size(bytes: u64) -> FileSizeCap {
+    // SAFETY: plain libc with no memory involved. `signal` sets a disposition;
+    // `getrlimit` fills a local; `setrlimit` reads one fully-initialised
+    // `rlimit`. This is a test binary; the library itself is
+    // `#![forbid(unsafe_code)]`.
     unsafe {
         libc::signal(libc::SIGXFSZ, libc::SIG_IGN);
+        let mut previous = libc::rlimit {
+            rlim_cur: 0,
+            rlim_max: 0,
+        };
+        assert_eq!(
+            libc::getrlimit(libc::RLIMIT_FSIZE, &raw mut previous),
+            0,
+            "the test could not read the current file-size limit: {}",
+            std::io::Error::last_os_error()
+        );
         let limit = libc::rlimit {
             rlim_cur: bytes,
-            rlim_max: bytes,
+            // Untouched. Lowering it would make the cap irreversible and is not
+            // needed: the soft limit is what the kernel enforces.
+            rlim_max: previous.rlim_max,
         };
         assert_eq!(
             libc::setrlimit(libc::RLIMIT_FSIZE, &raw const limit),
@@ -72,6 +130,7 @@ fn cap_file_size(bytes: u64) {
             "the test could not impose a file-size limit: {}",
             std::io::Error::last_os_error()
         );
+        FileSizeCap { previous }
     }
 }
 
@@ -94,7 +153,8 @@ async fn a_write_the_filesystem_refuses_is_reported_as_that_refusal() {
     let data = Bytes::from(vec![0xA5u8; OBJECT_LEN]);
     let expected = ContentHash::blake3(&data);
 
-    cap_file_size(FSIZE_CEILING);
+    // Held for the rest of the test, and lifted when it ends however it ends.
+    let _cap = cap_file_size(FSIZE_CEILING);
 
     let error = fs
         .put(&key, data, &expected, SourceModified::unknown())

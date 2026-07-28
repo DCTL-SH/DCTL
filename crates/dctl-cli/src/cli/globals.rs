@@ -271,9 +271,18 @@ pub struct GlobalArgs {
     )]
     pub checkers: usize,
 
-    /// Bandwidth limit per second, e.g. 10M. 'off' for unlimited. Paced per
-    /// file: one large object is not split, so the run's average rate is what
-    /// is capped.
+    /// Bandwidth limit per second, e.g. 10M. 'off' for unlimited.
+    ///
+    /// Paced BETWEEN files, not inside one: the debt a file creates is paid off
+    /// before the next file starts, so a run of a single object is not paced at
+    /// all and the last file of any run is unpaced. 8 MiB as one file at
+    /// --bwlimit 1M takes 47 ms; the same 8 MiB as eight files takes 7 s. Pacing
+    /// a single large upload needs the streaming engine and this build does not
+    /// do it.
+    ///
+    /// The wording used to end "so the run's average rate is what is capped",
+    /// which is false whenever there is one object — and one huge sealed object
+    /// is what this tool is for.
     #[arg(long, global = true, value_name = "RATE", help_heading = "Transfer")]
     pub bwlimit: Option<ByteLimit>,
 
