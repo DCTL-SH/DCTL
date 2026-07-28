@@ -296,13 +296,18 @@ a weaker answer dressed up as the one you asked for is exactly the misreporting
 the durability contract exists to prevent.
 
 Against a **plain object store** — a `local:`, `sftp:`, `b2:`, `s3:` or `r2:`
-remote holding ordinary objects — the transfer family cannot supply a hash for
-the destination side and **refuses** rather than downgrading. That refusal names
-the file and says what to do instead. `dctl check --checksum` *can* answer over
-the same remote, because it reads each object back and hashes it; that is a full
-download of the destination, and it is the price of the question. A vault
-destination answers for free, from the plaintext BLAKE3 its index recorded at
-write time.
+remote holding ordinary objects — DCTL reads each object back and hashes it. A
+plain store holds the plaintext, so the hash of what it is holding is exactly the
+digest the comparison needs. That is a **full pass over the destination**, which
+on a metered provider is egress, and the run says so once on stderr rather than
+letting you find it on an invoice. `--size-only`, or the default
+size-and-modification-time comparison, reads nothing.
+
+A vault destination answers for free, from the plaintext BLAKE3 its index
+recorded at write time. The one object that still cannot answer is one nobody has
+read: a row written by `dctl index rebuild` carries an empty digest, which is
+*unknown* rather than a hash, and the command fails naming the file and the
+remedy.
 
 ### `--size-only`
 
@@ -498,11 +503,23 @@ did not.
 
 ### `--low-level-retries N`
 
-**Refused** (exit 7). Request-level retries exist for Backblaze B2 only, on a
-schedule this flag cannot reach, and there is no such layer for sftp, S3, R2 or
-the local filesystem. Honouring it on one backend and dropping it on four would
-leave you unable to tell which runs were protected. Whole-file retries *are*
-honoured on every backend — see `--retries`.
+**Refused** (exit 7). Request-level retries now exist on **every** backend, but
+on a schedule this flag cannot reach: attempts, backoff, jitter and the total
+waiting budget are chosen per provider and are not a single number. Accepting an
+`N` that set one of the four and silently ignored the other three would be a dial
+that half works, which is worse than one that says no.
+
+What the schedule is, since the flag will not let you change it: six attempts for
+`sftp`, `b2`, `s3` and `r2`, starting at half a second and doubling to eight,
+honouring a server's `Retry-After` up to a minute, and never waiting more than
+two minutes in total for one operation; three attempts over one second for
+`local:`, where the errors worth repeating clear immediately or not at all. `5xx`,
+`408` and `429` are temporary; `401` and `403` never are. A failure that is
+retried says how many attempts were made; one that is not says nothing about
+retrying, which is the fix for a hint that used to claim exhausted retries over a
+single attempt.
+
+Whole-file retries are separate and are what `--retries` controls.
 
 ### `--timeout SECONDS`
 
@@ -890,6 +907,13 @@ plain through a pipe, honouring `NO_COLOR` (disables), `CLICOLOR_FORCE`
 that renders colour but does not look like a terminal to `isatty`. JSON output is
 never coloured whatever this says, since escape sequences inside string values
 break every downstream parser.
+
+It reaches both streams and every command that renders anything: `ls`, `lsl`,
+`lsd`, `tree`, `size`, `check`, `about`, the warnings and errors on stderr, and
+the end-of-run summary. Sizes and counts are one colour, paths another,
+directories bold, timestamps and structural chrome dimmed. Styling never changes
+the layout — columns are measured before they are painted, so `--color always`
+and `--color never` produce the same visible text.
 
 ### `--ascii`
 
