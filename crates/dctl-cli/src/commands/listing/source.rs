@@ -79,6 +79,16 @@ pub trait Pages: Send {
     fn links(&self) -> dctl_store::LinkReport {
         dctl_store::LinkReport::default()
     }
+
+    /// What the walk behind this listing passed over that it could not carry.
+    ///
+    /// Read after the listing is drained, like [`links`](Pages::links), and
+    /// reported by the same six verbs: a `ls` that shows one file over a
+    /// directory holding four entries is the same silence as a `copy` that
+    /// stores one.
+    fn specials(&self) -> dctl_store::SpecialReport {
+        dctl_store::SpecialReport::default()
+    }
 }
 
 /// A page cursor over the binary's one read abstraction.
@@ -136,6 +146,10 @@ impl Pages for Streamed {
 
     fn links(&self) -> dctl_store::LinkReport {
         self.entries.links()
+    }
+
+    fn specials(&self) -> dctl_store::SpecialReport {
+        self.entries.specials()
     }
 }
 

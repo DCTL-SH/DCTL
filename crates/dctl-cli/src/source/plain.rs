@@ -38,7 +38,9 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use dctl_store::{Backend, ByteRange, LinkPolicy, LinkReport, ObjectKey, ObjectMeta, StoreError};
+use dctl_store::{
+    Backend, ByteRange, LinkPolicy, LinkReport, ObjectKey, ObjectMeta, SpecialReport, StoreError,
+};
 use zeroize::Zeroizing;
 
 use crate::config::Config;
@@ -104,6 +106,7 @@ impl Source for PlainSource {
             exhausted: false,
             page: VecDeque::new(),
             links: LinkReport::default(),
+            specials: SpecialReport::default(),
         }))
     }
 
@@ -325,6 +328,10 @@ struct Paged {
     /// first page and leave the continuations empty, and merging an empty report
     /// changes nothing.
     links: LinkReport,
+    /// What every page fetched so far said about the fifos, sockets and device
+    /// nodes its walk met. Merged for the reason `links` is merged, and beside
+    /// it because they are one promise about two kinds of entry.
+    specials: SpecialReport,
 }
 
 impl Paged {
@@ -347,6 +354,7 @@ impl Paged {
         let stalled = page.items.is_empty() && page.next_cursor == self.cursor;
 
         self.links.merge(&page.links);
+        self.specials.merge(&page.specials);
 
         self.page = page
             .items
@@ -381,6 +389,10 @@ impl Entries for Paged {
 
     fn links(&self) -> LinkReport {
         self.links.clone()
+    }
+
+    fn specials(&self) -> SpecialReport {
+        self.specials.clone()
     }
 }
 

@@ -272,6 +272,25 @@ impl Backend for Guarded {
         self.inner.list_page(prefix, cursor).await
     }
 
+    /// Recorded on like every other read, and refused at the other end.
+    ///
+    /// This is the one read whose answer becomes a `delete`, which is an
+    /// argument for refusing it here — and the argument does not survive
+    /// contact with where the guard already is. A sweep that enumerated a
+    /// replacement would have every one of its deletions refused by
+    /// [`Guarded::delete`], so no key is removed from a store this run did not
+    /// open; refusing the listing as well would buy one clear error in place of
+    /// N, at the cost of making this the only read in the trait with its own
+    /// rule. The property is pinned at the destructive end, where it holds.
+    async fn list_staging(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> Result<crate::staging::StagingListing> {
+        self.opened_as().await?;
+        self.inner.list_staging(prefix, cursor).await
+    }
+
     async fn prepare_upload(
         &self,
         key: &ObjectKey,
@@ -348,6 +367,35 @@ mod tests {
             counter.calls("put"),
             1,
             "the refused write must not reach the provider"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_sweep_cannot_delete_debris_out_of_a_store_that_was_replaced() {
+        // `cleanup` reads a list of abandoned keys and then deletes every one of
+        // them, so the window between those two steps is the one place in this
+        // command where a replaced store would be destructive. The enumeration
+        // is a read and is recorded on rather than refused, like every other
+        // read; the property is pinned where it bites.
+        let inner = Arc::new(IdentifiedBackend::at("store-a"));
+        let counter = Arc::clone(&inner);
+        let backend = checked(Arc::clone(&inner) as Arc<dyn Backend>, "/srv/vault");
+
+        backend
+            .list_staging("", None)
+            .await
+            .expect("the store is the one the run recorded");
+        inner.become_store("store-b");
+
+        let error = backend
+            .delete(&key())
+            .await
+            .expect_err("a replacement must not be deleted from");
+        assert!(matches!(error, StoreError::RootChanged { .. }), "{error}");
+        assert_eq!(
+            counter.calls("delete"),
+            0,
+            "the refused deletion must not reach the provider"
         );
     }
 

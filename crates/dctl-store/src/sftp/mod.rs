@@ -70,6 +70,8 @@ use crate::links::{LinkPolicy, LinkReport};
 use crate::meter::{self, Meter};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
+use crate::specials::SpecialReport;
+use crate::staging::{StagingListing, Want};
 
 use path::{chunk_spans, join, normalize_base, prefix_dir, remote_path, temp_path};
 
@@ -473,16 +475,17 @@ impl Backend for SftpBackend {
             let j = join(&self.base, &key_root);
             if j.is_empty() { ".".to_string() } else { j }
         };
-        let walked = tree::collect(&self.sftp, open_root, key_root, self.links).await?;
+        let walked =
+            tree::collect(&self.sftp, open_root, key_root, self.links, Want::Objects).await?;
 
         // First page only. This backend re-walks the whole subtree per call
         // (`HANDOVER.md` §9.3 item 10), so attaching the report to every page
         // would multiply one tree's links by the page count and report a number
         // that was never true.
-        let links = if cursor.is_none() {
-            walked.links
+        let (links, specials) = if cursor.is_none() {
+            (walked.links, walked.specials)
         } else {
-            LinkReport::default()
+            (LinkReport::default(), SpecialReport::default())
         };
 
         Ok(path::page(
@@ -491,7 +494,38 @@ impl Backend for SftpBackend {
             cursor.as_deref(),
             PAGE_SIZE,
             links,
+            specials,
         ))
+    }
+
+    /// One page of the debris an interrupted upload left on the server.
+    ///
+    /// This backend stages for the same reason the local one does — the rename
+    /// is the commit — so it has real debris, and a killed `copy` leaves a
+    /// full-size staging file in the store every time. The walk runs under
+    /// [`LinkPolicy::Skip`] rather than the backend's own policy: DCTL writes
+    /// its staging files straight into the store, so following a link out of it
+    /// could only take a sweep somewhere it has no business deleting.
+    async fn list_staging(&self, prefix: &str, cursor: Option<String>) -> Result<StagingListing> {
+        let key_root = prefix_dir(prefix).to_string();
+        let open_root = {
+            let j = join(&self.base, &key_root);
+            if j.is_empty() { ".".to_string() } else { j }
+        };
+        let walked = tree::collect(
+            &self.sftp,
+            open_root,
+            key_root,
+            LinkPolicy::Skip,
+            Want::Staging,
+        )
+        .await?;
+        Ok(StagingListing::Page(path::staging_page(
+            walked.found,
+            prefix,
+            cursor.as_deref(),
+            PAGE_SIZE,
+        )))
     }
     // `prepare_upload` keeps the trait default: SFTP has no presigned/delegated
     // upload, so it returns a clear "unsupported" error.

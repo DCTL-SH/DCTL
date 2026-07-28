@@ -31,6 +31,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use dctl_store::SpecialReport;
 use dctl_store::links::{
     Ancestors, LinkPolicy, LinkReport, LinkTarget, LinkVerdict, decide, local_dir_id,
 };
@@ -76,6 +77,17 @@ pub struct Scan {
     /// thousands of links and this structure is held whole; see
     /// [`dctl_store::links`].
     pub links: LinkReport,
+    /// Every fifo, socket and device node met, counted, with a bounded sample
+    /// named.
+    ///
+    /// This walk did not merely pass over them in silence — it did not pass over
+    /// them at all. A tree holding a named pipe, a socket and two device nodes
+    /// planned `5 files`, stored the device nodes as objects, and then blocked
+    /// forever on the first `open` of the pipe, which is what a `backup /var`
+    /// looked like from the outside: a run that never returned. Skipping them is
+    /// the fix and matches every other walk in the workspace; saying so is the
+    /// other half.
+    pub specials: SpecialReport,
     /// Files excluded by `--min-size`, `--max-size`, `--max-depth` or
     /// `--files-from`. A count rather than a list: on a partial backup this is
     /// the *majority* of the tree, and listing it would bury the plan.
@@ -254,6 +266,22 @@ pub fn walk(root: &Path, selection: &Selection, policy: LinkPolicy) -> Scan {
                 } else {
                     scan.filtered += 1;
                 }
+                continue;
+            }
+
+            if !resolved.is_file() {
+                // A fifo, socket or device node. Unreachable for a *followed*
+                // link — `resolve_link` answers `NotStorable` and skips one of
+                // those — so this is the entry's own type.
+                //
+                // `resolved.len()` on one of these is not a length: a fifo
+                // reports 0 while an unbounded stream waits behind it, and a
+                // block device reports 0 while `/dev/sda` is four terabytes.
+                // Planning to "store 0 B" from either is a promise the transfer
+                // cannot keep, and the pipe is the one that does not fail — it
+                // blocks.
+                scan.specials
+                    .observe(relative, crate::specials::kind_of(&resolved));
                 continue;
             }
 
@@ -552,6 +580,76 @@ mod tests {
             LinkPolicy::Skip,
         );
         assert_eq!(paths(&scan), vec!["nested/c.txt"]);
+    }
+
+    /// A fifo, which any process may create. A device node needs `CAP_MKNOD`
+    /// and is asserted instead against the pure classifier in
+    /// `dctl_store::specials`, which needs no filesystem at all.
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo runs on a unix host");
+        assert!(status.success(), "mkfifo failed for {}", path.display());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_fifo_is_never_planned_for_storage_and_is_reported() {
+        // This walk did not merely stay quiet about special files — it planned
+        // to store them. A tree with a pipe in it planned `N + 1 files`, and the
+        // transfer then blocked forever on the first `open` of the pipe, because
+        // a fifo does not return until a writer appears. That is what
+        // `dctl backup /var vault:` looked like: a run that never came back.
+        let dir = tree();
+        make_fifo(&dir.path().join("pipe"));
+
+        let scan = walk(dir.path(), &selection(&[]), LinkPolicy::Skip);
+        assert!(
+            !paths(&scan).contains(&"pipe".to_string()),
+            "a fifo in the plan is a backup that hangs: {:?}",
+            paths(&scan)
+        );
+        assert_eq!(scan.specials.skipped(), 1);
+        assert_eq!(scan.specials.notes()[0].path, "pipe");
+        assert_eq!(scan.specials.notes()[0].kind, dctl_store::SpecialKind::Fifo);
+        // And it is not a *link*, which is the report that already existed and
+        // would have been the wrong one to grow.
+        assert!(scan.links.is_empty());
+        // Nor a filtered file: nothing filtered it, it cannot be stored at all.
+        assert_eq!(scan.filtered, 0);
+        // The ordinary files are all still there.
+        assert_eq!(
+            paths(&scan),
+            vec!["a.txt", "b.txt", "nested/c.txt", "nested/deep/d.txt"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_socket_is_reported_by_its_own_kind_rather_than_as_a_fifo() {
+        // `/run` and `/var/run` are full of these. The kind is what tells an
+        // operator whether they pointed the backup at the wrong root.
+        let dir = tree();
+        let _listener =
+            std::os::unix::net::UnixListener::bind(dir.path().join("app.sock")).unwrap();
+
+        let scan = walk(dir.path(), &selection(&[]), LinkPolicy::Skip);
+        assert_eq!(scan.specials.skipped(), 1);
+        assert_eq!(
+            scan.specials.notes()[0].kind,
+            dctl_store::SpecialKind::Socket
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_tree_with_no_special_files_reports_none() {
+        // The property that keeps the report worth reading.
+        let dir = tree();
+        let scan = walk(dir.path(), &selection(&[]), LinkPolicy::Skip);
+        assert!(scan.specials.is_empty());
     }
 
     #[cfg(unix)]

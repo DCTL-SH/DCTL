@@ -22,9 +22,8 @@
 //!
 //! ## Two of the four cannot be swept, and say so
 //!
-//! [`dctl_store::Backend`] exposes `put`, `get`, `head`, `delete` and
-//! `list_page`. There is no API for in-progress multipart uploads and none for
-//! object versions, on any provider, because the trait does not have one. A
+//! [`dctl_store::Backend`] has no API for in-progress multipart uploads and none
+//! for object versions, on any provider, because the trait does not have one. A
 //! sweep that reported "0 reclaimed" for a class it was never able to *look* at
 //! would be the misreport `PLAN.md` §6 forbids — so those two classes emit an
 //! explicit `unsupported` record instead, naming the capability that is missing.
@@ -36,33 +35,48 @@
 //! none of it, and exits 6. Anything else would either cry wolf on every default
 //! run or silently swallow a request.
 //!
-//! ## The staging sweep cannot see a filesystem backend's debris — OPEN
+//! ## The staging sweep can see a filesystem backend's debris — CLOSED
 //!
-//! Discovery of debris can only go through [`Backend::list_page`], and the
-//! filesystem-shaped backends — [`LocalFs`](dctl_store::LocalFs) and sftp —
-//! **deliberately omit staging files** from their listings, because a staging
-//! file is a write that never committed and listing one would offer a
-//! half-written upload as an object. So on `local:` and `sftp:` the debris this
-//! class exists to reclaim is invisible to it, and
-//! `dctl cleanup remote: --class staging` reports `OK removed: 0 object(s)` over
-//! a directory that may hold hundreds of gigabytes of abandoned uploads.
+//! This section used to say the opposite, at length, and it was the only entry
+//! on `HANDOVER.md`'s pre-production list that already admitted its own defect
+//! in the source: *"that report is a false all-clear, and it is not fixed
+//! here."* Discovery went through [`Backend::list_page`](dctl_store::Backend::list_page),
+//! and the filesystem-shaped backends **deliberately omit staging files** from
+//! their listings, because a staging file is a write that never committed and
+//! listing one would offer a half-written upload as an object. So the sweep
+//! searched a list its quarry had already been removed from. A `SIGKILL` three
+//! seconds into a `copy` leaves `o/.dctl-staging.<pid>.<seq>` — 10 MiB of it on
+//! `local:`, 12 MiB on `sftp:`, measured — and
+//! `dctl cleanup v: --class staging --min-age 0s` reported
+//! `OK removed: 0 object(s), 0 B` over both.
 //!
-//! **That report is a false all-clear, and it is not fixed here.** A nightly
-//! backup over a flaky link leaks one full-size staging file per interruption,
-//! and every night this command says there is nothing to reclaim while the
-//! remote disk fills.
+//! The fix is the one this module named: a `Backend` method that enumerates
+//! staging keys *on purpose*, separate from the object listing, so "what is
+//! stored?" and "what did we abandon?" stop sharing one answer. It is
+//! [`Backend::list_staging`](dctl_store::Backend::list_staging), and this layer
+//! sweeps what it returns. Special-casing a backend's name *here* would still be
+//! wrong, and is still not done: a second opinion about which keys exist is what
+//! put a user's `report.tmp.2024.csv` in the bin, so the only predicate applied
+//! here is [`dctl_store::is_staging_key`] — the same function the backends
+//! select with — used as a guard on the way to `delete` and not as a filter.
 //!
-//! This layer cannot fix it and does not pretend to: it reclaims exactly what
-//! the backend was willing to show it, and reports exactly what it reclaimed.
-//! The fix belongs in `dctl-store` — `Backend` needs a way to enumerate staging
-//! debris *on purpose*, separate from the object listing, so the two questions
-//! ("what is stored?" and "what did we abandon?") stop sharing one answer.
-//! Special-casing a backend's name here would be a second, contradictory opinion
-//! about which keys exist, and a second opinion about exactly that is what put a
-//! user's `report.tmp.2024.csv` in the bin.
+//! ## What the object stores answer, and why it is not zero
 //!
-//! The object stores are unaffected: b2, s3 and r2 stage under a key their own
-//! listing returns, so this class sweeps them correctly.
+//! b2, s3 and r2 **do not stage at all**: they upload straight to the object's
+//! final key with a checksum the provider verifies, so there is no temporary key
+//! for a killed process to abandon. (This module used to say they "stage under a
+//! key their own listing returns". That was wrong about the mechanism while
+//! being right about the outcome, and it is corrected here because the reason a
+//! number is right is part of the number.) Measured, not argued: a `SIGKILL`
+//! three seconds into a copy to a live B2 bucket leaves the bucket holding
+//! `system/envelope.bin` and nothing else.
+//!
+//! They therefore answer [`StagingListing::NotStaged`], which is reported as the
+//! sentence it carries rather than as `removed: 0` — a true number that reads
+//! exactly like the false all-clear this work removed. What an interrupted
+//! *large* upload leaves on those providers is an unfinished multipart upload,
+//! which is billed, which no listing shows, and which is the `multipart` class
+//! above, already refused by name.
 //!
 //! ## Why the orphan sweep proves the index is complete first
 //!
@@ -90,13 +104,25 @@
 //! magnitude — and lowering it towards zero re-opens that window. An object
 //! whose age cannot be established at all is never swept, for the same reason:
 //! unknown is not old.
+//!
+//! **The staging class now depends on it too, and that is new.** While the sweep
+//! could not see staging files it could not delete another run's *live* one
+//! either; now that it can see them, `--min-age 0s` over a store that a
+//! concurrent backup is writing into will delete the file that backup is part
+//! way through. Nothing is corrupted by that — the writer's `rename` fails and
+//! the object is simply not committed, which is the same outcome as any other
+//! interrupted write, and the next run stores it — but a run reported as failed
+//! for no reason an operator can see is a bad trade for a few reclaimed bytes.
+//! The default of a day is the answer, and `0s` remains available for the case
+//! it was asked for: an operator standing in front of a store they know nothing
+//! is writing to.
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::ValueEnum;
-use dctl_store::{Backend, ObjectKey};
+use dctl_store::{Backend, ObjectKey, StagingListing};
 use serde::Serialize;
 
 use crate::audit::record::Entry as AuditEntry;
@@ -107,6 +133,7 @@ use crate::constants::{
 };
 use crate::ctx::Ctx;
 use crate::error::Result;
+use crate::platform::path;
 use crate::source::plain::PlainSource;
 use crate::source::{Entry, Source as _};
 
@@ -289,7 +316,17 @@ pub async fn sweep(
     Ok(())
 }
 
-/// Sweep objects whose key marks them as staged rather than committed.
+/// Sweep the debris a write abandoned before its commit.
+///
+/// Asks the backend the second question — [`Backend::list_staging`] — rather
+/// than filtering the object listing, which omits exactly these keys and is why
+/// this sweep used to report a clean store over a killed upload's leftovers.
+///
+/// Paged, and the pager is believed only as far as it moves: a backend that
+/// returned nothing and handed back the cursor it was given has nothing further
+/// to say, and looping on it would hang a command whose whole job is to finish
+/// and report. The same guard [`crate::source::plain`] applies to the object
+/// listing, for the same reason.
 async fn staging(
     ctx: &Ctx,
     attribution: &Attribution<'_>,
@@ -298,23 +335,62 @@ async fn staging(
     prefix: &str,
     report: &mut Report<'_>,
 ) -> Result<()> {
-    let mut cursor = store.source.enumerate(prefix).await?;
-    while let Some(entry) = cursor.next().await? {
-        if !is_staged(&entry.path) {
-            continue;
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = match store.backend.list_staging(prefix, cursor.clone()).await? {
+            StagingListing::Page(page) => page,
+            StagingListing::NotStaged(reason) => {
+                // Not an error and not a zero. The operator asked a question
+                // with a clean answer and is told the answer, because
+                // `removed: 0` on its own is indistinguishable from the report
+                // this whole change exists to have stopped printing.
+                return report.not_staged(class_name(Class::Staging), reason);
+            }
+        };
+
+        let stalled = page.items.is_empty() && page.next_cursor == cursor;
+        for meta in page.items {
+            let key = meta.key.as_str().to_string();
+            // Whole components, never bytes. A backend matches a prefix the way
+            // a provider does, so `photos` brings back `photos-backup/…` too —
+            // and this command deletes what it is handed. The rule is the one
+            // [`crate::source::plain`] applies to the object listing, so the two
+            // classes of debris are scoped identically; a vault sweeps under an
+            // empty prefix, which admits everything by definition.
+            if !path::is_under(prefix, &key) {
+                continue;
+            }
+            if !is_staged(&key) {
+                // The guard, not a filter. `list_staging` promises staging keys
+                // and this is the one call in the binary whose answer becomes a
+                // `delete`, so a key that fails the promise is reported as the
+                // backend defect it is rather than quietly deleted or quietly
+                // dropped.
+                ctx.out.error(format!(
+                    "'{key}' was offered as abandoned debris but is not a staging key; \
+                     it has been left alone"
+                ));
+                ctx.stats.error();
+                continue;
+            }
+            let entry = Entry::new(&key, meta.size).with_modified(meta.modified_unix);
+            reclaim(
+                ctx,
+                attribution,
+                aging,
+                store,
+                entry,
+                REMOVAL_KIND_STAGING,
+                report,
+            )
+            .await?;
         }
-        reclaim(
-            ctx,
-            attribution,
-            aging,
-            store,
-            entry,
-            REMOVAL_KIND_STAGING,
-            report,
-        )
-        .await?;
+
+        if stalled || page.next_cursor.is_none() {
+            return Ok(());
+        }
+        cursor = page.next_cursor;
     }
-    Ok(())
 }
 
 /// Sweep content objects no index row refers to.
@@ -450,10 +526,11 @@ async fn count_under(store: &Store, prefix: &str) -> Result<usize> {
 ///
 /// Two views of **one** backend handle, built from a single [`Arc`] so they can
 /// never come to describe different remotes: [`PlainSource`] supplies the paged
-/// enumeration `PLAN.md` §16.2 requires, and the backend supplies the `delete`
-/// that the read abstraction deliberately does not have. Keeping the `Arc` here
-/// rather than reaching into the source is what lets the read side stay
-/// read-only for every other caller in the binary.
+/// enumeration `PLAN.md` §16.2 requires for the orphan class, and the backend
+/// supplies both the `delete` that the read abstraction deliberately does not
+/// have and the staging enumeration it deliberately does not offer. Keeping the
+/// `Arc` here rather than reaching into the source is what lets the read side
+/// stay read-only for every other caller in the binary.
 struct Store {
     source: PlainSource,
     backend: Arc<dyn Backend>,
@@ -477,19 +554,19 @@ impl Store {
 
 /// Whether a backend key marks a staged, uncommitted object.
 ///
-/// Asks [`dctl_store::is_staging_name`] about the key's **last component**, which
-/// is the one place in the workspace that decides what a staging file is called.
-/// This function used to hold a second opinion — `key.contains(".tmp.")` — and a
+/// One line, delegating to [`dctl_store::is_staging_key`], which is the one
+/// place in the workspace that decides what a staging file is called. This
+/// function used to hold a second opinion — `key.contains(".tmp.")` — and a
 /// second opinion about which keys are DCTL's own is precisely how a user's
 /// `report.tmp.2024.csv` came to be swept up as debris by one half of the tool
 /// and hidden from listings by the other.
 ///
-/// The last component rather than the whole key: a staging file is a sibling of
-/// the object it stages, so the marker is on the file's own name. Testing the
-/// whole key would let a *directory* called `.dctl-staging.x` condemn everything
-/// beneath it.
+/// It survives the move of discovery into the backend because it is no longer a
+/// *filter* but a *guard*: the backend selects, and this is the last thing that
+/// runs before a `delete`. Asking the same function twice is not a second
+/// opinion; it is the one opinion, checked where the irreversible thing happens.
 fn is_staged(key: &str) -> bool {
-    dctl_store::is_staging_name(key.rsplit('/').next().unwrap_or(key))
+    dctl_store::is_staging_key(key)
 }
 
 /// How long ago `entry` was last written, or [`None`] if that is not knowable.
@@ -576,6 +653,22 @@ mod tests {
         assert!(!is_staged("o/abcdef0123456789"));
         assert!(!is_staged("notes/tmp/a.txt"));
         assert!(!is_staged("archive.tmpfile"));
+    }
+
+    #[test]
+    fn the_guard_before_a_delete_is_the_backends_own_rule_and_not_a_second_one() {
+        // Two rules is how a key ends up hidden by one half of the tool and
+        // deleted by the other. Asserted directly against the storage crate's
+        // function so a divergence is a failure here rather than a support call.
+        for key in [
+            "o/.dctl-staging.4711.0",
+            ".dctl-staging.1.0",
+            "report.tmp.2024.csv",
+            "o/8f14e45fceea167a5a36dedd4bea2543",
+            "system/envelope.bin",
+        ] {
+            assert_eq!(is_staged(key), dctl_store::is_staging_key(key), "{key}");
+        }
     }
 
     #[test]

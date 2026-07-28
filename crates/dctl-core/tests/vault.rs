@@ -172,6 +172,14 @@ async fn a_store_that_cannot_be_read_is_reported_as_that_rather_than_as_a_bad_pa
         async fn list_page(&self, _: &str, _: Option<String>) -> Result<Page, StoreError> {
             Err(StoreError::Backend("403 forbidden".into()))
         }
+
+        async fn list_staging(
+            &self,
+            _: &str,
+            _: Option<String>,
+        ) -> Result<dctl_store::StagingListing, StoreError> {
+            Err(StoreError::Backend("403 forbidden".into()))
+        }
     }
 
     let index = TempDir::new().unwrap();
@@ -1177,6 +1185,14 @@ impl Backend for FaultyGrantGet {
 
     async fn list_page(&self, prefix: &str, cursor: Option<String>) -> dctl_store::Result<Page> {
         self.inner.list_page(prefix, cursor).await
+    }
+
+    async fn list_staging(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> dctl_store::Result<dctl_store::StagingListing> {
+        self.inner.list_staging(prefix, cursor).await
     }
 }
 

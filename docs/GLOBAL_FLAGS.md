@@ -843,6 +843,16 @@ stored, so it raises the error count and the exit code (**6**, `partial_failure`
 while the rest of the tree still transfers. Under `skip` nothing looks behind a
 link, so nothing can call one broken.
 
+**A fifo, socket or device node has no flag and is reported anyway.** No setting
+would store one — there are no bytes behind any of them — so there is nothing to
+decide, only something to disclose. Every walk prints `skipped N special file(s)`
+on stderr and names each one at `-v` with what it is (`pipe: a named pipe`,
+`run/docker.sock: a unix socket`, `dev/sda: a block device`). It is a warning and
+never an error, which is also where rclone settled: `Storable` returns false and
+logs `Can't transfer non file/directory` (`backend/local/local.go:1301`) without
+raising an error count, so a `/var` full of sockets does not fail a nightly run.
+A tree with none prints nothing.
+
 **On restore, a followed link comes back as a copy.** A vault is keyed by logical
 path and has no record type for "this path is a link to that one", so
 `srv/data -> /mnt/bigdisk/data` backed up with `--links follow` restores as a

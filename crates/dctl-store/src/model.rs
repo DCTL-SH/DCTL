@@ -71,6 +71,15 @@ pub struct Page {
     /// skipped is a listing whose callers will forget to ask; the silence that
     /// followed is the defect [`crate::links`] exists to remove.
     pub links: crate::links::LinkReport,
+    /// What the walk behind this page passed over that was neither a file, a
+    /// directory nor a link — a fifo, a socket, a device node.
+    ///
+    /// Beside [`links`](Page::links) and for the identical reason, because it is
+    /// the identical failure: a tree holding a named pipe listed as one file,
+    /// `Errors: 0`, exit 0, with the pipe appearing nowhere in any output at any
+    /// verbosity. Also empty for the object stores, which hold no such thing.
+    /// See [`crate::specials`].
+    pub specials: crate::specials::SpecialReport,
 }
 
 /// Result of a verified put: the backend-confirmed size and content hash.

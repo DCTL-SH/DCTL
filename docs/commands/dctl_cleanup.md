@@ -14,11 +14,17 @@ listing, all of it billed for. Four classes, selectable individually with
   The parts already stored are charged for, and no listing shows them.
   Reclaiming them is nearly free of risk once they are old enough.
 * **`staging` — stale staging objects.** A staged upload that never reached
-  step 4 is left under a temporary key containing the marker `.tmp.`. This
-  litter is a *consequence* of the verified-write contract, not a bug: DCTL
-  writes to a temporary key first and only makes an object visible once its
+  step 4 is left under a key whose last component begins with `.dctl-staging.`.
+  This litter is a *consequence* of the verified-write contract, not a bug: DCTL
+  writes to a temporary name first and `rename`s onto the real one only once its
   checksum matches, so an interrupted write is guaranteed to leave a partial
   object that was never committed and that nothing references.
+
+  **The marker is a leading-dot prefix on the name, not a substring anywhere in
+  the key.** This page used to say `.tmp.`, which the code stopped using because
+  a substring test matched real files — `report.tmp.2024.csv`,
+  `db.tmp.2024-07-27.sql`, Office's own `~$report.tmp.docx` — and this command
+  deletes what it matches.
 * **`orphans` — content objects no index record refers to.** The store holds an
   object that nothing in the encrypted index points at, so no path can ever name
   it and no read will ever reach it. It is billable and invisible, which is why
@@ -77,11 +83,35 @@ same numbers.
 ### What runs today
 
 **The sweep runs, and reports per class which ones a backend can actually
-answer.** `staging` and `orphans` are reclaimed from the object store directly.
-`multipart` and `versions` need provider APIs a backend may not expose — the
-local backend does not — and those classes come back as `unsupported` with a
-warning naming what could not be enumerated, rather than as silence that would
-read as "nothing to reclaim":
+answer.** There are three answers, not two, and the difference between them is
+the point of the page:
+
+| Answer | Means | Exit |
+|--------|-------|------|
+| a count | The class was enumerated and this is what was reclaimed. | 0 |
+| `not-staged` | The class was asked about and this backend has none of it. | 0 |
+| `unsupported` | This backend cannot enumerate the class at all. | 0, or **6** if you named that class with `--class` |
+
+`orphans` is reclaimed from the index and the store together. `staging` is
+enumerated **on purpose**, through a storage call that exists only for it:
+`local:` and `sftp:` stage every write beside its object and rename onto the
+final name, so a killed `copy` leaves a full-size staging file and this is the
+command that reclaims it. Earlier revisions of this page did not say so, and
+earlier builds could not: discovery went through the ordinary object listing,
+which omits staging files by design, so the sweep searched a list its quarry had
+already been removed from and reported `OK removed: 0 object(s), 0 B` over a
+store holding megabytes of debris.
+
+`b2`, `s3` and `r2` upload straight to the object's final key, so nothing is ever
+written under a temporary one and nothing can be abandoned there. They answer
+`not-staged` with that sentence rather than a bare zero — a true number that
+reads exactly like the false all-clear above. What an interrupted **large**
+upload leaves on those providers is an unfinished multipart upload, which is
+billed, which no listing shows, and which is the `multipart` class below.
+
+`multipart` and `versions` need provider APIs no backend here exposes, and those
+classes come back as `unsupported` with a warning naming what could not be
+enumerated, rather than as silence that would read as "nothing to reclaim":
 
 ```console
 $ dctl cleanup vault: --force
@@ -105,11 +135,25 @@ not implemented in this build" and quoted an exit-7 refusal that no build now
 produces — which is the difference that matters: `unsupported` is a per-class
 fact about one backend, not a statement about the command.
 
+A B2 remote whose 200 MiB upload was killed part-way prints all three answers at
+once, which is what the distinction is for: `multipart` unsupported (the class
+that really did leak there, named), `staging` not-staged (the class that cannot
+leak there, and why), `versions` unsupported.
+
 The alternative — printing `reclaimed 0 bytes` from a sweep that never listed
 anything — is exactly the lie `PLAN.md` §6 forbids. The provider APIs for
 multipart listing arrive with the §11 **Phase 1 (B2 MVP)** backend work; the
 `versions` class additionally depends on the snapshots/versioning work listed
 under **Phase 4 (Hardening)**.
+
+**`--min-age` protects a run that is happening right now.** Now that the sweep
+can see staging files it can also see the one a *concurrent* backup is part way
+through writing, so `--min-age 0s` over a store something else is writing into
+will delete that file. Nothing is corrupted by it — the writer's rename fails and
+the object is simply not committed, exactly as if the run had been interrupted,
+and the next run stores it — but the default of a day exists so that a nightly
+`cleanup` and a nightly `backup` that overlap do not fight. Use `0s` when you
+know nothing else is writing.
 
 ```
 dctl cleanup REMOTE: [flags]
@@ -165,7 +209,7 @@ $ dctl cleanup vault:photos/2024 --class staging --min-age 2h --dry-run --json
       "staging"
     ],
     "min_age_secs": 7200,
-    "staging_marker": ".tmp."
+    "staging_marker": ".dctl-staging."
   },
   "status": "planned"
 }

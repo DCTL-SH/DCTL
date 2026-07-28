@@ -4301,3 +4301,402 @@ fn a_tree_with_no_links_says_nothing_about_them() {
         "an ordinary tree must produce no link report at all:\n{stderr}"
     );
 }
+
+// ── 22. the debris a killed write leaves, and the sweep that must see it ──────
+
+/// A staging file exactly as an interrupted verified write leaves one.
+///
+/// Spelled out rather than taken from `dctl_store::staging_name()`: this file
+/// pins the *observable* layout, and a test that asked the code under test what
+/// it calls its own debris would keep passing if that answer changed to
+/// something `cleanup` no longer recognised.
+#[cfg(unix)]
+fn plant_staging_file(directory: &Path, bytes: &[u8]) -> PathBuf {
+    std::fs::create_dir_all(directory).expect("create the store directory");
+    let path = directory.join(".dctl-staging.4711.0");
+    std::fs::write(&path, bytes).expect("plant the staging file");
+    path
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_reclaims_the_staging_file_an_interrupted_write_left_in_a_plain_store() {
+    // `HANDOVER.md` §11.2: a `SIGKILL` three seconds into a copy leaves
+    // `o/.dctl-staging.<pid>.<seq>` in the store, and
+    // `cleanup --class staging --min-age 0s` reported `OK removed: 0 object(s)`
+    // with the file still there. A nightly backup over a flaky link leaks one
+    // full-size staging file per interruption and is told every night that
+    // there is nothing to reclaim.
+    let sandbox = Sandbox::new();
+    let store = sandbox.dir("store");
+    sandbox.write("store/o/real.bin", b"a committed object");
+    let debris = plant_staging_file(&store.join("o"), &vec![7u8; 4096]);
+
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", store.display()))
+        .assert()
+        .success();
+
+    let assertion = sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("cleanup")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .args(["--class", "staging", "--min-age", "0s"])
+        .assert()
+        .success();
+    let output = assertion.get_output();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !debris.exists(),
+        "the sweep reported on debris it left behind:\n{text}"
+    );
+    assert!(
+        text.contains("removed: 1 object(s)"),
+        "the count must be the debris actually removed:\n{text}"
+    );
+    assert!(
+        sandbox.exists("store/o/real.bin"),
+        "a committed object is not debris"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cleanup_reclaims_the_staging_file_an_interrupted_write_left_in_a_vault() {
+    // The same defect on the sealed view, which is the one an operator actually
+    // runs: `dctl cleanup archive: --class staging`.
+    let sandbox = Sandbox::new();
+    sandbox.write("plain/note.txt", b"kept");
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success();
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("plain"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+
+    let debris = plant_staging_file(&sandbox.path("vault").join("o"), &vec![3u8; 2048]);
+
+    let assertion = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("cleanup")
+        .arg(format!("{VAULT_NAME}:"))
+        .args(["--class", "staging", "--min-age", "0s"])
+        .assert()
+        .success();
+    let output = assertion.get_output();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        !debris.exists(),
+        "the vault sweep gave a false all-clear:\n{text}"
+    );
+    assert!(
+        text.contains("removed: 1 object(s)"),
+        "the count must be the debris actually removed:\n{text}"
+    );
+    // And the vault is untouched: the file that was really stored still lists.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("ls")
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("note.txt"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_cleanup_sweep_never_reclaims_a_users_file_that_merely_looks_temporary() {
+    // The other direction, and the reason the sweep may not carry its own
+    // opinion about which keys are DCTL's: a substring test on `.tmp.` is what
+    // put a user's `report.tmp.2024.csv` in the bin.
+    let sandbox = Sandbox::new();
+    let store = sandbox.dir("store");
+    sandbox.write("store/report.tmp.2024.csv", b"rows");
+    sandbox.write("store/photo.jpg.tmp.4711.0", b"an older DCTL's spelling");
+    let debris = plant_staging_file(&store, b"half a write");
+
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", store.display()))
+        .assert()
+        .success();
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("cleanup")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .args(["--class", "staging", "--min-age", "0s"])
+        .assert()
+        .success();
+
+    assert!(!debris.exists(), "the debris was not reclaimed");
+    assert!(
+        sandbox.exists("store/report.tmp.2024.csv"),
+        "a user's file was swept as debris"
+    );
+    assert!(
+        sandbox.exists("store/photo.jpg.tmp.4711.0"),
+        "an older DCTL's staging spelling is an ordinary file now"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_staging_file_younger_than_the_minimum_age_is_left_where_it_is() {
+    // `--min-age` is load-bearing rather than a tuning knob: now that the sweep
+    // can see staging debris it can also see *another run's live write*, and the
+    // age bound is the only thing standing between the two.
+    let sandbox = Sandbox::new();
+    let store = sandbox.dir("store");
+    let debris = plant_staging_file(&store, b"a write happening right now");
+
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", store.display()))
+        .assert()
+        .success();
+    let assertion = sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("cleanup")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .args(["--class", "staging", "--min-age", "1h"])
+        .assert()
+        .success();
+    let output = assertion.get_output();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(debris.exists(), "a live write was deleted:\n{text}");
+    assert!(
+        text.contains("removed: 0 object(s)"),
+        "and the run must say it removed nothing:\n{text}"
+    );
+}
+
+// ── 23. a fifo, socket or device node is reported, never passed over silently ─
+
+/// A tree holding one ordinary file and one of each special file that can be
+/// created without privileges.
+///
+/// A device node needs `CAP_MKNOD`, so it is not made here: the classification
+/// of every POSIX file type is asserted exhaustively and without a filesystem
+/// in `dctl_store::specials`, and the device nodes themselves are exercised
+/// against a real tree in the live verification.
+#[cfg(unix)]
+fn tree_with_special_files(sandbox: &Sandbox) -> PathBuf {
+    let src = sandbox.dir("src");
+    sandbox.write("src/keep.txt", b"ordinary");
+    let made = std::process::Command::new("mkfifo")
+        .arg(src.join("pipe"))
+        .status()
+        .expect("mkfifo runs");
+    assert!(made.success(), "mkfifo failed — the case cannot be tested");
+    std::os::unix::net::UnixListener::bind(src.join("sock")).expect("bind a unix socket");
+    src
+}
+
+#[cfg(unix)]
+#[test]
+fn a_fifo_and_a_socket_in_the_source_are_counted_and_named_rather_than_passed_over() {
+    // `HANDOVER.md` §11.2: a tree holding `real.txt` and a named pipe copied as
+    // `Files: 1 / 1, Errors: 0`, exit 0, with the pipe appearing nowhere in
+    // stdout, stderr or the log even at `-v`. Skipping is right and matches
+    // rclone — but rclone logs `Can't transfer non file/directory`
+    // (`backend/local/local.go:1301`), and DCTL's own source cites that very
+    // line as its authority for skipping while omitting the half that speaks.
+    let sandbox = Sandbox::new();
+    let src = tree_with_special_files(&sandbox);
+    let destination = sandbox.dir("dst");
+
+    let assertion = sandbox
+        .dctl()
+        .args(["--no-ask-password", "-v"])
+        .arg("copy")
+        .arg(&src)
+        .arg(&destination)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+
+    assert!(
+        stderr.contains("skipped 2 special file(s)"),
+        "the run said nothing about what it passed over:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("pipe: a named pipe"),
+        "-v must name the fifo and say what it is:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("sock: a unix socket"),
+        "-v must name the socket and say what it is:\n{stderr}"
+    );
+    // The skip itself is unchanged, and it is still not an error: rclone's
+    // `Storable` returns false and logs, and raises no error count with it.
+    assert!(sandbox.exists("dst/keep.txt"));
+    assert!(!sandbox.exists("dst/pipe"));
+    assert!(!sandbox.exists("dst/sock"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_listing_says_what_it_passed_over_just_as_a_transfer_does() {
+    // The listing family and the transfer family must agree about a tree: a
+    // `ls` that shows one file and a `copy` that stores one file, over a
+    // directory holding four entries, is the same silence in two places.
+    let sandbox = Sandbox::new();
+    let src = tree_with_special_files(&sandbox);
+
+    let assertion = sandbox
+        .dctl()
+        .args(["--no-ask-password", "-v"])
+        .arg("ls")
+        .arg(&src)
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+
+    assert!(
+        stderr.contains("skipped 2 special file(s)"),
+        "`ls` must disclose what it did not list:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("pipe: a named pipe"),
+        "-v must name it:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_backup_never_offers_to_store_a_fifo_and_says_that_it_did_not() {
+    // The backup walk was worse than silent: it planned to *store* the fifo,
+    // the socket and every device node, counted them in `N files`, and then
+    // blocked forever on the first `open` of the pipe — a backup of `/var` that
+    // never returns. Skipping them is the fix; saying so is the other half.
+    let sandbox = Sandbox::new();
+    let src = tree_with_special_files(&sandbox);
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success();
+
+    let assertion = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--dry-run", "-v"])
+        .arg("backup")
+        .arg(&src)
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let output = assertion.get_output();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+
+    assert!(
+        !stdout.contains("src/pipe") && !stdout.contains("src/sock"),
+        "a plan that offers to store a fifo is a plan that hangs:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("keep.txt"),
+        "the ordinary file must still be planned:\n{stdout}"
+    );
+    assert!(
+        stderr.contains("skipped 2 special file(s)"),
+        "the scan must disclose what it passed over:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_tree_with_no_special_files_says_nothing_about_them() {
+    // The property that keeps the warning worth reading, asserted for specials
+    // exactly as it is for links: an ordinary tree produces no line at all.
+    let sandbox = Sandbox::new();
+    sandbox.write("tree/a.txt", b"a");
+
+    let assertion = sandbox
+        .dctl()
+        .args(["--no-ask-password", "-v"])
+        .arg("ls")
+        .arg(sandbox.path("tree"))
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assertion.get_output().stderr).into_owned();
+    assert!(
+        !stderr.contains("special file"),
+        "an ordinary tree must produce no special-file report at all:\n{stderr}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_scoped_sweep_reclaims_the_debris_under_the_path_it_was_given_and_no_other() {
+    // `photos` is not the parent of `photos-backup`, and this command deletes
+    // what it is handed. A backend matches a prefix the way a provider does —
+    // by bytes — so the sweep applies the same whole-component containment the
+    // object listing does, or `cleanup remote:photos` reclaims out of a
+    // directory nobody named.
+    let sandbox = Sandbox::new();
+    let store = sandbox.dir("store");
+    let named = plant_staging_file(&store.join("photos"), b"asked for");
+    let neighbour = plant_staging_file(&store.join("photos-backup"), b"not asked for");
+
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", store.display()))
+        .assert()
+        .success();
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("cleanup")
+        .arg(format!("{PLAIN_REMOTE}:photos"))
+        .args(["--class", "staging", "--min-age", "0s"])
+        .assert()
+        .success();
+
+    assert!(
+        !named.exists(),
+        "the debris that was asked for is still there"
+    );
+    assert!(
+        neighbour.exists(),
+        "a neighbouring directory was swept because its name starts the same way"
+    );
+}

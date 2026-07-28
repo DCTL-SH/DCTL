@@ -30,6 +30,7 @@ pub mod r2;
 pub mod retry;
 pub mod s3;
 pub mod sftp;
+pub mod specials;
 pub mod staging;
 mod streaming;
 #[cfg(test)]
@@ -52,4 +53,7 @@ pub use retry::{RetryPolicy, Retrying};
 pub use s3::{S3Backend, S3Config};
 pub use sftp::base::Base as SftpBase;
 pub use sftp::{SftpBackend, SftpConfig};
-pub use staging::{STAGING_NAME_PREFIX, is_staging_name};
+pub use specials::{SPECIAL_NOTE_SAMPLE, SpecialKind, SpecialNote, SpecialReport};
+pub use staging::{
+    STAGING_NAME_PREFIX, StagingListing, StagingPage, Want, is_staging_key, is_staging_name,
+};

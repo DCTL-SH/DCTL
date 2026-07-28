@@ -45,8 +45,9 @@ use serde::Serialize;
 use crate::commands::listing::emit::Emitter;
 use crate::constants::{
     REMOVAL_KIND_OBJECT, REMOVAL_SIZE_ABSENT, REMOVAL_SIZE_WIDTH, REMOVAL_STATUS_ABSENT,
-    REMOVAL_STATUS_FAILED, REMOVAL_STATUS_REMOVED, REMOVAL_STATUS_SUMMARY,
-    REMOVAL_STATUS_UNSUPPORTED, REMOVAL_STATUS_WIDTH, REMOVAL_STATUS_WOULD_REMOVE,
+    REMOVAL_STATUS_FAILED, REMOVAL_STATUS_NOT_STAGED, REMOVAL_STATUS_REMOVED,
+    REMOVAL_STATUS_SUMMARY, REMOVAL_STATUS_UNSUPPORTED, REMOVAL_STATUS_WIDTH,
+    REMOVAL_STATUS_WOULD_REMOVE,
 };
 use crate::ctx::Ctx;
 use crate::error::Result;
@@ -90,6 +91,9 @@ pub struct Totals {
     pub failed: u64,
     /// Debris classes this backend cannot enumerate.
     pub unsupported: u64,
+    /// Debris classes this backend does not have. Never an error: the question
+    /// was answered, and the answer was "there is no such thing here".
+    pub not_staged: u64,
     /// Bytes accounted for by `removed` (or by `would_remove` on a dry run), or
     /// `null` when any of those objects had no recorded size.
     ///
@@ -117,6 +121,7 @@ impl Default for Totals {
             absent: 0,
             failed: 0,
             unsupported: 0,
+            not_staged: 0,
             bytes: Some(0),
             measured_bytes: 0,
             unmeasured: 0,
@@ -265,6 +270,31 @@ impl<'a> Report<'a> {
         })
     }
 
+    /// Record a class of debris this backend does not have, and why.
+    ///
+    /// Distinct from [`unsupported`](Report::unsupported) in every way that
+    /// matters: that one means "I could not look", this one means "I looked at
+    /// the question and there is nothing of this kind here". It raises no error
+    /// however the class was asked for, because nothing failed — and it is said
+    /// out loud rather than left to `removed: 0`, because a bare zero from a
+    /// sweep is precisely the sentence this command spent a release printing
+    /// untruthfully on the backends where the debris does accumulate.
+    ///
+    /// # Errors
+    /// A stdout write failure other than a broken pipe.
+    pub fn not_staged(&mut self, class: &'static str, reason: impl Into<String>) -> Result<()> {
+        let reason = reason.into();
+        self.totals.not_staged += 1;
+        self.ctx.out.warn(format!("{class}: {reason}"));
+        self.write(&Record {
+            status: REMOVAL_STATUS_NOT_STAGED,
+            path: None,
+            size: None,
+            kind: Some(class),
+            reason: Some(reason),
+        })
+    }
+
     /// The totals so far, for a caller that has to decide what to say next.
     #[must_use]
     pub const fn totals(&self) -> Totals {
@@ -387,7 +417,7 @@ fn text_line(record: &Record<'_>, units: crate::output::Units) -> String {
 mod tests {
     use super::*;
     use crate::cli::globals::GlobalArgs;
-    use crate::constants::{REMOVAL_KIND_DIRECTORY, REMOVAL_STATUS_PLANNED};
+    use crate::constants::{REMOVAL_KIND_DIRECTORY, REMOVAL_KIND_STAGING, REMOVAL_STATUS_PLANNED};
     use crate::output::Units;
     use clap::Parser;
 
@@ -491,6 +521,58 @@ mod tests {
         report.removed(&item("a", u64::MAX)).unwrap();
         report.removed(&item("b", 1)).unwrap();
         assert_eq!(report.totals().bytes, Some(u64::MAX));
+    }
+
+    #[test]
+    fn a_class_this_backend_does_not_have_is_neither_an_error_nor_a_removal() {
+        // The third answer. `unsupported` means "I could not look" and raises
+        // the run's error count when the class was named; this one means "I
+        // looked and there is no such thing here", which nothing failed at. A
+        // sweep of an object store, whose uploads never touch a temporary key,
+        // has to be able to say so without failing and without printing the bare
+        // `removed: 0` that made this report untrustworthy on the backends where
+        // the debris does accumulate.
+        let ctx = ctx(&["--quiet"]);
+        let mut report = Report::new(&ctx);
+        report
+            .not_staged(
+                REMOVAL_KIND_STAGING,
+                "this backend uploads straight to the final key",
+            )
+            .unwrap();
+
+        let totals = report.totals();
+        assert_eq!(totals.not_staged, 1);
+        assert_eq!(totals.unsupported, 0, "it is not the same answer");
+        assert_eq!(totals.removed, 0);
+        assert_eq!(totals.failed, 0);
+        assert_eq!(ctx.stats.snapshot().errors, 0, "nothing failed");
+        assert_eq!(ctx.outcome(), crate::exit::ExitCode::Success);
+    }
+
+    #[test]
+    fn the_two_answers_that_are_not_counts_are_distinguishable_in_the_json() {
+        // A consumer branches on the status, and the two facts have different
+        // remedies: one is "use the provider's console", the other is "there is
+        // nothing to do".
+        let inapplicable = serde_json::to_value(Record {
+            status: REMOVAL_STATUS_NOT_STAGED,
+            path: None,
+            size: None,
+            kind: Some(REMOVAL_KIND_STAGING),
+            reason: Some("never stages".into()),
+        })
+        .unwrap();
+        let unavailable = serde_json::to_value(Record {
+            status: REMOVAL_STATUS_UNSUPPORTED,
+            path: None,
+            size: None,
+            kind: Some(REMOVAL_KIND_STAGING),
+            reason: Some("no API".into()),
+        })
+        .unwrap();
+        assert_ne!(inapplicable["status"], unavailable["status"]);
+        assert_eq!(inapplicable["status"], REMOVAL_STATUS_NOT_STAGED);
     }
 
     #[test]

@@ -2102,6 +2102,19 @@ pub const LINKS_SKIPPED_HINT: &str = "Use --links follow to store what they poin
 pub const LINKS_BROKEN_HINT: &str = "Those paths were asked for and could not be stored. Repair or remove the links, \
      then run again.";
 
+/// What to say after reporting fifos, sockets and device nodes a walk passed
+/// over.
+///
+/// It names no flag, and that is the difference from [`LINKS_SKIPPED_HINT`]:
+/// there is no setting that would store a socket, because a socket has no bytes
+/// to store. rclone offers `skip_specials` only to turn the *message* off, which
+/// is a knob for silence rather than for behaviour and is not worth a flag here.
+/// So the sentence says what was passed over and what would have to change on
+/// the filesystem — nothing, usually, which is exactly what the operator needs
+/// to conclude before they trust the run.
+pub const SPECIALS_SKIPPED_HINT: &str = "A fifo, socket or device node holds no bytes a transfer can carry, so none was \
+     stored. Run with -v to see their names.";
+
 /// Column headers of the transfer plan table.
 ///
 /// Prefixed rather than generic, following [`INTEGRITY_COLUMN_STATUS`]'s
@@ -4155,6 +4168,16 @@ pub const REMOVAL_STATUS_FAILED: &str = "failed";
 
 /// Status of a debris class this backend cannot enumerate.
 pub const REMOVAL_STATUS_UNSUPPORTED: &str = "unsupported";
+
+/// Status of a debris class that does not exist on this backend.
+///
+/// Deliberately not [`REMOVAL_STATUS_UNSUPPORTED`], and the distinction is a
+/// correctness one rather than a nicety: "I could not look" and "I looked and
+/// there is no such thing here" are different answers, only one of them is a
+/// reason to fail a run that asked for that class by name, and neither of them
+/// is the bare `removed: 0` that made this whole family's report untrustworthy
+/// on the backends where the debris actually accumulates.
+pub const REMOVAL_STATUS_NOT_STAGED: &str = "not-staged";
 
 /// Status of the single closing record that carries the run's totals.
 pub const REMOVAL_STATUS_SUMMARY: &str = "summary";

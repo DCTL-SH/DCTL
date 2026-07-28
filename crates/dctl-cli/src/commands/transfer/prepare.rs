@@ -446,15 +446,17 @@ fn nested(inner: &RemoteSpec, outer: &RemoteSpec, which: &str, relation: &str) -
 /// unrepresentable filename is data the user asked for and did not get, and
 /// finding that out from a restore is far too late.
 ///
-/// The symbolic-link half is delegated to [`crate::links`] rather than worded
-/// here, because the listing family and `backup` have to say the same thing
-/// about the same tree — an operator who checks with `ls` and then runs `copy`
-/// must not be told two different stories.
+/// The symbolic-link half is delegated to [`crate::links`], and the special-file
+/// half to [`crate::specials`], rather than worded here, because the listing
+/// family and `backup` have to say the same thing about the same tree — an
+/// operator who checks with `ls` and then runs `copy` must not be told two
+/// different stories.
 fn warn_about_omissions(ctx: &Ctx, listing: &Listing) {
     if !listing.has_omissions() {
         return;
     }
     crate::links::report(ctx, &listing.links);
+    crate::specials::report(ctx, &listing.specials);
     if listing.unrepresentable_skipped > 0 {
         ctx.out.warn(format!(
             "skipped {} entr(y/ies) whose names have no logical path: not valid UTF-8, \

@@ -1,5 +1,5 @@
 //! The recursive `readdir` that turns an SFTP subtree into object keys, and the
-//! symbolic links it used to drop.
+//! entries it used to drop.
 //!
 //! SFTP has no recursive listing, so this walks. What it walks *over* is the
 //! part that mattered: a `SSH_FXP_READDIR` entry carries the attributes of
@@ -8,6 +8,11 @@
 //! nothing. `/srv/data -> /mnt/bigdisk/data` is the canonical layout on exactly
 //! the kind of host this backend exists to reach, and pointing DCTL at `/srv`
 //! listed an empty tree.
+//!
+//! The same `_ => {}` swallowed every fifo, socket and device node too, and that
+//! half outlived the link fix by a full pass: `ls sftp:/var` reported the files
+//! and said nothing whatever about the sockets. Both are now [`observe`]d, and
+//! there is no arm left that ends in silence.
 //!
 //! # What each policy costs on the wire
 //!
@@ -22,23 +27,28 @@
 //! Ordinary subdirectories cost nothing extra under any policy. Their canonical
 //! path is their parent's plus their own name — they are not links, so there is
 //! nothing for the server to resolve — and computing it here rather than asking
-//! keeps the walk's request count where it was.
+//! keeps the walk's request count where it was. A special file costs nothing
+//! either: the type bits it is classified from arrived with the directory entry.
 
 use openssh_sftp_client::Sftp;
 use tokio_stream::StreamExt as _;
 
 use crate::error::Result;
 use crate::links::{Ancestors, DirId, LinkPolicy, LinkReport, LinkTarget, LinkVerdict, decide};
+use crate::specials::{SpecialKind, SpecialReport};
+use crate::staging::Want;
 
 use std::sync::Arc;
 
 use super::map_sftp_err;
 
-/// One walk's findings: `(key, size, modified_unix)` per object, plus the links.
+/// One walk's findings: `(key, size, modified_unix)` per object, plus what was
+/// passed over.
 #[derive(Debug, Default)]
 pub(super) struct Walked {
     pub found: Vec<(String, u64, Option<i64>)>,
     pub links: LinkReport,
+    pub specials: SpecialReport,
 }
 
 /// A directory waiting to be read.
@@ -51,7 +61,8 @@ struct Pending {
     ancestors: Option<Arc<Ancestors>>,
 }
 
-/// Walk the subtree at `open_root` under `policy`.
+/// Walk the subtree at `open_root` under `policy`, collecting what `want`
+/// selects.
 ///
 /// `key_root` is the same directory expressed as a key prefix, carried
 /// separately because the two spellings diverge: the wire path is absolute or
@@ -66,6 +77,7 @@ pub(super) async fn collect(
     open_root: String,
     key_root: String,
     policy: LinkPolicy,
+    want: Want,
 ) -> Result<Walked> {
     let mut walked = Walked::default();
     let mut fs = sftp.fs();
@@ -131,6 +143,7 @@ pub(super) async fn collect(
                         ancestors.as_ref(),
                         &open_child,
                         key_child,
+                        want,
                     )
                     .await?;
                     if let Some(chain) = followed {
@@ -157,12 +170,23 @@ pub(super) async fn collect(
                         key_child,
                         md.len().unwrap_or(0),
                         md.modified().map(|t| t.as_duration().as_secs() as i64),
+                        want,
                     );
                 }
-                // A device, socket or fifo, or a type the server declined to
-                // report. Neither has bytes a transfer carries, and neither is a
-                // door into a tree the way a link is.
-                _ => {}
+                // A device, socket or fifo. Nothing a transfer can carry, and
+                // nothing this walk may pass over in silence — the classification
+                // is the one pure rule in `crate::specials`, fed the type bits
+                // that already arrived with the directory entry.
+                Some(ft) => walked.specials.observe(
+                    key_child,
+                    SpecialKind::from_posix_mode(ft.as_raw() as u32)
+                        .unwrap_or(SpecialKind::Unknown),
+                ),
+                // The server sent no permissions attribute, which is legal in
+                // version 3 of the protocol and leaves the type unknowable.
+                // Something is there, it was not listed, and saying so is the
+                // whole point.
+                None => walked.specials.observe(key_child, SpecialKind::Unknown),
             }
         }
     }
@@ -174,6 +198,7 @@ pub(super) async fn collect(
 ///
 /// Returning the pieces rather than pushing the stack itself keeps the wire path
 /// — which the caller still owns — out of this function's signature twice.
+#[allow(clippy::too_many_arguments)]
 async fn follow(
     walked: &mut Walked,
     fs: &mut openssh_sftp_client::fs::Fs,
@@ -182,6 +207,7 @@ async fn follow(
     ancestors: Option<&Arc<Ancestors>>,
     open_child: &str,
     key_child: String,
+    want: Want,
 ) -> Result<Option<(String, Option<Arc<Ancestors>>)>> {
     if !policy.follows() {
         walked
@@ -261,26 +287,31 @@ async fn follow(
             key_child,
             target.len().unwrap_or(0),
             target.modified().map(|t| t.as_duration().as_secs() as i64),
+            want,
         );
     } else {
+        // A link followed to a fifo, socket or device node. Reported as a link
+        // verdict rather than as a special file, for the reason the local walk
+        // gives: what the operator can act on is the link, which is in the tree
+        // and has a name to exclude.
         walked.links.observe(key_child, LinkVerdict::NotStorable);
     }
     Ok(None)
 }
 
-/// Add one object, unless it is an uncommitted write.
+/// Add one object, if it is the kind of file this walk was asked for.
 ///
 /// One rule, one implementation, in [`crate::staging`]: a prefix test on the
-/// file's own name. The substring test this replaced hid every object whose name
-/// contained `.tmp.` from `ls`, `size`, `scrub`, `copy`, `sync` and `purge`
-/// alike.
-fn emit(walked: &mut Walked, key: String, size: u64, modified_unix: Option<i64>) {
-    if let Some(name) = key.rsplit('/').next()
-        && crate::staging::is_staging_name(name)
-    {
-        return;
+/// file's own name, and the two selections are exact complements of it. The
+/// substring test this replaced hid every object whose name contained `.tmp.`
+/// from `ls`, `size`, `scrub`, `copy`, `sync` and `purge` alike — and the
+/// listing that dropped staging files was the only listing `cleanup` had, so a
+/// sweep of abandoned uploads searched a list they had already been removed
+/// from and reported that there were none.
+fn emit(walked: &mut Walked, key: String, size: u64, modified_unix: Option<i64>, want: Want) {
+    if want.keeps(&key) {
+        walked.found.push((key, size, modified_unix));
     }
-    walked.found.push((key, size, modified_unix));
 }
 
 /// The canonical path a chain node stands for, or `""` when it holds none.
@@ -371,9 +402,23 @@ mod tests {
             format!("d/{}42.1", crate::staging::STAGING_NAME_PREFIX),
             10,
             None,
+            Want::Objects,
         );
-        emit(&mut walked, "d/real.bin".into(), 10, None);
+        emit(&mut walked, "d/real.bin".into(), 10, None, Want::Objects);
         assert_eq!(walked.found.len(), 1);
         assert_eq!(walked.found[0].0, "d/real.bin");
+    }
+
+    #[test]
+    fn the_staging_walk_returns_exactly_what_the_object_walk_omits() {
+        // The two questions over one subtree, in the one place the sftp walk
+        // decides them. A key in neither answer is what let `cleanup` report a
+        // store clean while a killed upload's 12 MiB sat in it.
+        let staged = format!("d/{}42.1", crate::staging::STAGING_NAME_PREFIX);
+        let mut debris = Walked::default();
+        emit(&mut debris, staged.clone(), 10, None, Want::Staging);
+        emit(&mut debris, "d/real.bin".into(), 10, None, Want::Staging);
+        assert_eq!(debris.found.len(), 1);
+        assert_eq!(debris.found[0].0, staged);
     }
 }

@@ -174,6 +174,21 @@ impl Backend for Retrying {
         .await
     }
 
+    /// Retried like every other read. Enumeration stores nothing, so repeating
+    /// it can produce a stale answer at worst — and a sweep that gave up on the
+    /// first dropped packet would leave the debris it was run to reclaim.
+    async fn list_staging(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> Result<crate::staging::StagingListing> {
+        run("list_staging", self.policy, |_| {
+            let cursor = cursor.clone();
+            async move { self.inner.list_staging(prefix, cursor).await }
+        })
+        .await
+    }
+
     async fn prepare_upload(
         &self,
         key: &ObjectKey,
@@ -275,6 +290,7 @@ mod tests {
         retried!("exists", exists(&key));
         retried!("delete", delete(&key));
         retried!("list_page", list_page("", None));
+        retried!("list_staging", list_staging("", None));
     }
 
     #[tokio::test]

@@ -557,6 +557,14 @@ mod tests {
         ) -> dctl_store::Result<Page> {
             self.inner.list_page(prefix, cursor).await
         }
+
+        async fn list_staging(
+            &self,
+            prefix: &str,
+            cursor: Option<String>,
+        ) -> dctl_store::Result<dctl_store::StagingListing> {
+            self.inner.list_staging(prefix, cursor).await
+        }
     }
 
     async fn vault_with(files: &[(&str, &[u8])]) -> Fixture {

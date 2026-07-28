@@ -51,6 +51,7 @@ mod platform;
 mod remote;
 mod session;
 mod source;
+mod specials;
 
 use clap::Parser;
 

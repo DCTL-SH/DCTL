@@ -88,6 +88,17 @@ impl Stream {
         self.pages.links()
     }
 
+    /// What the walk behind this stream passed over that was neither a file, a
+    /// directory nor a link.
+    ///
+    /// Unfiltered for the reason [`links`](Stream::links) is: a fifo the walk
+    /// skipped produced no entry, so no `--include` was ever asked about it, and
+    /// reporting only the ones that "matched" would mean reporting none.
+    #[must_use]
+    pub fn specials(&self) -> dctl_store::SpecialReport {
+        self.pages.specials()
+    }
+
     /// Call `visit` for every entry in scope, in path order.
     ///
     /// Stops at the first error from either the source or the visitor, and

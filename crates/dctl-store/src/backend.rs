@@ -8,6 +8,7 @@ use crate::error::{Result, StoreError};
 use crate::guard::StoreIdentity;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
+use crate::staging::StagingListing;
 
 /// A delegated (presigned) authorization to upload exactly ONE object key.
 ///
@@ -142,7 +143,42 @@ pub trait Backend: Send + Sync {
 
     /// One page of a prefix listing. Pass the previous page's `next_cursor` to
     /// continue; `None` starts from the beginning. Keeps memory constant.
+    ///
+    /// **Never includes staging files.** A write that has not reached its commit
+    /// is not an object, and offering one here is how a `copy` restores a
+    /// truncated file. What was abandoned is a separate question, asked of
+    /// [`list_staging`](Backend::list_staging).
     async fn list_page(&self, prefix: &str, cursor: Option<String>) -> Result<Page>;
+
+    /// One page of the **staging debris** under `prefix` — the objects a write
+    /// abandoned before its commit — or the reason this backend has none.
+    ///
+    /// The second question, asked separately, and the whole of the fix for a
+    /// `cleanup` that reported `OK removed: 0 object(s), 0 B` over a store
+    /// holding a 528 KiB staging file that a `SIGKILL` had left there. Discovery
+    /// used to go through [`list_page`](Backend::list_page), which
+    /// *deliberately* omits exactly those keys, so the sweep could not see what
+    /// it existed to remove and said so in its own source while the verdict said
+    /// the opposite.
+    ///
+    /// Deliberately **not** a provided method, for the reason
+    /// [`store_identity`](Backend::store_identity) is not: a default returning an
+    /// empty page would hand every backend added later a silent false all-clear,
+    /// which is the precise defect this method closes. A new provider must
+    /// decide, and [`StagingListing::NotStaged`] is how it says "nothing is ever
+    /// written under a temporary key here, and here is why".
+    ///
+    /// Implementations must return **only** keys that satisfy
+    /// [`is_staging_key`](crate::staging::is_staging_key). The sweep checks it
+    /// again before deleting anything — not as a second opinion, since it is the
+    /// same function, but because this is the one call in the binary whose
+    /// answer is turned straight into `delete`.
+    ///
+    /// # Errors
+    /// Whatever enumerating reported. A failure is an error and never an empty
+    /// page: "I could not look" and "there is nothing there" are the two answers
+    /// this whole method exists to keep apart.
+    async fn list_staging(&self, prefix: &str, cursor: Option<String>) -> Result<StagingListing>;
 
     /// Issue a delegated authorization for a client to upload the single object `key`
     /// **directly** to the backend (see [`UploadTicket`]).

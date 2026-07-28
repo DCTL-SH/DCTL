@@ -136,6 +136,28 @@ impl Backend for R2Backend {
     async fn delete(&self, key: &ObjectKey) -> Result<()> {
         self.client.delete(key).await
     }
+    /// Nothing is ever written under a temporary key here, so nothing can be
+    /// abandoned under one.
+    ///
+    /// Measured rather than assumed: a `SIGKILL` three seconds into a copy to a
+    /// live B2 bucket leaves the bucket holding `system/envelope.bin` and
+    /// nothing else. The upload goes straight to the final key with a checksum
+    /// the provider verifies, so there is no staging namespace to sweep.
+    ///
+    /// What an interrupted *large* upload leaves is an unfinished multipart
+    /// upload, which is billed, which no listing shows, and which is a different
+    /// class — reported as `unsupported` by name, because no API in this build
+    /// can enumerate it.
+    async fn list_staging(
+        &self,
+        _prefix: &str,
+        _cursor: Option<String>,
+    ) -> Result<crate::staging::StagingListing> {
+        Ok(crate::staging::StagingListing::NotStaged(
+            crate::staging::NOT_STAGED_REASON,
+        ))
+    }
+
     async fn list_page(&self, prefix: &str, cursor: Option<String>) -> Result<Page> {
         self.client.list_page(prefix, cursor).await
     }

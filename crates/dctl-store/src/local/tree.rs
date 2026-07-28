@@ -11,8 +11,9 @@
 //! child and matched on *is a directory* then *is a file*. That call does not
 //! traverse links, so a symlink is neither, fell past both arms, and was
 //! dropped without a word — the defect [`crate::links`] documents in full.
-//! Every branch below therefore ends in either a key or a
-//! [`LinkVerdict`](crate::links::LinkVerdict); nothing leaves this function
+//! Every branch below therefore ends in either a key, a
+//! [`LinkVerdict`](crate::links::LinkVerdict) or a
+//! [`SpecialKind`](crate::specials::SpecialKind); nothing leaves this function
 //! unaccounted for.
 //!
 //! # What the walk costs under the default
@@ -21,7 +22,19 @@
 //! canonicalises a path and never builds an ancestor chain, so a tree with no
 //! links is read with exactly the syscalls it was read with before. The `stat`
 //! per link, the `realpath` per link under `in-tree`, and the chain node per
-//! directory are all paid only by a run that asked to follow.
+//! directory are all paid only by a run that asked to follow. One further `stat`
+//! is paid per *special* entry, to learn which kind it is; a tree with no fifos,
+//! sockets or device nodes pays nothing for it.
+//!
+//! # The two questions this walk answers
+//!
+//! "What is stored?" and "what did we abandon?" are asked separately, and
+//! [`Want`] is which one is being asked. They used to share one answer — the
+//! object listing, which omits staging files by design — so `dctl cleanup
+//! --class staging` swept a listing that had already dropped every key it was
+//! looking for and reported `OK removed: 0 object(s)` over a directory of
+//! abandoned uploads. One walk, one rule, two mutually exclusive selections; see
+//! [`crate::staging`].
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -30,14 +43,19 @@ use crate::error::Result;
 use crate::links::{
     Ancestors, LinkPolicy, LinkReport, LinkTarget, LinkVerdict, decide, local_dir_id,
 };
+use crate::specials::{SpecialKind, SpecialReport};
+use crate::staging::Want;
 
-/// One walk's findings: the keys it produced, and what it did about the links.
+/// One walk's findings: the keys it produced, and what it passed over.
 #[derive(Debug, Default)]
 pub(super) struct Walked {
-    /// Forward-slash-relative keys of every regular file the walk reached.
+    /// Forward-slash-relative keys of every file the walk kept.
     pub keys: Vec<String>,
     /// Every symbolic link met, counted, with a bounded sample named.
     pub links: LinkReport,
+    /// Every fifo, socket or device node met, counted, with a bounded sample
+    /// named.
+    pub specials: SpecialReport,
 }
 
 /// A directory waiting to be read, with the chain of directories above it.
@@ -50,14 +68,15 @@ struct Pending {
     ancestors: Option<Arc<Ancestors>>,
 }
 
-/// Walk `root` under `policy`, returning its object keys and its link report.
+/// Walk `root` under `policy`, returning the keys `want` selects and the report
+/// of everything passed over.
 ///
 /// # Errors
 /// An unreadable directory *other than a missing one* fails the walk: a listing
 /// that quietly omitted a subtree it could not open would be the same misreport
 /// this module exists to remove. A missing directory is an empty listing, which
 /// is the ordinary answer for a prefix that holds no objects yet.
-pub(super) async fn collect(root: &Path, policy: LinkPolicy) -> Result<Walked> {
+pub(super) async fn collect(root: &Path, policy: LinkPolicy, want: Want) -> Result<Walked> {
     let mut walked = Walked::default();
 
     // Resolved once. Only `in-tree` asks where a link led, so only `in-tree`
@@ -114,6 +133,7 @@ pub(super) async fn collect(root: &Path, policy: LinkPolicy) -> Result<Walked> {
                     &ancestors,
                     path,
                     key,
+                    want,
                 )
                 .await?;
             } else if file_type.is_dir() {
@@ -122,16 +142,57 @@ pub(super) async fn collect(root: &Path, policy: LinkPolicy) -> Result<Walked> {
                     path,
                 });
             } else if file_type.is_file() {
-                emit(&mut walked, key);
+                emit(&mut walked, key, want);
+            } else {
+                // A socket, fifo or device node: nothing a transfer can carry,
+                // and — unlike a link — not a door into a whole tree. Passing
+                // over it is rclone's behaviour too, and so is *saying so*:
+                // `Storable` matches `os.ModeNamedPipe|os.ModeSocket|os.ModeDevice`
+                // and returns false (`backend/local/local.go:1299`), and the
+                // next line logs `Can't transfer non file/directory` (`:1301`)
+                // unless the operator asked for silence with `skip_specials`.
+                // DCTL cited the first half of that as its authority and omitted
+                // the second, so a backup of `/var` was told nothing at all.
+                walked.specials.observe(key, kind_of(&entry).await);
             }
-            // Anything else — a socket, fifo or device — has no bytes a
-            // transfer carries. Passing over those is rclone's behaviour too
-            // (`backend/local/local.go:1298`, "Can't transfer non file/directory"),
-            // and unlike a link it is not a door to a whole tree.
         }
     }
 
     Ok(walked)
+}
+
+/// Which special file `entry` is.
+///
+/// One `stat`, and only for an entry already known to be neither a file, a
+/// directory nor a link — so an ordinary tree pays nothing. The mode rather than
+/// [`std::os::unix::fs::FileTypeExt`]'s four predicates because the rule that
+/// turns type bits into a name lives in [`crate::specials`] and is shared with
+/// the sftp walk, which receives those same bits straight off the wire; two
+/// walks with two copies of a classification is how `local:` and `sftp:` came to
+/// disagree about a symbolic link.
+///
+/// [`SpecialKind::Unknown`] when the `stat` fails — the entry was there a moment
+/// ago and cannot be described now, which is a fact worth reporting and not a
+/// reason to drop it.
+async fn kind_of(entry: &tokio::fs::DirEntry) -> SpecialKind {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        // `DirEntry::metadata` does not traverse links, which is right: this
+        // branch is only reached for an entry that is not one.
+        entry
+            .metadata()
+            .await
+            .ok()
+            .map_or(SpecialKind::Unknown, |metadata| {
+                SpecialKind::from_posix_mode(metadata.mode()).unwrap_or(SpecialKind::Unknown)
+            })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = entry;
+        SpecialKind::Unknown
+    }
 }
 
 /// Decide one symbolic link and act on the decision.
@@ -139,6 +200,7 @@ pub(super) async fn collect(root: &Path, policy: LinkPolicy) -> Result<Walked> {
 /// Split out because it is where the policy actually bites, and a reader
 /// checking that every path ends in a verdict should be able to see all of them
 /// at once.
+#[allow(clippy::too_many_arguments)]
 async fn follow(
     walked: &mut Walked,
     stack: &mut Vec<Pending>,
@@ -147,6 +209,7 @@ async fn follow(
     ancestors: &Option<Arc<Ancestors>>,
     path: PathBuf,
     key: String,
+    want: Want,
 ) -> Result<()> {
     if !policy.follows() {
         walked
@@ -198,8 +261,12 @@ async fn follow(
         });
     } else if target.is_file() {
         walked.links.observe(key.clone(), LinkVerdict::Followed);
-        emit(walked, key);
+        emit(walked, key, want);
     } else {
+        // A link followed to a fifo, socket or device node. Reported as a link
+        // verdict rather than as a special file, because what the operator has
+        // to act on is the *link* — the thing inside the tree, with a name they
+        // can exclude — and the target may not be in the tree at all.
         walked.links.observe(key, LinkVerdict::NotStorable);
     }
     Ok(())
@@ -218,7 +285,7 @@ async fn descend(ancestors: &Option<Arc<Ancestors>>, path: &Path) -> Option<Arc<
     }
 }
 
-/// Add one file's key, unless it is an uncommitted write.
+/// Add one file's key, if it is the kind of file this walk was asked for.
 ///
 /// One rule, one implementation, in [`crate::staging`]: a prefix test on the
 /// file's own name. It is applied here and not at each of the three call sites,
@@ -226,13 +293,15 @@ async fn descend(ancestors: &Option<Arc<Ancestors>>, path: &Path) -> Option<Arc<
 /// staging file is — the substring test this replaced hid `report.tmp.2024.csv`
 /// from every listing, and `copy` said `Files: 5 / 5, Errors: 0` and left it
 /// behind.
-fn emit(walked: &mut Walked, key: String) {
-    if let Some(name) = key.rsplit('/').next()
-        && crate::staging::is_staging_name(name)
-    {
-        return;
+///
+/// The two selections are exact complements of one predicate, which is what
+/// makes them exhaustive: every file under the root is in exactly one of the two
+/// answers, so nothing can fall between them the way staging debris fell between
+/// "not listed" and "not swept".
+fn emit(walked: &mut Walked, key: String, want: Want) {
+    if want.keeps(&key) {
+        walked.keys.push(key);
     }
-    walked.keys.push(key);
 }
 
 /// A path's key relative to the walk root: forward slashes, no leading
@@ -273,9 +342,18 @@ mod tests {
     }
 
     async fn walk(root: &Path, policy: LinkPolicy) -> Walked {
-        let mut walked = collect(root, policy).await.unwrap();
+        let mut walked = collect(root, policy, Want::Objects).await.unwrap();
         walked.keys.sort();
         walked
+    }
+
+    /// A fifo, which any process may create.
+    fn make_fifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo runs on a unix host");
+        assert!(status.success(), "mkfifo failed for {}", path.display());
     }
 
     #[tokio::test]
@@ -313,7 +391,67 @@ mod tests {
             let walked = walk(temp.path(), policy).await;
             assert_eq!(walked.keys, ["a.txt"]);
             assert!(walked.links.is_empty(), "{policy} invented a link");
+            assert!(walked.specials.is_empty(), "{policy} invented a special");
         }
+    }
+
+    #[tokio::test]
+    async fn a_fifo_in_the_tree_is_named_rather_than_dropped() {
+        // The second half of the silence: a link *pointing at* a fifo has always
+        // been reported, and the fifo itself was invisible. rclone logs
+        // `Can't transfer non file/directory` (`backend/local/local.go:1301`)
+        // and this walk cited that very line while saying nothing.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("keep.txt"), b"ordinary").unwrap();
+        make_fifo(&temp.path().join("pipe"));
+
+        let walked = walk(temp.path(), LinkPolicy::Skip).await;
+        assert_eq!(walked.keys, ["keep.txt"], "the skip itself is unchanged");
+        assert_eq!(walked.specials.skipped(), 1);
+        assert_eq!(walked.specials.notes()[0].path, "pipe");
+        assert_eq!(walked.specials.notes()[0].kind, SpecialKind::Fifo);
+    }
+
+    #[tokio::test]
+    async fn a_socket_in_the_tree_is_named_by_its_own_kind() {
+        // `/run` and `/var/run` are full of these, and a backup of either used
+        // to report `Errors: 0` over a tree it had not wholly represented.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("keep.txt"), b"ordinary").unwrap();
+        let _listener =
+            std::os::unix::net::UnixListener::bind(temp.path().join("app.sock")).unwrap();
+
+        let walked = walk(temp.path(), LinkPolicy::Skip).await;
+        assert_eq!(walked.keys, ["keep.txt"]);
+        assert_eq!(walked.specials.skipped(), 1);
+        assert_eq!(walked.specials.notes()[0].path, "app.sock");
+        assert_eq!(walked.specials.notes()[0].kind, SpecialKind::Socket);
+    }
+
+    #[tokio::test]
+    async fn a_special_file_is_reported_under_every_link_policy() {
+        // The two reports are independent: `--links` decides what happens to a
+        // link and has nothing to say about a fifo, so no setting of it may
+        // silence one.
+        let temp = tempfile::TempDir::new().unwrap();
+        make_fifo(&temp.path().join("pipe"));
+        for policy in [LinkPolicy::Skip, LinkPolicy::Follow, LinkPolicy::InTree] {
+            let walked = walk(temp.path(), policy).await;
+            assert_eq!(walked.specials.skipped(), 1, "{policy}");
+            assert!(walked.links.is_empty(), "{policy}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_special_file_below_the_root_keeps_its_whole_path() {
+        // The name has to be pasteable into an `--exclude`, which means it is
+        // the key and not the bare filename.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(temp.path().join("var/run")).unwrap();
+        make_fifo(&temp.path().join("var/run/pipe"));
+
+        let walked = walk(temp.path(), LinkPolicy::Skip).await;
+        assert_eq!(walked.specials.notes()[0].path, "var/run/pipe");
     }
 
     #[tokio::test]
@@ -445,22 +583,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_link_to_a_socket_is_reported_as_unstorable_rather_than_dropped() {
-        // Nothing to carry, and nothing hidden either.
+        // Nothing to carry, and nothing hidden either. Reported as a *link*, not
+        // as a special file: the thing in the tree with a name to exclude is the
+        // link, and the target may be somewhere else entirely.
         let temp = tempfile::TempDir::new().unwrap();
         let fifo = temp.path().join("pipe");
-        let made = std::process::Command::new("mkfifo")
-            .arg(&fifo)
-            .status()
-            .map(|status| status.success())
-            .unwrap_or(false);
-        if !made {
-            return; // no mkfifo on this host; the pure decision is covered above
-        }
+        make_fifo(&fifo);
         std::os::unix::fs::symlink(&fifo, temp.path().join("alias")).unwrap();
 
         let walked = walk(temp.path(), LinkPolicy::Follow).await;
         assert!(walked.keys.is_empty());
-        assert_eq!(walked.links.skipped(), 1);
         assert_eq!(
             walked
                 .links
@@ -470,6 +602,9 @@ mod tests {
                 .map(|note| note.verdict),
             Some(LinkVerdict::NotStorable)
         );
+        // And the fifo itself is reported once, on its own account.
+        assert_eq!(walked.specials.skipped(), 1);
+        assert_eq!(walked.specials.notes()[0].path, "pipe");
     }
 
     #[tokio::test]
@@ -498,5 +633,43 @@ mod tests {
 
         let walked = walk(temp.path(), LinkPolicy::Follow).await;
         assert_eq!(walked.keys, ["real.txt"]);
+    }
+
+    #[tokio::test]
+    async fn the_staging_walk_returns_exactly_what_the_object_walk_omits() {
+        // The two questions, over one tree. Every file is in exactly one answer;
+        // a file in neither is the shape that let staging debris sit in a store
+        // that `cleanup` said was clean.
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path();
+        std::fs::create_dir_all(root.join("o")).unwrap();
+        std::fs::write(root.join("o/real.bin"), b"committed").unwrap();
+        std::fs::write(root.join("report.tmp.2024.csv"), b"a user's file").unwrap();
+        let staging = format!("{}4711.0", crate::staging::STAGING_NAME_PREFIX);
+        std::fs::write(root.join("o").join(&staging), b"half a write").unwrap();
+
+        let objects = collect(root, LinkPolicy::Skip, Want::Objects)
+            .await
+            .unwrap();
+        let mut object_keys = objects.keys;
+        object_keys.sort();
+        assert_eq!(object_keys, ["o/real.bin", "report.tmp.2024.csv"]);
+
+        let debris = collect(root, LinkPolicy::Skip, Want::Staging)
+            .await
+            .unwrap();
+        assert_eq!(debris.keys, [format!("o/{staging}")]);
+    }
+
+    #[tokio::test]
+    async fn a_store_with_nothing_abandoned_enumerates_no_debris() {
+        // The honest empty answer, which is what makes a non-empty one mean
+        // something.
+        let temp = tempfile::TempDir::new().unwrap();
+        std::fs::write(temp.path().join("a.bin"), b"committed").unwrap();
+        let debris = collect(temp.path(), LinkPolicy::Skip, Want::Staging)
+            .await
+            .unwrap();
+        assert!(debris.keys.is_empty());
     }
 }

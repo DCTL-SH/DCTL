@@ -50,6 +50,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
+use dctl_store::SpecialReport;
 use dctl_store::links::{
     Ancestors, LinkPolicy, LinkReport, LinkTarget, LinkVerdict, decide, local_dir_id,
 };
@@ -197,6 +198,11 @@ pub struct Listing {
     /// why silence here was the one defect that destroyed data without saying
     /// so.
     pub links: LinkReport,
+    /// What the walk met that was neither a file, a directory nor a link: a
+    /// fifo, a socket, a device node. Counted and sampled by name, and reported
+    /// for the same reason the links are — a tree holding a pipe copied as
+    /// `Files: 1 / 1, Errors: 0` with the pipe named nowhere at any verbosity.
+    pub specials: SpecialReport,
     /// Entries with no logical path: a name that is not valid UTF-8, or one
     /// containing a character another platform reads as a separator (see
     /// [`crate::platform::path`]). They cannot be stored under a name the user
@@ -219,7 +225,9 @@ impl Listing {
     /// Whether anything at all was skipped and therefore deserves a warning.
     #[must_use]
     pub fn has_omissions(&self) -> bool {
-        crate::links::needs_saying(&self.links) || self.unrepresentable_skipped > 0
+        crate::links::needs_saying(&self.links)
+            || crate::specials::needs_saying(&self.specials)
+            || self.unrepresentable_skipped > 0
     }
 }
 
@@ -349,6 +357,7 @@ async fn walk_remote(
     // walk below, which is why the report has to travel with the listing rather
     // than being produced by whichever code path happened to enumerate.
     listing.links = cursor.links();
+    listing.specials = cursor.specials();
 
     // Deterministic order, matching the local walk, so a plan printed twice is
     // byte-identical whichever side produced it.
@@ -558,7 +567,17 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
         // A socket, device or FIFO named directly: there is no tree beneath it
         // and no bytes a transfer could carry. Not counted as a skipped link,
         // because it is not one — the root's link, if there was one, has already
-        // been resolved above.
+        // been resolved above. Counted as the special file it is, though:
+        // `dctl copy /run/docker.sock backup:` used to report `Files: 0 / 0,
+        // Errors: 0` and exit 0, which is the same wordless success over an
+        // unrepresented source as every other case in this pass.
+        listing.specials.observe(
+            root.file_name().map_or_else(
+                || root.display().to_string(),
+                |name| name.to_string_lossy().into_owned(),
+            ),
+            crate::specials::kind_of(&metadata),
+        );
         return Ok(listing);
     }
 
@@ -650,13 +669,26 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
                         .map(|chain| chain.child(local_dir_id(&metadata, &child_path)));
                     stack.push((child_path, path, chain));
                 }
-            } else if metadata.is_file()
-                && options.accepts_file(&path, metadata.len(), local_modified(&metadata))
-            {
-                collisions.observe(&path, &child.path());
+            } else if metadata.is_file() {
+                if options.accepts_file(&path, metadata.len(), local_modified(&metadata)) {
+                    collisions.observe(&path, &child.path());
+                    listing
+                        .entries
+                        .push(file_entry(path, &child.path(), &metadata, options)?);
+                }
+            } else {
+                // A fifo, socket or device node. Unreachable for a *followed*
+                // link — `resolve_link` has already answered `NotStorable` and
+                // skipped one of those — so this is always the entry's own type,
+                // and the mode it is classified from is the one already read.
+                //
+                // Reported before the filters and not after: an `--include` was
+                // never asked about it, because it produced no entry to ask
+                // about. The filter decides what is transferred, never what is
+                // disclosed.
                 listing
-                    .entries
-                    .push(file_entry(path, &child.path(), &metadata, options)?);
+                    .specials
+                    .observe(path, crate::specials::kind_of(&metadata));
             }
         }
 
@@ -803,6 +835,80 @@ mod tests {
 
     fn paths(listing: &Listing) -> Vec<&str> {
         listing.entries.iter().map(|e| e.path.as_str()).collect()
+    }
+
+    /// A fifo, which any process may create.
+    #[cfg(unix)]
+    fn make_fifo(path: &Path) {
+        let status = std::process::Command::new("mkfifo")
+            .arg(path)
+            .status()
+            .expect("mkfifo runs on a unix host");
+        assert!(status.success(), "mkfifo failed for {}", path.display());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_fifo_in_the_source_is_counted_and_named_rather_than_dropped() {
+        // The skip was always right and always silent: `copy` over this tree
+        // reported `Files: 3 / 3, Errors: 0`, exit 0, and the pipe appeared
+        // nowhere at any verbosity — while rclone, which this walk cites as its
+        // authority for skipping, logs `Can't transfer non file/directory`
+        // (`backend/local/local.go:1301`).
+        let dir = tree();
+        make_fifo(&dir.path().join("pipe"));
+        let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
+
+        let listing = source(&ctx(&[]), &endpoint, &ListOptions::default())
+            .await
+            .unwrap();
+
+        assert!(!paths(&listing).contains(&"pipe"), "{:?}", paths(&listing));
+        assert_eq!(listing.specials.skipped(), 1);
+        assert_eq!(listing.specials.notes()[0].path, "pipe");
+        assert_eq!(
+            listing.specials.notes()[0].kind,
+            dctl_store::SpecialKind::Fifo
+        );
+        assert!(listing.has_omissions(), "the run must not stay quiet");
+        // And it is not a link: the report that already existed is the wrong
+        // one for an entry with no target and no policy.
+        assert!(listing.links.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_filter_decides_what_is_transferred_and_never_what_is_disclosed() {
+        // A special file produced no entry, so no `--include` was ever asked
+        // about it. Reporting only the ones that "matched" would report none,
+        // which is the silence being removed wearing a filter.
+        let dir = tree();
+        make_fifo(&dir.path().join("pipe"));
+        let endpoint = RemoteSpec::Local(dir.path().to_path_buf());
+
+        let listing = source(&ctx(&[]), &endpoint, &options(&["--include", "*.txt"]))
+            .await
+            .unwrap();
+        assert_eq!(listing.specials.skipped(), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_source_that_is_itself_a_fifo_is_named_rather_than_listing_empty() {
+        // `dctl copy /run/docker.sock backup:` reported `Files: 0 / 0,
+        // Errors: 0` and exited 0 — a wordless success over a source that was
+        // never represented, which is the same failure one level up.
+        let dir = tempfile::tempdir().unwrap();
+        let pipe = dir.path().join("pipe");
+        make_fifo(&pipe);
+        let endpoint = RemoteSpec::Local(pipe);
+
+        let listing = source(&ctx(&[]), &endpoint, &ListOptions::default())
+            .await
+            .unwrap();
+        assert!(listing.entries.is_empty());
+        assert_eq!(listing.specials.skipped(), 1);
+        assert_eq!(listing.specials.notes()[0].path, "pipe");
     }
 
     #[tokio::test]

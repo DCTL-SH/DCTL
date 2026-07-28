@@ -159,6 +159,17 @@ pub trait Entries: Send {
     fn links(&self) -> dctl_store::LinkReport {
         dctl_store::LinkReport::default()
     }
+
+    /// What the walk behind this cursor passed over that was neither a file, a
+    /// directory nor a link.
+    ///
+    /// Beside [`links`](Entries::links) and for the identical reason: a fifo the
+    /// walk skipped produced *no entry*, so nothing that travelled with the
+    /// entries could have carried it, and the silence went through five
+    /// commands. Empty for every source that walks no filesystem.
+    fn specials(&self) -> dctl_store::SpecialReport {
+        dctl_store::SpecialReport::default()
+    }
 }
 
 /// Something objects can be listed from and read out of.

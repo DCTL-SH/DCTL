@@ -104,7 +104,7 @@ pub async fn run(ctx: &Ctx, args: &TreeArgs) -> Result<()> {
             .try_for_each(|entry| emitter.push(&JsonEntry::new(entry)))
             .await?;
         emitter.finish()?;
-        listing::report_links(ctx, &stream);
+        listing::report_omissions(ctx, &stream);
         listing::report_empty(ctx, &stream, &target);
         return Ok(());
     }
@@ -139,7 +139,7 @@ pub async fn run(ctx: &Ctx, args: &TreeArgs) -> Result<()> {
         bytes_or_unknown(tree.total_bytes(), ctx.out.units())
     ));
 
-    listing::report_links(ctx, &stream);
+    listing::report_omissions(ctx, &stream);
     if tree.is_empty() {
         listing::report_empty(ctx, &stream, &target);
     }

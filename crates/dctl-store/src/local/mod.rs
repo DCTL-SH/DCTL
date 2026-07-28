@@ -203,4 +203,19 @@ impl Backend for LocalFs {
     async fn list_page(&self, prefix: &str, cursor: Option<String>) -> Result<Page> {
         walk::list_page(self, prefix, cursor).await
     }
+
+    /// This backend stages, so it has debris to enumerate and does.
+    ///
+    /// `rename` is what makes a local write atomic and a staging sibling is what
+    /// there is to rename, so every interrupted `put` leaves exactly one of
+    /// these — and until this method existed the sweep that exists to reclaim
+    /// them looked in the object listing, which omits them on purpose, and
+    /// reported that there were none.
+    async fn list_staging(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> Result<crate::staging::StagingListing> {
+        walk::list_staging_page(self, prefix, cursor).await
+    }
 }

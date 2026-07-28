@@ -164,6 +164,7 @@ pub async fn run(ctx: &Ctx, args: &BackupArgs) -> Result<()> {
     // transfer and listing families so an operator who checks with `ls` and then
     // runs `backup` is told the same thing about the same tree.
     crate::links::report(ctx, &scan.links);
+    crate::specials::report(ctx, &scan.specials);
 
     // Names are checked for *any* platform: this tree may be restored anywhere.
     let mut findings = preflight::inspect(&scan.logical_paths(), None, Audience::AnyPlatform);

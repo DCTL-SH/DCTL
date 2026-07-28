@@ -9,6 +9,7 @@ use std::path::{Component, Path};
 
 use crate::error::{Result, StoreError};
 use crate::model::{ObjectKey, ObjectMeta, Page};
+use crate::staging::StagingPage;
 
 /// Normalize a configured `base` into a remote path string with no trailing slash.
 ///
@@ -507,12 +508,48 @@ mod tests {
 /// returned directories in readdir order would give a different one each run.
 #[must_use]
 pub(super) fn page(
-    mut found: Vec<(String, u64, Option<i64>)>,
+    found: Vec<(String, u64, Option<i64>)>,
     prefix: &str,
     cursor: Option<&str>,
     page_size: usize,
     links: crate::links::LinkReport,
+    specials: crate::specials::SpecialReport,
 ) -> Page {
+    let (items, next_cursor) = cut(found, prefix, cursor, page_size);
+    Page {
+        items,
+        next_cursor,
+        links,
+        specials,
+    }
+}
+
+/// The same cut over the debris an interrupted write abandoned.
+///
+/// The *same* function does the cutting, which is the point: a second copy of
+/// the cursor arithmetic for the sweep would be a second place for `cleanup` to
+/// drop an object per page, and this command turns what it is handed straight
+/// into `delete`. What differs is only the selection made by the walk upstream
+/// ([`Want`](crate::staging::Want)) and the absence of a link or special-file
+/// report, which belongs to the object listing and would be double-counted here.
+#[must_use]
+pub(super) fn staging_page(
+    found: Vec<(String, u64, Option<i64>)>,
+    prefix: &str,
+    cursor: Option<&str>,
+    page_size: usize,
+) -> StagingPage {
+    let (items, next_cursor) = cut(found, prefix, cursor, page_size);
+    StagingPage { items, next_cursor }
+}
+
+/// Filter, sort and cut one page out of everything a walk found.
+fn cut(
+    mut found: Vec<(String, u64, Option<i64>)>,
+    prefix: &str,
+    cursor: Option<&str>,
+    page_size: usize,
+) -> (Vec<ObjectMeta>, Option<String>) {
     found.retain(|(key, _, _)| key.starts_with(prefix));
     found.sort_by(|a, b| a.0.cmp(&b.0));
 
@@ -534,17 +571,14 @@ pub(super) fn page(
     } else {
         None
     };
-    Page {
-        items,
-        next_cursor,
-        links,
-    }
+    (items, next_cursor)
 }
 
 #[cfg(test)]
 mod page_tests {
     use super::*;
     use crate::links::LinkReport;
+    use crate::specials::SpecialReport;
 
     fn found(keys: &[&str]) -> Vec<(String, u64, Option<i64>)> {
         keys.iter()
@@ -574,7 +608,14 @@ mod page_tests {
         let mut cursor: Option<String> = None;
         let mut pages = 0;
         loop {
-            let page = page(found(&all), "", cursor.as_deref(), 2, LinkReport::default());
+            let page = page(
+                found(&all),
+                "",
+                cursor.as_deref(),
+                2,
+                LinkReport::default(),
+                SpecialReport::default(),
+            );
             seen.extend(keys(&page));
             pages += 1;
             assert!(pages < 10, "the walk did not terminate: {seen:?}");
@@ -592,7 +633,14 @@ mod page_tests {
         // The listing is what a transfer compares against, so an entry that
         // dropped its modification time would make `sync` re-transfer that file
         // on every run.
-        let page = page(found(&["a", "b"]), "", None, 10, LinkReport::default());
+        let page = page(
+            found(&["a", "b"]),
+            "",
+            None,
+            10,
+            LinkReport::default(),
+            SpecialReport::default(),
+        );
         assert_eq!(page.items[1].size, 1);
         assert_eq!(page.items[1].modified_unix, Some(1));
     }
@@ -607,6 +655,7 @@ mod page_tests {
             None,
             10,
             LinkReport::default(),
+            SpecialReport::default(),
         );
         assert_eq!(keys(&page), vec!["p/00", "p/000"]);
     }
@@ -617,25 +666,55 @@ mod page_tests {
         // is always `None` lists the first page of a million objects and reports
         // success over the rest.
         assert_eq!(
-            page(found(&["a", "b"]), "", None, 2, LinkReport::default()).next_cursor,
+            page(
+                found(&["a", "b"]),
+                "",
+                None,
+                2,
+                LinkReport::default(),
+                SpecialReport::default()
+            )
+            .next_cursor,
             None
         );
         assert_eq!(
-            page(found(&["a", "b", "c"]), "", None, 2, LinkReport::default()).next_cursor,
+            page(
+                found(&["a", "b", "c"]),
+                "",
+                None,
+                2,
+                LinkReport::default(),
+                SpecialReport::default()
+            )
+            .next_cursor,
             Some("b".to_string())
         );
     }
 
     #[test]
     fn a_cursor_past_the_end_yields_an_empty_final_page() {
-        let page = page(found(&["a", "b"]), "", Some("z"), 2, LinkReport::default());
+        let page = page(
+            found(&["a", "b"]),
+            "",
+            Some("z"),
+            2,
+            LinkReport::default(),
+            SpecialReport::default(),
+        );
         assert!(page.items.is_empty());
         assert_eq!(page.next_cursor, None);
     }
 
     #[test]
     fn an_empty_walk_is_an_empty_page() {
-        let page = page(Vec::new(), "anything/", None, 10, LinkReport::default());
+        let page = page(
+            Vec::new(),
+            "anything/",
+            None,
+            10,
+            LinkReport::default(),
+            SpecialReport::default(),
+        );
         assert!(page.items.is_empty());
         assert_eq!(page.next_cursor, None);
     }
@@ -643,7 +722,14 @@ mod page_tests {
     #[test]
     fn a_page_is_sorted_however_the_walk_found_things() {
         // The cursor is a position in an order; readdir has none.
-        let page = page(found(&["c", "a", "b"]), "", None, 10, LinkReport::default());
+        let page = page(
+            found(&["c", "a", "b"]),
+            "",
+            None,
+            10,
+            LinkReport::default(),
+            SpecialReport::default(),
+        );
         assert_eq!(keys(&page), vec!["a", "b", "c"]);
     }
 }

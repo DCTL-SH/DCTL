@@ -270,6 +270,44 @@ files — `report.tmp.2024.csv`, `db.tmp.2024-07-27.sql`, Office's own
 `~$report.tmp.docx` — from every listing while `copy` reported `Files: 5 / 5,
 Errors: 0`. One rule, one implementation, in `dctl_store::staging`.
 
+**Two questions, never one listing.** Because the object listing omits these
+keys, it cannot be what a sweep of them searches — and for one release it was, so
+`dctl cleanup --class staging` reported `OK removed: 0 object(s)` over a store
+holding a killed upload's leftovers. `Backend` therefore has a second
+enumeration, `list_staging`, that returns *only* staging keys. The two
+selections are exact complements of one predicate
+(`dctl_store::is_staging_key`), which is what makes them exhaustive: every file
+in a store is in exactly one of the two answers, so nothing can fall between them
+again. The method has no default implementation, so a backend added later cannot
+inherit the silence; `b2`, `s3` and `r2` answer that they never stage, because
+they upload straight to the final key.
+
+#### What a walk does with a fifo, a socket or a device node
+
+Skips it, and says so. None of them has bytes a transfer can carry, which is also
+where rclone settled — `Storable` matches
+`os.ModeNamedPipe|os.ModeSocket|os.ModeDevice` and returns false
+(`backend/local/local.go:1299`) — but the very next line logs `Can't transfer non
+file/directory` (`:1301`), and DCTL cited the first half as its authority while
+omitting the second. A tree holding one file and one named pipe copied as
+`Files: 1 / 1, Errors: 0`, exit 0, with the pipe named nowhere at any verbosity.
+
+Four walks meet these — the `local:` and `sftp:` backends', the transfer
+family's, and `backup`'s — and all four now report them the way symbolic links
+are reported: an exact count, a bounded sample of names, and the kind of each,
+because a socket in `/run` is expected while a block device under a backup root
+usually means the root is wrong. The classification is one pure function over the
+file-type bits of a POSIX mode (`dctl_store::specials`), shared by all four, so a
+fifo cannot be a fifo on one backend and a socket on another. It is a warning and
+never an error: there are no bytes to lose, and rclone does not raise an error
+count for one either.
+
+`backup` was worse than quiet. Its scan treated anything that was not a directory
+as a file, so it *planned to store* the device nodes, counted them in its file
+total, and then blocked forever on the first `open` of a fifo — which is what
+`dctl backup /var vault:` looked like from the outside: a run that never came
+back.
+
 ---
 
 ## 4. Two invariants, stated precisely

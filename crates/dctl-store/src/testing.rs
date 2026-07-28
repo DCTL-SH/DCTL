@@ -184,6 +184,17 @@ impl Backend for CountingBackend {
         Ok(Page::default())
     }
 
+    async fn list_staging(
+        &self,
+        _prefix: &str,
+        _cursor: Option<String>,
+    ) -> Result<crate::staging::StagingListing> {
+        self.attempt("list_staging")?;
+        Ok(crate::staging::StagingListing::Page(
+            crate::staging::StagingPage::default(),
+        ))
+    }
+
     async fn store_identity(&self) -> Result<Option<StoreIdentity>> {
         self.attempt("store_identity")?;
         Ok(Some(StoreIdentity::distinguishing("counting")))
@@ -344,6 +355,17 @@ impl Backend for IdentifiedBackend {
     async fn list_page(&self, _prefix: &str, _cursor: Option<String>) -> Result<Page> {
         self.record("list_page");
         Ok(Page::default())
+    }
+
+    async fn list_staging(
+        &self,
+        _prefix: &str,
+        _cursor: Option<String>,
+    ) -> Result<crate::staging::StagingListing> {
+        self.record("list_staging");
+        Ok(crate::staging::StagingListing::Page(
+            crate::staging::StagingPage::default(),
+        ))
     }
 }
 
