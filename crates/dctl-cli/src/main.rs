@@ -124,7 +124,11 @@ enum Outcome {
 /// Run the command, racing it against an interrupt.
 async fn execute(cli: Cli) -> ExitCode {
     let show_summary = cli.command.is_transfer();
-    let stats_interval = cli.globals.stats;
+    // Resolved before the globals are moved into the context, and resolved once:
+    // `--progress` shortens the cadence and `--stats 0` turns it off, and a
+    // second place deciding that is a second place for them to disagree.
+    let record_interval =
+        output::progress::ticker::interval(cli.globals.progress, cli.globals.stats);
     let context = Ctx::new(cli.globals);
 
     tracing::debug!(
@@ -180,7 +184,7 @@ async fn execute(cli: Cli) -> ExitCode {
         let _ticker = output::progress::ticker::spawn(
             &context.progress,
             &context.stats,
-            stats_interval,
+            record_interval,
             output::progress::ticker::Style::resolve(context.globals.stats_one_line),
         );
 

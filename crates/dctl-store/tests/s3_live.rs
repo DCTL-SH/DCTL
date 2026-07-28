@@ -14,10 +14,19 @@
 //! CompleteMultipartUpload, then `get_to_path` streams it back for a byte-identical
 //! compare. This same path is what R2 uses (it reuses the S3 client).
 //!
-//! LIVE VERIFICATION STATUS: pending the user's S3/R2/B2 credentials. These tests have
-//! NOT yet been run against a live endpoint — the user must supply the `DCTL_S3_*` env
-//! vars (post B2 DCTL001 key rotation for the B2 S3 endpoint) and run with `--ignored`.
-//! They never run in CI (no creds → skipped; `#[ignore]` keeps them out of the default run).
+//! LIVE VERIFICATION STATUS: **never run.** No S3 or R2 credentials have existed in
+//! this environment, so not one line below has been executed against a live endpoint.
+//! That sentence used to be buried under two tests that printed `skipping …` and
+//! reported **ok**, which is why `gated::require` now makes a missing variable a
+//! failure — see `tests/gated/mod.rs` for the whole argument, and
+//! `tests/credential_gate.rs` for what stops it coming back.
+//!
+//! What covers the S3 backend meanwhile is offline and stated plainly: the SigV4
+//! signing is checked against AWS's own published test vectors, the presigned-URL
+//! assembly and the `x-amz-meta-mtime` write are unit-tested in `s3::client`, and
+//! nothing else is claimed.
+
+mod gated;
 
 use bytes::Bytes;
 use dctl_store::{
@@ -30,14 +39,25 @@ use dctl_store::{
 /// rather than falling back to the single-shot path.
 const STREAM_SOURCE_LEN: u64 = 100 * 1024 * 1024 + 6 * 1024 * 1024;
 
-fn config_from_env() -> Option<S3Config> {
-    Some(S3Config::new(
-        std::env::var("DCTL_S3_ENDPOINT").ok()?,
-        std::env::var("DCTL_S3_REGION").ok()?,
-        std::env::var("DCTL_S3_BUCKET").ok()?,
-        std::env::var("DCTL_S3_ACCESS_KEY").ok()?,
-        std::env::var("DCTL_S3_SECRET_KEY").ok()?,
-    ))
+/// Every variable an S3 round trip needs, in the order [`S3Config::new`] takes them.
+const S3_VARS: &[&str] = &[
+    "DCTL_S3_ENDPOINT",
+    "DCTL_S3_REGION",
+    "DCTL_S3_BUCKET",
+    "DCTL_S3_ACCESS_KEY",
+    "DCTL_S3_SECRET_KEY",
+];
+
+/// The endpoint configuration, or a failure naming what is missing.
+fn config_or_fail(test: &str) -> S3Config {
+    let values = gated::require(test, S3_VARS);
+    S3Config::new(
+        values[0].clone(),
+        values[1].clone(),
+        values[2].clone(),
+        values[3].clone(),
+        values[4].clone(),
+    )
 }
 
 /// Write a deterministic `len`-byte pattern to `path` in fixed-size blocks, so the test
@@ -72,12 +92,10 @@ fn hash_file(path: &std::path::Path, algo: HashAlgo) -> ContentHash {
 }
 
 #[tokio::test]
-#[ignore = "requires live S3 credentials via DCTL_S3_* env vars"]
+#[ignore = "needs a live S3 endpoint: DCTL_S3_ENDPOINT, DCTL_S3_REGION, DCTL_S3_BUCKET, \
+            DCTL_S3_ACCESS_KEY, DCTL_S3_SECRET_KEY"]
 async fn s3_full_round_trip() {
-    let Some(config) = config_from_env() else {
-        eprintln!("skipping s3_full_round_trip: DCTL_S3_* not set");
-        return;
-    };
+    let config = config_or_fail("s3_full_round_trip");
 
     let s3 = S3Backend::new(config).unwrap();
     let key = ObjectKey::new(format!("dctl-s3-test/roundtrip-{}.bin", std::process::id()));
@@ -110,12 +128,10 @@ async fn s3_full_round_trip() {
 }
 
 #[tokio::test]
-#[ignore = "requires live S3 credentials via DCTL_S3_* env vars"]
+#[ignore = "needs a live S3 endpoint: DCTL_S3_ENDPOINT, DCTL_S3_REGION, DCTL_S3_BUCKET, \
+            DCTL_S3_ACCESS_KEY, DCTL_S3_SECRET_KEY"]
 async fn s3_stream_from_path_round_trip() {
-    let Some(config) = config_from_env() else {
-        eprintln!("skipping s3_stream_from_path_round_trip: DCTL_S3_* not set");
-        return;
-    };
+    let config = config_or_fail("s3_stream_from_path_round_trip");
 
     let s3 = S3Backend::new(config).unwrap();
     let key = ObjectKey::new(format!("dctl-s3-test/stream-{}.bin", std::process::id()));

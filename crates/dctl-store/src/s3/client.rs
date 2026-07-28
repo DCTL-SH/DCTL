@@ -924,6 +924,30 @@ mod tests {
         assert_eq!(render_src_modified(SourceModified::unknown()), None);
     }
 
+    /// The header set a write actually carries, key included.
+    ///
+    /// `render_src_modified` being tested was never enough: it could be correct
+    /// while the header it feeds was named something else, or while nothing sent
+    /// it at all. Every S3 write goes through this one function, and no S3
+    /// credentials exist in this environment — `tests/s3_live.rs` has never run —
+    /// so this is the only thing standing between the sync fix and a silent
+    /// regression on S3 and R2 (`HANDOVER.md` §11.2).
+    #[test]
+    fn a_write_carries_the_source_time_as_the_user_metadata_header() {
+        assert_eq!(
+            S3Client::metadata_headers(SourceModified::at(1_577_836_800)),
+            vec![("x-amz-meta-mtime", "1577836800.000000000".to_string())]
+        );
+    }
+
+    #[test]
+    fn a_write_with_no_source_time_carries_no_metadata_at_all() {
+        // Absent rather than zero: an object stamped 1970 looks older than every
+        // local file and inverts `--update` over all of them. S3's own
+        // `LastModified` then stands, which `head` deliberately does not read.
+        assert!(S3Client::metadata_headers(SourceModified::unknown()).is_empty());
+    }
+
     #[test]
     fn a_written_time_reads_back_as_the_same_whole_second() {
         for seconds in [0_i64, 1, 1_577_836_800, -86_400] {

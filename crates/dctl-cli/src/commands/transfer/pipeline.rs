@@ -280,7 +280,20 @@ async fn walk<D: StageDriver>(ctx: &Ctx, driver: &D, entry: &PlanEntry) -> Resul
     // the moment the run ends — so this is the only place a completed file
     // leaves a durable trace of how long it took, which is what turns "the
     // backup got slower" into a question with an answer.
-    tracing::debug!(
+    //
+    // At **INFO**, because that is what `dctl --help` sells `--log-level info`
+    // as: "one record per file transferred". It sat at `debug` instead, so a
+    // ten-file copy to a plain remote emitted zero INFO records — at any
+    // verbosity, including `trace`, since every level shows the records of the
+    // ones below it and there were none to show. `-v` was useless for the one
+    // thing an operator reaches for it (`HANDOVER.md` §11.2). A promise in
+    // `--help` that the binary does not keep is the same class of statement as a
+    // transfer reported that did not happen, one layer out.
+    //
+    // A failed file gets one too, carrying `stored = false`. That is more than
+    // the promise, not less: a log of successes cannot answer "what did not make
+    // it last night?", which is most of why anybody greps one.
+    tracing::info!(
         { fields::PATH } = entry.dest.as_str(),
         { fields::BYTES } = tracing::field::debug(entry.size),
         { fields::DURATION_MS } = elapsed_ms(started),
@@ -974,6 +987,107 @@ mod tests {
         assert_eq!(snapshot.checksum_mismatches, 1);
         assert_eq!(snapshot.errors, 2, "a mismatch is also an error");
         assert_eq!(ctx.outcome(), ExitCode::ChecksumMismatch);
+    }
+
+    /// `dctl --help` says `--log-level info` gives "one record per file
+    /// transferred". This is that sentence, held to.
+    ///
+    /// It was false for the whole plain transfer path: the only per-file record
+    /// was at `debug`, so a ten-file copy at `--log-level info` emitted nothing
+    /// at all and `-v` was useless for the one thing an operator would reach for
+    /// it (`HANDOVER.md` §11.2). The assertion is on the **filter**, not on the
+    /// macro call, because those are different claims and only the first is what
+    /// the flag promises — a record emitted at `debug` and discarded by an
+    /// `info` filter is exactly what the defect was.
+    #[test]
+    fn one_info_record_is_emitted_for_every_file() {
+        let ctx = ctx(&[]);
+        let driver = Recording::default();
+
+        let (log, ()) = crate::logging::Capture::of(crate::logging::LogLevel::Info, || {
+            block_on(async {
+                for name in ["a.txt", "b/c.txt", "d.bin"] {
+                    transfer_file(&ctx, TEST_OP, &driver, &entry(name, 100))
+                        .await
+                        .unwrap();
+                }
+            });
+        });
+
+        let records = log.records_containing("file finished");
+        assert_eq!(
+            records.len(),
+            3,
+            "one record per file, at info. Got:\n{}",
+            log.text()
+        );
+        // Each names the file it is about, and says whether it landed — a record
+        // that cannot be tied to a path is a record nobody can act on.
+        for name in ["a.txt", "b/c.txt", "d.bin"] {
+            assert!(
+                records.iter().any(|line| line.contains(name)),
+                "no record for {name} in:\n{}",
+                log.text()
+            );
+        }
+        assert!(
+            records.iter().all(|line| line.contains("stored=true")),
+            "got:\n{}",
+            log.text()
+        );
+    }
+
+    #[test]
+    fn a_file_that_failed_is_reported_as_not_stored() {
+        // A log of successes cannot answer "what did not make it last night?".
+        let ctx = ctx(&[]);
+        let driver = Recording::failing_at(Stage::Uploading);
+
+        let (log, ()) = crate::logging::Capture::of(crate::logging::LogLevel::Info, || {
+            block_on(async {
+                let _ = transfer_file(&ctx, TEST_OP, &driver, &entry("doomed.bin", 100)).await;
+            });
+        });
+
+        let records = log.records_containing("file finished");
+        assert_eq!(records.len(), 1, "got:\n{}", log.text());
+        assert!(records[0].contains("stored=false"), "got: {}", records[0]);
+    }
+
+    #[test]
+    fn the_default_verbosity_stays_quiet() {
+        // The flag has to mean something, which means the records must not be
+        // there without it. A run that logged one line per file by default would
+        // bury a warning under ten million of them.
+        let ctx = ctx(&[]);
+        let (log, ()) = crate::logging::Capture::of(crate::logging::LogLevel::Warn, || {
+            block_on(async {
+                transfer_file(&ctx, TEST_OP, &Recording::default(), &entry("a.txt", 1))
+                    .await
+                    .unwrap();
+            });
+        });
+        assert!(
+            log.records_containing("file finished").is_empty(),
+            "got:\n{}",
+            log.text()
+        );
+    }
+
+    /// Drive a future to completion on this thread.
+    ///
+    /// [`crate::logging::Capture`] installs its subscriber for the current
+    /// thread, so the work has to be polled here rather than handed to a
+    /// multi-threaded runtime — a poll on another thread would find no
+    /// subscriber and the capture would be empty, which is the one way these
+    /// tests could pass while proving nothing. Built here rather than taken from
+    /// `#[tokio::test]` because a runtime cannot be started inside a runtime.
+    fn block_on<T>(future: impl std::future::Future<Output = T>) -> T {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a current-thread runtime")
+            .block_on(future)
     }
 
     #[test]

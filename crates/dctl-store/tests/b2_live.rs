@@ -13,11 +13,13 @@
 //! byte-identical compare.
 //!
 //! LIVE VERIFICATION STATUS: **run**, on 2026-07-27, against bucket DCTL001. All
-//! three pass. They still never run in CI (no creds → skipped; `#[ignore]` keeps
-//! them out of the default run), so this line is the only record that they have
-//! been exercised — re-run them after any change under `b2/` and update the date.
+//! four pass. They still never run in CI — `#[ignore]` keeps them out of the
+//! default run, and asking for them without credentials is a **failure** rather
+//! than a skip (`tests/gated/mod.rs`) — so this line is the only record that they
+//! have been exercised. Re-run them after any change under `b2/` and update the
+//! date.
 //!
-//! ## What these three still do not cover
+//! ## What these four still do not cover
 //!
 //! Stated because the header used to say "pending" long after it was stale, and
 //! a stale status line is worse than none: a reader takes "these tests pass" for
@@ -38,7 +40,12 @@
 //!   `b2_stores_and_returns_the_source_modification_time`: written as the
 //!   documented `src_last_modified_millis` file-info key and read back from
 //!   both `head` and `list_page`, with the fallback to `uploadTimestamp` for
-//!   an object that never recorded one.
+//!   an object that never recorded one. It is no longer the *only* thing that
+//!   covers the write: `b2::upload` now assembles the header set and the
+//!   `b2_start_large_file` body as values, and unit-tests both, so deleting the
+//!   time fails `cargo test --workspace` rather than only this file.
+
+mod gated;
 
 use bytes::Bytes;
 use dctl_store::b2::{B2Backend, B2Credentials};
@@ -49,12 +56,21 @@ use dctl_store::{Backend, ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, S
 /// size), rather than falling back to the single-shot path.
 const STREAM_SOURCE_LEN: u64 = 100 * 1024 * 1024 + 6 * 1024 * 1024;
 
-fn creds_from_env() -> Option<(String, String, String)> {
-    Some((
-        std::env::var("DCTL_B2_KEY_ID").ok()?,
-        std::env::var("DCTL_B2_APP_KEY").ok()?,
-        std::env::var("DCTL_B2_BUCKET").ok()?,
-    ))
+/// Every variable a live B2 round trip needs.
+const B2_VARS: &[&str] = &["DCTL_B2_KEY_ID", "DCTL_B2_APP_KEY", "DCTL_B2_BUCKET"];
+
+/// A connected backend, or a failure naming what is missing.
+///
+/// The bucket has no default on purpose. These tests write into whatever they
+/// are given, and a maintainer who exported keys for something else should not
+/// discover that by finding objects in it.
+fn backend_or_fail(test: &str) -> B2Backend {
+    let creds = gated::require(test, B2_VARS);
+    B2Backend::new(
+        B2Credentials::new(creds[0].clone(), creds[1].clone()),
+        creds[2].clone(),
+    )
+    .expect("a b2 backend from live credentials")
 }
 
 /// Write a deterministic `len`-byte pattern to `path` in fixed-size blocks, so the test
@@ -89,14 +105,9 @@ fn hash_file(path: &std::path::Path, algo: HashAlgo) -> ContentHash {
 }
 
 #[tokio::test]
-#[ignore = "requires live B2 credentials via DCTL_B2_* env vars"]
+#[ignore = "needs a live B2 bucket: DCTL_B2_KEY_ID, DCTL_B2_APP_KEY, DCTL_B2_BUCKET"]
 async fn b2_full_round_trip() {
-    let Some((key_id, app_key, bucket)) = creds_from_env() else {
-        eprintln!("skipping b2_full_round_trip: DCTL_B2_* not set");
-        return;
-    };
-
-    let b2 = B2Backend::new(B2Credentials::new(key_id, app_key), bucket).unwrap();
+    let b2 = backend_or_fail("b2_full_round_trip");
     let key = ObjectKey::new(format!("dctl-test/roundtrip-{}.bin", std::process::id()));
     let data = Bytes::from((0u8..=255).cycle().take(5000).collect::<Vec<u8>>());
     let expected = ContentHash::sha1(&data);
@@ -135,7 +146,7 @@ async fn b2_full_round_trip() {
 }
 
 #[tokio::test]
-#[ignore = "requires live B2 credentials via DCTL_B2_* env vars"]
+#[ignore = "needs a live B2 bucket: DCTL_B2_KEY_ID, DCTL_B2_APP_KEY, DCTL_B2_BUCKET"]
 async fn b2_stores_and_returns_the_source_modification_time() {
     // The property `sync` is incremental because of, on the backend where it is
     // least obvious it can be done at all: B2 stamps its own `uploadTimestamp`,
@@ -149,15 +160,14 @@ async fn b2_stores_and_returns_the_source_modification_time() {
     // must come back from **`list_page`**, because that is what a transfer
     // compares against. `head` is asserted as well since they are separate calls.
     //
+    // What this adds to `b2::upload`'s own tests is the half they cannot reach:
+    // that B2 *accepts* the key and hands it back. That the key is sent at all is
+    // now proved offline, in the gate.
+    //
     // 2020-01-01T00:00:00Z: far from any clock this test can run against, so a
     // backend that quietly reported "now" cannot pass by accident.
     const AGED: i64 = 1_577_836_800;
-    let Some((key_id, app_key, bucket)) = creds_from_env() else {
-        eprintln!("skipping b2_stores_and_returns_the_source_modification_time: DCTL_B2_* not set");
-        return;
-    };
-
-    let b2 = B2Backend::new(B2Credentials::new(key_id, app_key), bucket).unwrap();
+    let b2 = backend_or_fail("b2_stores_and_returns_the_source_modification_time");
     let prefix = format!("dctl-test/mtime-{}/", std::process::id());
     let key = ObjectKey::new(format!("{prefix}aged.bin"));
     let data = Bytes::from_static(b"written now, modified in 2020");
@@ -208,14 +218,9 @@ async fn b2_stores_and_returns_the_source_modification_time() {
 }
 
 #[tokio::test]
-#[ignore = "requires live B2 credentials via DCTL_B2_* env vars"]
+#[ignore = "needs a live B2 bucket: DCTL_B2_KEY_ID, DCTL_B2_APP_KEY, DCTL_B2_BUCKET"]
 async fn b2_stream_from_path_round_trip() {
-    let Some((key_id, app_key, bucket)) = creds_from_env() else {
-        eprintln!("skipping b2_stream_from_path_round_trip: DCTL_B2_* not set");
-        return;
-    };
-
-    let b2 = B2Backend::new(B2Credentials::new(key_id, app_key), bucket).unwrap();
+    let b2 = backend_or_fail("b2_stream_from_path_round_trip");
     let key = ObjectKey::new(format!("dctl-test/stream-{}.bin", std::process::id()));
 
     // Build a >100 MiB source on disk (constant memory) and its SHA-1 (B2's algo).
@@ -246,14 +251,9 @@ async fn b2_stream_from_path_round_trip() {
 }
 
 #[tokio::test]
-#[ignore = "requires live B2 credentials via DCTL_B2_* env vars"]
+#[ignore = "needs a live B2 bucket: DCTL_B2_KEY_ID, DCTL_B2_APP_KEY, DCTL_B2_BUCKET"]
 async fn b2_prepare_upload_ticket_shape() {
-    let Some((key_id, app_key, bucket)) = creds_from_env() else {
-        eprintln!("skipping b2_prepare_upload_ticket_shape: DCTL_B2_* not set");
-        return;
-    };
-
-    let b2 = B2Backend::new(B2Credentials::new(key_id, app_key), bucket).unwrap();
+    let b2 = backend_or_fail("b2_prepare_upload_ticket_shape");
     let key = ObjectKey::new(format!("dctl-test/ticket-{}.bin", std::process::id()));
 
     // A delegated ticket is a live b2_get_upload_url + the exact POST the client replays.

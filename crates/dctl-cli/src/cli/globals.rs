@@ -400,17 +400,24 @@ pub struct GlobalArgs {
     #[arg(long, global = true, help_heading = "Output")]
     pub ascii: bool,
 
-    /// Keep progress on. Bars need a terminal; redirected, that is the periodic
-    /// status line rather than bars.
+    /// Watch this run: a status record every second instead of every --stats
+    /// seconds, and progress kept on under --json. Bars need a terminal;
+    /// redirected, progress is the periodic record rather than bars.
     ///
-    /// The old wording promised "live progress bars, even when output is
+    /// Two effects, both observable, because a flag that changes nothing is a
+    /// belief rather than a setting. `--stats 0` still wins — it is an
+    /// instruction about this exact output — and `--quiet` beats everything.
+    /// See [`crate::output::ProgressMode`] and
+    /// [`ticker::interval`](crate::output::progress::ticker::interval).
+    ///
+    /// An earlier wording promised "live progress bars, even when output is
     /// redirected" and the opposite happened: forcing bars off a terminal drew
     /// nothing and stopped the periodic line as well, so `-P` was the only way
-    /// to make a redirected run quieter. See [`crate::output::ProgressMode`].
+    /// to make a redirected run quieter.
     #[arg(short = 'P', long, global = true, help_heading = "Output")]
     pub progress: bool,
 
-    /// Emit a status line every N seconds. 0 disables.
+    /// Emit a status record every N seconds. 0 disables. -P shortens it.
     #[arg(
         long,
         global = true,

@@ -16,9 +16,19 @@
 //!
 //! LIVE VERIFICATION STATUS: **run**, on 2026-07-27, against a real `sshd` +
 //! `internal-sftp` subsystem on lsx-002 (`DCTL_SFTP_HOST=sftpprobe`). It still
-//! never runs in CI — no `DCTL_SFTP_HOST` means it is skipped, and `#[ignore]`
-//! keeps it out of the default run — so this line is the only record that it has
-//! been exercised. Re-run it after any change to `sftp/`, and update the date.
+//! never runs in CI — `#[ignore]` keeps it out of the default run, and asking for
+//! it without `DCTL_SFTP_HOST` is a **failure** rather than a skip
+//! (`tests/gated/mod.rs`) — so this line is the only record that it has been
+//! exercised. Re-run it after any change to `sftp/`, and update the date.
+//!
+//! It is no longer the only witness to the *order* of a staged write. That —
+//! stage, flush, close, stamp the source's time, rename, and clean up on every
+//! failure — is now stated against a trait in `sftp::ops` and driven by a fake in
+//! `sftp::write`, so it is proved by `cargo test --workspace`. What is left here
+//! is everything only a real server can answer: that `sshd` accepts the calls,
+//! honours the rename, keeps the times, and lists what was written.
+
+mod gated;
 
 use bytes::Bytes;
 use dctl_store::{
@@ -30,11 +40,8 @@ use dctl_store::{
 /// and `get_to_path` exercise the bounded, multi-iteration streaming path.
 const STREAM_SOURCE_LEN: u64 = 5 * 1024 * 1024 + 123;
 
-fn host_from_env() -> Option<String> {
-    std::env::var("DCTL_SFTP_HOST")
-        .ok()
-        .filter(|s| !s.is_empty())
-}
+/// The one variable this test cannot supply a default for: which host to touch.
+const SFTP_VARS: &[&str] = &["DCTL_SFTP_HOST"];
 
 fn base_from_env() -> String {
     std::env::var("DCTL_SFTP_BASE").unwrap_or_else(|_| "~/dctl-sftp-livetest".to_string())
@@ -76,12 +83,10 @@ fn blake3(data: &[u8]) -> ContentHash {
 }
 
 #[tokio::test]
-#[ignore = "requires a live ssh-config host via DCTL_SFTP_HOST (needs system ssh + its ProxyCommand)"]
+#[ignore = "needs a live ssh-config host in DCTL_SFTP_HOST, reachable by the system ssh \
+            (including any ProxyCommand its config names)"]
 async fn sftp_full_round_trip() {
-    let Some(host) = host_from_env() else {
-        eprintln!("skipping sftp_full_round_trip: DCTL_SFTP_HOST not set");
-        return;
-    };
+    let host = gated::require("sftp_full_round_trip", SFTP_VARS).swap_remove(0);
     // Per-run scratch subdirectory so parallel/repeated runs never collide, and so
     // cleanup can remove exactly what this run created.
     let run = format!("run-{}", std::process::id());

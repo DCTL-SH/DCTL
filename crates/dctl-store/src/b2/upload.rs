@@ -35,6 +35,58 @@ fn file_info(modified: SourceModified) -> serde_json::Value {
     }
 }
 
+/// The whole `b2_start_large_file` request body.
+///
+/// A value the two large-file paths *transmit* rather than a body each of them
+/// assembles, and that is the point: the source's modification time is carried
+/// in `fileInfo`, and while each call site built its own JSON the only thing
+/// that could notice the field going missing was a live test against a real
+/// bucket (`HANDOVER.md` §15.4). Deleting it from here fails
+/// `cargo test --workspace`, which is the gate this project quotes.
+fn start_large_file_body(
+    bucket_id: &str,
+    key: &ObjectKey,
+    modified: SourceModified,
+) -> serde_json::Value {
+    serde_json::json!({
+        "bucketId": bucket_id,
+        "fileName": key.as_str(),
+        "contentType": constants::CONTENT_TYPE_AUTO,
+        "fileInfo": file_info(modified),
+    })
+}
+
+/// Every header a single-file upload carries except the per-attempt
+/// `Authorization`, which belongs to the upload URL and changes on each retry.
+///
+/// The same argument as [`start_large_file_body`], on the path that carries most
+/// objects: the source's time travels with the bytes as
+/// `X-Bz-Info-src_last_modified_millis`, and it used to be three lines inside a
+/// retry closure that no offline test could reach. It travels with the bytes
+/// rather than in a later call because B2 fixes `fileInfo` at upload — changing
+/// it afterwards means copying the object onto itself, which is a second request
+/// and a second *version* of every file on every run.
+fn upload_headers(
+    key: &ObjectKey,
+    sha1_hex: &str,
+    content_len: usize,
+    modified: SourceModified,
+) -> Vec<(&'static str, String)> {
+    let mut headers = vec![
+        (constants::H_FILE_NAME, encode_file_name(key.as_str())),
+        (
+            constants::H_CONTENT_TYPE,
+            constants::CONTENT_TYPE_AUTO.to_string(),
+        ),
+        (constants::H_CONTENT_SHA1, sha1_hex.to_string()),
+        (constants::H_CONTENT_LENGTH, content_len.to_string()),
+    ];
+    if let Some(millis) = modified.millis() {
+        headers.push((constants::H_SRC_MODIFIED, millis.to_string()));
+    }
+    headers
+}
+
 pub(super) async fn put(
     b2: &B2Backend,
     key: &ObjectKey,
@@ -92,11 +144,10 @@ async fn upload_single(
     modified: SourceModified,
 ) -> Result<()> {
     let sha1_hex = sha1.hex();
-    // The source's time travels with the bytes rather than in a later call: B2
-    // fixes `fileInfo` at upload, so changing it afterwards means copying the
-    // object onto itself — a second request, and a second *version* of every
-    // file on every run.
-    let src_modified = modified.millis().map(|millis| millis.to_string());
+    // Assembled once, outside the retry, because it is the same request every
+    // attempt: a header set rebuilt per attempt is a header set that can differ
+    // between them.
+    let headers = upload_headers(key, &sha1_hex, data.len(), modified);
     retry::run(constants::OP_UPLOAD_FILE, |_| async {
         let upload: GetUploadUrlResponse = b2
             .post_json_once(
@@ -110,13 +161,11 @@ async fn upload_single(
         let mut request = b2
             .client
             .post(&upload.upload_url)
-            .header(constants::H_AUTHORIZATION, &upload.authorization_token)
-            .header(constants::H_FILE_NAME, encode_file_name(key.as_str()))
-            .header(constants::H_CONTENT_TYPE, constants::CONTENT_TYPE_AUTO)
-            .header(constants::H_CONTENT_SHA1, &sha1_hex)
-            .header(constants::H_CONTENT_LENGTH, data.len().to_string());
-        if let Some(millis) = &src_modified {
-            request = request.header(constants::H_SRC_MODIFIED, millis);
+            // Bound to the URL this attempt was handed, so it is the one header
+            // that cannot come from the description above.
+            .header(constants::H_AUTHORIZATION, &upload.authorization_token);
+        for (name, value) in &headers {
+            request = request.header(*name, value);
         }
         let resp = request
             .body(data.to_vec())
@@ -147,12 +196,7 @@ async fn upload_large(
     let start: StartLargeFileResponse = b2
         .post_json(
             constants::EP_START_LARGE_FILE,
-            serde_json::json!({
-                "bucketId": auth.bucket_id,
-                "fileName": key.as_str(),
-                "contentType": constants::CONTENT_TYPE_AUTO,
-                "fileInfo": file_info(modified),
-            }),
+            start_large_file_body(&auth.bucket_id, key, modified),
         )
         .await?;
 
@@ -264,12 +308,7 @@ async fn stream_large_from_path(
     let start: StartLargeFileResponse = b2
         .post_json(
             constants::EP_START_LARGE_FILE,
-            serde_json::json!({
-                "bucketId": auth.bucket_id,
-                "fileName": key.as_str(),
-                "contentType": constants::CONTENT_TYPE_AUTO,
-                "fileInfo": file_info(modified),
-            }),
+            start_large_file_body(&auth.bucket_id, key, modified),
         )
         .await?;
 
@@ -503,6 +542,89 @@ mod tests {
         // the listing falls back to it. Sending `"0"` would date every such
         // object 1970 and invert `--update` over all of them.
         assert_eq!(file_info(SourceModified::unknown()), serde_json::json!({}));
+    }
+
+    /// The whole `b2_start_large_file` body, including the time.
+    ///
+    /// The two large-file paths used to assemble this inline, so deleting the
+    /// `fileInfo` line from either left `cargo test --workspace` green and was
+    /// caught only by `b2_stores_and_returns_the_source_modification_time` with
+    /// live credentials (`HANDOVER.md` §15.4). Asserting the body as a whole is
+    /// what closes that: there is one description, and this is a test of it.
+    #[test]
+    fn a_large_file_starts_with_the_source_time_in_its_file_info() {
+        assert_eq!(
+            start_large_file_body(
+                "bucket-abc",
+                &ObjectKey::new("photos/2020/a.jpg"),
+                SourceModified::at(1_577_836_800)
+            ),
+            serde_json::json!({
+                "bucketId": "bucket-abc",
+                "fileName": "photos/2020/a.jpg",
+                "contentType": "b2/x-auto",
+                "fileInfo": { "src_last_modified_millis": "1577836800000" },
+            })
+        );
+    }
+
+    #[test]
+    fn a_large_file_with_no_source_time_carries_an_empty_file_info() {
+        let body = start_large_file_body(
+            "bucket-abc",
+            &ObjectKey::new("scratch.bin"),
+            SourceModified::unknown(),
+        );
+        assert_eq!(body["fileInfo"], serde_json::json!({}));
+    }
+
+    /// The single-file path, which is what carries most objects.
+    ///
+    /// The header is B2's documented spelling — rclone's too, so the two tools
+    /// read each other's buckets rather than each seeing the other's objects as
+    /// modified when they were uploaded.
+    #[test]
+    fn a_single_file_upload_sends_the_source_time_with_the_bytes() {
+        let headers = upload_headers(
+            &ObjectKey::new("a b.jpg"),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            4096,
+            SourceModified::at(1_577_836_800),
+        );
+        assert!(
+            headers.contains(&(
+                "X-Bz-Info-src_last_modified_millis",
+                "1577836800000".to_string()
+            )),
+            "got {headers:?}"
+        );
+        // …alongside everything else the request needs, so a reader can see the
+        // whole description in one place.
+        assert!(headers.contains(&("X-Bz-File-Name", "a%20b.jpg".to_string())));
+        assert!(headers.contains(&("Content-Type", "b2/x-auto".to_string())));
+        assert!(headers.contains(&(
+            "X-Bz-Content-Sha1",
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709".to_string()
+        )));
+        assert!(headers.contains(&("Content-Length", "4096".to_string())));
+    }
+
+    #[test]
+    fn a_single_file_upload_with_no_source_time_sends_no_such_header() {
+        // Absent, not zero. B2 then stamps its own `uploadTimestamp` and the
+        // listing falls back to it; a `"0"` would date the object 1970.
+        let headers = upload_headers(
+            &ObjectKey::new("scratch.bin"),
+            "da39a3ee5e6b4b0d3255bfef95601890afd80709",
+            1,
+            SourceModified::unknown(),
+        );
+        assert!(
+            !headers
+                .iter()
+                .any(|(name, _)| *name == constants::H_SRC_MODIFIED),
+            "got {headers:?}"
+        );
     }
 
     /// Offline B2 ticket assembly: correct method, verbatim URL, token-scoped (no signed

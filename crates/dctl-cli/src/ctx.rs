@@ -77,9 +77,13 @@ impl Ctx {
         );
         let stats = Stats::shared();
         let progress = Arc::new(Progress::new(
+            // `--json` and `--quiet` are handed over separately, and the
+            // difference is what `-P` acts on: silence is absolute, machine
+            // output is only a default. See `ProgressMode::resolve`.
             crate::output::ProgressMode::resolve(
                 globals.progress,
-                globals.quiet || out.is_json(),
+                globals.quiet,
+                out.is_json(),
                 Out::stderr_is_terminal(),
             ),
             globals.units,

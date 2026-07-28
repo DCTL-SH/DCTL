@@ -42,9 +42,15 @@
 //! comparison reads as a difference and re-transfers: a cost, never a wrong
 //! answer. Storing a wrapped value instead would give the file a confident,
 //! fabricated date that every later run would believe.
+//!
+//! The rule and the order that carries it are in [`ops`] and [`write`], stated
+//! against a trait so both are provable without an ssh host — which they were
+//! not, and the cost of that is `HANDOVER.md` §15.4.
 
 pub mod base;
+mod ops;
 mod path;
+mod write;
 
 use std::path::Path;
 use std::sync::Arc;
@@ -53,19 +59,17 @@ use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use openssh::{KnownHosts, Session};
 use openssh_sftp_client::error::SftpErrorKind;
-use openssh_sftp_client::file::File;
-use openssh_sftp_client::metadata::MetaDataBuilder;
-use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions, UnixTimeStamp};
-use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
+use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions};
+use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio_stream::StreamExt as _;
 
 use crate::backend::Backend;
-use crate::checksum::{ContentHash, Hasher};
+use crate::checksum::ContentHash;
 use crate::error::{Result, StoreError};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
 
-use path::{ancestor_dirs, chunk_spans, join, normalize_base, prefix_dir, remote_path, temp_path};
+use path::{chunk_spans, join, normalize_base, prefix_dir, remote_path, temp_path};
 
 /// Fixed transfer-chunk size for the streaming upload/download paths. Peak memory
 /// on those paths is `O(CHUNK_LEN)`, independent of object size.
@@ -141,102 +145,6 @@ impl SftpBackend {
             base: normalize_base(&cfg.base),
         })
     }
-
-    // ---- internal helpers -------------------------------------------------
-
-    /// Realize `mkdir -p` for the parent of a remote **file** path. Each ancestor
-    /// is created shortest-first; an "already exists" (or otherwise non-fatal)
-    /// error on an intermediate directory is ignored — a genuinely un-writable
-    /// parent surfaces when the subsequent file open/rename fails.
-    async fn mkdir_p(&self, remote_file: &str) {
-        let mut fs = self.sftp.fs();
-        for dir in ancestor_dirs(remote_file) {
-            let _ = fs.create_dir(&dir).await;
-        }
-    }
-
-    /// Best-effort remove of a remote path, ignoring any error (used to clean up a
-    /// staging temp on the failure paths).
-    async fn remove_quiet(&self, remote: &str) {
-        let mut fs = self.sftp.fs();
-        let _ = fs.remove_file(remote).await;
-    }
-
-    /// Apply the writer's modification time to `remote`, when the protocol can
-    /// hold it.
-    ///
-    /// Called on the **staging path**, so the object arrives at its final name
-    /// already stamped and no listing can observe it carrying the write time.
-    ///
-    /// A failure is reported rather than swallowed: the bytes are already correct
-    /// at this point, so publishing anyway is tempting — and it is exactly what
-    /// makes the next run find the object different, transfer it again, and go on
-    /// doing that forever with nothing on either stream to explain it.
-    ///
-    /// Two facts about SFTP version 3 shape this:
-    ///
-    /// * `SSH_FILEXFER_ATTR_ACMODTIME` carries access **and** modification time as
-    ///   one pair, so an access time has to be supplied to set a modification
-    ///   time at all. It is the current clock, not a copy of `modified`: this run
-    ///   really did just write the file, and nothing in DCTL reads an access time,
-    ///   so the honest value costs nothing and the fabricated one buys nothing.
-    /// * Both are unsigned 32-bit seconds. A time outside 1970–2106 has no
-    ///   representation, so it is left unstamped — see the module documentation.
-    async fn stamp(&self, remote: &str, modified: SourceModified) -> Result<()> {
-        let Some(when) = modified
-            .system_time()
-            .and_then(|time| UnixTimeStamp::new(time).ok())
-        else {
-            return Ok(());
-        };
-        let accessed = UnixTimeStamp::new(std::time::SystemTime::now()).unwrap_or(when);
-        let metadata = MetaDataBuilder::new().time(accessed, when).create();
-        self.sftp
-            .fs()
-            .set_metadata(remote, metadata)
-            .await
-            .map_err(|e| map_sftp_err(remote, e))
-    }
-
-    /// Durability where the server offers it: fsync the handle, tolerating only
-    /// a server that does not implement `fsync@openssh.com`.
-    ///
-    /// The tolerance is for a **missing capability**, and nothing else. It used
-    /// to swallow every error the fsync could return, `tracing::debug!` them and
-    /// carry on to the rename — so a server whose filesystem filled up between
-    /// the last write and the flush published the object anyway and DCTL
-    /// reported a successful transfer. That is the same defect as
-    /// `docs/HANDOVER.md` §16.1 with the failure hidden one layer further down:
-    /// an I/O error that nothing read, and a verdict reached without it.
-    ///
-    /// "Best effort" is an honest description of doing less when the server
-    /// cannot do more. It is not a licence to ignore the server saying no.
-    ///
-    /// # Errors
-    /// Whatever the fsync reported, other than [`SftpError::UnsupportedExtension`].
-    async fn fsync_or_fail(remote: &str, file: &mut File) -> Result<()> {
-        match file.sync_all().await {
-            Ok(()) => Ok(()),
-            // Server lacks the fsync extension — durability is best-effort here.
-            Err(SftpError::UnsupportedExtension(_)) => {
-                tracing::debug!("sftp server has no fsync extension; write is not forced to disk");
-                Ok(())
-            }
-            Err(e) => Err(map_sftp_err(remote, e)),
-        }
-    }
-
-    /// Open a fresh remote file for writing (create + truncate).
-    async fn create_remote(&self, remote: &str) -> Result<File> {
-        self.sftp
-            .options()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(remote)
-            .await
-            .map_err(|e| map_sftp_err(remote, e))
-    }
 }
 
 #[async_trait]
@@ -245,6 +153,13 @@ impl Backend for SftpBackend {
         "sftp"
     }
 
+    /// Verified, atomic write of bytes already in hand.
+    ///
+    /// The order — stage, flush, close, stamp, rename, and remove the staging
+    /// file on any failure — lives in [`write::put_bytes`], stated against
+    /// [`ops::RemoteFs`] so it is provable without a server. What is left here is
+    /// the one thing that genuinely needs this backend: mapping the key into the
+    /// remote path space, which is where traversal is refused.
     async fn put(
         &self,
         key: &ObjectKey,
@@ -253,57 +168,11 @@ impl Backend for SftpBackend {
         modified: SourceModified,
     ) -> Result<PutOutcome> {
         let remote = remote_path(&self.base, key)?;
-
-        // Verified write: the in-hand bytes must match the caller's declared hash
-        // before anything is written. We then write exactly these verified bytes,
-        // and the SSH transport is integrity-protected end to end.
-        let computed = ContentHash::compute(expected.algo, &data);
-        if !computed.matches(expected) {
-            return Err(StoreError::ChecksumMismatch {
-                expected: expected.hex(),
-                actual: computed.hex(),
-            });
-        }
-
-        self.mkdir_p(&remote).await;
-        let tmp = temp_path(&remote);
-
-        // Stage → flush → close, cleaning up the temp on any failure.
-        let mut file = self.create_remote(&tmp).await?;
-        if let Err(e) = file.write_all(&data).await {
-            drop(file);
-            self.remove_quiet(&tmp).await;
-            return Err(map_sftp_err(&tmp, e));
-        }
-        if let Err(e) = Self::fsync_or_fail(&tmp, &mut file).await {
-            drop(file);
-            self.remove_quiet(&tmp).await;
-            return Err(e);
-        }
-        if let Err(e) = file.close().await {
-            self.remove_quiet(&tmp).await;
-            return Err(map_sftp_err(&tmp, e));
-        }
-
-        // The writer's time, before the name exists.
-        if let Err(e) = self.stamp(&tmp, modified).await {
-            self.remove_quiet(&tmp).await;
-            return Err(e);
-        }
-
-        // Atomically publish.
-        let mut fs = self.sftp.fs();
-        if let Err(e) = fs.rename(&tmp, &remote).await {
-            self.remove_quiet(&tmp).await;
-            return Err(map_sftp_err(&remote, e));
-        }
-
-        Ok(PutOutcome {
-            size: data.len() as u64,
-            verified: computed,
-        })
+        write::put_bytes(self, &remote, &data, expected, modified).await
     }
 
+    /// The same write, fed from a file instead of memory, at `O(CHUNK_LEN)`
+    /// peak regardless of object size.
     async fn put_from_path(
         &self,
         key: &ObjectKey,
@@ -312,71 +181,12 @@ impl Backend for SftpBackend {
         modified: SourceModified,
     ) -> Result<PutOutcome> {
         let remote = remote_path(&self.base, key)?;
-
         let mut src = tokio::fs::File::open(source).await?;
         let total = src.metadata().await?.len();
-
-        self.mkdir_p(&remote).await;
-        let tmp = temp_path(&remote);
-        let mut file = self.create_remote(&tmp).await?;
-
-        // Stream source → remote temp in bounded chunks, hashing as we go so the
-        // upload is verified without ever holding the whole file (peak memory is
-        // O(CHUNK_LEN)). On any failure or a final hash mismatch, the temp is
-        // removed and nothing is committed.
-        let mut hasher = Hasher::new(expected.algo);
-        let mut buf = vec![0u8; CHUNK_LEN as usize];
-        for span in chunk_spans(total, CHUNK_LEN) {
-            let n = span.len as usize;
-            if let Err(e) = src.read_exact(&mut buf[..n]).await {
-                drop(file);
-                self.remove_quiet(&tmp).await;
-                return Err(e.into());
-            }
-            hasher.update(&buf[..n]);
-            if let Err(e) = file.write_all(&buf[..n]).await {
-                drop(file);
-                self.remove_quiet(&tmp).await;
-                return Err(map_sftp_err(&tmp, e));
-            }
-        }
-
-        let computed = hasher.finalize();
-        if !computed.matches(expected) {
-            drop(file);
-            self.remove_quiet(&tmp).await;
-            return Err(StoreError::ChecksumMismatch {
-                expected: expected.hex(),
-                actual: computed.hex(),
-            });
-        }
-
-        if let Err(e) = Self::fsync_or_fail(&tmp, &mut file).await {
-            drop(file);
-            self.remove_quiet(&tmp).await;
-            return Err(e);
-        }
-        if let Err(e) = file.close().await {
-            self.remove_quiet(&tmp).await;
-            return Err(map_sftp_err(&tmp, e));
-        }
-
-        // The writer's time, before the name exists.
-        if let Err(e) = self.stamp(&tmp, modified).await {
-            self.remove_quiet(&tmp).await;
-            return Err(e);
-        }
-
-        let mut fs = self.sftp.fs();
-        if let Err(e) = fs.rename(&tmp, &remote).await {
-            self.remove_quiet(&tmp).await;
-            return Err(map_sftp_err(&remote, e));
-        }
-
-        Ok(PutOutcome {
-            size: total,
-            verified: computed,
-        })
+        write::put_stream(
+            self, &remote, &mut src, total, CHUNK_LEN, expected, modified,
+        )
+        .await
     }
 
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
@@ -586,28 +396,7 @@ impl Backend for SftpBackend {
             }
         }
 
-        found.retain(|(k, _, _)| k.starts_with(prefix));
-        found.sort_by(|a, b| a.0.cmp(&b.0));
-
-        let start = match &cursor {
-            Some(c) => found.partition_point(|(k, _, _)| k.as_str() <= c.as_str()),
-            None => 0,
-        };
-        let end = (start + PAGE_SIZE).min(found.len());
-        let items = found[start..end]
-            .iter()
-            .map(|(k, size, mtime)| ObjectMeta {
-                key: ObjectKey::new(k.clone()),
-                size: *size,
-                modified_unix: *mtime,
-            })
-            .collect();
-        let next_cursor = if end < found.len() {
-            found.get(end - 1).map(|(k, _, _)| k.clone())
-        } else {
-            None
-        };
-        Ok(Page { items, next_cursor })
+        Ok(path::page(found, prefix, cursor.as_deref(), PAGE_SIZE))
     }
     // `prepare_upload` keeps the trait default: SFTP has no presigned/delegated
     // upload, so it returns a clear "unsupported" error.

@@ -28,6 +28,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod gated;
+
 use bytes::Bytes;
 use dctl_store::{Backend, ContentHash, LocalFs, ObjectKey, SourceModified, StoreError};
 
@@ -131,11 +133,11 @@ async fn a_write_the_filesystem_refuses_is_reported_as_that_refusal() {
 
 /// The same claim against a genuinely full filesystem.
 ///
-/// `#[ignore]` because it needs one, and **panics** rather than returning when
-/// [`FULL_FS_DIR`] is unset or the directory it names has room: a test that
-/// prints "skipping" and reports `ok` is `docs/HANDOVER.md` §11.3 item 2, and the
-/// whole point of this file is that a failure must not be able to look like a
-/// success.
+/// `#[ignore]` because it needs one, and it obtains [`FULL_FS_DIR`] through the
+/// same [`gated::require`] every other gated test in this crate uses — one rule,
+/// one implementation. A test that prints "skipping" and reports `ok` is
+/// `HANDOVER.md` §11.3 item 2, and the whole point of this file is that a failure
+/// must not be able to look like a success.
 ///
 /// Run with, for example:
 ///
@@ -147,10 +149,13 @@ async fn a_write_the_filesystem_refuses_is_reported_as_that_refusal() {
 #[tokio::test]
 #[ignore = "needs a filesystem with no free space; set DCTL_FULL_FS_DIR"]
 async fn a_full_filesystem_reports_no_space_left_on_device() {
-    let root = std::env::var(FULL_FS_DIR).unwrap_or_else(|_| {
-        panic!("{FULL_FS_DIR} is not set; this test cannot run and must not pass")
-    });
-    let root = std::path::PathBuf::from(root);
+    let root = std::path::PathBuf::from(
+        gated::require(
+            "a_full_filesystem_reports_no_space_left_on_device",
+            &[FULL_FS_DIR],
+        )
+        .swap_remove(0),
+    );
     assert!(
         root.is_dir(),
         "{FULL_FS_DIR}={} is not a directory",

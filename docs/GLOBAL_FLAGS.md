@@ -731,18 +731,39 @@ renders the Unicode set as mojibake.
 
 ### `-P`, `--progress`
 
-Force live progress bars on, even when stderr is not a terminal. Without it, bars
-appear only when stderr really is a terminal and a redirected run falls back to
-periodic plain-text status lines, since bar redraws would fill a log file with
-megabytes of escape sequences. Use it inside a PTY wrapper or a CI job that
-renders ANSI but fails the `isatty` test. `--quiet` beats it.
+**Watch this run.** DCTL shows progress by default in every environment it can —
+bars when stderr is a terminal, periodic status records when it is redirected — so
+this flag does not switch progress on. It changes the two things a person standing
+over a run wants changed:
+
+* **The cadence.** A redirected run reports every `--stats` seconds, a minute by
+  default: right for an unattended nightly job, useless to somebody watching.
+  `-P` selects **one second**.
+* **Machine output stops silencing it.** `--json` turns the display off by
+  default, because a program is reading stdout. That is a courtesy rather than a
+  constraint — progress is written to stderr and cannot reach the JSON — so `-P`
+  brings it back, and stdout still carries exactly one JSON document.
+
+`--stats 0` beats it: that is a direct instruction about this exact output.
+`--quiet` beats everything.
+
+It does **not** conjure bars through a pipe, and an earlier release's promise that
+it would was worse than useless — bars draw through a terminal handle, so forcing
+them off a terminal rendered nothing *and* stopped the periodic record, making
+`-P` the only way to make a redirected run quieter. Off a terminal, "progress"
+means the periodic record, and this flag makes it frequent.
+
+One limit, stated plainly: progress is **per file**, not per byte. A single very
+large file's bar moves once, at the end, because the storage layer takes a whole
+buffer and returns a count. A tree of files behaves as expected.
 
 ### `--stats SECONDS`
 
 How often the periodic status record is emitted when bars are unavailable — that
 is, whenever output is redirected. `0` disables it entirely. Sixty seconds is a
 readable cadence for a long transfer in a log file; shorten it if you are watching
-a CI job and want more evidence of life.
+a CI job and want more evidence of life, or pass `-P`, which shortens it to one
+second for you.
 
 The record is the **same report** the run prints at the end, taken mid-run: the
 same rows, in the same order, in the same units. A watcher reading a log at 3 a.m.

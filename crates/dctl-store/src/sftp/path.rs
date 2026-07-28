@@ -8,7 +8,7 @@
 use std::path::{Component, Path};
 
 use crate::error::{Result, StoreError};
-use crate::model::ObjectKey;
+use crate::model::{ObjectKey, ObjectMeta, Page};
 
 /// Normalize a configured `base` into a remote path string with no trailing slash.
 ///
@@ -324,5 +324,155 @@ mod tests {
             a.rsplit('/').next().unwrap_or_default()
         ));
         assert!(!a.contains("obj.bin"));
+    }
+}
+
+/// Turn everything a recursive walk found into one page of a listing.
+///
+/// Split from the walk because this is where a listing goes quietly wrong.
+/// The walk's failure modes are loud — a connection drops, a directory is
+/// unreadable — while every mistake available here produces a **plausible page
+/// that is missing objects**: an off-by-one at the cursor drops one object per
+/// page, an inclusive partition repeats one, a `next_cursor` that is never `None`
+/// loops forever and one that is always `None` lists the first page of a million.
+/// A transfer then reports success over the subset it was shown.
+///
+/// The pieces:
+///
+/// * `found` is `(key, size, modified_unix)` for every file under the prefix's
+///   *directory*, which is as narrowly as SFTP can be asked to walk.
+/// * `prefix` filters exactly, because `p/00` and `p/000` share a directory.
+/// * `cursor` is the last key of the previous page, so the next one starts
+///   strictly after it — `partition_point` on `<=`, never on `<`.
+/// * `next_cursor` is `Some` only when objects remain, which is what stops the
+///   walk.
+///
+/// Sorted before paging: the cursor is a position in an order, and a walk that
+/// returned directories in readdir order would give a different one each run.
+#[must_use]
+pub(super) fn page(
+    mut found: Vec<(String, u64, Option<i64>)>,
+    prefix: &str,
+    cursor: Option<&str>,
+    page_size: usize,
+) -> Page {
+    found.retain(|(key, _, _)| key.starts_with(prefix));
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+
+    let start = match cursor {
+        Some(after) => found.partition_point(|(key, _, _)| key.as_str() <= after),
+        None => 0,
+    };
+    let end = (start + page_size).min(found.len());
+    let items = found[start..end]
+        .iter()
+        .map(|(key, size, modified_unix)| ObjectMeta {
+            key: ObjectKey::new(key.clone()),
+            size: *size,
+            modified_unix: *modified_unix,
+        })
+        .collect();
+    let next_cursor = if end < found.len() {
+        found.get(end - 1).map(|(key, _, _)| key.clone())
+    } else {
+        None
+    };
+    Page { items, next_cursor }
+}
+
+#[cfg(test)]
+mod page_tests {
+    use super::*;
+
+    fn found(keys: &[&str]) -> Vec<(String, u64, Option<i64>)> {
+        keys.iter()
+            .enumerate()
+            .map(|(n, key)| ((*key).to_string(), n as u64, Some(n as i64)))
+            .collect()
+    }
+
+    fn keys(page: &Page) -> Vec<String> {
+        page.items
+            .iter()
+            .map(|meta| meta.key.as_str().to_string())
+            .collect()
+    }
+
+    /// Walking a listing to its end must see every object exactly once.
+    ///
+    /// The property the whole cursor exists for, and one that was only ever
+    /// checked against a live `sshd` — `tests/sftp_live.rs`, which is `#[ignore]`d
+    /// and needs `DCTL_SFTP_HOST`, so `cargo test --workspace` proved nothing
+    /// about it. A page size of two over five objects is the smallest fixture
+    /// that catches both an off-by-one that drops and one that repeats.
+    #[test]
+    fn paging_to_the_end_yields_every_object_once_and_in_order() {
+        let all = ["a", "b", "c", "d", "e"];
+        let mut seen = Vec::new();
+        let mut cursor: Option<String> = None;
+        let mut pages = 0;
+        loop {
+            let page = page(found(&all), "", cursor.as_deref(), 2);
+            seen.extend(keys(&page));
+            pages += 1;
+            assert!(pages < 10, "the walk did not terminate: {seen:?}");
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        assert_eq!(seen, all, "every object, once, in order");
+        assert_eq!(pages, 3, "5 objects at 2 per page");
+    }
+
+    #[test]
+    fn a_page_carries_the_size_and_time_the_walk_found() {
+        // The listing is what a transfer compares against, so an entry that
+        // dropped its modification time would make `sync` re-transfer that file
+        // on every run.
+        let page = page(found(&["a", "b"]), "", None, 10);
+        assert_eq!(page.items[1].size, 1);
+        assert_eq!(page.items[1].modified_unix, Some(1));
+    }
+
+    #[test]
+    fn the_prefix_filters_exactly_rather_than_by_directory() {
+        // `p/00` and `p/000` live in the same directory, so the walk brings back
+        // both and only this can tell them apart.
+        let page = page(found(&["p/00", "p/000", "p/01", "q/00"]), "p/00", None, 10);
+        assert_eq!(keys(&page), vec!["p/00", "p/000"]);
+    }
+
+    #[test]
+    fn a_final_page_reports_no_cursor() {
+        // A cursor that is always `Some` makes the caller loop forever; one that
+        // is always `None` lists the first page of a million objects and reports
+        // success over the rest.
+        assert_eq!(page(found(&["a", "b"]), "", None, 2).next_cursor, None);
+        assert_eq!(
+            page(found(&["a", "b", "c"]), "", None, 2).next_cursor,
+            Some("b".to_string())
+        );
+    }
+
+    #[test]
+    fn a_cursor_past_the_end_yields_an_empty_final_page() {
+        let page = page(found(&["a", "b"]), "", Some("z"), 2);
+        assert!(page.items.is_empty());
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn an_empty_walk_is_an_empty_page() {
+        let page = page(Vec::new(), "anything/", None, 10);
+        assert!(page.items.is_empty());
+        assert_eq!(page.next_cursor, None);
+    }
+
+    #[test]
+    fn a_page_is_sorted_however_the_walk_found_things() {
+        // The cursor is a position in an order; readdir has none.
+        let page = page(found(&["c", "a", "b"]), "", None, 10);
+        assert_eq!(keys(&page), vec!["a", "b", "c"]);
     }
 }

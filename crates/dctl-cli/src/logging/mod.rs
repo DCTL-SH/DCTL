@@ -27,12 +27,16 @@
 //! | `dek_fp`     | DEK fingerprint — never the key                  |
 //! | `error_code` | Stable slug from [`crate::exit::ExitCode`]       |
 
+#[cfg(test)]
+pub mod capture;
 mod format;
 mod init;
 pub mod redact;
 
 mod level;
 
+#[cfg(test)]
+pub use capture::Capture;
 pub use format::LogFormat;
 pub use init::{LogConfig, LogInitError, init};
 pub use level::LogLevel;

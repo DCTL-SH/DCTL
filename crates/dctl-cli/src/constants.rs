@@ -356,6 +356,16 @@ pub const FILE_LABEL_WIDTH: usize = 36;
 /// (`--stats`).
 pub const DEFAULT_STATS_INTERVAL_SECS: u64 = 60;
 
+/// How often that line is emitted when `--progress` asked for a live view.
+///
+/// One second, which is the shortest interval that stays readable in a file
+/// somebody later scrolls through. rclone's `-P` redraws twice a second, but it
+/// *overwrites* its block in place on a terminal, so its cadence costs nothing in
+/// the log; DCTL's plain record is appended, and every one of them is kept. A
+/// minute is right for an unattended nightly job and useless for somebody
+/// watching a redirected run happen, which is exactly what `-P` asks for.
+pub const PROGRESS_STATS_INTERVAL_SECS: u64 = 1;
+
 /// Field width for a percentage, on the bars and in the one-line status alike.
 ///
 /// Three digits so `7%`, `70%` and `100%` all occupy the same columns, and the

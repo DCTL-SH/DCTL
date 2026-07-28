@@ -3677,3 +3677,145 @@ fn no_successful_transfer_exits_silently_on_both_streams() {
         );
     }
 }
+
+/// Bytes per file, and the rate the pacing tests below hold a run to.
+///
+/// Chosen together so a run lasts about two seconds: long enough for the
+/// one-second periodic record to fire at least once, short enough that three of
+/// these are not a noticeable part of the suite. The pacing is what buys the
+/// time — a local copy of 400 KiB is otherwise instantaneous, and a flag about
+/// *periodic* output cannot be observed in a run that does not last a period.
+///
+/// **Two** files, not one, and that is not arbitrary: `--bwlimit` charges a file
+/// after it has moved and makes the *next* one wait, so a single-file run is
+/// never delayed at all (`limits::bandwidth`). One file paced to any rate
+/// whatsoever finishes instantly, which is how the first draft of this test
+/// managed to prove nothing.
+const PACED_BYTES: usize = 200 * 1024;
+const PACED_RATE: &str = "100k";
+
+/// Write the paced fixture: two files, each [`PACED_BYTES`] of `fill`.
+fn paced_source(sandbox: &Sandbox, fill: u8) {
+    sandbox.write("src/one.bin", &vec![fill; PACED_BYTES]);
+    sandbox.write("src/two.bin", &vec![fill; PACED_BYTES]);
+}
+
+/// Status records on a stream, counted by the one thing only they carry.
+///
+/// `--stats-one-line` is passed by both callers so the periodic record is a
+/// single line containing an ETA. The end-of-run summary renders the same
+/// counters but has no ETA row — it is a report of what happened, not a
+/// projection — so this counts periodic records and nothing else. Counting
+/// `Errors` instead would count the final summary too and both runs would look
+/// identical.
+fn status_records(stderr: &[u8]) -> usize {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .filter(|line| line.contains("ETA"))
+        .count()
+}
+
+/// `-P` has to change what a run actually writes, or it is a belief rather than
+/// a flag.
+///
+/// This is `HANDOVER.md` §11.2's fourth bullet, end to end: the flag was
+/// accepted, documented, and produced byte-identical output in every
+/// environment. Off a terminal the display is periodic records, and their
+/// cadence is what `-P` selects — a minute by default, which is right for an
+/// unattended nightly job and useless to somebody watching, against one second,
+/// which is what asking to watch means.
+///
+/// Both runs are redirected, because `assert_cmd` captures the streams: that is
+/// the environment the flag exists for and the one where the previous behaviour
+/// was actively harmful.
+#[test]
+fn progress_changes_what_a_redirected_run_reports() {
+    let sandbox = Sandbox::new();
+    paced_source(&sandbox, 0x41);
+
+    let quiet_run = sandbox
+        .dctl()
+        .args([
+            "--bwlimit",
+            PACED_RATE,
+            "--stats-one-line",
+            "copy",
+            "src",
+            "dst-plain",
+        ])
+        .assert()
+        .success();
+    let watched_run = sandbox
+        .dctl()
+        .args([
+            "-P",
+            "--bwlimit",
+            PACED_RATE,
+            "--stats-one-line",
+            "copy",
+            "src",
+            "dst-watched",
+        ])
+        .assert()
+        .success();
+
+    let unwatched = status_records(&quiet_run.get_output().stderr);
+    let watched = status_records(&watched_run.get_output().stderr);
+    assert_eq!(
+        unwatched,
+        0,
+        "a two-second run reports nothing at the default one-minute cadence, and \
+         that is the behaviour -P exists to change. Got:\n{}",
+        String::from_utf8_lossy(&quiet_run.get_output().stderr)
+    );
+    assert!(
+        watched >= 1,
+        "-P asked to watch a two-second run and got {watched} status records:\n{}",
+        String::from_utf8_lossy(&watched_run.get_output().stderr)
+    );
+
+    // And the transfer itself is unaffected: a flag about output must not change
+    // what lands.
+    assert_eq!(
+        std::fs::read(sandbox.path("dst-watched/two.bin")).expect("the copy landed"),
+        vec![0x41; PACED_BYTES]
+    );
+}
+
+/// `--json -P` gives the operator progress back without touching the JSON.
+///
+/// The other half of what `-P` does. `--json` silences the display because a
+/// program is reading stdout — a courtesy, since progress goes to stderr and the
+/// two cannot collide. For a four-hour run there is then nothing at all to watch,
+/// so `-P` restores it, and this proves the restoration does not cost the machine
+/// consumer anything: stdout still parses.
+#[test]
+fn progress_restores_the_display_under_json_without_polluting_it() {
+    let sandbox = Sandbox::new();
+    paced_source(&sandbox, 0x42);
+
+    let run = sandbox
+        .dctl()
+        .args([
+            "--json",
+            "-P",
+            "--bwlimit",
+            PACED_RATE,
+            "--stats-one-line",
+            "copy",
+            "src",
+            "dst",
+        ])
+        .assert()
+        .success();
+    let output = run.get_output();
+
+    assert!(
+        status_records(&output.stderr) >= 1,
+        "--json -P must still show progress on stderr:\n{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .unwrap_or_else(|e| panic!("stdout must still be one JSON document ({e}):\n{stdout}"));
+}
