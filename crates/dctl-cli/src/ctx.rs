@@ -17,6 +17,18 @@ use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
 use crate::output::{Out, Progress, Stats};
 
+/// How a command body ended, as far as the end-of-run summary is concerned.
+///
+/// Two states rather than a bool so the call sites read as what happened rather
+/// than as a flag whose polarity has to be remembered.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Ran {
+    /// The body returned, whatever its per-file counters say.
+    Completed,
+    /// The body returned an error.
+    Failed,
+}
+
 /// Resolved state for one command invocation.
 pub struct Ctx {
     /// Fully-parsed global flags.
@@ -143,10 +155,27 @@ impl Ctx {
 
     /// Emit the end-of-run summary, if this command should have one.
     pub fn finish(&self, show_summary: bool) {
+        self.finish_with(show_summary, Ran::Completed);
+    }
+
+    /// Emit the end-of-run summary, unless the run failed having done nothing.
+    ///
+    /// The exception is narrow on purpose. A `copy` that moved nine hundred of a
+    /// thousand files and then failed needs its summary — that is the only
+    /// record of what did land. A run that refused before it started has no such
+    /// record, and printing one anyway put `Errors: 0` in a table directly above
+    /// `error: …`, which is not noise but a contradiction. See
+    /// [`Snapshot::attempted_nothing`](crate::output::stats::Snapshot::attempted_nothing).
+    pub fn finish_with(&self, show_summary: bool, ran: Ran) {
         self.progress.finish();
-        if show_summary {
-            self.out.summary(&self.stats.snapshot());
+        if !show_summary {
+            return;
         }
+        let snapshot = self.stats.snapshot();
+        if ran == Ran::Failed && snapshot.attempted_nothing() {
+            return;
+        }
+        self.out.summary(&snapshot);
     }
 
     /// The exit code implied by the counters.

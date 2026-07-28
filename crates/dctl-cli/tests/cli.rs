@@ -2963,3 +2963,72 @@ fn json_on_a_transfer_with_a_failure_still_reports_what_happened() {
     assert_eq!(document["result"]["files"], 1);
     assert_eq!(sandbox.read("dst/ok.txt"), b"fine");
 }
+
+#[test]
+fn a_run_that_refused_before_it_started_prints_no_statistics_block() {
+    // `dctl replicate` against a location that is not a vault's object store
+    // printed a full summary *above* its own error:
+    //
+    //      Transferred: 0 B / 0 B, -
+    //            Files: 0 / 0
+    //           Errors: 0
+    //     error: SOURCE-STORE: 'pl:' is not a vault's object store …
+    //
+    // `Errors: 0` in a table is not noise there; it is a direct contradiction of
+    // the line beneath it, printed first and with more formatting. The refusal
+    // is the whole report a run like this has.
+    let sandbox = Sandbox::new();
+    sandbox.dir("plain");
+    sandbox
+        .dctl()
+        .args(["config", "create", "plainloc", "local"])
+        .arg(format!("path={}", sandbox.path("plain").display()))
+        .assert()
+        .success();
+
+    let refused = sandbox
+        .dctl()
+        .args(["replicate", "plainloc:", "elsewhere:"])
+        // 7 = fatal_error (docs/EXIT_CODES.md).
+        .assert()
+        .code(7);
+    let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+
+    assert!(
+        stderr.contains("is not a vault's object store"),
+        "the refusal itself must still be reported:\n{stderr}"
+    );
+    for row in ["Transferred:", "Files:", "Errors:", "Elapsed:"] {
+        assert!(
+            !stderr.contains(row),
+            "a run that attempted nothing must not print '{row}':\n{stderr}"
+        );
+    }
+}
+
+#[test]
+fn a_run_that_failed_partway_still_prints_what_it_moved() {
+    // The control, and the reason the rule is about *attempting nothing* rather
+    // than about failing. A copy that moved one file of two and then failed has
+    // a record nothing else carries: suppressing the summary here would lose the
+    // only statement of what actually landed.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/ok.txt", b"fine");
+    sandbox.write("src/blocked.txt", b"nope");
+    sandbox.dir("dst/blocked.txt");
+
+    let partial = sandbox
+        .dctl()
+        .args(["copy", "src", "dst"])
+        // 6 = partial_failure (docs/EXIT_CODES.md).
+        .assert()
+        .code(6);
+    let stderr = String::from_utf8_lossy(&partial.get_output().stderr).into_owned();
+
+    assert!(stderr.contains("Transferred:"), "{stderr}");
+    assert!(stderr.contains("Errors:"), "{stderr}");
+    assert!(
+        stderr.contains("Files:"),
+        "the file counters are the record of what landed:\n{stderr}"
+    );
+}

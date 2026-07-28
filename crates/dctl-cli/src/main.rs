@@ -206,7 +206,12 @@ async fn execute(cli: Cli) -> ExitCode {
         }
 
         Outcome::Finished(Err(error)) => {
-            context.finish(show_summary);
+            // `Ran::Failed` suppresses the summary when nothing was attempted.
+            // A partial run keeps it — the counters are the only record of what
+            // did land — but a refusal has nothing to report, and printing
+            // `Errors: 0` in a table immediately above `error: …` contradicted
+            // the line it introduced.
+            context.finish_with(show_summary, ctx::Ran::Failed);
             report(&context, &error);
             error.code()
         }

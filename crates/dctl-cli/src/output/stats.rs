@@ -235,6 +235,44 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Whether the run moved, checked, skipped, deleted or failed **nothing**.
+    ///
+    /// The state a command reaches when it refuses before any work begins: a
+    /// destination that is not a vault's object store, a source that does not
+    /// exist, a filter flag a verb does not accept. Every counter is still at
+    /// its initial value because nothing ever touched one.
+    ///
+    /// It exists so that failure path can suppress the summary. A run that
+    /// refused printed a full statistics block *above* its own error —
+    ///
+    /// ```text
+    ///  Transferred: 0 B / 0 B, -
+    ///        Files: 0 / 0
+    ///       Errors: 0
+    ///      Elapsed: 0s
+    /// error: SOURCE-STORE: 'pl:' is not a vault's object store …
+    /// ```
+    ///
+    /// — where `Errors: 0` is not merely noise but a direct contradiction of the
+    /// line beneath it, printed first and in a table. On a *successful* run the
+    /// same zeroes are a positive statement ("this ran and did nothing"), which
+    /// is why the rule is about failure and not about emptiness.
+    #[must_use]
+    pub const fn attempted_nothing(&self) -> bool {
+        self.bytes_transferred == 0
+            && self.bytes_total == 0
+            && self.bytes_verified == 0
+            && self.files_done == 0
+            && self.files_total == 0
+            && self.files_skipped == 0
+            && self.files_deleted == 0
+            && self.checks_done == 0
+            && self.checks_total == 0
+            && self.errors == 0
+            && self.retries == 0
+            && self.checksum_mismatches == 0
+    }
+
     /// Completion as a percentage of total bytes, or `None` when the total is
     /// not yet known (a streaming walk has not finished counting).
     #[must_use]
@@ -256,6 +294,41 @@ impl Snapshot {
 #[cfg(test)]
 mod tests {
     use super::{Stage, Stats};
+
+    #[test]
+    fn a_run_that_touched_no_counter_says_so_and_one_that_touched_any_does_not() {
+        // What decides whether a failing run prints a summary above its own
+        // error. Every counter has to be consulted: a run that only skipped, only
+        // deleted, or only failed still did something worth reporting, and one
+        // that reached even a single file has a record the error message does not
+        // carry.
+        assert!(Stats::new().snapshot().attempted_nothing());
+
+        /// One counter, named, and the call that moves it.
+        type Touch = (&'static str, fn(&Stats));
+
+        let touched: [Touch; 11] = [
+            ("bytes", |s| s.add_bytes(1)),
+            ("verified bytes", |s| s.add_verified_bytes(1)),
+            ("total bytes", |s| s.set_total_bytes(1)),
+            ("total files", |s| s.set_total_files(1)),
+            ("a file", Stats::file_done),
+            ("a skip", Stats::file_skipped),
+            ("a delete", Stats::file_deleted),
+            ("a check", Stats::check_done),
+            ("total checks", |s| s.set_total_checks(1)),
+            ("a retry", Stats::retry),
+            ("an error", Stats::error),
+        ];
+        for (what, touch) in touched {
+            let stats = Stats::new();
+            touch(&stats);
+            assert!(
+                !stats.snapshot().attempted_nothing(),
+                "a run that recorded {what} did not attempt nothing"
+            );
+        }
+    }
 
     #[test]
     fn counters_accumulate() {
