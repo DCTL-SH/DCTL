@@ -22,6 +22,7 @@
 use bytes::Bytes;
 use dctl_store::{
     Backend, ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, S3Backend, S3Config,
+    SourceModified,
 };
 
 /// Bytes for the streaming test source. Exceeds S3's 100 MiB multipart threshold so
@@ -83,7 +84,10 @@ async fn s3_full_round_trip() {
     let data = Bytes::from((0u8..=255).cycle().take(5000).collect::<Vec<u8>>());
     let expected = ContentHash::blake3(&data);
 
-    let outcome = s3.put(&key, data.clone(), &expected).await.unwrap();
+    let outcome = s3
+        .put(&key, data.clone(), &expected, SourceModified::unknown())
+        .await
+        .unwrap();
     assert_eq!(outcome.size, data.len() as u64);
 
     assert!(s3.exists(&key).await.unwrap());
@@ -123,7 +127,10 @@ async fn s3_stream_from_path_round_trip() {
     let expected = hash_file(&src, HashAlgo::Blake3);
 
     // put_from_path: streamed multipart upload, verified.
-    let outcome = s3.put_from_path(&key, &src, &expected).await.unwrap();
+    let outcome = s3
+        .put_from_path(&key, &src, &expected, SourceModified::unknown())
+        .await
+        .unwrap();
     assert_eq!(outcome.size, STREAM_SOURCE_LEN);
     assert!(outcome.verified.matches(&expected));
     assert_eq!(s3.head(&key).await.unwrap().size, STREAM_SOURCE_LEN);

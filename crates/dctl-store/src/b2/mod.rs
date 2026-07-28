@@ -27,6 +27,7 @@ use crate::backend::{Backend, UploadTicket};
 use crate::checksum::ContentHash;
 use crate::error::{Result, StoreError};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
+use crate::modified::SourceModified;
 
 use api::{AuthState, AuthorizeResponse, ListBucketsResponse};
 use retry::{Attempt, Observed};
@@ -298,8 +299,9 @@ impl Backend for B2Backend {
         key: &ObjectKey,
         data: Bytes,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
-        upload::put(self, key, data, expected).await
+        upload::put(self, key, data, expected, modified).await
     }
 
     async fn put_from_path(
@@ -307,8 +309,9 @@ impl Backend for B2Backend {
         key: &ObjectKey,
         source: &std::path::Path,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
-        upload::put_from_path(self, key, source, expected).await
+        upload::put_from_path(self, key, source, expected, modified).await
     }
 
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {

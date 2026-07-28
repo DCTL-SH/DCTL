@@ -228,11 +228,103 @@ impl VersionPages for LiveVersions<'_> {
     }
 }
 
+/// Describe one listed file, preferring the source's own modification time.
+///
+/// ## The rule for objects written before DCTL sent a time
+///
+/// `src_last_modified_millis` is read when it is there and `uploadTimestamp` is
+/// used when it is not. That is the whole migration story, and it needs no
+/// version field because the two facts are distinguishable by presence alone:
+/// an object carrying the key was written with a source time, and one without it
+/// was written before DCTL sent one (or by a tool that never did).
+///
+/// The fallback is deliberately *not* "absent". An object with no recorded source
+/// time still has a true, useful timestamp — when the provider accepted it — and
+/// reporting nothing would make `--update` unable to protect it and `dctl lsl`
+/// print a blank column for half a bucket. It does mean an object uploaded before
+/// this change is compared against a source time it never recorded and is
+/// transferred once more; after that one run it carries its own time and is never
+/// sent again. Silently pretending the upload time *is* the source time is what
+/// the old code did, and it is why every run was a full run.
 fn to_meta(f: super::api::FileItem) -> ObjectMeta {
+    let recorded = f
+        .file_info
+        .get(constants::FILE_INFO_SRC_MODIFIED)
+        .and_then(|millis| millis.parse::<i64>().ok())
+        // Floor division, so a pre-epoch millisecond value does not round
+        // *towards* the epoch and land a file one second later than it is.
+        .map(|millis| millis.div_euclid(constants::MILLIS_PER_SECOND));
     ObjectMeta {
         key: ObjectKey::new(f.file_name),
         size: f.content_length,
-        modified_unix: Some(f.upload_timestamp / constants::MILLIS_PER_SECOND),
+        modified_unix: Some(recorded.unwrap_or(f.upload_timestamp / constants::MILLIS_PER_SECOND)),
+    }
+}
+
+#[cfg(test)]
+mod meta_tests {
+    use super::to_meta;
+    use crate::b2::api::FileItem;
+
+    fn item(body: serde_json::Value) -> FileItem {
+        serde_json::from_value(body).expect("a listed file parses")
+    }
+
+    #[test]
+    fn a_recorded_source_time_outranks_the_upload_timestamp() {
+        // The whole point: the object was uploaded today and the file it holds
+        // was last written in 2020. Reporting today is a true fact about a
+        // different event, and it is what made every `sync` a full `sync`.
+        let meta = to_meta(item(serde_json::json!({
+            "fileName": "a.txt",
+            "contentLength": 14,
+            "uploadTimestamp": 1_784_000_000_000_i64,
+            "action": "upload",
+            "fileInfo": { "src_last_modified_millis": "1577836800000" },
+        })));
+        assert_eq!(meta.modified_unix, Some(1_577_836_800));
+    }
+
+    #[test]
+    fn an_object_written_before_this_change_falls_back_to_its_upload_time() {
+        // The migration rule, stated as a test: no key means no source time was
+        // ever recorded, and the upload time is the only true timestamp there is.
+        let meta = to_meta(item(serde_json::json!({
+            "fileName": "old.txt",
+            "contentLength": 3,
+            "uploadTimestamp": 1_600_000_000_000_i64,
+            "action": "upload",
+        })));
+        assert_eq!(meta.modified_unix, Some(1_600_000_000));
+    }
+
+    #[test]
+    fn an_unparsable_source_time_falls_back_rather_than_failing_the_listing() {
+        // Another tool may have written anything into that key. A whole bucket
+        // must stay listable regardless.
+        let meta = to_meta(item(serde_json::json!({
+            "fileName": "odd.txt",
+            "contentLength": 1,
+            "uploadTimestamp": 1_600_000_000_000_i64,
+            "action": "upload",
+            "fileInfo": { "src_last_modified_millis": "not-a-number" },
+        })));
+        assert_eq!(meta.modified_unix, Some(1_600_000_000));
+    }
+
+    #[test]
+    fn a_pre_epoch_source_time_rounds_away_from_the_epoch() {
+        // Truncating division would turn -1500 ms into 1970-01-01T00:00:00 and
+        // move the file *forwards* in time. Floor division keeps it before the
+        // epoch, where it is.
+        let meta = to_meta(item(serde_json::json!({
+            "fileName": "ancient.txt",
+            "contentLength": 1,
+            "uploadTimestamp": 1_600_000_000_000_i64,
+            "action": "upload",
+            "fileInfo": { "src_last_modified_millis": "-1500" },
+        })));
+        assert_eq!(meta.modified_unix, Some(-2));
     }
 }
 

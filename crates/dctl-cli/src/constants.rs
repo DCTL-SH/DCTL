@@ -1878,7 +1878,7 @@ pub const INTEGRITY_COLUMN_DETAIL: &str = "Detail";
 /// component.
 pub const REMOTE_NAME_EXTRA_CHARS: &[char] = &['-', '_', '.'];
 
-/// Tolerance, in seconds, when comparing two modification times.
+/// Default tolerance, in seconds, when comparing two modification times.
 ///
 /// One second, not zero, because timestamp resolution is the least portable
 /// thing about a filesystem: FAT stores two-second granularity, S3 and B2 return
@@ -1887,8 +1887,26 @@ pub const REMOTE_NAME_EXTRA_CHARS: &[char] = &['-', '_', '.'];
 /// look modified and a `sync` re-uploads the entire dataset on every run.
 ///
 /// Mirrors rclone's `--modify-window`, so a user porting a script sees the same
-/// set of files treated as unchanged.
+/// set of files treated as unchanged. `--modify-window` overrides it;
+/// [`crate::cli::window`] is where the two meet and is the only place either is
+/// read.
 pub const DEFAULT_MODIFY_WINDOW_SECS: u64 = 1;
+
+/// The narrowest `--modify-window` that can mean anything.
+///
+/// Equal to the resolution DCTL stores modification times at — whole unix
+/// seconds, in the index row, in a sealed object's metadata and in every
+/// backend's listing alike. A narrower window cannot distinguish two files that
+/// were stored differently; it can only reject files as modified because of
+/// sub-second digits that were never recorded on either side. Separate from
+/// [`DEFAULT_MODIFY_WINDOW_SECS`] because they answer different questions — what
+/// to use when nobody said, and what nobody may go below — and a future default
+/// of two seconds must not quietly move the floor with it.
+pub const MIN_MODIFY_WINDOW_SECS: u64 = 1;
+
+/// What to do about a `--modify-window` narrower than the stored resolution.
+pub const MODIFY_WINDOW_TOO_SMALL_HINT: &str = "Use --modify-window 1 or wider, or --checksum to compare contents instead \
+     of times.";
 
 /// Whether a local directory walk follows symbolic links.
 ///
@@ -3220,18 +3238,25 @@ pub const TOUCH_RESTAMP_HINT: &str = "The object was not modified. A vault keeps
 ///
 /// **Not a build gap, and the wording must never suggest one.** A transfer
 /// (`dctl copy`, `move`, `sync`) writes a plain object into a bucket today, so
-/// "this build cannot write there" is simply false. What an object store has no
-/// notion of is a *settable* modification time: B2, S3 and R2 all assign
-/// `Last-Modified` themselves when the object is stored, and their APIs expose
-/// no operation that moves it afterwards. `touch` is the command whose entire
-/// purpose is to move it.
+/// "this build cannot write there" is simply false.
 ///
-/// So the missing capability belongs to the **provider**, one layer below
-/// `dctl-store`, and no `PLAN.md` phase delivers it — there is nothing to
-/// schedule. That is why the hint offers the two things that *are* possible
-/// instead of a release to wait for.
+/// The reason this is refused has narrowed, and the wording narrowed with it.
+/// It used to read "the provider assigns `Last-Modified` and exposes no way to
+/// change it", which is no longer true and was too strong even then: a write
+/// now carries the source's own time
+/// ([`SourceModified`](dctl_store::SourceModified)), and B2's `b2_copy_file` and
+/// S3's `CopyObject` can replace an existing object's metadata afterwards.
+///
+/// What is true is that **there is no way to move the time without rewriting the
+/// object**. A server-side copy is a new object version — billed, retained by the
+/// bucket's lifecycle rules, and on B2 one more version to enumerate on delete —
+/// which is a great deal to do behind a command whose whole promise is "this
+/// changes only a timestamp". So this is a decision rather than an absence, and
+/// the hint offers the two things that are possible instead of a release to wait
+/// for.
 pub const TOUCH_OBJECT_STORE_FEATURE: &str = "setting the modification time of an object in an object store — the \
-     provider assigns it on write and exposes no way to change it —";
+     provider fixes it when the object is written, and moving it afterwards \
+     means rewriting the object —";
 
 /// Remediation hint attached to [`TOUCH_OBJECT_STORE_FEATURE`].
 ///
@@ -3240,11 +3265,18 @@ pub const TOUCH_OBJECT_STORE_FEATURE: &str = "setting the modification time of a
 /// object is an ordinary write, and `dctl rcat` is the command for it — once it
 /// grows the object-store arm ([`RCAT_OBJECT_STORE_FEATURE`]). Until then the
 /// honest route to an empty object in a bucket is a transfer of an empty file.
-pub const TOUCH_OBJECT_STORE_HINT: &str = "Nothing was written. A bucket's 'last modified' is the time the provider \
-     stored the object, not a value DCTL can set — no phase of PLAN.md changes \
-     that, because it is the provider's own model. To create an empty object \
-     there, copy an empty file with `dctl copy`; to stamp a time, address a \
-     local remote, whose filesystem timestamps are settable.";
+///
+/// It also names the route that *does* set a bucket object's time, because there
+/// is one: writing the object. `dctl copy` records the source file's own
+/// modification time, so stamping a time in a bucket means stamping the local
+/// file and copying it.
+pub const TOUCH_OBJECT_STORE_HINT: &str = "Nothing was written. A bucket fixes an object's 'last modified' when the \
+     object is stored; moving it afterwards would mean rewriting the object as a \
+     new, billed version, which DCTL will not do behind a command that promises \
+     to change only a timestamp — so no phase of PLAN.md delivers it. To create \
+     an empty object there, copy an empty file with `dctl copy`; to stamp a time, \
+     `touch` the local file and copy it, since a transfer records the source's \
+     own modification time.";
 
 /// Feature name reported when `rcat` is aimed at a plain object store.
 ///
@@ -5460,9 +5492,10 @@ mod tests {
         // became false for all three of its callers at once — the failure mode
         // this pair exists to prevent.
         //
-        // `touch` is refused by the provider's own model and no release changes
-        // it; `rcat` is refused by a branch nobody has written yet. Telling
-        // either user the other's story sends them somewhere useless.
+        // `touch` is refused by a decision about cost that no release reverses —
+        // moving a bucket object's time means rewriting it as a new, billed
+        // version — while `rcat` is refused by a branch nobody has written yet.
+        // Telling either user the other's story sends them somewhere useless.
         assert!(
             TOUCH_OBJECT_STORE_HINT.contains("no phase"),
             "a gap no release closes must not name a phase: {TOUCH_OBJECT_STORE_HINT}"

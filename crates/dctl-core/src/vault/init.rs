@@ -41,7 +41,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use dctl_crypto::{constants, envelope, kdf, keys};
-use dctl_store::{Backend, ContentHash, ObjectKey};
+use dctl_store::{Backend, ContentHash, ObjectKey, SourceModified};
 use zeroize::Zeroizing;
 
 use crate::error::Result;
@@ -143,11 +143,13 @@ impl Vault {
         let env = envelope::Envelope { vault_id, slots };
         let bytes = envelope::serialize(&env)?;
         let expected = ContentHash::blake3(&bytes);
+        // The envelope is DCTL's own bookkeeping; no source file has its age.
         backend
             .put(
                 &ObjectKey::new(layout::ENVELOPE_OBJECT_KEY),
                 Bytes::from(bytes),
                 &expected,
+                SourceModified::unknown(),
             )
             .await?;
         tracing::info!(

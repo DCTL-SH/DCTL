@@ -28,6 +28,20 @@
 //! is only then atomically renamed onto the final path (`posix-rename@openssh.com`
 //! when available). Nothing is committed unless the bytes hash to `expected`, so a
 //! failure at any step leaves no partial or committed object.
+//!
+//! # The modification time, and the one time this protocol cannot hold
+//!
+//! The writer's [`SourceModified`] is applied with a `SETSTAT` on the **staging
+//! path, before the rename** — the object therefore appears at its final name
+//! already carrying the source's time, and the next run's comparison finds it
+//! unchanged rather than re-uploading it forever.
+//!
+//! SFTP version 3 stores `atime`/`mtime` as **unsigned 32-bit seconds**, so a
+//! source modified before 1970 or after 2106 has no representation on the wire.
+//! Those are left unstamped and keep the server's write time, which the
+//! comparison reads as a difference and re-transfers: a cost, never a wrong
+//! answer. Storing a wrapped value instead would give the file a confident,
+//! fabricated date that every later run would believe.
 
 mod path;
 
@@ -39,7 +53,8 @@ use bytes::{Bytes, BytesMut};
 use openssh::{KnownHosts, Session};
 use openssh_sftp_client::error::SftpErrorKind;
 use openssh_sftp_client::file::File;
-use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions};
+use openssh_sftp_client::metadata::MetaDataBuilder;
+use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions, UnixTimeStamp};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 use tokio_stream::StreamExt as _;
 
@@ -47,6 +62,7 @@ use crate::backend::Backend;
 use crate::checksum::{ContentHash, Hasher};
 use crate::error::{Result, StoreError};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
+use crate::modified::SourceModified;
 
 use path::{ancestor_dirs, chunk_spans, join, normalize_base, prefix_dir, remote_path, temp_path};
 
@@ -145,6 +161,42 @@ impl SftpBackend {
         let _ = fs.remove_file(remote).await;
     }
 
+    /// Apply the writer's modification time to `remote`, when the protocol can
+    /// hold it.
+    ///
+    /// Called on the **staging path**, so the object arrives at its final name
+    /// already stamped and no listing can observe it carrying the write time.
+    ///
+    /// A failure is reported rather than swallowed: the bytes are already correct
+    /// at this point, so publishing anyway is tempting — and it is exactly what
+    /// makes the next run find the object different, transfer it again, and go on
+    /// doing that forever with nothing on either stream to explain it.
+    ///
+    /// Two facts about SFTP version 3 shape this:
+    ///
+    /// * `SSH_FILEXFER_ATTR_ACMODTIME` carries access **and** modification time as
+    ///   one pair, so an access time has to be supplied to set a modification
+    ///   time at all. It is the current clock, not a copy of `modified`: this run
+    ///   really did just write the file, and nothing in DCTL reads an access time,
+    ///   so the honest value costs nothing and the fabricated one buys nothing.
+    /// * Both are unsigned 32-bit seconds. A time outside 1970–2106 has no
+    ///   representation, so it is left unstamped — see the module documentation.
+    async fn stamp(&self, remote: &str, modified: SourceModified) -> Result<()> {
+        let Some(when) = modified
+            .system_time()
+            .and_then(|time| UnixTimeStamp::new(time).ok())
+        else {
+            return Ok(());
+        };
+        let accessed = UnixTimeStamp::new(std::time::SystemTime::now()).unwrap_or(when);
+        let metadata = MetaDataBuilder::new().time(accessed, when).create();
+        self.sftp
+            .fs()
+            .set_metadata(remote, metadata)
+            .await
+            .map_err(|e| map_sftp_err(remote, e))
+    }
+
     /// Best-effort durability: fsync the handle when the server advertises the
     /// `fsync@openssh.com` extension, otherwise a no-op.
     async fn fsync_best_effort(file: &mut File) {
@@ -182,6 +234,7 @@ impl Backend for SftpBackend {
         key: &ObjectKey,
         data: Bytes,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
         let remote = remote_path(&self.base, key)?;
 
@@ -212,6 +265,12 @@ impl Backend for SftpBackend {
             return Err(map_sftp_err(&tmp, e));
         }
 
+        // The writer's time, before the name exists.
+        if let Err(e) = self.stamp(&tmp, modified).await {
+            self.remove_quiet(&tmp).await;
+            return Err(e);
+        }
+
         // Atomically publish.
         let mut fs = self.sftp.fs();
         if let Err(e) = fs.rename(&tmp, &remote).await {
@@ -230,6 +289,7 @@ impl Backend for SftpBackend {
         key: &ObjectKey,
         source: &Path,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
         let remote = remote_path(&self.base, key)?;
 
@@ -276,6 +336,13 @@ impl Backend for SftpBackend {
             self.remove_quiet(&tmp).await;
             return Err(map_sftp_err(&tmp, e));
         }
+
+        // The writer's time, before the name exists.
+        if let Err(e) = self.stamp(&tmp, modified).await {
+            self.remove_quiet(&tmp).await;
+            return Err(e);
+        }
+
         let mut fs = self.sftp.fs();
         if let Err(e) = fs.rename(&tmp, &remote).await {
             self.remove_quiet(&tmp).await;

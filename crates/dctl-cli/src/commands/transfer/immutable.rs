@@ -171,6 +171,7 @@ mod tests {
                     dest: (*path).to_string(),
                     size: Some(1),
                     reason: "test",
+                    modified: None,
                 })
                 .collect(),
         }

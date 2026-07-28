@@ -108,6 +108,24 @@ impl Modified {
     }
 }
 
+/// The storage layer's view of the same fact.
+///
+/// [`dctl_store::SourceModified`] is what a `Backend` write carries, and it is
+/// deliberately the *resolved* form: a backend records a time or it does not, and
+/// there is nothing there to distinguish "now" from "the source's own time"
+/// because both are simply the time being stored. The distinction matters only up
+/// here, where a caller states which claim it is making — so the conversion is
+/// where [`Modified::Now`] stops being a promise and becomes a number, once,
+/// through the same [`Modified::resolve`] the index record goes through.
+///
+/// Written as a `From` rather than left to call sites, so a write that has a
+/// [`Modified`] in hand cannot reach the backend having quietly dropped it.
+impl From<Modified> for dctl_store::SourceModified {
+    fn from(modified: Modified) -> Self {
+        Self::from_unix(modified.resolve())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -153,6 +171,21 @@ mod tests {
         // tolerance every comparison applies.
         let when = UNIX_EPOCH + Duration::from_millis(1_700_000_000_750);
         assert_eq!(Modified::at(when), Modified::At(1_700_000_000));
+    }
+
+    #[test]
+    fn the_storage_layers_view_is_the_resolved_number_and_nothing_else() {
+        // "Now" is a promise up here and a number down there, resolved exactly
+        // once on the way across.
+        assert_eq!(
+            dctl_store::SourceModified::from(Modified::At(1_700_000_000)),
+            dctl_store::SourceModified::at(1_700_000_000)
+        );
+        assert_eq!(
+            dctl_store::SourceModified::from(Modified::Unknown),
+            dctl_store::SourceModified::unknown()
+        );
+        assert!(dctl_store::SourceModified::from(Modified::Now).is_known());
     }
 
     #[test]

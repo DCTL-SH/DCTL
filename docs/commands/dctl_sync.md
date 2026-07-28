@@ -20,6 +20,46 @@ building is to never run a sync you have not previewed.
 If you want to add and update without ever removing, use
 [`copy`](dctl_copy.md). That is the whole difference between the two verbs.
 
+### The second run is cheap
+
+This is the property that makes `sync` worth putting in a cron job, and it is
+worth stating explicitly because it did not hold until recently.
+
+Every write records the **source's own modification time** at the destination —
+in a vault's index row and inside the sealed object's own metadata, on a
+filesystem or SFTP host as the file's `mtime`, on B2 as the documented
+`src_last_modified_millis` field. So the default size-and-time comparison
+finds an unchanged tree unchanged, and the second run transfers nothing and
+fetches nothing:
+
+```console
+$ dctl sync ./src backup:
+       Files: 3 / 3
+$ dctl sync ./src backup:
+       Files: 0 / 0
+      Checks: 3 / 3
+     Skipped: 3 (unchanged)
+```
+
+`dctl check ./src backup:` immediately afterwards reports `all match`, from the
+same comparison with the same tolerance — the two verbs read
+[`--modify-window`](../GLOBAL_FLAGS.md#--modify-window-seconds) from one place, so
+they cannot disagree about a tree one of them has just written.
+
+Three things this does **not** cover, stated here rather than found on a bill:
+
+* **S3 and R2.** The source's time is stored as `x-amz-meta-mtime`, but
+  `ListObjectsV2` does not return user metadata and a transfer compares against
+  the listing — so a sync to those two providers still re-transfers an unchanged
+  tree. Use `--size-only` there.
+* **Objects written before this build.** A bucket's existing objects carry no
+  recorded source time, so the first run against one re-uploads the tree once.
+  Every run after that skips.
+* **An edit that changes neither the size nor the timestamp.** Invisible to the
+  default comparison by construction — the same trade rclone and rsync make.
+  `--checksum` is the answer, and against a vault destination it costs nothing on
+  the vault's side because the index already holds the plaintext BLAKE3.
+
 ### The safety guards
 
 `sync` refuses rather than guesses when the arguments cannot mean what they say.

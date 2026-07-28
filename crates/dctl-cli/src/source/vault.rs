@@ -474,16 +474,20 @@ mod tests {
             key: &ObjectKey,
             data: Bytes,
             expected: &ContentHash,
+            modified: dctl_store::SourceModified,
         ) -> dctl_store::Result<PutOutcome> {
-            self.inner.put(key, data, expected).await
+            self.inner.put(key, data, expected, modified).await
         }
         async fn put_from_path(
             &self,
             key: &ObjectKey,
             source: &Path,
             expected: &ContentHash,
+            modified: dctl_store::SourceModified,
         ) -> dctl_store::Result<PutOutcome> {
-            self.inner.put_from_path(key, source, expected).await
+            self.inner
+                .put_from_path(key, source, expected, modified)
+                .await
         }
         async fn get(&self, key: &ObjectKey) -> dctl_store::Result<Bytes> {
             let bytes = self.inner.get(key).await?;

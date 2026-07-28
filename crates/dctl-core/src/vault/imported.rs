@@ -11,7 +11,7 @@
 use bytes::Bytes;
 use dctl_crypto::constants::KEY_ID_LEN;
 use dctl_crypto::kem;
-use dctl_store::{ContentHash, ObjectKey, StoreError};
+use dctl_store::{ContentHash, ObjectKey, SourceModified, StoreError};
 
 use super::{Vault, layout};
 use crate::error::Result;
@@ -42,8 +42,16 @@ impl Vault {
         let dik1 = kem::serialize_dik1(self.root()?, keypair)?;
         let key = format!("{}{}", layout::IMPORTED_KEY_PREFIX, hex::encode(key_id));
         let expected = ContentHash::blake3(&dik1);
+        // DCTL's own bookkeeping, not a user's file: there is no source whose age
+        // this could be. See `super::put` for why even a sealed *object* never
+        // hands its time to the provider.
         self.backend
-            .put(&ObjectKey::new(key), Bytes::from(dik1.to_vec()), &expected)
+            .put(
+                &ObjectKey::new(key),
+                Bytes::from(dik1.to_vec()),
+                &expected,
+                SourceModified::unknown(),
+            )
             .await?;
         tracing::info!(key_id = %hex::encode(key_id), "imported keypair sealed to k/*");
         Ok(key_id)

@@ -15,6 +15,7 @@
 //! under [`crate::commands`] — this file only wires them together.
 
 pub mod globals;
+pub mod window;
 
 // Tests and nothing else. `mentions` reads this crate's own source and
 // `doc_mentions` reads `docs/`, and both ask the parser below whether every

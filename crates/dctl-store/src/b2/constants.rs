@@ -41,6 +41,21 @@ pub(super) const H_CONTENT_TYPE: &str = "Content-Type";
 pub(super) const H_CONTENT_LENGTH: &str = "Content-Length";
 pub(super) const H_RANGE: &str = "Range";
 
+/// The `fileInfo` key B2 reserves for the source's own last-modified time, in
+/// epoch milliseconds.
+///
+/// Not a name invented here: it is the key Backblaze documents for exactly this
+/// purpose and the one `rclone` reads and writes, so a bucket written by DCTL
+/// keeps its timestamps when read by rclone and the other way round. Choosing a
+/// private spelling would have made every object DCTL wrote look, to every other
+/// tool, like a file last modified when it was uploaded.
+///
+/// See <https://www.backblaze.com/apidocs/b2-upload-file>.
+pub(super) const FILE_INFO_SRC_MODIFIED: &str = "src_last_modified_millis";
+/// [`FILE_INFO_SRC_MODIFIED`] as an upload header: B2 carries `fileInfo` on
+/// `b2_upload_file` as `X-Bz-Info-<key>`.
+pub(super) const H_SRC_MODIFIED: &str = "X-Bz-Info-src_last_modified_millis";
+
 /// Content type instructing B2 to auto-detect (`b2/x-auto`).
 pub(super) const CONTENT_TYPE_AUTO: &str = "b2/x-auto";
 

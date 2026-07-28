@@ -75,14 +75,20 @@ its timestamp restored afterwards. That is the same trade rclone and rsync make,
 and `--checksum` is the answer: it compares the plaintext BLAKE3 the vault
 recorded at write time against a hash of the local file.
 
-*The one place a timestamp is not carried.* A **plain** remote — including a
-bucket. `Backend::put` stores bytes under a key and has no parameter for a time,
-and for B2, S3 and R2 there could not be one: the provider stamps `Last-Modified`
-itself on acceptance and exposes no way to move it. So a plain destination reports
-when it was written, the default comparison finds every file different on the next
-run, and `--size-only` is the comparison that needs no clock. The same applies in
-reverse: a file downloaded *from* a plain remote is written with the time of the
-download. Both are pinned by tests rather than left to be discovered on a bill.
+*A plain remote carries it too, and that was the second half of the defect.*
+`Backend::put` used to store bytes under a key with no parameter for a time, and
+the page you are reading claimed a bucket could not accept one. That was wrong.
+A local file's inode takes it, an SFTP `SETSTAT` takes it, and B2 has a documented
+`src_last_modified_millis` file-info field that `rclone` has used for years. All
+three now do, in both directions, so `dctl sync ./src backup:` and
+`dctl sync backup: ./restored` are each incremental after their first run.
+
+The one provider pair this does **not** reach is **S3 and R2**. The time is
+written (`x-amz-meta-mtime`, rclone's spelling) and `head` reads it back, but
+`ListObjectsV2` does not return user metadata and a transfer compares against the
+listing — so an S3 or R2 destination still re-transfers an unchanged tree. Closing
+it means one `HEAD` per listed object, which is a per-object request against a
+provider that bills them and therefore a cost decision to take deliberately.
 
 *Vaults written by an earlier build.* Their index rows hold write times. The first
 run of this build against one finds those rows disagreeing with the sources and
@@ -268,29 +274,34 @@ Out to a **local path**, the same: the restored file is stamped with the time th
 vault recorded for it before it is published, so a second `dctl copy archive:
 ./restored` transfers nothing.
 
-Into a **plain remote — a `local:` remote or a bucket — it does not.** Objects
-carry the time the *store* wrote them (`Backend::put` takes no modification time,
-and B2/S3/R2 assign `Last-Modified` themselves), so the default size-and-time
-comparison finds every file different and copies it again. There is no recorded
-plaintext hash to compare instead either: a store holds the object and nothing
-about it, and a provider's own checksum is a SHA-1 or an ETag rather than the
-BLAKE3 of the plaintext — which is also why `--checksum` against a bucket is
-refused rather than approximated.
-
-So for a plain destination you re-copy on a schedule, use **`--size-only`**,
-which needs no clock and does skip:
+Into a **plain remote — a `local:` remote, an SFTP host or a B2 bucket — the
+same.** The write records the source's own modification time (the file's inode,
+an SFTP `SETSTAT`, or B2's `src_last_modified_millis`), so the default
+size-and-time comparison skips:
 
 ```console
-$ dctl copy ./src backup:            # every run
+$ dctl copy ./src backup:            # first run
        Files: 3 / 3
-$ dctl copy ./src backup: --size-only
+$ dctl copy ./src backup:            # and every run after
        Files: 0 / 0
 ```
 
-Against a paid provider that difference is money, so it is stated here rather
-than left to be discovered on an invoice. A modification time that survives a
-plain write needs a parameter `dctl_store::Backend::put` does not have; until
-then this is the honest behaviour rather than a bug.
+**S3 and R2 are the exception.** The time is written as `x-amz-meta-mtime` and
+`head` reads it back, but `ListObjectsV2` does not return user metadata and a
+transfer compares against the listing — so those two still re-transfer an
+unchanged tree, and `--size-only` is the comparison to reach for there.
+
+**Objects a bucket already holds** were written before DCTL sent a time, so B2
+falls back to their upload timestamp and the first run of this build against such
+a bucket re-uploads the tree once. After that run every object carries its own
+source time and is never sent again.
+
+`--checksum` against a plain destination is still **refused** rather than
+approximated: a store holds the object and nothing about it, and a provider's own
+checksum is a SHA-1 or an ETag rather than the BLAKE3 of the plaintext.
+`dctl check --checksum` can answer over the same remote, because it reads each
+object back and hashes it — a full download of the destination, which is the
+price of that question.
 
 **Writing a plain object into a bucket works.** `dctl copy ./src b2:mybucket`
 stores unencrypted objects under the prefix you named, through the same
@@ -306,11 +317,11 @@ Two things to know before pointing a nightly job at one:
   every sealed vault write to those providers already uses, but the plain-object
   write itself has only been run against the local-filesystem backend behind the
   same trait. Try it with `--dry-run` and a small tree first.
-* **A plain destination is not incrementally comparable by default** — see
-  "Re-running a copy" above. Objects carry the time the store wrote them, so the
-  default size-and-time comparison finds every file different on the next run
-  and re-uploads it. Use `--size-only` for a plain remote you re-copy on a
-  schedule, and remember that a provider charges for the upload either way.
+* **A plain B2 destination is incrementally comparable**; an S3 or R2 one is
+  not — see "Re-running a copy" above. On S3 and R2 the source time is stored but
+  a listing cannot return it, so use `--size-only` for a remote of those two that
+  you re-copy on a schedule, and remember that a provider charges for the upload
+  either way.
 
 Reading a bucket is unchanged and needs no flags: the backend `copy` fetches
 from is the one `dctl ls` lists through.

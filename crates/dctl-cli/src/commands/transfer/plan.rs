@@ -11,6 +11,8 @@
 //! executor made its own decisions as it walked, the approved list and the
 //! performed list would be two different things.
 
+use std::time::SystemTime;
+
 use serde::{Serialize, Serializer};
 
 use crate::constants::{
@@ -125,6 +127,28 @@ pub struct PlanEntry {
     pub size: Option<u64>,
     /// Stable slug explaining the decision.
     pub reason: &'static str,
+    /// When the **source** said its content was last modified.
+    ///
+    /// Carried so a destination that cannot ask the source a second time still
+    /// records the right time. The concrete case is a download from a plain
+    /// object store: the bytes arrive through
+    /// [`Backend::get`](dctl_store::Backend::get), which returns bytes and
+    /// nothing else, so without this the local file would be stamped with the
+    /// moment it was written and every later run would fetch it again. Asking the
+    /// provider for the object's metadata a second time would answer the same
+    /// question at the price of one extra round trip per file — on a metered
+    /// provider, a request per file per night forever.
+    ///
+    /// Taken from the listing that produced the plan, which is also what the
+    /// comparison read, so the time a file is stored with is exactly the time
+    /// that decided it had to be stored.
+    ///
+    /// **Not serialised.** A plan describes what would be *done*; this is an
+    /// input to the decision, already summarised by
+    /// [`PlanEntry::reason`], and adding it would change the shape of every
+    /// `--dry-run --json` document for no reader's benefit.
+    #[serde(skip)]
+    pub modified: Option<SystemTime>,
 }
 
 impl PlanEntry {
@@ -262,6 +286,7 @@ impl Plan {
                 dest: item.path.clone(),
                 size: item.size,
                 reason: action.reason(),
+                modified: item.modified,
             });
         }
 
@@ -276,6 +301,8 @@ impl Plan {
                     dest: item.path.clone(),
                     size: item.size,
                     reason: PLAN_REASON_EXTRA,
+                    // A deletion has no source, so there is no source time.
+                    modified: None,
                 });
             }
         }
@@ -315,6 +342,7 @@ impl Plan {
                 dest: dest_name.to_string(),
                 size: source.size,
                 reason: action.reason(),
+                modified: source.modified,
             }],
         })
     }
@@ -418,6 +446,8 @@ fn empty_dir_entry(item: &Entry, exists_at_dest: bool, policy: &Policy) -> PlanE
         } else {
             PLAN_REASON_MISSING
         },
+        // A directory carries no content, so it has no content time.
+        modified: None,
     }
 }
 

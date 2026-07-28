@@ -154,7 +154,7 @@ pub async fn run(ctx: &Ctx, args: &CheckArgs) -> Result<()> {
     // before a password is asked for rather than after.
     let filter = Filter::from_globals(&ctx.globals)?;
 
-    let comparison = Comparison::from_globals(&ctx.globals);
+    let comparison = Comparison::from_globals(&ctx.globals)?;
     ctx.out.info(format!(
         "{command}: '{source_target}' against '{dest_target}'{}",
         if args.one_way {
@@ -432,9 +432,15 @@ mod tests {
     #[tokio::test]
     async fn the_comparison_follows_the_global_flags() {
         let (ctx, _) = parse(&["check", "src:", "dst:", "--checksum"]);
-        assert_eq!(Comparison::from_globals(&ctx.globals), Comparison::Checksum);
+        assert_eq!(
+            Comparison::from_globals(&ctx.globals).unwrap(),
+            Comparison::Checksum
+        );
         let (ctx, _) = parse(&["check", "src:", "dst:", "--size-only"]);
-        assert_eq!(Comparison::from_globals(&ctx.globals), Comparison::SizeOnly);
+        assert_eq!(
+            Comparison::from_globals(&ctx.globals).unwrap(),
+            Comparison::SizeOnly
+        );
     }
 
     /// A directory tree on disk, which both `check` arguments can address.

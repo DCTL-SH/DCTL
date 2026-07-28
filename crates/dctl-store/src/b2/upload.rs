@@ -9,6 +9,7 @@ use crate::backend::UploadTicket;
 use crate::checksum::{ContentHash, Hasher};
 use crate::error::{Result, StoreError};
 use crate::model::{ObjectKey, PutOutcome};
+use crate::modified::SourceModified;
 use crate::streaming;
 
 use super::api::{
@@ -19,11 +20,27 @@ use super::name::encode_file_name;
 use super::retry::{self, Attempt};
 use super::{B2Backend, constants, read_json, transport_attempt};
 
+/// The `fileInfo` B2 stores with an object, as the JSON body of
+/// `b2_start_large_file` wants it.
+///
+/// Empty when the writer had no time to record — B2 then stamps only its own
+/// `uploadTimestamp`, which is what [`listing::to_meta`](super::listing) falls
+/// back to.
+fn file_info(modified: SourceModified) -> serde_json::Value {
+    match modified.millis() {
+        Some(millis) => {
+            serde_json::json!({ constants::FILE_INFO_SRC_MODIFIED: millis.to_string() })
+        }
+        None => serde_json::json!({}),
+    }
+}
+
 pub(super) async fn put(
     b2: &B2Backend,
     key: &ObjectKey,
     data: Bytes,
     expected: &ContentHash,
+    modified: SourceModified,
 ) -> Result<PutOutcome> {
     // Guard: the caller's declared hash must match the bytes we're about to send.
     let caller = ContentHash::compute(expected.algo, &data);
@@ -38,9 +55,9 @@ pub(super) async fn put(
     let sha1 = ContentHash::sha1(&data);
     let auth = b2.auth().await?;
     if data.len() as u64 <= constants::MULTIPART_THRESHOLD {
-        upload_single(b2, &auth, key, &data, &sha1).await?;
+        upload_single(b2, &auth, key, &data, &sha1, modified).await?;
     } else {
-        upload_large(b2, &auth, key, &data).await?;
+        upload_large(b2, &auth, key, &data, modified).await?;
     }
 
     // B2 confirmed the SHA-1 of the exact bytes we sent, and those bytes matched
@@ -72,8 +89,14 @@ async fn upload_single(
     key: &ObjectKey,
     data: &[u8],
     sha1: &ContentHash,
+    modified: SourceModified,
 ) -> Result<()> {
     let sha1_hex = sha1.hex();
+    // The source's time travels with the bytes rather than in a later call: B2
+    // fixes `fileInfo` at upload, so changing it afterwards means copying the
+    // object onto itself — a second request, and a second *version* of every
+    // file on every run.
+    let src_modified = modified.millis().map(|millis| millis.to_string());
     retry::run(constants::OP_UPLOAD_FILE, |_| async {
         let upload: GetUploadUrlResponse = b2
             .post_json_once(
@@ -84,14 +107,18 @@ async fn upload_single(
             .await?;
 
         tracing::debug!(bytes = data.len(), "b2 upload (single-file)");
-        let resp = b2
+        let mut request = b2
             .client
             .post(&upload.upload_url)
             .header(constants::H_AUTHORIZATION, &upload.authorization_token)
             .header(constants::H_FILE_NAME, encode_file_name(key.as_str()))
             .header(constants::H_CONTENT_TYPE, constants::CONTENT_TYPE_AUTO)
             .header(constants::H_CONTENT_SHA1, &sha1_hex)
-            .header(constants::H_CONTENT_LENGTH, data.len().to_string())
+            .header(constants::H_CONTENT_LENGTH, data.len().to_string());
+        if let Some(millis) = &src_modified {
+            request = request.header(constants::H_SRC_MODIFIED, millis);
+        }
+        let resp = request
             .body(data.to_vec())
             .send()
             .await
@@ -115,6 +142,7 @@ async fn upload_large(
     auth: &AuthState,
     key: &ObjectKey,
     data: &[u8],
+    modified: SourceModified,
 ) -> Result<()> {
     let start: StartLargeFileResponse = b2
         .post_json(
@@ -123,6 +151,7 @@ async fn upload_large(
                 "bucketId": auth.bucket_id,
                 "fileName": key.as_str(),
                 "contentType": constants::CONTENT_TYPE_AUTO,
+                "fileInfo": file_info(modified),
             }),
         )
         .await?;
@@ -207,6 +236,7 @@ pub(super) async fn put_from_path(
     key: &ObjectKey,
     source: &Path,
     expected: &ContentHash,
+    modified: SourceModified,
 ) -> Result<PutOutcome> {
     let size = tokio::fs::metadata(source).await?.len();
 
@@ -214,11 +244,11 @@ pub(super) async fn put_from_path(
     // single-shot path, exactly like `put` (same in-memory guard + SHA-1 upload).
     if !streaming::use_multipart(size, constants::MULTIPART_THRESHOLD) {
         let data = tokio::fs::read(source).await?;
-        return put(b2, key, Bytes::from(data), expected).await;
+        return put(b2, key, Bytes::from(data), expected, modified).await;
     }
 
     let auth = b2.auth().await?;
-    stream_large_from_path(b2, &auth, key, source, expected).await
+    stream_large_from_path(b2, &auth, key, source, expected, modified).await
 }
 
 /// Stream a large file to B2, aborting the large-file upload on any error so nothing
@@ -229,6 +259,7 @@ async fn stream_large_from_path(
     key: &ObjectKey,
     source: &Path,
     expected: &ContentHash,
+    modified: SourceModified,
 ) -> Result<PutOutcome> {
     let start: StartLargeFileResponse = b2
         .post_json(
@@ -237,6 +268,7 @@ async fn stream_large_from_path(
                 "bucketId": auth.bucket_id,
                 "fileName": key.as_str(),
                 "contentType": constants::CONTENT_TYPE_AUTO,
+                "fileInfo": file_info(modified),
             }),
         )
         .await?;
@@ -452,6 +484,26 @@ fn build_b2_ticket(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_known_time_becomes_the_file_info_b2_documents() {
+        // The key is `src_last_modified_millis` — Backblaze's own spelling, which
+        // rclone also reads and writes. A private one would make every object
+        // DCTL wrote look, to every other tool, like a file modified when it was
+        // uploaded.
+        assert_eq!(
+            file_info(SourceModified::at(1_577_836_800)),
+            serde_json::json!({ "src_last_modified_millis": "1577836800000" })
+        );
+    }
+
+    #[test]
+    fn an_unknown_time_sends_no_file_info_at_all() {
+        // Not a zero and not the epoch: B2 stamps its own `uploadTimestamp`, and
+        // the listing falls back to it. Sending `"0"` would date every such
+        // object 1970 and invert `--update` over all of them.
+        assert_eq!(file_info(SourceModified::unknown()), serde_json::json!({}));
+    }
 
     /// Offline B2 ticket assembly: correct method, verbatim URL, token-scoped (no signed
     /// expiry), url-encoded file name, `b2/x-auto`, the `do_not_verify` SHA-1 sentinel, and

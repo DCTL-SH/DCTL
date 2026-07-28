@@ -19,7 +19,7 @@ use dctl_crypto::constants::OBJECT_HEAD_LEN;
 use dctl_crypto::object::{self, Metadata};
 use dctl_crypto::path;
 use dctl_index::Record;
-use dctl_store::{ContentHash, HashAlgo, Hasher, ObjectKey};
+use dctl_store::{ContentHash, HashAlgo, Hasher, ObjectKey, SourceModified};
 use zeroize::Zeroizing;
 
 use super::{Modified, Vault, layout};
@@ -102,11 +102,17 @@ impl Vault {
 
         // Verified streaming write of the content object: the backend copies the temp
         // file into place and confirms the on-disk bytes hash to `object_hash`.
+        //
+        // No modification time on the provider's copy, for the reason
+        // `super::put` states at length: the time is a fact about the plaintext,
+        // it is already sealed inside the object's own metadata, and putting it in
+        // the bucket as well would publish a per-file edit history in the clear.
         self.backend
             .put_from_path(
                 &ObjectKey::new(object_key.clone()),
                 sealed.temp.path(),
                 &sealed.object_hash,
+                SourceModified::unknown(),
             )
             .await?;
         tracing::debug!(object = %object_key, "verified streaming write to backend complete");
@@ -121,6 +127,7 @@ impl Vault {
                 &ObjectKey::new(name_key),
                 Bytes::from(name_val),
                 &name_expected,
+                SourceModified::unknown(),
             )
             .await?;
 

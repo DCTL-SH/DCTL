@@ -126,15 +126,24 @@ impl ComparePolicy {
     /// Both halves arrive here rather than being read at the call sites, so
     /// `--checksum` (global) and `--ignore-existing` (per-command) can never be
     /// honoured by one command and forgotten by another.
-    #[must_use]
-    pub fn resolve(globals: &GlobalArgs, flags: &CompareFlags) -> Self {
-        Self {
+    ///
+    /// The tolerance comes from [`crate::cli::window`] rather than from a
+    /// constant read here, because `check` has to reach the same number: two
+    /// verbs applying two tolerances to the same pair of timestamps is how
+    /// `dctl check` came to report a tree `dctl sync` had just made identical as
+    /// entirely different.
+    ///
+    /// # Errors
+    /// [`ExitCode::Usage`] for a `--modify-window` narrower than the whole second
+    /// DCTL records — see [`crate::cli::window::resolve`].
+    pub fn resolve(globals: &GlobalArgs, flags: &CompareFlags) -> Result<Self> {
+        Ok(Self {
             checksum: globals.checksum,
             size_only: globals.size_only,
             ignore_existing: flags.ignore_existing,
             update: flags.update,
-            modify_window: Duration::from_secs(DEFAULT_MODIFY_WINDOW_SECS),
-        }
+            modify_window: crate::cli::window::resolve(globals)?,
+        })
     }
 }
 

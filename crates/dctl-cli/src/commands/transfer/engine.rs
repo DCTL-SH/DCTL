@@ -617,11 +617,20 @@ impl StageDriver for Engine {
     ///
     /// Every arm also answers *when the content last changed*, because that fact
     /// belongs to the content and the destination has to record it — see
-    /// [`super::staged`]. Four of the five can: a local file is asked through the
-    /// same handle its bytes were read from, and a vault object carries the time
-    /// in its index row. A plain object store cannot, and says so rather than
-    /// substituting the clock: what it reports is when the provider accepted the
-    /// object, which is a true fact about a different event.
+    /// [`super::staged`]. Each does it from the cheapest place that can answer
+    /// truthfully: a local file is asked through the same handle its bytes were
+    /// read from, a vault object carries the time in its index row, and a plain
+    /// object carries the time the *listing* reported for it, which is the same
+    /// number the comparison used to decide this file had to move.
+    ///
+    /// That last one used to be [`Modified::Unknown`], because
+    /// [`crate::remote::PlainRemote::get`] returns bytes and nothing else. The
+    /// consequence was not a missing field: the downloaded file was stamped with
+    /// the moment it was written, so the next run compared it against the object
+    /// it came from, found a difference, and fetched it again — every run,
+    /// forever. Reading the plan's copy of the source's time costs nothing and no
+    /// extra round trip; asking the provider a second time would cost one request
+    /// per file per run.
     async fn read(&self, entry: &PlanEntry) -> Result<()> {
         self.check_size(entry)?;
 
@@ -636,12 +645,10 @@ impl StageDriver for Engine {
                 let bytes = vault.get_file(&path).await?;
                 Staged::new(bytes, recorded_modification(vault, &path)?)
             }
-            // Nothing better than "unknown" is available here, and inventing one
-            // would be worse than the re-download it would avoid: see the arm's
-            // note above and `docs/commands/dctl_copy.md`.
-            Direction::PlainDownload => {
-                Staged::new(self.plain()?.get(&entry.source).await?, Modified::Unknown)
-            }
+            Direction::PlainDownload => Staged::new(
+                self.plain()?.get(&entry.source).await?,
+                planned_modification(entry),
+            ),
         };
 
         self.put_staged(&entry.dest, staged)
@@ -685,12 +692,16 @@ impl StageDriver for Engine {
                     .put_file(&self.sealed_path(&entry.dest), bytes, staged.modified)
                     .await?;
             }
-            // No timestamp goes with it, because there is nowhere to put one:
-            // `Backend::put` stores bytes under a key, and a bucket assigns its
-            // own `Last-Modified` on acceptance. Stated here rather than left as
-            // an omission a reader has to infer.
+            // The source's own time goes with the bytes. There *is* somewhere to
+            // put it — a local file's inode, an SFTP `SETSTAT`, B2's
+            // `src_last_modified_millis` — and until there was, a plain
+            // destination reported the moment of the upload, so every later
+            // comparison found every file changed and `sync` re-uploaded the
+            // whole dataset on every run.
             Direction::PlainUpload => {
-                self.plain()?.put(&entry.dest, bytes).await?;
+                self.plain()?
+                    .put(&entry.dest, bytes, staged.modified.into())
+                    .await?;
             }
             Direction::Download | Direction::PlainDownload | Direction::LocalOnly => {
                 let path = self.dest_path(&entry.dest);
@@ -1012,6 +1023,18 @@ async fn read_local(path: &std::path::Path) -> Result<Staged> {
     Ok(Staged::new(bytes, modified))
 }
 
+/// The modification time the plan recorded for one entry's source.
+///
+/// The plan is built from the same listing the comparison read, so this is
+/// exactly the number that decided the file had to move — which is the property
+/// that makes the *next* run's comparison agree with this one's. A source that
+/// reported no time yields [`Modified::Unknown`], and the destination keeps the
+/// moment it was written: honest, and re-transferred next run rather than wrongly
+/// skipped.
+fn planned_modification(entry: &PlanEntry) -> Modified {
+    entry.modified.map_or(Modified::Unknown, Modified::at)
+}
+
 /// The modification time a vault recorded for one of its objects.
 ///
 /// A keyed index lookup ([`dctl_core::Vault::record`]), not a listing: this is
@@ -1146,6 +1169,7 @@ mod tests {
             dest: dest.to_string(),
             size: Some(size),
             reason: "test",
+            modified: None,
         }
     }
 

@@ -161,6 +161,31 @@ impl Sandbox {
             .expect("set the modification time");
     }
 
+    /// Replace a file's contents while leaving its modification time exactly
+    /// where it was.
+    ///
+    /// The edit a size-and-time comparison is blind to by construction, and the
+    /// only thing `--checksum` can be tested against. Capturing and restoring the
+    /// file's *own* timestamp rather than backdating it again from the clock:
+    /// `now - A_DAY` computed a second time is a second later than the first, and
+    /// a second is the modify window — so a test written that way passes or fails
+    /// depending on how long the commands before it took, which is the kind of
+    /// flake that gets a real failure dismissed as noise.
+    fn edit_keeping_time(&self, relative: &str, bytes: &[u8]) {
+        let path = self.path(relative);
+        let when = std::fs::metadata(&path)
+            .expect("the file exists")
+            .modified()
+            .expect("this platform reports modification times");
+        std::fs::write(&path, bytes).expect("rewrite the file");
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open the file to restore its time")
+            .set_modified(when)
+            .expect("restore the modification time");
+    }
+
     fn read(&self, relative: &str) -> Vec<u8> {
         std::fs::read(self.path(relative)).expect("read file")
     }
@@ -1151,27 +1176,13 @@ fn copy_into_a_plain_configured_remote_honours_the_prefix() {
     );
 }
 
-#[test]
-fn a_second_copy_into_a_plain_remote_re_transfers_and_size_only_is_the_way_out() {
-    // A limitation, pinned deliberately rather than discovered on a bill.
-    //
-    // `Backend::put` stores bytes under a key and carries no modification time —
-    // there is no parameter for one, and for a bucket there could not be: B2, S3
-    // and R2 stamp `Last-Modified` themselves. So a plain destination reports the
-    // time it was *written*, exactly as a sealed vault reports the time it was
-    // sealed (defect D5), and the default size-and-time comparison finds every
-    // file different on the next run.
-    //
-    // For a vault, `crate::fidelity` substitutes a content comparison, because
-    // the index recorded a plaintext BLAKE3 at write time. A plain remote has no
-    // such record: a store holds the object and nothing about it, and a bucket's
-    // own checksum is SHA-1 or an ETag rather than a BLAKE3 of the plaintext. So
-    // there is nothing to substitute, and the honest behaviour is the one
-    // asserted here — re-transfer — with `--size-only` as the comparison that
-    // needs no clock.
-    //
-    // Assert both halves, because the first alone would pass on a tool that
-    // simply never skipped anything.
+/// A sandbox holding a day-old three-file tree and a plain `local:` remote.
+///
+/// Backdating matters and is not decoration. A file copied a moment after it was
+/// written falls inside the modify window whatever the destination records, so a
+/// tree built and copied in the same second cannot tell a working incremental
+/// transfer from a broken one. A day is what a real backup looks like.
+fn aged_source_and_plain_remote() -> Sandbox {
     let sandbox = Sandbox::new();
     for (path, bytes) in AGED_TREE {
         sandbox.write(path, bytes);
@@ -1184,29 +1195,239 @@ fn a_second_copy_into_a_plain_remote_re_transfers_and_size_only_is_the_way_out()
         .arg(format!("path={}", root.display()))
         .assert()
         .success();
+    sandbox
+}
 
-    for _ in 0..2 {
-        sandbox
-            .dctl()
-            .arg("--no-ask-password")
-            .arg("copy")
-            .arg(sandbox.path("src"))
-            .arg(format!("{PLAIN_REMOTE}:"))
-            .assert()
-            .success()
-            .stderr(predicates::str::contains("Files: 3 / 3"));
-    }
+#[test]
+fn a_second_copy_into_a_plain_remote_transfers_nothing() {
+    // The defect this whole change exists for, at the level a user meets it.
+    //
+    // `Backend::put` used to store bytes under a key and carry no modification
+    // time — there was no parameter for one — so a plain destination reported
+    // the moment it was *written*, the default size-and-time comparison found
+    // every file different, and the second run of a nightly backup re-uploaded
+    // the entire dataset. This test asserted that behaviour, on the grounds that
+    // a bucket stamps its own `Last-Modified`; the premise was wrong. A local
+    // file's inode, an SFTP `SETSTAT` and B2's `src_last_modified_millis` all
+    // hold the source's time perfectly well.
+    //
+    // Both halves are asserted, because the second run alone would pass on a
+    // tool that never transferred anything at all.
+    let sandbox = aged_source_and_plain_remote();
 
     sandbox
         .dctl()
         .arg("--no-ask-password")
-        .arg("--size-only")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 3 / 3"));
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
         .arg("copy")
         .arg(sandbox.path("src"))
         .arg(format!("{PLAIN_REMOTE}:"))
         .assert()
         .success()
         .stderr(predicates::str::contains("Files: 0 / 0"));
+}
+
+#[test]
+fn sync_into_a_plain_remote_is_incremental_and_check_agrees_with_it() {
+    // The property that makes `sync` worth putting in a cron job, and the one
+    // `check` has to corroborate. Four runs, in the order an operator would hit
+    // them:
+    //
+    //   1. everything transfers;
+    //   2. nothing transfers, and `check` calls the tree identical;
+    //   3. one file is touched and exactly one file transfers;
+    //   4. one file's contents change without changing its size or its time —
+    //      invisible to size-and-time by construction, which is what `--checksum`
+    //      is for.
+    //
+    // Run 2 asserting `Files: 0 / 0` *and* `check` reporting `all match` is the
+    // pair that matters: before this, the second sync moved `3 / 3` and `check`
+    // answered `3 of 3 paths differ` over a copy it had just made byte-for-byte.
+    let sandbox = aged_source_and_plain_remote();
+    let sync = |extra: &[&str]| {
+        let mut command = sandbox.dctl();
+        command
+            .arg("--no-ask-password")
+            .arg("--force")
+            .args(extra)
+            .arg("sync")
+            .arg(sandbox.path("src"))
+            .arg(format!("{PLAIN_REMOTE}:"));
+        command
+    };
+
+    sync(&[])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 3 / 3"));
+
+    sync(&[])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 0 / 0"));
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("check")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("all match"));
+
+    // One file, moved well outside the modify window.
+    sandbox.age("src/b.txt", A_DAY * 30);
+    sync(&[])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 1 / 1"));
+
+    // Same length, same timestamp, different bytes: the documented blind spot of
+    // a size-and-time comparison, and the reason `--checksum` exists.
+    sandbox.edit_keeping_time("src/a.txt", b"FIRST");
+    sync(&[])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 0 / 0"));
+
+    // `check --checksum` reads both sides and hashes them, so it sees the edit
+    // the metadata comparison cannot. `sync --checksum` against a plain store
+    // still refuses — the transfer listing does not read object bodies, and a
+    // provider's own checksum is not a BLAKE3 of the plaintext — which is a
+    // refusal with a reason rather than a wrong answer. Both are asserted, so
+    // neither can change without this test noticing.
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("--checksum")
+        .arg("check")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .failure()
+        .stdout(predicates::str::contains("differ  a.txt"));
+    sync(&["--checksum"])
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("no content hash"));
+}
+
+#[test]
+fn sync_out_of_a_plain_remote_is_incremental_too() {
+    // The other direction, and a separate code path. A download from a plain
+    // store fetches bytes through `Backend::get`, which returns bytes and nothing
+    // else — so the local file used to be stamped with the moment it was written,
+    // and the next run compared it against the object it came from, found a
+    // difference, and fetched it again. On a metered provider that is egress per
+    // file per run, for a restore mirror nobody is changing.
+    //
+    // The source time now travels on the plan, taken from the same listing the
+    // comparison read, so no extra round trip is paid to learn it.
+    let sandbox = aged_source_and_plain_remote();
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success();
+
+    let out = sandbox.dir("out");
+    let down = || {
+        let mut command = sandbox.dctl();
+        command
+            .arg("--no-ask-password")
+            .arg("--force")
+            .arg("sync")
+            .arg(format!("{PLAIN_REMOTE}:"))
+            .arg(&out);
+        command
+    };
+
+    down()
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 3 / 3"));
+    down()
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 0 / 0"));
+}
+
+#[test]
+fn a_same_size_edit_is_caught_by_checksum_against_a_vault() {
+    // The other half of the `--checksum` story, on the destination that can
+    // answer it without reading anything back: a vault index records the
+    // plaintext BLAKE3 of everything it holds, so content equality costs one
+    // local read and no egress at all.
+    //
+    // Three runs: everything moves, nothing moves, then one file is edited in
+    // place — same length, same timestamp — and is invisible to size-and-time
+    // and caught by `--checksum`.
+    let sandbox = aged_source_and_vault();
+    let sync = |extra: &[&str]| {
+        let mut command = sandbox.dctl();
+        command
+            .env("DCTL_PASSWORD", GOOD_PASSWORD)
+            .arg("--force")
+            .args(extra)
+            .arg("sync")
+            .arg(sandbox.path("src"))
+            .arg(format!("{VAULT_NAME}:"));
+        command
+    };
+
+    sync(&[])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 3 / 3"));
+    sync(&[])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 0 / 0"));
+
+    sandbox.edit_keeping_time("src/a.txt", b"FIRST");
+    sync(&[])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 0 / 0"));
+    sync(&["--checksum"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 1 / 1"));
+}
+
+#[test]
+fn a_modify_window_below_the_stored_resolution_is_refused_by_every_verb_that_reads_it() {
+    // A flag that parses, appears in `--help` and does nothing is the defect this
+    // codebase keeps finding in other tools. `--modify-window 0` cannot be
+    // honoured — DCTL records whole seconds — so it is refused, by the transfer
+    // family and by `check` alike, from the one function that decides it.
+    let sandbox = aged_source_and_plain_remote();
+
+    for verb in ["copy", "sync", "check"] {
+        sandbox
+            .dctl()
+            .arg("--no-ask-password")
+            .args(["--modify-window", "0"])
+            .arg(verb)
+            .arg(sandbox.path("src"))
+            .arg(format!("{PLAIN_REMOTE}:"))
+            .assert()
+            .failure()
+            .stderr(predicates::str::contains("whole"));
+    }
 }
 
 #[test]

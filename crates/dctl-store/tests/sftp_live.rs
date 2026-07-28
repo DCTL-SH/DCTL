@@ -23,6 +23,7 @@
 use bytes::Bytes;
 use dctl_store::{
     Backend, ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, SftpBackend, SftpConfig,
+    SourceModified,
 };
 
 /// A multi-chunk source (> the backend's 4 MiB streaming chunk) so `put_from_path`
@@ -95,7 +96,12 @@ async fn sftp_full_round_trip() {
     let small_hash = blake3(&small);
 
     let outcome = sftp
-        .put(&small_key, small.clone(), &small_hash)
+        .put(
+            &small_key,
+            small.clone(),
+            &small_hash,
+            SourceModified::unknown(),
+        )
         .await
         .expect("put small");
     assert_eq!(outcome.size, small.len() as u64);
@@ -129,9 +135,14 @@ async fn sftp_full_round_trip() {
     // A second small object so listing has more than one item.
     let other_key = ObjectKey::new("nested/dir/other.bin");
     let other = Bytes::from_static(b"a second small object");
-    sftp.put(&other_key, other.clone(), &blake3(&other))
-        .await
-        .unwrap();
+    sftp.put(
+        &other_key,
+        other.clone(),
+        &blake3(&other),
+        SourceModified::unknown(),
+    )
+    .await
+    .unwrap();
 
     // Verified-write refuses a hash mismatch and commits nothing.
     let bad_key = ObjectKey::new("nested/dir/bad.bin");
@@ -140,6 +151,7 @@ async fn sftp_full_round_trip() {
             &bad_key,
             Bytes::from_static(b"actual"),
             &blake3(b"different"),
+            SourceModified::unknown(),
         )
         .await
         .unwrap_err();
@@ -157,7 +169,7 @@ async fn sftp_full_round_trip() {
 
     let stream_key = ObjectKey::new("stream/big.bin");
     let outcome = sftp
-        .put_from_path(&stream_key, &src, &src_hash)
+        .put_from_path(&stream_key, &src, &src_hash, SourceModified::unknown())
         .await
         .expect("streamed put_from_path");
     assert_eq!(outcome.size, STREAM_SOURCE_LEN);
@@ -249,7 +261,7 @@ async fn sftp_full_round_trip() {
         ),
     ];
     for (key, body) in &awkward {
-        sftp.put(key, body.clone(), &blake3(body))
+        sftp.put(key, body.clone(), &blake3(body), SourceModified::unknown())
             .await
             .unwrap_or_else(|error| panic!("{key} must be storable: {error}"));
     }
@@ -266,6 +278,51 @@ async fn sftp_full_round_trip() {
     for (key, _) in &awkward {
         sftp.delete(key).await.unwrap();
     }
+
+    // ---- the source's modification time survives the write ---------------------
+    //
+    // The property `sync` is incremental because of. A `SETSTAT` that never
+    // happened would leave the server's write time, every later run would compare
+    // the object against its source, find a difference, and upload it again —
+    // forever, with nothing on either stream to say why. 2020-01-01T00:00:00Z is
+    // far from any clock this test can run against, so a backend that stamped
+    // "now" cannot pass by accident. Both read paths are asserted, because a
+    // transfer compares against the *listing* and not against `head`.
+    const AGED: i64 = 1_577_836_800;
+    let aged_key = ObjectKey::new("aged/2020.bin");
+    let aged = Bytes::from_static(b"written now, modified in 2020");
+    sftp.put(
+        &aged_key,
+        aged.clone(),
+        &blake3(&aged),
+        SourceModified::at(AGED),
+    )
+    .await
+    .expect("put aged");
+    assert_eq!(
+        sftp.head(&aged_key).await.unwrap().modified_unix,
+        Some(AGED),
+        "head must report the time the writer gave, not the time of the write"
+    );
+    let aged_page = sftp.list_page("aged/", None).await.unwrap();
+    assert_eq!(
+        aged_page.items.first().map(|item| item.modified_unix),
+        Some(Some(AGED)),
+        "a listing must report the same time head does"
+    );
+    // The streaming write is separate code and is what `backup` uses for a large
+    // file, so a stamp applied only on the buffered path would make exactly the
+    // big files re-upload every night.
+    let aged_stream_key = ObjectKey::new("aged/streamed.bin");
+    sftp.put_from_path(&aged_stream_key, &src, &src_hash, SourceModified::at(AGED))
+        .await
+        .expect("streaming put aged");
+    assert_eq!(
+        sftp.head(&aged_stream_key).await.unwrap().modified_unix,
+        Some(AGED)
+    );
+    sftp.delete(&aged_key).await.unwrap();
+    sftp.delete(&aged_stream_key).await.unwrap();
 
     // ---- delete is idempotent and really removes the object --------------------
     sftp.delete(&small_key).await.unwrap();

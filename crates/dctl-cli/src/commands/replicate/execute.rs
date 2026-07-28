@@ -290,9 +290,19 @@ async fn one(
     }
 
     ctx.progress.set_stage(&handle, Stage::Uploading);
+    // No modification time on the replica's copy. Everything replicated here is
+    // a *sealed* object or DCTL's own bookkeeping, and a sealed object never
+    // hands the plaintext's age to a provider — see `dctl_core`'s `put`. The
+    // replica is a byte-for-byte copy of ciphertext, and the times that matter
+    // are inside it.
     if let Err(error) = destination
         .backend()
-        .put(&key, bytes.clone(), &expected)
+        .put(
+            &key,
+            bytes.clone(),
+            &expected,
+            dctl_store::SourceModified::unknown(),
+        )
         .await
     {
         let classified = CliError::from(error);

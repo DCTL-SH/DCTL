@@ -2,11 +2,122 @@
 //! range reads, listing/pagination, idempotent delete, and key-safety.
 
 use bytes::Bytes;
-use dctl_store::{Backend, ByteRange, ContentHash, LocalFs, ObjectKey, StoreError};
+use dctl_store::{Backend, ByteRange, ContentHash, LocalFs, ObjectKey, SourceModified, StoreError};
 use tempfile::TempDir;
 
 fn blake3(data: &[u8]) -> ContentHash {
     ContentHash::blake3(data)
+}
+
+/// A time far from any clock this test could be run against, so a backend that
+/// stamped "now" instead of storing what it was given cannot pass by accident.
+/// 2020-01-01T00:00:00Z.
+const AGED: i64 = 1_577_836_800;
+
+#[tokio::test]
+async fn a_written_modification_time_comes_back_from_head_and_from_a_listing() {
+    // The property `sync` is incremental because of. A `put` that accepted the
+    // time and dropped it would still store the bytes, still verify them, and
+    // still pass every other test in this file — and every later run would
+    // compare the object against its source, find the destination stamped with
+    // the moment of the write, and transfer it again.
+    //
+    // Both read paths are asserted because they are different code: `head` stats
+    // one path and `list_page` walks the tree, and a transfer compares against
+    // the *listing*.
+    let dir = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+    let key = ObjectKey::new("nested/dir/aged.bin");
+    let data = Bytes::from_static(b"written now, modified in 2020");
+
+    fs.put(&key, data.clone(), &blake3(&data), SourceModified::at(AGED))
+        .await
+        .unwrap();
+
+    assert_eq!(fs.head(&key).await.unwrap().modified_unix, Some(AGED));
+    let page = fs.list_page("nested/", None).await.unwrap();
+    assert_eq!(
+        page.items.first().map(|item| item.modified_unix),
+        Some(Some(AGED)),
+        "a listing must report the same time `head` does"
+    );
+}
+
+#[tokio::test]
+async fn the_streaming_write_stamps_the_time_too() {
+    // A separate code path — `put_from_path` streams and never buffers — and one
+    // a small fixture never reaches through `put`. `backup` of a large file goes
+    // through here, so a stamp applied only on the buffered path would make
+    // exactly the big files re-transfer forever.
+    let dir = TempDir::new().unwrap();
+    let src = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+    let key = ObjectKey::new("streamed/aged.bin");
+    let data = vec![7u8; 4096];
+    let src_path = src.path().join("source.bin");
+    std::fs::write(&src_path, &data).unwrap();
+
+    fs.put_from_path(&key, &src_path, &blake3(&data), SourceModified::at(AGED))
+        .await
+        .unwrap();
+
+    assert_eq!(fs.head(&key).await.unwrap().modified_unix, Some(AGED));
+}
+
+#[tokio::test]
+async fn an_unknown_time_leaves_the_write_time_rather_than_stamping_the_epoch() {
+    // The honest fallback. Stamping 1970 would make every such object look older
+    // than every local file and invert `--update` over all of them.
+    let dir = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+    let key = ObjectKey::new("unstamped.bin");
+    let data = Bytes::from_static(b"no time to give");
+
+    fs.put(
+        &key,
+        data.clone(),
+        &blake3(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .unwrap();
+
+    let reported = fs.head(&key).await.unwrap().modified_unix.unwrap();
+    assert!(
+        reported > AGED,
+        "expected a recent write time, got {reported}"
+    );
+}
+
+#[tokio::test]
+async fn a_pre_epoch_time_survives_the_write() {
+    // A restored archive legitimately holds them, and a backend that clamped to
+    // zero would silently rewrite the fact it was asked to store.
+    let dir = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+    let key = ObjectKey::new("ancient.bin");
+    let data = Bytes::from_static(b"older than the epoch");
+
+    fs.put(
+        &key,
+        data.clone(),
+        &blake3(&data),
+        SourceModified::at(-86_400),
+    )
+    .await
+    .unwrap();
+
+    // The backend model reports whole seconds since the epoch and cannot express
+    // a negative one, so what is asserted is what a reader can observe: the file
+    // on disk carries the time it was given.
+    let on_disk = std::fs::metadata(dir.path().join("ancient.bin"))
+        .unwrap()
+        .modified()
+        .unwrap();
+    assert_eq!(
+        on_disk,
+        std::time::UNIX_EPOCH - std::time::Duration::from_secs(86_400)
+    );
 }
 
 #[tokio::test]
@@ -16,7 +127,15 @@ async fn put_get_head_roundtrip() {
     let key = ObjectKey::new("nested/dir/object.bin");
     let data = Bytes::from_static(b"hello, verified world");
 
-    let outcome = fs.put(&key, data.clone(), &blake3(&data)).await.unwrap();
+    let outcome = fs
+        .put(
+            &key,
+            data.clone(),
+            &blake3(&data),
+            SourceModified::unknown(),
+        )
+        .await
+        .unwrap();
     assert_eq!(outcome.size, data.len() as u64);
     assert!(outcome.verified.matches(&blake3(&data)));
 
@@ -36,6 +155,7 @@ async fn mismatch_commits_nothing() {
             &key,
             Bytes::from_static(b"actual data"),
             &blake3(b"different data"),
+            SourceModified::unknown(),
         )
         .await
         .unwrap_err();
@@ -60,7 +180,7 @@ async fn put_from_path_streams_a_file_and_verifies() {
 
     let key = ObjectKey::new("streamed/object.bin");
     let outcome = fs
-        .put_from_path(&key, &src_path, &blake3(&data))
+        .put_from_path(&key, &src_path, &blake3(&data), SourceModified::unknown())
         .await
         .unwrap();
     assert_eq!(outcome.size, data.len() as u64);
@@ -81,7 +201,12 @@ async fn put_from_path_rejects_wrong_expected_hash() {
 
     let key = ObjectKey::new("wrong.bin");
     let err = fs
-        .put_from_path(&key, &src_path, &blake3(b"some other bytes"))
+        .put_from_path(
+            &key,
+            &src_path,
+            &blake3(b"some other bytes"),
+            SourceModified::unknown(),
+        )
         .await
         .unwrap_err();
 
@@ -102,9 +227,14 @@ async fn get_to_path_streams_a_file_correctly() {
     // Larger than the internal copy buffer, to exercise the multi-block streaming path.
     let data: Vec<u8> = (0u32..300_000).map(|i| (i % 251) as u8).collect();
     let key = ObjectKey::new("streamed/object.bin");
-    fs.put(&key, Bytes::from(data.clone()), &blake3(&data))
-        .await
-        .unwrap();
+    fs.put(
+        &key,
+        Bytes::from(data.clone()),
+        &blake3(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .unwrap();
 
     // Streaming download reproduces the object byte-for-byte, creating parent dirs.
     let dest = out.path().join("nested/copy.bin");
@@ -126,7 +256,14 @@ async fn range_reads_match_slices_and_clamp() {
     let fs = LocalFs::new(dir.path());
     let key = ObjectKey::new("r.bin");
     let data = Bytes::from((0u8..100).collect::<Vec<u8>>());
-    fs.put(&key, data.clone(), &blake3(&data)).await.unwrap();
+    fs.put(
+        &key,
+        data.clone(),
+        &blake3(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .unwrap();
 
     let mid = fs
         .get_range(&key, ByteRange::new(10, Some(20)))
@@ -162,7 +299,14 @@ async fn delete_is_idempotent() {
     let fs = LocalFs::new(dir.path());
     let key = ObjectKey::new("d.bin");
     let data = Bytes::from_static(b"z");
-    fs.put(&key, data.clone(), &blake3(&data)).await.unwrap();
+    fs.put(
+        &key,
+        data.clone(),
+        &blake3(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .unwrap();
 
     fs.delete(&key).await.unwrap();
     assert!(!fs.exists(&key).await.unwrap());
@@ -180,12 +324,20 @@ async fn listing_filters_by_prefix_and_paginates_by_cursor() {
     for i in 0..5u8 {
         let key = ObjectKey::new(format!("p/{i:03}"));
         let data = Bytes::from(vec![i]);
-        fs.put(&key, data.clone(), &blake3(&data)).await.unwrap();
+        fs.put(
+            &key,
+            data.clone(),
+            &blake3(&data),
+            SourceModified::unknown(),
+        )
+        .await
+        .unwrap();
     }
     fs.put(
         &ObjectKey::new("q/other"),
         Bytes::from_static(b"o"),
         &blake3(b"o"),
+        SourceModified::unknown(),
     )
     .await
     .unwrap();
@@ -230,6 +382,7 @@ async fn rejects_path_traversal_keys() {
             &ObjectKey::new("../escape"),
             Bytes::from_static(b"x"),
             &blake3(b"x"),
+            SourceModified::unknown(),
         )
         .await
         .unwrap_err();
@@ -269,7 +422,14 @@ async fn a_file_whose_name_looks_temporary_survives_a_whole_round_trip() {
     for name in NAMES_THAT_LOOK_TEMPORARY {
         let key = ObjectKey::new((*name).to_string());
         let body = Bytes::from(format!("IMPORTANT USER DATA in {name}"));
-        fs.put(&key, body.clone(), &blake3(&body)).await.unwrap();
+        fs.put(
+            &key,
+            body.clone(),
+            &blake3(&body),
+            SourceModified::unknown(),
+        )
+        .await
+        .unwrap();
         assert_eq!(fs.get(&key).await.unwrap(), body, "{name}");
     }
 
@@ -303,7 +463,14 @@ async fn a_staging_file_left_by_a_crash_is_not_listed_as_an_object() {
 
     let real = ObjectKey::new("kept.bin");
     let body = Bytes::from_static(b"committed");
-    fs.put(&real, body.clone(), &blake3(&body)).await.unwrap();
+    fs.put(
+        &real,
+        body.clone(),
+        &blake3(&body),
+        SourceModified::unknown(),
+    )
+    .await
+    .unwrap();
 
     // Exactly what a SIGKILL between the write and the rename leaves behind.
     let abandoned = dir
@@ -338,9 +505,14 @@ async fn a_name_at_the_filesystem_limit_is_storable() {
     let key = ObjectKey::new("x".repeat(250));
     let body = Bytes::from_static(b"at the limit");
 
-    fs.put(&key, body.clone(), &blake3(&body))
-        .await
-        .expect("a name the filesystem accepts must be storable");
+    fs.put(
+        &key,
+        body.clone(),
+        &blake3(&body),
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("a name the filesystem accepts must be storable");
     assert_eq!(fs.get(&key).await.unwrap(), body);
     assert_eq!(fs.list_page("", None).await.unwrap().items.len(), 1);
 }

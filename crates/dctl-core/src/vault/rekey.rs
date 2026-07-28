@@ -24,7 +24,7 @@
 
 use bytes::Bytes;
 use dctl_crypto::{constants, envelope, kdf};
-use dctl_store::{ContentHash, ObjectKey};
+use dctl_store::{ContentHash, ObjectKey, SourceModified};
 
 use crate::error::{CoreError, Result};
 
@@ -122,8 +122,14 @@ impl Vault {
         };
         let bytes = envelope::serialize(&rewritten)?;
         let expected = ContentHash::blake3(&bytes);
+        // The envelope is DCTL's own bookkeeping; no source file has its age.
         self.backend
-            .put(&key, Bytes::from(bytes), &expected)
+            .put(
+                &key,
+                Bytes::from(bytes),
+                &expected,
+                SourceModified::unknown(),
+            )
             .await?;
 
         tracing::info!(

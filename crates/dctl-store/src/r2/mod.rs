@@ -12,6 +12,7 @@ use crate::backend::{Backend, UploadTicket};
 use crate::checksum::ContentHash;
 use crate::error::Result;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
+use crate::modified::SourceModified;
 use crate::s3::{S3Client, S3Config};
 
 /// R2's fixed SigV4 region.
@@ -48,16 +49,20 @@ impl Backend for R2Backend {
         key: &ObjectKey,
         data: Bytes,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
-        self.client.put(key, data, expected).await
+        self.client.put(key, data, expected, modified).await
     }
     async fn put_from_path(
         &self,
         key: &ObjectKey,
         source: &std::path::Path,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
-        self.client.put_from_path(key, source, expected).await
+        self.client
+            .put_from_path(key, source, expected, modified)
+            .await
     }
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
         self.client.get(key).await

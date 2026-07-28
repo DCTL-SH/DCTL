@@ -5,7 +5,7 @@ use bytes::Bytes;
 use dctl_crypto::object::{self, Metadata};
 use dctl_crypto::path;
 use dctl_index::Record;
-use dctl_store::{ContentHash, ObjectKey};
+use dctl_store::{ContentHash, ObjectKey, SourceModified};
 
 use crate::error::{CoreError, Result};
 
@@ -58,12 +58,22 @@ impl Vault {
         tracing::debug!(object = %object_key, object_bytes = obj.len(), "sealed object");
 
         // Verified write of the content object.
+        //
+        // `SourceModified::unknown()`, and that is a security decision rather than
+        // an omission. A file's modification time is a fact about the *plaintext*,
+        // and this vault's whole claim is that nothing about the plaintext — name,
+        // size pattern or age — reaches the provider. The time is sealed inside
+        // the object's own encrypted metadata a few lines above, where a rebuild
+        // can recover it and the provider cannot read it; writing it into the
+        // bucket's user metadata as well would hand over a per-file edit history
+        // in the clear, for free, to buy nothing DCTL does not already have.
         let expected = ContentHash::blake3(&obj);
         self.backend
             .put(
                 &ObjectKey::new(object_key.clone()),
                 Bytes::from(obj),
                 &expected,
+                SourceModified::unknown(),
             )
             .await?;
         tracing::debug!(object = %object_key, "verified write to backend complete");
@@ -79,6 +89,7 @@ impl Vault {
                 &ObjectKey::new(name_key),
                 Bytes::from(name_val),
                 &name_expected,
+                SourceModified::unknown(),
             )
             .await?;
 

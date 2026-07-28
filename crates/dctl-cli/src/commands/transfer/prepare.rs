@@ -105,7 +105,11 @@ impl Request<'_> {
     /// because a vault could not answer by time — and that is gone: the vault
     /// answers by time like anything else now, so what runs is what was asked
     /// for.
-    fn compare_policy(&self) -> ComparePolicy {
+    ///
+    /// # Errors
+    /// A `--modify-window` narrower than the resolution DCTL records — see
+    /// [`crate::cli::window`].
+    fn compare_policy(&self) -> Result<ComparePolicy> {
         ComparePolicy::resolve(self.globals, self.compare)
     }
 
@@ -115,15 +119,19 @@ impl Request<'_> {
     /// so the one field that separates a `copy` from a `sync` is chosen by a
     /// word — `copying` or `syncing` — instead of by a bare `true` that a
     /// careless edit could flip.
-    fn plan_policy(&self) -> Policy {
-        let compare = self.compare_policy();
+    ///
+    /// # Errors
+    /// As [`Request::compare_policy`].
+    fn plan_policy(&self) -> Result<Policy> {
+        let compare = self.compare_policy()?;
         let base = if self.delete_extras {
             Policy::syncing(compare)
         } else {
             Policy::copying(compare)
         };
-        base.with_empty_src_dirs(self.create_empty_src_dirs)
-            .with_traversal(!self.traversal.no_traverse)
+        Ok(base
+            .with_empty_src_dirs(self.create_empty_src_dirs)
+            .with_traversal(!self.traversal.no_traverse))
     }
 }
 
@@ -200,7 +208,7 @@ async fn diff_directory_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Pre
     let plan = Plan::compute(
         &source_listing.entries,
         &dest_listing.entries,
-        &request.plan_policy(),
+        &request.plan_policy()?,
     )?;
 
     Ok(Prepared {
@@ -249,7 +257,7 @@ async fn diff_exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepare
         let plan = Plan::compute(
             &source_listing.entries,
             &dest_listing.entries,
-            &request.plan_policy(),
+            &request.plan_policy()?,
         )?;
         return Ok(Prepared {
             source,
@@ -282,7 +290,7 @@ async fn diff_exact_transfer(ctx: &Ctx, request: &Request<'_>) -> Result<Prepare
         source_entry,
         existing.as_ref(),
         &name,
-        &request.plan_policy(),
+        &request.plan_policy()?,
     )?;
 
     Ok(Prepared {

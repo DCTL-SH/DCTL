@@ -224,6 +224,21 @@ pub struct GlobalArgs {
     )]
     pub size_only: bool,
 
+    /// Treat modification times within this many seconds as equal.
+    ///
+    /// Not validated here, and deliberately: clap can only say "not a number",
+    /// and the interesting refusal — a window smaller than the whole second DCTL
+    /// records — needs a sentence of explanation that belongs with the rule it
+    /// enforces. See [`crate::cli::window`].
+    #[arg(
+        long,
+        global = true,
+        default_value_t = constants::DEFAULT_MODIFY_WINDOW_SECS,
+        value_name = "SECONDS",
+        help_heading = "Durability"
+    )]
+    pub modify_window: u64,
+
     /// Refuse to modify or delete anything that already exists.
     #[arg(long, global = true, help_heading = "Durability")]
     pub immutable: bool,

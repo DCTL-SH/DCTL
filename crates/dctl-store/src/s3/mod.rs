@@ -19,6 +19,7 @@ use crate::backend::{Backend, UploadTicket};
 use crate::checksum::ContentHash;
 use crate::error::Result;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
+use crate::modified::SourceModified;
 
 pub(crate) use client::S3Client;
 
@@ -46,16 +47,20 @@ impl Backend for S3Backend {
         key: &ObjectKey,
         data: Bytes,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
-        self.client.put(key, data, expected).await
+        self.client.put(key, data, expected, modified).await
     }
     async fn put_from_path(
         &self,
         key: &ObjectKey,
         source: &std::path::Path,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
-        self.client.put_from_path(key, source, expected).await
+        self.client
+            .put_from_path(key, source, expected, modified)
+            .await
     }
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
         self.client.get(key).await

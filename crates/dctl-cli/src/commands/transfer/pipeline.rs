@@ -471,6 +471,7 @@ mod tests {
             dest: path.to_string(),
             size: Some(size),
             reason: "test",
+            modified: None,
         }
     }
 

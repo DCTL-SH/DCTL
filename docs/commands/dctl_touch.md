@@ -77,16 +77,23 @@ added so `dctl copy` could record a source's modification time instead of the
 moment of the upload — so the flag is honoured. Only re-stamping something the
 vault already holds is still refused, and for its own reason.
 
-**An object store is refused outright, and this one is nobody's build gap.**
+**An object store is refused outright, and the reason has narrowed twice.**
 The refusal used to read "nothing in this build writes a plain object into a
-bucket". That is no longer true — `dctl copy ./file b2:bucket/key` writes one —
-and it was never the reason `touch` could not work there. A bucket has no
-`utimes()`: B2, S3 and R2 each assign `Last-Modified` when they accept the
-object and expose no operation that moves it. The missing capability is the
-**provider's**, one layer below `dctl-store`, and **no phase of `PLAN.md`
-delivers it**, so the message names no release to wait for. Creating an empty
-object there *is* possible — that is a write, not a stamp — and `dctl copy` of
-an empty file performs it.
+bucket". That stopped being true when `dctl copy ./file b2:bucket/key` started
+writing one. It then read "the provider assigns the time and exposes no way to
+change it", and that stopped being true too: a transfer now records the source
+file's own modification time (on B2, the documented `src_last_modified_millis`
+field), and B2's `b2_copy_file` and S3's `CopyObject` can replace an existing
+object's metadata.
+
+What remains true is that **there is no way to move the time without rewriting
+the object**. A server-side copy is a new object version — billed, kept by the
+bucket's lifecycle rules, and on B2 one more version to enumerate when the object
+is deleted. That is a great deal to do behind a command whose whole promise is
+"this changes only a timestamp", so `touch` refuses and says so. Two things *are*
+possible and the hint names both: creating an empty object (that is a write, not
+a stamp — `dctl copy` of an empty file performs it), and stamping a time, by
+`touch`ing the local file and copying it.
 
 ### Timestamps are UTC and whole seconds
 
@@ -247,20 +254,22 @@ takes one now — `dctl copy` needed it to record a source's modification time
 instead of the moment of the upload — and a refusal kept past the reason for it is
 how a tool ends up with rules nobody can explain.
 
-A bucket has no settable modification time — the one thing `touch` exists to
-set. The refusal says so, and offers the two things that *are* possible instead
-of a phase that is never coming:
+A bucket's modification time is fixed when the object is written, and moving it
+afterwards means rewriting the object — the one thing `touch` must not do. The
+refusal says so, and offers the two things that *are* possible instead of a phase
+that is never coming:
 
 ```console
 $ dctl touch b2:mybucket/x
 error: setting the modification time of an object in an object store — the
-provider assigns it on write and exposes no way to change it — (b2, dctl touch)
-is not implemented in this build
-warning: Nothing was written. A bucket's 'last modified' is the time the provider
-stored the object, not a value DCTL can set — no phase of PLAN.md changes that,
-because it is the provider's own model. To create an empty object there, copy an
-empty file with `dctl copy`; to stamp a time, address a local remote, whose
-filesystem timestamps are settable.
+provider fixes it when the object is written, and moving it afterwards means
+rewriting the object — (b2, dctl touch) is not implemented in this build
+warning: Nothing was written. A bucket fixes an object's 'last modified' when the
+object is stored; moving it afterwards would mean rewriting the object as a new,
+billed version, which DCTL will not do behind a command that promises to change
+only a timestamp — so no phase of PLAN.md delivers it. To create an empty object
+there, copy an empty file with `dctl copy`; to stamp a time, `touch` the local
+file and copy it, since a transfer records the source's own modification time.
 $ echo $?
 7
 ```

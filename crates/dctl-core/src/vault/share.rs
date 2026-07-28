@@ -26,7 +26,7 @@ use dctl_crypto::constants::{
 use dctl_crypto::object::{self, Metadata};
 use dctl_crypto::{kem, path};
 use dctl_index::Record;
-use dctl_store::{ByteRange, ContentHash, ObjectKey, StoreError};
+use dctl_store::{ByteRange, ContentHash, ObjectKey, SourceModified, StoreError};
 
 use super::{Modified, Vault, layout};
 use crate::error::{CoreError, Result};
@@ -104,12 +104,17 @@ impl Vault {
         tracing::debug!(object = %object_key, object_bytes = obj.len(), "sealed shared object");
 
         // Verified write of the content object.
+        // No modification time on the provider's copy: the file's age is a fact
+        // about the plaintext, sealed inside the object's own metadata, and
+        // `super::put` explains at length why publishing it would cost the vault
+        // its central claim.
         let expected = ContentHash::blake3(&obj);
         self.backend
             .put(
                 &ObjectKey::new(object_key.clone()),
                 Bytes::from(obj),
                 &expected,
+                SourceModified::unknown(),
             )
             .await?;
         tracing::debug!(object = %object_key, "verified write to backend complete");
@@ -124,6 +129,7 @@ impl Vault {
                 &ObjectKey::new(name_key),
                 Bytes::from(name_val),
                 &name_expected,
+                SourceModified::unknown(),
             )
             .await?;
 
@@ -254,9 +260,15 @@ impl Vault {
                 ))
             })?;
             let sidecar = kem::sidecar::serialize(&file_id, &head_bytes, grant_gen, &grants)?;
+            // DCTL's own bookkeeping; no source file has its age.
             let expected = ContentHash::blake3(&sidecar);
             self.backend
-                .put(&sidecar_key, Bytes::from(sidecar), &expected)
+                .put(
+                    &sidecar_key,
+                    Bytes::from(sidecar),
+                    &expected,
+                    SourceModified::unknown(),
+                )
                 .await?;
             tracing::info!(added, grant_gen, "grant sidecar written");
         }
@@ -339,9 +351,15 @@ impl Vault {
             ))
         })?;
         let sidecar = kem::sidecar::serialize(&file_id, &head_bytes, grant_gen, &grants)?;
+        // DCTL's own bookkeeping; no source file has its age.
         let expected = ContentHash::blake3(&sidecar);
         self.backend
-            .put(&sidecar_key, Bytes::from(sidecar), &expected)
+            .put(
+                &sidecar_key,
+                Bytes::from(sidecar),
+                &expected,
+                SourceModified::unknown(),
+            )
             .await?;
 
         // §14: delete this recipient's discovery record so it no longer ENUMERATES the
@@ -426,9 +444,15 @@ impl Vault {
             layout::RECIP_KEY_PREFIX,
             hex::encode(self.identity_key_id)
         );
+        // DCTL's own bookkeeping; no source file has its age.
         let expected = ContentHash::blake3(&out);
         self.backend
-            .put(&ObjectKey::new(key), Bytes::from(out), &expected)
+            .put(
+                &ObjectKey::new(key),
+                Bytes::from(out),
+                &expected,
+                SourceModified::unknown(),
+            )
             .await?;
         tracing::info!("published recipient identity to registry");
         Ok(())
@@ -650,9 +674,15 @@ impl Vault {
             hex::encode(recipient.key_id()),
             hex::encode(disc.file_id)
         );
+        // DCTL's own bookkeeping; no source file has its age.
         let expected = ContentHash::blake3(&record);
         self.backend
-            .put(&ObjectKey::new(key), Bytes::from(record), &expected)
+            .put(
+                &ObjectKey::new(key),
+                Bytes::from(record),
+                &expected,
+                SourceModified::unknown(),
+            )
             .await?;
         tracing::debug!(
             recipient = %hex::encode(recipient.key_id()),

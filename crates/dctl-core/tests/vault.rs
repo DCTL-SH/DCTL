@@ -1013,13 +1013,14 @@ impl Backend for FaultyGrantGet {
         key: &ObjectKey,
         data: Bytes,
         expected: &ContentHash,
+        modified: dctl_store::SourceModified,
     ) -> dctl_store::Result<PutOutcome> {
         if self.fail_discovery_put.load(Ordering::SeqCst) && key.as_str().starts_with("d/") {
             return Err(StoreError::Backend(
                 "injected transient 503 on discovery-record PUT".into(),
             ));
         }
-        self.inner.put(key, data, expected).await
+        self.inner.put(key, data, expected, modified).await
     }
 
     async fn get(&self, key: &ObjectKey) -> dctl_store::Result<Bytes> {

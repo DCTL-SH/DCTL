@@ -513,10 +513,17 @@ mod tests {
     async fn an_object_store_is_refused_for_the_reason_that_actually_applies() {
         // The refusal that must not drift back to "this build cannot write a
         // plain object": a transfer writes one, so that wording would send a
-        // reader to wait for a release that already happened. What is missing is
-        // the provider's — an object store assigns its own last-modified — and
-        // the message has to carry the provider name, the layer, and no phase,
-        // because promising a phase for something no release can deliver is the
+        // reader to wait for a release that already happened.
+        //
+        // The reason has since narrowed a second time. It used to be the
+        // provider's ("a bucket assigns its own last-modified and cannot be
+        // told otherwise"), and that is no longer true — a transfer records the
+        // source's own time, and `b2_copy_file`/`CopyObject` can replace an
+        // existing object's metadata. What is true is that moving the time means
+        // **rewriting the object**, as a new billed version, which is not
+        // something to do behind a command promising to change only a timestamp.
+        // So the message has to carry the provider name, that reason, and no
+        // phase — promising a phase for a decision no release reverses is the
         // same lie in the other direction.
         let target = target("b2:mybucket/x");
         let error = apply(
@@ -542,8 +549,8 @@ mod tests {
         );
         let hint = error.hint().expect("a refusal must say what to do");
         assert!(
-            hint.contains("provider"),
-            "the layer the gap belongs to must be named: {hint}"
+            hint.contains("rewriting the object"),
+            "the reason must be the one that actually applies: {hint}"
         );
         assert!(
             hint.contains("no phase of PLAN.md") || hint.contains("no phase"),

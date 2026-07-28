@@ -6,6 +6,7 @@ use bytes::Bytes;
 use crate::checksum::ContentHash;
 use crate::error::{Result, StoreError};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
+use crate::modified::SourceModified;
 
 /// A delegated (presigned) authorization to upload exactly ONE object key.
 ///
@@ -30,19 +31,36 @@ pub struct UploadTicket {
 
 /// A storage backend: moves opaque objects to/from a provider.
 ///
-/// Two invariants every implementation must uphold:
+/// Three invariants every implementation must uphold:
 /// - **Verified write:** [`put`](Backend::put) must not report success unless the
 ///   stored bytes match `expected`. On mismatch it must leave nothing committed.
 /// - **Range read:** [`get_range`](Backend::get_range) must return exactly the
 ///   requested bytes without transferring the whole object (streaming-seek).
+/// - **The writer's time comes back:** a `put` carrying a known
+///   [`SourceModified`] must be readable back through [`head`](Backend::head) and
+///   [`list_page`](Backend::list_page) as that same whole second — or the
+///   implementation must document, in its own module, exactly why its protocol
+///   cannot. This is the property `sync` is incremental *because of*, and the one
+///   whose absence made every run a full run.
 #[async_trait]
 pub trait Backend: Send + Sync {
     /// Short, stable backend identifier (e.g. `"local"`, `"b2"`).
     fn name(&self) -> &'static str;
 
-    /// Atomically store `data` under `key`, verifying it matches `expected`.
-    async fn put(&self, key: &ObjectKey, data: Bytes, expected: &ContentHash)
-    -> Result<PutOutcome>;
+    /// Atomically store `data` under `key`, verifying it matches `expected`, and
+    /// record `modified` as the object's last-modified time.
+    ///
+    /// `modified` describes the **content**, not this call — see
+    /// [`SourceModified`]. [`SourceModified::unknown`] leaves the provider's own
+    /// timestamp standing, which is what DCTL's internal bookkeeping objects want
+    /// and what a copy from a source that reports no time has always defaulted to.
+    async fn put(
+        &self,
+        key: &ObjectKey,
+        data: Bytes,
+        expected: &ContentHash,
+        modified: SourceModified,
+    ) -> Result<PutOutcome>;
 
     /// Store the file at `source` under `key`, verifying it matches `expected`.
     ///
@@ -57,9 +75,10 @@ pub trait Backend: Send + Sync {
         key: &ObjectKey,
         source: &std::path::Path,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
         let data = tokio::fs::read(source).await?;
-        self.put(key, Bytes::from(data), expected).await
+        self.put(key, Bytes::from(data), expected, modified).await
     }
 
     /// Fetch the entire object.

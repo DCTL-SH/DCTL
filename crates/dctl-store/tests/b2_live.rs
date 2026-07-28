@@ -34,11 +34,15 @@
 //!   `b2::api::tests`.
 //! * **Retry and re-authentication.** There is none to test (see the b2 probe
 //!   findings F10 and F13).
-//! * **Source modification time.** Not stored, so nothing round-trips it.
+//! * **Source modification time.** Covered by
+//!   `b2_stores_and_returns_the_source_modification_time`: written as the
+//!   documented `src_last_modified_millis` file-info key and read back from
+//!   both `head` and `list_page`, with the fallback to `uploadTimestamp` for
+//!   an object that never recorded one.
 
 use bytes::Bytes;
 use dctl_store::b2::{B2Backend, B2Credentials};
-use dctl_store::{Backend, ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey};
+use dctl_store::{Backend, ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, SourceModified};
 
 /// Bytes for the streaming test source. Exceeds B2's 100 MiB large-file threshold so
 /// `put_from_path` takes the multipart branch (≥ 2 parts for the usual ~100 MB part
@@ -98,7 +102,10 @@ async fn b2_full_round_trip() {
     let expected = ContentHash::sha1(&data);
 
     // put (verified)
-    let outcome = b2.put(&key, data.clone(), &expected).await.unwrap();
+    let outcome = b2
+        .put(&key, data.clone(), &expected, SourceModified::unknown())
+        .await
+        .unwrap();
     assert_eq!(outcome.size, data.len() as u64);
 
     // head / exists
@@ -129,6 +136,79 @@ async fn b2_full_round_trip() {
 
 #[tokio::test]
 #[ignore = "requires live B2 credentials via DCTL_B2_* env vars"]
+async fn b2_stores_and_returns_the_source_modification_time() {
+    // The property `sync` is incremental because of, on the backend where it is
+    // least obvious it can be done at all: B2 stamps its own `uploadTimestamp`,
+    // and the old code reported that as the object's modification time. So every
+    // object looked like it had been "modified" at the moment of the upload,
+    // every comparison found every file changed, and a nightly `sync` re-uploaded
+    // the whole bucket.
+    //
+    // The time goes in the documented `src_last_modified_millis` file-info key —
+    // rclone's spelling too, so the two tools read each other's buckets — and it
+    // must come back from **`list_page`**, because that is what a transfer
+    // compares against. `head` is asserted as well since they are separate calls.
+    //
+    // 2020-01-01T00:00:00Z: far from any clock this test can run against, so a
+    // backend that quietly reported "now" cannot pass by accident.
+    const AGED: i64 = 1_577_836_800;
+    let Some((key_id, app_key, bucket)) = creds_from_env() else {
+        eprintln!("skipping b2_stores_and_returns_the_source_modification_time: DCTL_B2_* not set");
+        return;
+    };
+
+    let b2 = B2Backend::new(B2Credentials::new(key_id, app_key), bucket).unwrap();
+    let prefix = format!("dctl-test/mtime-{}/", std::process::id());
+    let key = ObjectKey::new(format!("{prefix}aged.bin"));
+    let data = Bytes::from_static(b"written now, modified in 2020");
+
+    b2.put(
+        &key,
+        data.clone(),
+        &ContentHash::sha1(&data),
+        SourceModified::at(AGED),
+    )
+    .await
+    .unwrap();
+
+    assert_eq!(
+        b2.head(&key).await.unwrap().modified_unix,
+        Some(AGED),
+        "head must report the writer's time, not the upload timestamp"
+    );
+    let page = b2.list_page(&prefix, None).await.unwrap();
+    assert_eq!(
+        page.items.first().map(|item| item.modified_unix),
+        Some(Some(AGED)),
+        "a listing must report the same time head does — this is what sync reads"
+    );
+
+    // An object written without a time still reports one: B2's own upload
+    // timestamp, which is the migration rule for every object in every existing
+    // bucket. Absent would be worse — `dctl lsl` would print a blank column for
+    // half a bucket, and `--update` could not protect anything.
+    let untimed = ObjectKey::new(format!("{prefix}untimed.bin"));
+    b2.put(
+        &untimed,
+        data.clone(),
+        &ContentHash::sha1(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .unwrap();
+    let reported = b2.head(&untimed).await.unwrap().modified_unix.unwrap();
+    assert!(
+        reported > AGED,
+        "an object with no recorded source time falls back to its upload time, got {reported}"
+    );
+
+    b2.delete(&key).await.unwrap();
+    b2.delete(&untimed).await.unwrap();
+    eprintln!("b2_stores_and_returns_the_source_modification_time: OK");
+}
+
+#[tokio::test]
+#[ignore = "requires live B2 credentials via DCTL_B2_* env vars"]
 async fn b2_stream_from_path_round_trip() {
     let Some((key_id, app_key, bucket)) = creds_from_env() else {
         eprintln!("skipping b2_stream_from_path_round_trip: DCTL_B2_* not set");
@@ -145,7 +225,10 @@ async fn b2_stream_from_path_round_trip() {
     let expected = hash_file(&src, HashAlgo::Sha1);
 
     // put_from_path: streamed multipart upload, verified.
-    let outcome = b2.put_from_path(&key, &src, &expected).await.unwrap();
+    let outcome = b2
+        .put_from_path(&key, &src, &expected, SourceModified::unknown())
+        .await
+        .unwrap();
     assert_eq!(outcome.size, STREAM_SOURCE_LEN);
     assert!(outcome.verified.matches(&expected));
     assert_eq!(b2.head(&key).await.unwrap().size, STREAM_SOURCE_LEN);

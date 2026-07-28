@@ -47,11 +47,25 @@
 //! down a BLAKE3 of the buffer and lets the contract do its job. Re-implementing
 //! a staged write here would be a second, weaker copy of a guarantee that
 //! already exists one layer down.
+//!
+//! ## The source's modification time travels with the bytes
+//!
+//! An ordinary object is stored **as itself**: it has no encrypted header to
+//! carry facts about it, so what the provider records is all there is. If the
+//! source's modification time is not written here, the destination reports the
+//! moment of the upload, every later comparison finds every file changed, and a
+//! nightly `sync` re-uploads the whole dataset for the life of the remote. That
+//! was true of every plain destination until this parameter existed, on local
+//! disk, over SFTP and on B2 alike.
+//!
+//! Unlike a vault, there is nothing to leak by recording it: the object's *name*
+//! and *contents* are already in the clear at the destination the user named, so
+//! its age discloses nothing the provider cannot already read.
 
 use std::sync::Arc;
 
 use bytes::Bytes;
-use dctl_store::{Backend, ContentHash, ObjectKey};
+use dctl_store::{Backend, ContentHash, ObjectKey, SourceModified};
 use zeroize::Zeroizing;
 
 use crate::config;
@@ -141,13 +155,18 @@ impl PlainRemote {
         Ok(Zeroizing::new(bytes.to_vec()))
     }
 
-    /// Store one object, verified.
+    /// Store one object, verified, carrying the source's modification time.
     ///
     /// The hash is computed here and handed to [`Backend::put`], which is the
     /// party that can actually check it: it compares what the store holds
     /// against this digest and commits nothing if they differ. Success from this
     /// call therefore means the bytes are stored *and* were checked, which is
     /// what the pipeline's `upload` stage is allowed to claim.
+    ///
+    /// `modified` describes the **content** — see
+    /// [`SourceModified`](dctl_store::SourceModified) — and is a required
+    /// argument rather than an option, so a write path added later cannot omit it
+    /// and quietly make `sync` non-incremental again on that one route.
     ///
     /// The copy into [`Bytes`] is unavoidable at this seam — the trait takes an
     /// owned, cheaply-cloneable buffer because a provider may retry a request —
@@ -159,13 +178,14 @@ impl PlainRemote {
     /// [`ExitCode::ChecksumMismatch`](crate::exit::ExitCode::ChecksumMismatch)
     /// when the store did not hold what was sent, plus whatever the provider
     /// reported.
-    pub async fn put(&self, relative: &str, bytes: &[u8]) -> Result<()> {
+    pub async fn put(&self, relative: &str, bytes: &[u8], modified: SourceModified) -> Result<()> {
         let expected = ContentHash::blake3(bytes);
         self.backend
             .put(
                 &self.key(relative),
                 Bytes::copy_from_slice(bytes),
                 &expected,
+                modified,
             )
             .await?;
         Ok(())
@@ -247,7 +267,10 @@ mod tests {
         let (_dir, ctx) = ctx_with(&plain_remote_at(root.path()));
 
         let remote = PlainRemote::open(&ctx, &named("backup", "")).expect("no password is needed");
-        remote.put("a.txt", b"real bytes").await.expect("stored");
+        remote
+            .put("a.txt", b"real bytes", SourceModified::unknown())
+            .await
+            .expect("stored");
 
         // Asserted on the filesystem, not on the return value: the point is that
         // the bytes are *there*, under the name a later listing would find.
@@ -267,7 +290,10 @@ mod tests {
         let (_dir, ctx) = ctx_with(&plain_remote_at(root.path()));
 
         let remote = PlainRemote::open(&ctx, &named("backup", "photos")).expect("opens");
-        remote.put("2024/a.jpg", b"image").await.expect("stored");
+        remote
+            .put("2024/a.jpg", b"image", SourceModified::unknown())
+            .await
+            .expect("stored");
 
         assert!(root.path().join("photos/2024/a.jpg").exists());
         assert!(
@@ -286,7 +312,10 @@ mod tests {
         let remote = PlainRemote::open(&ctx, &named("backup", "")).expect("opens");
         assert!(remote.delete("never-existed.txt").await.is_ok());
 
-        remote.put("gone.txt", b"x").await.expect("stored");
+        remote
+            .put("gone.txt", b"x", SourceModified::unknown())
+            .await
+            .expect("stored");
         remote.delete("gone.txt").await.expect("removed");
         assert!(!root.path().join("gone.txt").exists());
     }

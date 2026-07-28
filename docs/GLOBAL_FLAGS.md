@@ -218,6 +218,7 @@ before it has tried.
 | `--verify-samples` | `N` | `8` | — |
 | `--checksum` | — | off | — |
 | `--size-only` | — | off | — |
+| `--modify-window` | `SECONDS` | `1` | — |
 | `--immutable` | — | off | — |
 
 ### `--verify MODE`
@@ -283,6 +284,15 @@ command **fails** rather than quietly falling back to a weaker comparison, since
 a weaker answer dressed up as the one you asked for is exactly the misreporting
 the durability contract exists to prevent.
 
+Against a **plain object store** — a `local:`, `sftp:`, `b2:`, `s3:` or `r2:`
+remote holding ordinary objects — the transfer family cannot supply a hash for
+the destination side and **refuses** rather than downgrading. That refusal names
+the file and says what to do instead. `dctl check --checksum` *can* answer over
+the same remote, because it reads each object back and hashes it; that is a full
+download of the destination, and it is the price of the question. A vault
+destination answers for free, from the plaintext BLAKE3 its index recorded at
+write time.
+
 ### `--size-only`
 
 Compare by size alone, ignoring modification time. The fastest and weakest
@@ -290,18 +300,38 @@ comparison: it is the right choice against a destination whose timestamps are
 untrustworthy, and the wrong one anywhere an in-place edit might preserve a file's
 length. Conflicts with `--checksum` — the two ask for contradictory comparisons,
 so passing both is a usage error rather than a silent precedence rule. With
-neither flag, the default is size plus modification time within a one-second
-window.
+neither flag, the default is size plus modification time within `--modify-window`.
 
-**One exception, and it is announced.** A sealed vault records the moment each
-object was written rather than the source file's modification time, so the
-default comparison cannot mean anything against one. When `copy`, `move`,
-`sync` or `check` has a vault on either side and neither flag was given, the
-default becomes a **content** comparison — the vault records a plaintext BLAKE3
-and can answer the stronger question — and the run warns on stderr naming the
-side that forced it. `--size-only` and `--checksum` are unaffected: both are
-explicit, and neither depends on a timestamp. See
-[dctl copy](commands/dctl_copy.md) for the cost and for what retires it.
+**There is no longer an exception for vaults.** A sealed vault used to record the
+moment each object was written rather than the source file's modification time,
+so the default comparison could not mean anything against one, and DCTL
+substituted a content comparison and warned about it. Both the cause and the
+substitution are gone: a vault index row and a sealed object's own metadata carry
+the *source's* time, so a vault answers the ordinary size-and-time question like
+any other destination.
+
+### `--modify-window SECONDS`
+
+How far apart two modification times may be and still count as the same instant.
+Defaults to `1`.
+
+A tolerance is not optional, because the two sides of a comparison record time
+differently and cannot be talked out of it. A local filesystem keeps
+nanoseconds (ext4), 100 ns (NTFS) or two whole seconds (FAT); DCTL's own records
+— the index row, a sealed object's metadata and every backend listing — keep
+whole unix seconds; SFTP carries `mtime` as unsigned 32-bit seconds and cannot
+return more; B2 stores milliseconds. With a zero tolerance every one of those
+differences reads as "modified", and a nightly `sync` re-uploads the dataset for
+a reason nobody can see.
+
+Widen it for a destination that rounds: `--modify-window 2` is what a
+FAT-formatted backup disk needs. **Narrowing it below `1` is refused**, with a
+message saying why — DCTL stores whole seconds, so a smaller window cannot
+express a real distinction and can only reject unchanged files. A flag that
+parsed and then silently ignored its argument would be worse.
+
+The same value is used by `copy`, `move`, `sync` and `check`, from one place, so
+`check` cannot disagree with the `sync` that produced the tree it is checking.
 
 ### `--immutable`
 

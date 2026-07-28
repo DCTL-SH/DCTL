@@ -1,7 +1,21 @@
-//! Atomic, verified write: temp file → fsync → read-back verify → atomic rename.
+//! Atomic, verified write: temp file → fsync → read-back verify → stamp → atomic
+//! rename.
 //!
 //! Nothing is ever published unless the bytes on disk match the expected hash, and
 //! a failure at any step leaves no partial or committed object.
+//!
+//! ## Where the modification time is set, and why it is there
+//!
+//! On the **staging file, after the read-back verification and before the
+//! rename**. A rename carries the inode across, so the object appears at its
+//! final name already stamped — there is no window in which a listing could see
+//! it with the write time, and no second `open` by name that could stamp
+//! whatever a later lookup of that name finds.
+//!
+//! Doing it afterwards would also have to reopen a file that another process may
+//! by then have replaced, and a failure at that point would leave a committed
+//! object carrying the wrong time — which is invisible until the next `sync`
+//! re-transfers it and nothing on either stream says why.
 
 use std::path::{Path, PathBuf};
 
@@ -11,6 +25,7 @@ use tokio::io::AsyncWriteExt;
 use crate::checksum::{ContentHash, HashAlgo, Hasher};
 use crate::error::{Result, StoreError};
 use crate::model::{ObjectKey, PutOutcome};
+use crate::modified::SourceModified;
 
 use super::LocalFs;
 
@@ -18,11 +33,29 @@ use super::LocalFs;
 /// memory to a constant, independent of the source file's size.
 const STREAM_BUF_LEN: usize = 128 * 1024;
 
+/// Stamp `path` with the writer's modification time, if there is one to set.
+///
+/// A failure is a real failure rather than a shrug. The bytes are correct at this
+/// point, so it is tempting to publish anyway — but an object that silently kept
+/// the write time is compared against its source on the next run, found to
+/// differ, and transferred again, forever, with nothing to explain it. Refusing
+/// the commit leaves the staging file to be cleaned up and reports the reason.
+fn stamp(path: &Path, modified: SourceModified) -> std::io::Result<()> {
+    let Some(when) = modified.system_time() else {
+        return Ok(());
+    };
+    std::fs::File::options()
+        .write(true)
+        .open(path)?
+        .set_times(std::fs::FileTimes::new().set_modified(when))
+}
+
 pub(super) async fn put(
     fs: &LocalFs,
     key: &ObjectKey,
     data: Bytes,
     expected: &ContentHash,
+    modified: SourceModified,
 ) -> Result<PutOutcome> {
     let dest = fs.resolve(key)?;
 
@@ -63,6 +96,18 @@ pub(super) async fn put(
         });
     }
 
+    // The writer's time, onto the inode that is about to be published.
+    {
+        let staging = tmp.clone();
+        let stamped = tokio::task::spawn_blocking(move || stamp(&staging, modified))
+            .await
+            .map_err(|e| StoreError::Backend(format!("stamping task failed: {e}")))?;
+        if let Err(e) = stamped {
+            let _ = tokio::fs::remove_file(&tmp).await;
+            return Err(e.into());
+        }
+    }
+
     // Atomically publish, then fsync the directory so the rename is durable.
     tokio::fs::rename(&tmp, &dest).await?;
     if let Some(parent) = dest.parent() {
@@ -90,20 +135,23 @@ pub(super) async fn put_from_path(
     key: &ObjectKey,
     source: &Path,
     expected: &ContentHash,
+    modified: SourceModified,
 ) -> Result<PutOutcome> {
     let dest = fs.resolve(key)?;
     let source = source.to_path_buf();
     let expected = expected.clone();
-    tokio::task::spawn_blocking(move || put_from_path_blocking(&dest, &source, &expected))
+    tokio::task::spawn_blocking(move || put_from_path_blocking(&dest, &source, &expected, modified))
         .await
         .map_err(|e| StoreError::Backend(format!("streaming verified write task failed: {e}")))?
 }
 
-/// The blocking body of [`put_from_path`]: stream-copy → sync → stream-verify → rename.
+/// The blocking body of [`put_from_path`]: stream-copy → sync → stream-verify →
+/// stamp → rename.
 fn put_from_path_blocking(
     dest: &Path,
     source: &Path,
     expected: &ContentHash,
+    modified: SourceModified,
 ) -> Result<PutOutcome> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -130,6 +178,12 @@ fn put_from_path_blocking(
             expected: expected.hex(),
             actual: on_disk.hex(),
         });
+    }
+
+    // The writer's time, onto the inode that is about to be published.
+    if let Err(e) = stamp(&tmp, modified) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
     }
 
     // Atomically publish, then fsync the directory so the rename is durable.

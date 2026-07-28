@@ -1,5 +1,33 @@
 //! The shared S3 protocol client: SigV4-signed requests and the object operations.
 //! Reused by every S3-family provider backend (generic S3, R2, …).
+//!
+//! # The source modification time, and the half of it this protocol will not give
+//! back
+//!
+//! A write records the source's own last-modified time as the user-metadata key
+//! `x-amz-meta-mtime`, spelled the way `rclone` spells it (float seconds), so a
+//! bucket written by DCTL keeps its timestamps when read by rclone and the other
+//! way round. [`head`](S3Client::head) reads it back, which is what
+//! `dctl cat`/`dctl stat` see.
+//!
+//! **`ListObjectsV2` does not return user metadata**, so
+//! [`list_page`](S3Client::list_page) cannot report it — and a listing is what
+//! `sync`, `copy` and `check` compare with. So an incremental `sync` to S3 or R2
+//! is **not** delivered by this change: those two providers still re-transfer an
+//! unchanged tree, exactly as they did before. The time is written and is not
+//! lost; what is missing is a way to read it back a page at a time.
+//!
+//! Closing it means one `HEAD` per listed object, which is what rclone does
+//! (`readMetaData`) — a per-object request against a provider that bills them,
+//! and therefore a cost decision to make deliberately rather than a line to slip
+//! in here. Until that decision is made, this module reports what it can and this
+//! paragraph is the whole of the claim.
+//!
+//! `list_page` deliberately keeps answering `None` for the time rather than
+//! substituting the object's `LastModified`. That value is when the provider
+//! accepted the upload, so it is always "now" for a fresh copy — which would make
+//! every destination object look *newer* than its source and cause `--update` to
+//! skip the entire tree. An absent time transfers; a wrong one loses data.
 
 use std::path::Path;
 
@@ -10,6 +38,7 @@ use crate::backend::UploadTicket;
 use crate::checksum::{ContentHash, Hasher};
 use crate::error::{Result, StoreError};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
+use crate::modified::SourceModified;
 use crate::streaming;
 
 use super::config::{S3_SERVICE, S3Config};
@@ -31,6 +60,42 @@ const LIST_PAGE_SIZE: u32 = 1000;
 /// Lifetime of a delegated (presigned) upload authorization: 15 minutes. Long enough for
 /// a client to start a background upload, short enough to bound the delegation.
 const PRESIGN_TTL_SECS: u64 = 15 * 60;
+/// The user-metadata header carrying the source's own last-modified time.
+///
+/// `rclone`'s spelling, not one invented here (`backend/s3/s3.go`, `metaMtime`),
+/// so the two tools read each other's buckets rather than each seeing the other's
+/// objects as modified when they were uploaded.
+const H_SRC_MODIFIED: &str = "x-amz-meta-mtime";
+
+/// Render a source modification time the way S3 user metadata carries one.
+///
+/// Float seconds with nanosecond places, which is what rclone writes and parses.
+/// DCTL records whole seconds, so the fractional part is always zero — written
+/// out in full anyway, because a bare integer is a *different string* to a reader
+/// expecting this format and the point of borrowing the spelling is that both
+/// tools accept it.
+fn render_src_modified(modified: SourceModified) -> Option<String> {
+    modified
+        .unix()
+        .map(|seconds| format!("{seconds}.000000000"))
+}
+
+/// Read back what [`render_src_modified`] wrote, in whole seconds.
+///
+/// [`None`] for absent or unparsable metadata: another tool may have written
+/// anything into that key, and a `head` that failed because of it would make an
+/// otherwise-readable object undescribable. Truncated towards negative infinity
+/// so a pre-epoch fraction does not move the file forwards in time.
+fn parse_src_modified(value: &str) -> Option<i64> {
+    let (seconds, fraction) = value.split_once('.').unwrap_or((value, ""));
+    let seconds: i64 = seconds.parse().ok()?;
+    // A negative time with a fractional part is that many seconds *before* the
+    // epoch plus a fraction more, so it floors one second further back.
+    if seconds < 0 && fraction.chars().any(|digit| digit != '0') {
+        return seconds.checked_sub(1);
+    }
+    Some(seconds)
+}
 
 pub(crate) struct S3Client {
     http: reqwest::Client,
@@ -135,6 +200,7 @@ impl S3Client {
         key: &ObjectKey,
         data: Bytes,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
         let caller = ContentHash::compute(expected.algo, &data);
         if !caller.matches(expected) {
@@ -145,9 +211,10 @@ impl S3Client {
         }
 
         if data.len() <= MULTIPART_THRESHOLD {
-            self.put_single(key.as_str(), data.clone()).await?;
+            self.put_single(key.as_str(), data.clone(), modified)
+                .await?;
         } else {
-            self.put_multipart(key.as_str(), &data).await?;
+            self.put_multipart(key.as_str(), &data, modified).await?;
         }
         Ok(PutOutcome {
             size: data.len() as u64,
@@ -155,11 +222,28 @@ impl S3Client {
         })
     }
 
-    async fn put_single(&self, key: &str, data: Bytes) -> Result<()> {
+    /// The user-metadata headers a write carries, as `send` wants them.
+    ///
+    /// Signed along with everything else: `send` folds `extra_headers` into the
+    /// SigV4 canonical request, so metadata that arrived at the provider without
+    /// having been signed would be rejected rather than silently dropped.
+    fn metadata_headers(modified: SourceModified) -> Vec<(&'static str, String)> {
+        render_src_modified(modified)
+            .map(|value| vec![(H_SRC_MODIFIED, value)])
+            .unwrap_or_default()
+    }
+
+    async fn put_single(&self, key: &str, data: Bytes, modified: SourceModified) -> Result<()> {
         // S3 recomputes the body SHA-256 and rejects if it differs from the signed
         // x-amz-content-sha256, so this is a verified write.
         let resp = self
-            .send(Method::PUT, Some(key), &[], &[], Some(data))
+            .send(
+                Method::PUT,
+                Some(key),
+                &[],
+                &Self::metadata_headers(modified),
+                Some(data),
+            )
             .await?;
         if resp.status().is_success() {
             Ok(())
@@ -171,13 +255,13 @@ impl S3Client {
     /// In-memory multipart upload (the buffered `>100 MiB` path reachable via
     /// [`put`](Self::put)). Aborts the upload on any error so no orphaned parts linger and
     /// get billed — mirroring the streaming sibling [`put_multipart_from_path`].
-    async fn put_multipart(&self, key: &str, data: &[u8]) -> Result<()> {
+    async fn put_multipart(&self, key: &str, data: &[u8], modified: SourceModified) -> Result<()> {
         let create = self
             .send(
                 Method::POST,
                 Some(key),
                 &[("uploads", String::new())],
-                &[],
+                &Self::metadata_headers(modified),
                 None,
             )
             .await?;
@@ -275,6 +359,7 @@ impl S3Client {
         key: &ObjectKey,
         source: &Path,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
         let size = tokio::fs::metadata(source).await?.len();
 
@@ -282,11 +367,11 @@ impl S3Client {
         // path, exactly like `put` (in-memory guard + SigV4 body verification).
         if !streaming::use_multipart(size, MULTIPART_THRESHOLD as u64) {
             let data = tokio::fs::read(source).await?;
-            return self.put(key, Bytes::from(data), expected).await;
+            return self.put(key, Bytes::from(data), expected, modified).await;
         }
 
         let verified = self
-            .put_multipart_from_path(key.as_str(), source, expected)
+            .put_multipart_from_path(key.as_str(), source, expected, modified)
             .await?;
         Ok(PutOutcome { size, verified })
     }
@@ -298,13 +383,14 @@ impl S3Client {
         key: &str,
         source: &Path,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<ContentHash> {
         let create = self
             .send(
                 Method::POST,
                 Some(key),
                 &[("uploads", String::new())],
-                &[],
+                &Self::metadata_headers(modified),
                 None,
             )
             .await?;
@@ -531,10 +617,18 @@ impl S3Client {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<u64>().ok())
             .unwrap_or(0);
+        // The source's own time when the object carries one, and nothing when it
+        // does not — never the object's `Last-Modified`, which is when the
+        // provider accepted the upload. See the module documentation.
+        let modified_unix = resp
+            .headers()
+            .get(H_SRC_MODIFIED)
+            .and_then(|v| v.to_str().ok())
+            .and_then(parse_src_modified);
         Ok(ObjectMeta {
             key: key.clone(),
             size,
-            modified_unix: None,
+            modified_unix,
         })
     }
 
@@ -579,6 +673,10 @@ impl S3Client {
         let items = listing
             .items
             .into_iter()
+            // No time: `ListObjectsV2` does not return user metadata, and the
+            // `LastModified` it does return is the upload time — which would make
+            // every destination object look newer than its source and cause
+            // `--update` to skip the whole tree. See the module documentation.
             .map(|(k, size)| ObjectMeta {
                 key: ObjectKey::new(k),
                 size,
@@ -813,6 +911,48 @@ fn presign_query_string(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_source_time_is_written_in_the_spelling_rclone_reads() {
+        // Borrowed on purpose (`backend/s3/s3.go`, `metaMtime`): a private format
+        // would make every object DCTL wrote look, to rclone, like a file
+        // modified when it was uploaded — and the other way round.
+        assert_eq!(
+            render_src_modified(SourceModified::at(1_577_836_800)).as_deref(),
+            Some("1577836800.000000000")
+        );
+        assert_eq!(render_src_modified(SourceModified::unknown()), None);
+    }
+
+    #[test]
+    fn a_written_time_reads_back_as_the_same_whole_second() {
+        for seconds in [0_i64, 1, 1_577_836_800, -86_400] {
+            let rendered =
+                render_src_modified(SourceModified::at(seconds)).expect("a known time renders");
+            assert_eq!(parse_src_modified(&rendered), Some(seconds), "{seconds}");
+        }
+    }
+
+    #[test]
+    fn a_time_another_tool_wrote_is_read_or_ignored_but_never_fatal() {
+        // rclone writes a real fraction; a stray value from anything else must
+        // not make an otherwise-readable object undescribable.
+        assert_eq!(
+            parse_src_modified("1577836800.123456789"),
+            Some(1_577_836_800)
+        );
+        assert_eq!(parse_src_modified("1577836800"), Some(1_577_836_800));
+        assert_eq!(parse_src_modified("yesterday"), None);
+        assert_eq!(parse_src_modified(""), None);
+    }
+
+    #[test]
+    fn a_pre_epoch_fraction_floors_backwards_rather_than_forwards() {
+        // -1.5 s is one and a half seconds *before* the epoch, so its whole
+        // second is -2. Truncating towards zero would move the file forwards.
+        assert_eq!(parse_src_modified("-1.500000000"), Some(-2));
+        assert_eq!(parse_src_modified("-1.000000000"), Some(-1));
+    }
 
     // AWS's published DUMMY credentials for SigV4 examples — never real secrets.
     const AWS_EXAMPLE_ACCESS: &str = "AKIAIOSFODNN7EXAMPLE";

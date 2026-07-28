@@ -22,9 +22,10 @@ use serde::Serialize;
 use crate::cli::GlobalArgs;
 use crate::constants::{
     COMBINED_MARK_DIFFER, COMBINED_MARK_ERROR, COMBINED_MARK_MATCH, COMBINED_MARK_MISSING_ON_DST,
-    COMBINED_MARK_MISSING_ON_SRC, DIFFERENCE_DIFFER, DIFFERENCE_ERROR, DIFFERENCE_MATCH,
-    DIFFERENCE_MISSING_ON_DST, DIFFERENCE_MISSING_ON_SRC,
+    COMBINED_MARK_MISSING_ON_SRC, DEFAULT_MODIFY_WINDOW_SECS, DIFFERENCE_DIFFER, DIFFERENCE_ERROR,
+    DIFFERENCE_MATCH, DIFFERENCE_MISSING_ON_DST, DIFFERENCE_MISSING_ON_SRC,
 };
+use crate::error::Result;
 
 /// One object as either side described it.
 ///
@@ -78,15 +79,38 @@ impl Entry {
 }
 
 /// Which fields decide whether two entries are the same object.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Comparison {
-    /// Size and modification time. The default.
-    #[default]
-    SizeAndModTime,
+    /// Size and modification time, to within `window_secs`. The default.
+    SizeAndModTime {
+        /// Tolerance in whole seconds — [`crate::cli::window`] decides it, and
+        /// the transfer family reads it from the same place.
+        ///
+        /// Carried in the value rather than read from a constant here, because
+        /// this comparison and
+        /// [`ComparePolicy`](crate::commands::transfer::ComparePolicy)'s must be
+        /// the *same* tolerance. They were not: `check` demanded exact equality
+        /// while `sync` allowed a second, so `check` reported files that `sync`
+        /// had just written from their source, with the source's own time, as
+        /// differing from it.
+        window_secs: u64,
+    },
     /// Size alone (`--size-only`).
     SizeOnly,
     /// Content hash (`--checksum`). The only mode that proves equality.
     Checksum,
+}
+
+impl Default for Comparison {
+    /// Size and time at the default tolerance.
+    ///
+    /// Hand-written because the default variant carries a field, and the field's
+    /// value is a decision — see [`crate::constants::DEFAULT_MODIFY_WINDOW_SECS`].
+    fn default() -> Self {
+        Self::SizeAndModTime {
+            window_secs: DEFAULT_MODIFY_WINDOW_SECS,
+        }
+    }
 }
 
 impl Comparison {
@@ -94,15 +118,21 @@ impl Comparison {
     ///
     /// `--checksum` and `--size-only` are declared mutually exclusive by clap, so
     /// there is no precedence question to get wrong here.
-    #[must_use]
-    pub const fn from_globals(globals: &GlobalArgs) -> Self {
+    ///
+    /// # Errors
+    /// [`ExitCode::Usage`](crate::exit::ExitCode::Usage) for a `--modify-window`
+    /// narrower than the resolution DCTL records — the same refusal a transfer
+    /// gives, from the same function.
+    pub fn from_globals(globals: &GlobalArgs) -> Result<Self> {
         if globals.checksum {
-            Self::Checksum
-        } else if globals.size_only {
-            Self::SizeOnly
-        } else {
-            Self::SizeAndModTime
+            return Ok(Self::Checksum);
         }
+        if globals.size_only {
+            return Ok(Self::SizeOnly);
+        }
+        Ok(Self::SizeAndModTime {
+            window_secs: crate::cli::window::resolve(globals)?.as_secs(),
+        })
     }
 
     /// Whether two entries are the same under this comparison.
@@ -121,7 +151,7 @@ impl Comparison {
                 .size
                 .zip(dest.size)
                 .map(|(left, right)| left == right),
-            Self::SizeAndModTime => {
+            Self::SizeAndModTime { window_secs } => {
                 match source.size.zip(dest.size) {
                     Some((left, right)) if left != right => return Some(false),
                     Some(_) => {}
@@ -130,7 +160,16 @@ impl Comparison {
                     None => return None,
                 }
                 match (source.modified_unix, dest.modified_unix) {
-                    (Some(left), Some(right)) => Some(left == right),
+                    // Within the window, not exactly equal. Two sides can record
+                    // the same instant differently and still both be right — a
+                    // whole-second store against a nanosecond filesystem, a
+                    // FAT destination rounding to two — and demanding equality
+                    // reports a difference that exists only in digits neither
+                    // side kept. See [`crate::cli::window`].
+                    // `abs_diff` rather than a subtraction: two times far apart in
+                    // opposite directions overflow an `i64` difference, and a
+                    // wrapped one compares as "close".
+                    (Some(left), Some(right)) => Some(left.abs_diff(right) <= window_secs),
                     // A side with no clock cannot be compared by time. Falling
                     // back to size alone would silently answer a weaker question.
                     _ => None,
@@ -215,7 +254,12 @@ impl Difference {
 }
 
 impl Serialize for Difference {
-    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+    /// Fully qualified: this module imports `crate::error::Result`, which takes
+    /// one type parameter, and `serde`'s signature needs the two-parameter one.
+    fn serialize<S: serde::Serializer>(
+        &self,
+        serializer: S,
+    ) -> std::result::Result<S::Ok, S::Error> {
         serializer.serialize_str(self.slug())
     }
 }
@@ -293,10 +337,79 @@ mod tests {
 
     #[test]
     fn the_default_comparison_notices_a_changed_time() {
+        // Outside the window, so genuinely different rather than merely
+        // differently recorded.
         let source = Entry::new("a.txt", Some(100)).modified(1);
-        let dest = Entry::new("a.txt", Some(100)).modified(2);
+        let dest = Entry::new("a.txt", Some(100)).modified(60);
         assert_eq!(
-            classify(Some(&source), Some(&dest), Comparison::SizeAndModTime),
+            classify(Some(&source), Some(&dest), Comparison::default()),
+            Difference::Differ
+        );
+    }
+
+    #[test]
+    fn two_times_inside_the_window_are_a_match_not_a_difference() {
+        // The half of the incremental-sync defect that lived here. `check`
+        // demanded exact equality while `sync` allowed a second, so a tree
+        // `sync` had just written — with the source's own time — came back as
+        // `3 of 3 paths differ`. The two verbs now read the same tolerance from
+        // `crate::cli::window`, and this is the assertion that fails first if
+        // they ever stop.
+        let source = Entry::new("a.txt", Some(100)).modified(1_700_000_000);
+        let dest = Entry::new("a.txt", Some(100)).modified(1_700_000_001);
+        assert_eq!(
+            classify(Some(&source), Some(&dest), Comparison::default()),
+            Difference::Match
+        );
+        // Symmetric: neither argument is privileged.
+        assert_eq!(
+            classify(Some(&dest), Some(&source), Comparison::default()),
+            Difference::Match
+        );
+    }
+
+    #[test]
+    fn a_wider_window_is_the_value_that_is_used() {
+        // A field that was carried and then ignored would look exactly like a
+        // working one against the default. Two seconds apart: outside the
+        // default window, inside a two-second one.
+        let source = Entry::new("a.txt", Some(100)).modified(1_700_000_000);
+        let dest = Entry::new("a.txt", Some(100)).modified(1_700_000_002);
+        assert_eq!(
+            classify(Some(&source), Some(&dest), Comparison::default()),
+            Difference::Differ
+        );
+        assert_eq!(
+            classify(
+                Some(&source),
+                Some(&dest),
+                Comparison::SizeAndModTime { window_secs: 2 }
+            ),
+            Difference::Match
+        );
+    }
+
+    #[test]
+    fn a_size_difference_still_wins_inside_the_window() {
+        // The window is a tolerance on *time*, not on content. A file whose
+        // length changed within the same second must not be waved through.
+        let source = Entry::new("a.txt", Some(100)).modified(1_700_000_000);
+        let dest = Entry::new("a.txt", Some(101)).modified(1_700_000_000);
+        assert_eq!(
+            classify(Some(&source), Some(&dest), Comparison::default()),
+            Difference::Differ
+        );
+    }
+
+    #[test]
+    fn times_far_apart_in_opposite_directions_do_not_wrap_into_a_match() {
+        // A plain subtraction of two `i64` timestamps overflows here, and a
+        // wrapped difference compares as "close" — a match between a file dated
+        // before the epoch and one dated after the end of time.
+        let source = Entry::new("a.txt", Some(1)).modified(i64::MIN);
+        let dest = Entry::new("a.txt", Some(1)).modified(i64::MAX);
+        assert_eq!(
+            classify(Some(&source), Some(&dest), Comparison::default()),
             Difference::Differ
         );
     }
@@ -309,7 +422,7 @@ mod tests {
         let source = Entry::new("a.txt", Some(100)).modified(1);
         let dest = Entry::new("a.txt", Some(100));
         assert_eq!(
-            classify(Some(&source), Some(&dest), Comparison::SizeAndModTime),
+            classify(Some(&source), Some(&dest), Comparison::default()),
             Difference::Error
         );
 
@@ -340,24 +453,31 @@ mod tests {
     #[test]
     fn only_a_checksum_comparison_claims_to_prove_contents() {
         assert!(Comparison::Checksum.proves_contents());
-        assert!(!Comparison::SizeAndModTime.proves_contents());
+        assert!(!Comparison::default().proves_contents());
         assert!(!Comparison::SizeOnly.proves_contents());
     }
 
     #[test]
     fn the_global_flags_select_the_comparison() {
         assert_eq!(
-            Comparison::from_globals(&globals(&[])),
-            Comparison::SizeAndModTime
+            Comparison::from_globals(&globals(&[])).unwrap(),
+            Comparison::default()
         );
         assert_eq!(
-            Comparison::from_globals(&globals(&["--checksum"])),
+            Comparison::from_globals(&globals(&["--checksum"])).unwrap(),
             Comparison::Checksum
         );
         assert_eq!(
-            Comparison::from_globals(&globals(&["--size-only"])),
+            Comparison::from_globals(&globals(&["--size-only"])).unwrap(),
             Comparison::SizeOnly
         );
+        // The flag reaches this comparison too, not only the transfer family's.
+        assert_eq!(
+            Comparison::from_globals(&globals(&["--modify-window", "5"])).unwrap(),
+            Comparison::SizeAndModTime { window_secs: 5 }
+        );
+        // And the refusal is the same one, from the same place.
+        assert!(Comparison::from_globals(&globals(&["--modify-window", "0"])).is_err());
     }
 
     #[test]

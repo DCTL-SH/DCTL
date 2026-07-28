@@ -29,9 +29,18 @@ The marks are rclone's, because the combined file is exactly the artefact people
 already have `awk` one-liners for.
 
 **What "the same" means is the global comparison dial**, and this is the pitfall
-worth reading twice. By default `check` compares size and modification time,
-which is cheap and catches the overwhelming majority of real differences — but
-two files can share both and still differ. `--size-only` is cheaper still and
+worth reading twice. By default `check` compares size and modification time
+**within `--modify-window` (one second unless you widen it)**, which is cheap and
+catches the overwhelming majority of real differences — but two files can share
+both and still differ.
+
+The window matters more than it looks. `check` used to demand *exact* equality
+while `copy` and `sync` allowed a second, so the two verbs answered the same
+question differently over the same pair of files — and on a destination that
+rounds timestamps (a FAT backup disk, a provider storing milliseconds) `check`
+reported files as `differ` that `sync` had just decided were identical. Both now
+resolve the tolerance from the same place, so a `--modify-window` you set applies
+to both and a tree `sync` has just written reports `0 differ`. `--size-only` is cheaper still and
 deliberately ignores time, for destinations whose clocks or metadata cannot be
 trusted. `--checksum` is the only mode that proves the contents match. The
 report always names which one ran and carries a `proves_contents` boolean,
@@ -67,10 +76,23 @@ comparison answers it from metadata alone. The report's `comparison` field says
 `size-and-modtime`, because that is what ran; nothing is substituted and the
 warning that announced the substitution no longer appears.
 
+The same is now true of a **plain** destination — a `local:` remote, an SFTP host
+or a B2 bucket — for the same reason: the write records the source's own time
+(the file's inode, an SFTP `SETSTAT`, B2's `src_last_modified_millis`), so
+`dctl check ./src backup:` reports `all match` over a tree `dctl sync` has just
+written. It did not: it reported `3 of 3 paths differ` over a copy it had made
+itself, byte-for-byte, which is a false failure on correct data.
+
+**S3 and R2 are still the exception.** The source's time is stored there
+(`x-amz-meta-mtime`) but `ListObjectsV2` does not return user metadata, so a
+listing cannot report it and `check` answers `error` — "could not be compared" —
+rather than a wrong verdict. Use `--checksum` or `--size-only` against those two.
+
 `dctl copy`, `move` and `sync` reach the same answer the same way, which is what
 keeps `check` and `copy` agreeing about the same two trees. See
 `docs/commands/dctl_copy.md`, including the note on what happens the first time
-this build meets a vault written by an older one.
+this build meets a vault written by an older one, or a bucket whose objects were
+uploaded before DCTL sent a time.
 
 *What that leaves.* Size and modification time cannot see an edit that changed
 neither — the same limit rclone and rsync have. `--checksum` is the mode that

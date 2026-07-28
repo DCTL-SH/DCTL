@@ -440,6 +440,28 @@ match its source by modification time, so `dctl copy` found the entire dataset
 just written entirely different. Naming the case at each call site is what makes
 that impossible to reintroduce by omission.
 
+**The same argument, one layer down: `Backend::put` takes a
+`dctl_store::SourceModified`.** Fixing the vault left the identical defect on
+every *plain* destination, because the storage trait had no parameter for a time
+at all — so `local:`, `sftp:` and `b2:` objects reported the moment of the upload
+and `dctl sync` re-transferred an unchanged tree on every run, on every one of
+them. Each backend now records it in its own native metadata: the file's inode
+(`local`), a `SETSTAT` on the staging path before the rename (`sftp`), and the
+documented `src_last_modified_millis` file-info key (`b2`, which is also
+`rclone`'s spelling, so the two tools read each other's buckets). S3 and R2 store
+it as `x-amz-meta-mtime` and return it from `head`, but `ListObjectsV2` does not
+return user metadata, so a *listing* cannot report it and those two remain
+non-incremental — stated in `s3/client.rs` and in `docs/commands/dctl_copy.md`
+rather than left to be found on an invoice.
+
+**A sealed object never gives its time to the provider.** `Vault::put_file`
+passes `SourceModified::unknown()` deliberately: a file's age is a fact about the
+plaintext, it is already sealed inside the object's own encrypted metadata where
+`dctl index rebuild` can recover it, and writing it into the bucket as well would
+publish a per-file edit history in the clear for no gain. That the *rebuilt*
+index sustains an incremental sync is the property that makes this the right
+place for it, and it is verified end to end against a live B2 vault.
+
 ### 5.3 Get a file
 
 `Vault::get_file` / `get_file_to_path` (CLI `dctl cat` / `dctl copy vault:PATH DEST`):

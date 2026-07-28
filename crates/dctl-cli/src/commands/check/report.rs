@@ -313,7 +313,7 @@ impl Report {
 /// the comparison itself has no opinion about what a user types.
 const fn comparison_slug(comparison: Comparison) -> &'static str {
     match comparison {
-        Comparison::SizeAndModTime => COMPARISON_SIZE_AND_MODTIME,
+        Comparison::SizeAndModTime { .. } => COMPARISON_SIZE_AND_MODTIME,
         Comparison::SizeOnly => COMPARISON_SIZE_ONLY,
         Comparison::Checksum => COMPARISON_CHECKSUM,
     }
@@ -409,7 +409,7 @@ mod tests {
         // "4 of 4 paths differ", with `"differ": 0` in its own JSON one line
         // above. The two trees were byte-identical, which `--checksum` confirmed
         // immediately. Naming the wrong finding sends the reader to the wrong fix.
-        let mut report = Report::new("./src", "archive:", Comparison::SizeAndModTime, false);
+        let mut report = Report::new("./src", "archive:", Comparison::default(), false);
         for path in ["a", "b"] {
             report.push(Record::new(path, Difference::Error));
         }
@@ -433,7 +433,7 @@ mod tests {
         // `--missing-on-dst` captures a list to feed `dctl copy --files-from`,
         // which is the right advice for a file the destination does not have and
         // useless for one that could not be compared. The hint gave it for both.
-        let mut incomparable = Report::new("./src", "archive:", Comparison::SizeAndModTime, false);
+        let mut incomparable = Report::new("./src", "archive:", Comparison::default(), false);
         incomparable.push(Record::new("a", Difference::Error));
         let hint = incomparable
             .outcome()
@@ -445,7 +445,7 @@ mod tests {
         );
         assert!(hint.contains("--checksum"), "{hint}");
 
-        let mut missing = Report::new("./src", "archive:", Comparison::SizeAndModTime, false);
+        let mut missing = Report::new("./src", "archive:", Comparison::default(), false);
         missing.push(Record::new("a", Difference::MissingOnDst));
         let hint = missing
             .outcome()
@@ -533,7 +533,7 @@ mod tests {
 
     #[test]
     fn a_metadata_comparison_does_not_claim_to_prove_contents() {
-        let report = Report::new("src:", "dst:", Comparison::SizeAndModTime, false);
+        let report = Report::new("src:", "dst:", Comparison::default(), false);
         let parsed: serde_json::Value =
             serde_json::from_str(&report.render(&out(Format::Json)).unwrap()).unwrap();
         assert_eq!(parsed["comparison"], "size-and-modtime");

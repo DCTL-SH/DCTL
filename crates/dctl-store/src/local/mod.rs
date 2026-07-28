@@ -20,6 +20,7 @@ use crate::backend::Backend;
 use crate::checksum::ContentHash;
 use crate::error::Result;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
+use crate::modified::SourceModified;
 
 /// A [`Backend`] backed by a local directory tree rooted at `root`.
 #[derive(Clone, Debug)]
@@ -55,8 +56,9 @@ impl Backend for LocalFs {
         key: &ObjectKey,
         data: Bytes,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
-        verified_write::put(self, key, data, expected).await
+        verified_write::put(self, key, data, expected, modified).await
     }
 
     async fn put_from_path(
@@ -64,8 +66,9 @@ impl Backend for LocalFs {
         key: &ObjectKey,
         source: &Path,
         expected: &ContentHash,
+        modified: SourceModified,
     ) -> Result<PutOutcome> {
-        verified_write::put_from_path(self, key, source, expected).await
+        verified_write::put_from_path(self, key, source, expected, modified).await
     }
 
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {

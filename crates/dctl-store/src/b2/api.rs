@@ -102,6 +102,17 @@ pub(crate) struct FileItem {
     pub content_length: u64,
     pub upload_timestamp: i64,
     pub action: String,
+    /// The `fileInfo` map B2 stores alongside the object.
+    ///
+    /// Only one key is read from it — `src_last_modified_millis`, the source's
+    /// own modification time (`constants::FILE_INFO_SRC_MODIFIED`). It is
+    /// defaulted rather than required because it is genuinely absent on every
+    /// object written before DCTL sent it, and on every object any other tool
+    /// wrote without one; an object with no `fileInfo` is ordinary, not
+    /// malformed, and refusing to parse the page it arrived in would make a
+    /// whole bucket unlistable.
+    #[serde(default)]
+    pub file_info: std::collections::HashMap<String, String>,
 }
 
 #[derive(Deserialize)]
