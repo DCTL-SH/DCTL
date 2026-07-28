@@ -119,6 +119,30 @@ pub(super) fn join(base: &str, rel: &str) -> String {
 /// - `base=""` (home-relative), `"a/b/obj"` → `["a", "a/b"]`
 #[must_use]
 pub(super) fn ancestor_dirs_below(base: &str, path: &str) -> Vec<String> {
+    ancestors_under(base, path, false)
+}
+
+/// The same, **including** the base itself.
+///
+/// For the one case where creating the base is correct: it was not there when
+/// this backend connected, so nothing can be lost by making it, and
+/// `dctl config create backup sftp host=… base=/srv/new` names a directory the
+/// first copy through it legitimately creates. That is the rule
+/// [`crate::guard::identity`] states for every provider — an *unrecorded*
+/// container admits the write that creates it — and it is the reason this is a
+/// second function rather than a flag inside the first: which of the two a
+/// caller wants is decided once, at connect, and not per write.
+///
+/// Still never anything **above** the base: `base=/srv/store` may create
+/// `/srv/store`, and may not create `/srv`.
+#[must_use]
+pub(super) fn ancestor_dirs_at_or_below(base: &str, path: &str) -> Vec<String> {
+    ancestors_under(base, path, true)
+}
+
+/// Shared body: keep the ancestors at least `depth` components deep, where
+/// `depth` is the base's own depth (inclusive) or one more than it (exclusive).
+fn ancestors_under(base: &str, path: &str, include_base: bool) -> Vec<String> {
     let all = ancestor_dirs(path);
     if base.is_empty() {
         return all;
@@ -126,9 +150,14 @@ pub(super) fn ancestor_dirs_below(base: &str, path: &str) -> Vec<String> {
     // Component-wise rather than `starts_with`, so a base of `/srv/store` does
     // not swallow `/srv/store-backup` — the same rule the listing prefix match
     // has to obey, and for the same reason.
-    let depth = base.split('/').filter(|part| !part.is_empty()).count();
+    let base_depth = base.split('/').filter(|part| !part.is_empty()).count();
+    let least = if include_base {
+        base_depth
+    } else {
+        base_depth + 1
+    };
     all.into_iter()
-        .filter(|dir| dir.split('/').filter(|part| !part.is_empty()).count() > depth)
+        .filter(|dir| dir.split('/').filter(|part| !part.is_empty()).count() >= least)
         .collect()
 }
 
@@ -301,6 +330,29 @@ mod tests {
     }
 
     #[test]
+    fn a_base_that_was_not_there_at_connect_is_created_and_nothing_above_it_is() {
+        // The other half of the rule, and the one the live round trip caught:
+        // `dctl config create backup sftp host=… base=/srv/new` names a
+        // directory the first copy through it legitimately creates, exactly as
+        // `local:` creates a root that was never there. What must still never be
+        // created is anything *above* the base — `/srv` is not DCTL's to make.
+        assert_eq!(
+            ancestor_dirs_at_or_below("/srv/store", "/srv/store/a/obj"),
+            vec!["/srv/store".to_string(), "/srv/store/a".to_string()]
+        );
+        assert!(
+            !ancestor_dirs_at_or_below("/srv/store", "/srv/store/a/obj")
+                .contains(&"/srv".to_string())
+        );
+        // An object at the top of a base that does not exist yet still needs the
+        // base itself.
+        assert_eq!(
+            ancestor_dirs_at_or_below("/srv/store", "/srv/store/obj"),
+            vec!["/srv/store".to_string()]
+        );
+    }
+
+    #[test]
     fn a_home_relative_base_still_creates_the_key_directories() {
         // An empty base is the home-relative case: there is nothing configured
         // above the key, so every ancestor of the key is the key's own.
@@ -333,6 +385,11 @@ mod tests {
             assert_eq!(
                 ancestor_dirs_below(base, "/srv/store/a/obj"),
                 vec!["/srv/store/a".to_string()],
+                "{base}"
+            );
+            assert_eq!(
+                ancestor_dirs_at_or_below(base, "/srv/store/a/obj"),
+                vec!["/srv/store".to_string(), "/srv/store/a".to_string()],
                 "{base}"
             );
         }

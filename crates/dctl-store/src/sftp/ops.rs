@@ -34,7 +34,7 @@ use openssh_sftp_client::{Error as SftpError, UnixTimeStamp};
 use crate::error::{Result, StoreError};
 use crate::modified::SourceModified;
 
-use super::path::ancestor_dirs_below;
+use super::path::{ancestor_dirs_at_or_below, ancestor_dirs_below};
 use super::{SftpBackend, map_sftp_err};
 
 /// The access/modification pair a `SETSTAT` carries.
@@ -193,7 +193,14 @@ impl RemoteFs for SftpBackend {
 
     async fn mkdir_p(&self, remote_file: &str) {
         let mut fs = self.sftp.fs();
-        for dir in ancestor_dirs_below(&self.base, remote_file) {
+        // Whether the base itself may be created was decided once, at connect,
+        // and is not re-decided per write — see [`SftpBackend::may_create_base`].
+        let dirs = if self.may_create_base {
+            ancestor_dirs_at_or_below(&self.base, remote_file)
+        } else {
+            ancestor_dirs_below(&self.base, remote_file)
+        };
+        for dir in dirs {
             let _ = fs.create_dir(&dir).await;
         }
     }

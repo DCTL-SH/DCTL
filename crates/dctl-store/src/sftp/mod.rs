@@ -145,6 +145,26 @@ pub struct SftpBackend {
     /// most visible: an SFTP transfer over a proxied tunnel is exactly the link
     /// an operator wants to leave usable while a backup runs.
     meter: Arc<dyn Meter>,
+    /// Whether a write may create [`base`](Self::base) itself.
+    ///
+    /// Decided **once, at connect**, and it is the whole of the vanished-base
+    /// guard's other half. If the base was not there when this backend opened,
+    /// nothing can be lost by creating it and
+    /// `dctl config create backup sftp host=… base=/srv/new` must keep working —
+    /// the same rule `local:` follows, and the same one
+    /// [`crate::guard::identity`] states for every provider: an *unrecorded*
+    /// container admits the write that creates it.
+    ///
+    /// If it **was** there, a write must never put it back. That is what made a
+    /// base renamed away mid-run get silently re-created underneath the run,
+    /// with seventeen of twenty-five objects landing in the replacement and
+    /// every one of them reported as stored and verified.
+    ///
+    /// At connect and not per write, because the question is about the run: a
+    /// base that disappears while the run is using it must stay disappeared, and
+    /// re-asking would answer "not there, so make it" — which is the defect
+    /// exactly.
+    may_create_base: bool,
 }
 
 impl SftpBackend {
@@ -165,12 +185,21 @@ impl SftpBackend {
             .map_err(|e| {
                 StoreError::Backend(format!("open sftp subsystem on {}: {e}", cfg.host))
             })?;
+        let base = normalize_base(&cfg.base);
+        // One `stat` at connect. A base that is absent now may be created by the
+        // first write; one that is present may never be re-created by any write
+        // in this run. See [`SftpBackend::may_create_base`].
+        let may_create_base = {
+            let probe = if base.is_empty() { "." } else { &base };
+            sftp.fs().metadata(probe).await.is_err()
+        };
         Ok(Self {
             session,
             sftp,
-            base: normalize_base(&cfg.base),
+            base,
             links: cfg.links,
             meter: meter::unmetered(),
+            may_create_base,
         })
     }
 
