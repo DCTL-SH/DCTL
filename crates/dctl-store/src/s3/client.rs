@@ -41,31 +41,12 @@ use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
 use crate::streaming;
 
-use super::config::{S3_SERVICE, S3Config};
+use super::config::S3Config;
+use super::constants::{
+    H_SRC_MODIFIED, LIST_PAGE_SIZE, MAX_PART_SIZE, MIN_PART_SIZE, PRESIGN_TTL_SECS, S3_SERVICE,
+};
 use super::sigv4;
 use super::xml;
-
-/// Objects larger than this use the multipart upload API.
-const MULTIPART_THRESHOLD: usize = 100 * 1024 * 1024;
-/// Base multipart part size (>= S3's 5 MiB minimum; last part may be smaller). Used as-is
-/// for normal objects; grown adaptively for objects that would exceed the 10,000-part cap.
-const PART_SIZE: usize = 100 * 1024 * 1024;
-/// S3's minimum part size: 5 MiB (every part but the last must be at least this).
-const S3_MIN_PART_SIZE: u64 = 5 * 1024 * 1024;
-/// S3's maximum part size: 5 GiB. Combined with the 10,000-part cap this bounds a single
-/// multipart object at 5 GiB * 10,000 ≈ 48.8 TiB.
-const S3_MAX_PART_SIZE: u64 = 5 * 1024 * 1024 * 1024;
-/// Objects returned per listing page.
-const LIST_PAGE_SIZE: u32 = 1000;
-/// Lifetime of a delegated (presigned) upload authorization: 15 minutes. Long enough for
-/// a client to start a background upload, short enough to bound the delegation.
-const PRESIGN_TTL_SECS: u64 = 15 * 60;
-/// The user-metadata header carrying the source's own last-modified time.
-///
-/// `rclone`'s spelling, not one invented here (`backend/s3/s3.go`, `metaMtime`),
-/// so the two tools read each other's buckets rather than each seeing the other's
-/// objects as modified when they were uploaded.
-const H_SRC_MODIFIED: &str = "x-amz-meta-mtime";
 
 /// Render a source modification time the way S3 user metadata carries one.
 ///
@@ -210,7 +191,7 @@ impl S3Client {
             });
         }
 
-        if data.len() <= MULTIPART_THRESHOLD {
+        if !streaming::use_multipart(data.len() as u64, self.config.part_size()) {
             self.put_single(key.as_str(), data.clone(), modified)
                 .await?;
         } else {
@@ -298,9 +279,9 @@ impl S3Client {
         // 10,000-part cap; normal objects keep PART_SIZE.
         let part_size = streaming::adaptive_part_size(
             data.len() as u64,
-            PART_SIZE as u64,
-            S3_MIN_PART_SIZE,
-            S3_MAX_PART_SIZE,
+            self.config.part_size(),
+            MIN_PART_SIZE,
+            MAX_PART_SIZE,
             streaming::MAX_PARTS,
         )?;
         let plan = streaming::plan_parts(data.len() as u64, part_size);
@@ -365,7 +346,7 @@ impl S3Client {
 
         // Below the threshold: read the bounded file and use the verified single-shot
         // path, exactly like `put` (in-memory guard + SigV4 body verification).
-        if !streaming::use_multipart(size, MULTIPART_THRESHOLD as u64) {
+        if !streaming::use_multipart(size, self.config.part_size()) {
             let data = tokio::fs::read(source).await?;
             return self.put(key, Bytes::from(data), expected, modified).await;
         }
@@ -432,9 +413,9 @@ impl S3Client {
         // used for the whole upload.
         let part_size = streaming::adaptive_part_size(
             size,
-            PART_SIZE as u64,
-            S3_MIN_PART_SIZE,
-            S3_MAX_PART_SIZE,
+            self.config.part_size(),
+            MIN_PART_SIZE,
+            MAX_PART_SIZE,
             streaming::MAX_PARTS,
         )?;
         let plan = streaming::plan_parts(size, part_size);

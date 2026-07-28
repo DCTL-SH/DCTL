@@ -16,7 +16,17 @@ use crate::modified::SourceModified;
 use crate::s3::{S3Client, S3Config};
 
 /// R2's fixed SigV4 region.
+///
+/// Not a placeholder and not a default that could be overridden: R2 has no
+/// regions, and Cloudflare's documentation requires requests to be signed for
+/// the literal string `auto`. Signing for `us-east-1` — the value an operator
+/// migrating an S3 config would carry over — is rejected with
+/// `SignatureDoesNotMatch`, which is why the R2 backend is a distinct type that
+/// sets this itself rather than an `S3Backend` with a different endpoint.
 const R2_REGION: &str = "auto";
+
+/// The endpoint template every R2 account is reached through.
+const R2_ENDPOINT_TEMPLATE: &str = "https://{account}.r2.cloudflarestorage.com";
 
 /// A `Backend` over a Cloudflare R2 bucket.
 pub struct R2Backend {
@@ -24,15 +34,44 @@ pub struct R2Backend {
 }
 
 impl R2Backend {
+    /// The S3 settings an R2 account resolves to: the derived endpoint, the
+    /// fixed `auto` region, and the caller's bucket and credentials.
+    ///
+    /// Public and separate from [`R2Backend::new`] because the two decisions R2
+    /// makes on the operator's behalf — the endpoint hostname and the signing
+    /// region — are the two most expensive things to get wrong and are otherwise
+    /// unobservable without a Cloudflare account. This is the seam a test drives
+    /// them through, and it is also how an operator points the same code path at
+    /// a jurisdiction-specific endpoint or a local S3 implementation.
+    #[must_use]
+    pub fn config(
+        account_id: &str,
+        bucket: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+    ) -> S3Config {
+        let endpoint = R2_ENDPOINT_TEMPLATE.replace("{account}", account_id);
+        S3Config::new(endpoint, R2_REGION, bucket, access_key, secret_key)
+    }
+
     /// Create an R2 backend. The endpoint is `https://<account_id>.r2.cloudflarestorage.com`.
+    ///
+    /// # Errors
+    /// Whatever building the TLS client reported.
     pub fn new(
         account_id: &str,
         bucket: impl Into<String>,
         access_key: impl Into<String>,
         secret_key: impl Into<String>,
     ) -> Result<Self> {
-        let endpoint = format!("https://{account_id}.r2.cloudflarestorage.com");
-        let config = S3Config::new(endpoint, R2_REGION, bucket, access_key, secret_key);
+        Self::from_config(Self::config(account_id, bucket, access_key, secret_key))
+    }
+
+    /// Create an R2 backend from settings [`R2Backend::config`] produced.
+    ///
+    /// # Errors
+    /// Whatever building the TLS client reported.
+    pub fn from_config(config: S3Config) -> Result<Self> {
         Ok(Self {
             client: S3Client::new(config)?,
         })
@@ -92,5 +131,51 @@ impl Backend for R2Backend {
         content_sha256: Option<&[u8; 32]>,
     ) -> Result<UploadTicket> {
         self.client.prepare_upload(key, content_len, content_sha256)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_endpoint_is_derived_from_the_account_and_nothing_else() {
+        // The one piece of R2-specific addressing, and it is unobservable
+        // without an account — so it is asserted here rather than assumed.
+        let config = R2Backend::config("abc123", "vault", "k", "s");
+        assert_eq!(
+            config.endpoint, "https://abc123.r2.cloudflarestorage.com",
+            "an R2 account id is a hostname label, not a path component"
+        );
+        assert_eq!(config.bucket, "vault");
+        // Path-style, which is what R2 serves: the bucket is the first path
+        // segment, never a hostname prefix.
+        assert!(config.path_style);
+    }
+
+    #[test]
+    fn the_signing_region_is_auto_and_is_not_a_default_to_be_overridden() {
+        // Signing for `us-east-1` — the value an operator migrating an S3 config
+        // brings with them — is rejected by R2 with SignatureDoesNotMatch. The
+        // region is therefore set by this constructor and not read from any
+        // setting, and this is the assertion that keeps it that way.
+        assert_eq!(R2Backend::config("abc123", "b", "k", "s").region, "auto");
+    }
+
+    #[test]
+    fn the_part_size_default_survives_the_r2_constructor() {
+        // R2 goes through the same client, so the multipart envelope has to be
+        // the same one — a smaller default here would silently change how an R2
+        // upload is cut without anything saying so.
+        assert_eq!(
+            R2Backend::config("a", "b", "k", "s").part_size(),
+            crate::s3::S3Config::new("https://x", "auto", "b", "k", "s").part_size()
+        );
+        assert_eq!(
+            R2Backend::config("a", "b", "k", "s")
+                .with_part_size(Some(8 * 1024 * 1024))
+                .part_size(),
+            8 * 1024 * 1024
+        );
     }
 }

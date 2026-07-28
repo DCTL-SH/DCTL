@@ -7,6 +7,7 @@
 
 mod client;
 mod config;
+mod constants;
 mod sigv4;
 mod xml;
 

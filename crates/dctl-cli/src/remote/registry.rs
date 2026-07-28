@@ -82,6 +82,13 @@ pub enum Target {
         endpoint: Option<String>,
         /// SigV4 signing region; falls back to the environment when unset.
         region: Option<String>,
+        /// Multipart part size in bytes, from the remote's `chunk_size`.
+        ///
+        /// `None` takes the client's default. No environment fall-back: unlike
+        /// the endpoint and the region this is a tuning choice rather than a
+        /// piece of addressing, and a machine-wide variable that silently
+        /// changed how every bucket was cut would be a strange thing to have.
+        chunk_size: Option<u64>,
     },
 
     /// A Cloudflare R2 bucket.
@@ -91,6 +98,8 @@ pub enum Target {
         /// Cloudflare account id, from which R2's endpoint is derived; falls
         /// back to the environment when unset.
         account: Option<String>,
+        /// Multipart part size in bytes, from the remote's `chunk_size`.
+        chunk_size: Option<u64>,
     },
 
     /// An SSH host reached over SFTP, driven by the system `ssh`.
@@ -156,25 +165,28 @@ pub fn build(resolved: &Resolved) -> Result<Arc<dyn Backend>> {
             bucket,
             endpoint,
             region,
+            chunk_size,
         } => {
             let endpoint = setting_or_env(endpoint.as_deref(), ENV_S3_ENDPOINT)?;
             let region = setting_or_env(region.as_deref(), ENV_S3_REGION)?;
             let access_key = env_required(ENV_S3_ACCESS_KEY)?;
             let secret_key = env_required(ENV_S3_SECRET_KEY)?;
-            let config = S3Config::new(endpoint, region, bucket.clone(), access_key, secret_key);
+            let config = S3Config::new(endpoint, region, bucket.clone(), access_key, secret_key)
+                .with_part_size(*chunk_size);
             Ok(Arc::new(S3Backend::new(config)?))
         }
 
-        Target::R2 { bucket, account } => {
+        Target::R2 {
+            bucket,
+            account,
+            chunk_size,
+        } => {
             let account = setting_or_env(account.as_deref(), ENV_R2_ACCOUNT_ID)?;
             let access_key = env_required(ENV_R2_ACCESS_KEY)?;
             let secret_key = env_required(ENV_R2_SECRET_KEY)?;
-            Ok(Arc::new(R2Backend::new(
-                &account,
-                bucket.clone(),
-                access_key,
-                secret_key,
-            )?))
+            let config = R2Backend::config(&account, bucket.clone(), access_key, secret_key)
+                .with_part_size(*chunk_size);
+            Ok(Arc::new(R2Backend::from_config(config)?))
         }
 
         // No credential is read: `ssh` authenticates the transport from the
@@ -328,6 +340,7 @@ mod tests {
                 bucket: "b".into(),
                 endpoint: None,
                 region: None,
+                chunk_size: None,
             }
             .provider_type(),
             PROVIDER_S3
@@ -336,6 +349,7 @@ mod tests {
             Target::R2 {
                 bucket: "b".into(),
                 account: None,
+                chunk_size: None,
             }
             .provider_type(),
             PROVIDER_R2

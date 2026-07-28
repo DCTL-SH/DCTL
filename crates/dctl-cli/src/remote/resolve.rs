@@ -40,9 +40,10 @@ use std::fmt;
 use std::path::PathBuf;
 
 use crate::constants::{
-    CONFIG_KEY_ACCOUNT, CONFIG_KEY_BASE, CONFIG_KEY_BUCKET, CONFIG_KEY_ENDPOINT, CONFIG_KEY_HOST,
-    CONFIG_KEY_PATH, CONFIG_KEY_REGION, CONFIG_REMOTE_TYPE_KEY, PATH_SEPARATOR, PROVIDER_B2,
-    PROVIDER_LOCAL, PROVIDER_R2, PROVIDER_S3, PROVIDER_SFTP, PROVIDER_VAULT, REMOTE_PROVIDER_TYPES,
+    CONFIG_KEY_ACCOUNT, CONFIG_KEY_BASE, CONFIG_KEY_BUCKET, CONFIG_KEY_CHUNK_SIZE,
+    CONFIG_KEY_ENDPOINT, CONFIG_KEY_HOST, CONFIG_KEY_PATH, CONFIG_KEY_REGION,
+    CONFIG_REMOTE_TYPE_KEY, PATH_SEPARATOR, PROVIDER_B2, PROVIDER_LOCAL, PROVIDER_R2, PROVIDER_S3,
+    PROVIDER_SFTP, PROVIDER_VAULT, REMOTE_PROVIDER_TYPES,
 };
 use crate::error::{CliError, Result};
 
@@ -271,11 +272,13 @@ fn target_from_entry(name: &str, entry: &RemoteEntry) -> Result<Target> {
             bucket: required(name, entry, CONFIG_KEY_BUCKET)?.to_string(),
             endpoint: entry.setting(CONFIG_KEY_ENDPOINT).map(str::to_string),
             region: entry.setting(CONFIG_KEY_REGION).map(str::to_string),
+            chunk_size: chunk_size(name, entry)?,
         }),
 
         PROVIDER_R2 => Ok(Target::R2 {
             bucket: required(name, entry, CONFIG_KEY_BUCKET)?.to_string(),
             account: entry.setting(CONFIG_KEY_ACCOUNT).map(str::to_string),
+            chunk_size: chunk_size(name, entry)?,
         }),
 
         // Both are required and neither has an environment fall-back: an sftp
@@ -371,10 +374,12 @@ fn shorthand(name: &str, path: &str) -> Result<Resolved> {
             bucket: bucket(name, container)?,
             endpoint: None,
             region: None,
+            chunk_size: None,
         },
         PROVIDER_R2 => Target::R2 {
             bucket: bucket(name, container)?,
             account: None,
+            chunk_size: None,
         },
         other => {
             return Err(
@@ -424,6 +429,36 @@ fn required<'a>(name: &str, entry: &'a RemoteEntry, key: &str) -> Result<&'a str
     })
 }
 
+/// The `chunk_size` setting, if a remote declares one.
+///
+/// Returns a *refusal* for a value that is not a positive whole number of bytes,
+/// rather than falling back to the default. This setting was inert until this
+/// pass — declared in the file, documented in `config providers`, and read by
+/// nothing — so the one thing it must not now do is accept a mistyped value and
+/// quietly use a different one. `chunk_size = "8MB"` is a fault in the file, and
+/// a fault in the file is worth a message naming the key.
+///
+/// # Errors
+/// [`crate::exit::ExitCode::FatalError`] naming the remote and the value.
+fn chunk_size(name: &str, entry: &RemoteEntry) -> Result<Option<u64>> {
+    let Some(written) = entry.setting(CONFIG_KEY_CHUNK_SIZE) else {
+        return Ok(None);
+    };
+    match written.trim().parse::<u64>() {
+        Ok(0) | Err(_) => Err(CliError::fatal(format!(
+            "remote '{name}' has {CONFIG_KEY_CHUNK_SIZE} = '{written}', which is not a \
+             positive number of bytes"
+        ))
+        .with_hint(format!(
+            "Write it as plain bytes, for example \
+             `dctl config update {name} {CONFIG_KEY_CHUNK_SIZE}=8388608` for 8 MiB. \
+             The provider's own minimum and maximum still apply and the value is \
+             clamped into them."
+        ))),
+        Ok(size) => Ok(Some(size)),
+    }
+}
+
 /// The advertised provider types, for a hint. Derived from the table rather than
 /// written out, so a new provider appears in every message that lists them.
 fn provider_list() -> String {
@@ -448,6 +483,108 @@ mod tests {
 
     fn resolve_str<C: RemoteCatalog + ?Sized>(input: &str, catalog: &C) -> Result<Resolved> {
         resolve(&RemoteSpec::parse(input)?, catalog)
+    }
+
+    /// Providers whose `chunk_size` setting reaches the backend that stores the
+    /// bytes, and providers whose does not.
+    ///
+    /// `chunk_size` is declared on four provider definitions in
+    /// [`crate::config::model`] and was read by **nothing**: an operator could
+    /// write `chunk_size = 8388608`, see it in `dctl config show`, and have every
+    /// upload cut at the compiled-in default anyway. That is the §13 defect —
+    /// a setting that parses, is documented, and reaches nothing — on the
+    /// configuration surface rather than the flag surface, where the standing
+    /// guard does not look.
+    ///
+    /// Two are wired here. Two are not, and the point of this table is that they
+    /// are *declared* not to be rather than silently so: adding a provider that
+    /// carries the setting without carrying it through fails
+    /// [`chunk_size_is_either_carried_to_the_backend_or_listed_as_inert`], which
+    /// says which list to add it to and what that costs.
+    const CHUNK_SIZE_HONOURED: &[&str] = &[PROVIDER_S3, PROVIDER_R2];
+
+    /// `chunk_size` on these providers is accepted by the parser and reaches
+    /// nothing. B2's part size is `dctl_store::b2`'s own constant and the vault's
+    /// is `dctl_core::constants::DEFAULT_CHUNK_SIZE`, neither of which has a
+    /// setter — so wiring them is a change to those crates' construction, not to
+    /// this one, and is on the pre-production list in `HANDOVER.md` §11.3 rather
+    /// than half-done here.
+    const CHUNK_SIZE_INERT: &[&str] = &[PROVIDER_B2, crate::constants::PROVIDER_VAULT];
+
+    #[test]
+    fn chunk_size_is_either_carried_to_the_backend_or_listed_as_inert() {
+        for provider in CHUNK_SIZE_HONOURED {
+            let entry = RemoteEntry::new(*provider)
+                .with_setting(CONFIG_KEY_BUCKET, "b")
+                .with_setting(CONFIG_KEY_ACCOUNT, "acct")
+                .with_setting(CONFIG_KEY_CHUNK_SIZE, "8388608");
+            let target = target_from_entry("r", &entry).expect("the remote resolves");
+            let carried = match target {
+                Target::S3 { chunk_size, .. } | Target::R2 { chunk_size, .. } => chunk_size,
+                other => panic!("'{provider}' resolved to {other:?}"),
+            };
+            assert_eq!(
+                carried,
+                Some(8_388_608),
+                "'{provider}' claims to honour chunk_size and drops it"
+            );
+        }
+
+        // The other two are named, so nobody has to rediscover that the setting
+        // is inert by measuring an upload.
+        for provider in CHUNK_SIZE_INERT {
+            assert!(
+                !CHUNK_SIZE_HONOURED.contains(provider),
+                "'{provider}' is in both lists"
+            );
+        }
+        assert_eq!(
+            CHUNK_SIZE_HONOURED.len() + CHUNK_SIZE_INERT.len(),
+            4,
+            "four provider definitions declare chunk_size; every one has to be in \
+             exactly one of these lists"
+        );
+    }
+
+    #[test]
+    fn a_mistyped_chunk_size_is_refused_rather_than_quietly_defaulted() {
+        // The one thing a newly-wired setting must not do is accept a value it
+        // cannot use and fall back to the default, which would look exactly like
+        // the inert behaviour it replaced.
+        for written in ["8MB", "0", "-1", "eight"] {
+            let entry = RemoteEntry::new(PROVIDER_S3)
+                .with_setting(CONFIG_KEY_BUCKET, "b")
+                .with_setting(CONFIG_KEY_CHUNK_SIZE, written);
+            let error = target_from_entry("r", &entry)
+                .expect_err(&format!("'{written}' must be refused, not defaulted"));
+            assert!(
+                error.message().contains(CONFIG_KEY_CHUNK_SIZE),
+                "the message must name the key: {}",
+                error.message()
+            );
+            assert!(error.hint().is_some(), "'{written}' failed without advice");
+        }
+        // A value the provider will clamp is still accepted here: clamping is
+        // the backend's business and happens with the number in hand, so a
+        // refusal at this layer would forbid a setting that works.
+        let small = RemoteEntry::new(PROVIDER_S3)
+            .with_setting(CONFIG_KEY_BUCKET, "b")
+            .with_setting(CONFIG_KEY_CHUNK_SIZE, "1024");
+        assert!(target_from_entry("r", &small).is_ok());
+
+        // An empty value is *unset*, not malformed — the same rule
+        // `endpoint = ""` follows, so a half-typed key keeps the default rather
+        // than failing the remote.
+        let blank = RemoteEntry::new(PROVIDER_S3)
+            .with_setting(CONFIG_KEY_BUCKET, "b")
+            .with_setting(CONFIG_KEY_CHUNK_SIZE, "");
+        assert!(matches!(
+            target_from_entry("r", &blank).expect("an empty setting is unset"),
+            Target::S3 {
+                chunk_size: None,
+                ..
+            }
+        ));
     }
 
     #[test]
@@ -572,6 +709,7 @@ mod tests {
                 // A half-typed key must not become an empty signing region: the
                 // environment fall-back has to stay reachable.
                 region: None,
+                chunk_size: None,
             }
         );
     }
@@ -618,6 +756,7 @@ mod tests {
                 bucket: "my-bucket".into(),
                 endpoint: None,
                 region: None,
+                chunk_size: None,
             }
         );
         assert_eq!(resolved.path(), "photos/2024");

@@ -33,7 +33,14 @@ tokio-stream = "0.1"
 [dev-dependencies]
 bytes = { workspace = true }
 tempfile = { workspace = true }
-tokio = { workspace = true }
+# `net` for the loopback S3 mock in `tests/s3_mock.rs`. Test-only on purpose: the
+# shipped library reaches the network through reqwest and opens no socket itself,
+# and a feature added to the workspace default would put a listener's worth of
+# code in a binary that never listens.
+tokio = { workspace = true, features = ["net"] }
+hex = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
 # Test-only. `tests/write_failure.rs` imposes RLIMIT_FSIZE to provoke the
 # deferred write failure that used to surface as a checksum mismatch; the
 # library itself is `#![forbid(unsafe_code)]` and links no libc.
