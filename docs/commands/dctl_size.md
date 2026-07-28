@@ -128,9 +128,10 @@ this command is that the number matches:
   and capacity decisions get made on these numbers.
 
 The positional argument is `REMOTE:PATH`, falling back to `--remote` /
-`DCTL_REMOTE`. `C:\data`, `d:/data` and `\\nas\share` are local paths on every
-platform — checked before the colon split, so `C:` is never a remote named `C` —
-and a remote name needs at least two characters. The path half is canonicalised
+`DCTL_REMOTE`. `\\nas\share` is a local path on every platform, and `C:\data`
+and `d:/data` are local where drives exist — both checked before the colon split.
+Off Windows those two name the remotes `C` and `d`, as they do in rclone. The
+path half is canonicalised
 (`/`-separated, NFC, no `.` components, no trailing slash) and a `..` component
 is rejected.
 

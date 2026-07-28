@@ -99,9 +99,9 @@ partial rebuild would also leave the index describing two different points in
 time.
 
 A local path is a usage error. A directory of ordinary files has no path→object
-mapping and nothing to rebuild one from. Following rclone's rule, `C:\data`,
-`d:/data` and `\\server\share` are local on every platform; remote names must be
-at least two characters, which is what makes the drive-letter rule unambiguous.
+mapping and nothing to rebuild one from. Following rclone's rule,
+`\\server\share` is local on every platform and `C:\data` and `d:/data` are local
+where drives exist; off Windows they name the remotes `C` and `d`.
 
 ### Output
 

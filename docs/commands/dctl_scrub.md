@@ -100,9 +100,9 @@ The target must be a remote. `REMOTE:` scrubs the whole dataset; `REMOTE:PATH`
 scrubs a prefix, matched by whole path components — `photos` is not the parent of
 `photos-backup`. A local directory is rejected as a usage error: it is not a
 remote holding a copy of anything, so there is nothing there to scrub. Following
-rclone's rule, `C:\data`, `d:/data` and `\\server\share` are local on every
-platform; remote names must be at least two characters, which is what makes the
-drive-letter rule unambiguous.
+rclone's rule, `\\server\share` is local on every platform and `C:\data` and
+`d:/data` are local where drives exist; off Windows they name the remotes `C` and
+`d`.
 
 `--include`, `--exclude`, `--min-size`, `--max-size` and `--max-depth` narrow
 what is read, and so do `--filter-from` and `--files-from`, which are

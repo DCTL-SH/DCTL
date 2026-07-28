@@ -378,7 +378,7 @@ impl FilterSet {
     /// The engine evaluates rules in the order it is given them, and it is given
     /// them in **rclone's** order — which is *not* the order they appear on the
     /// command line, and this module used to say it was. rclone's `parseRules`
-    /// (`fs/filter/rules.go:238`) walks the flags by kind:
+    /// (`fs/filter/rules.go:212`) walks the flags by kind:
     ///
     /// 1. every `--include`, then every `--include-from`;
     /// 2. every `--exclude`, then every `--exclude-from`;
@@ -391,7 +391,7 @@ impl FilterSet {
     /// exclusions and dropped it. Neither answer is obviously right — rclone's
     /// own code logs "using --filter is recommended instead of both --include
     /// and --exclude as the order they are parsed in is indeterminate"
-    /// (`fs/filter/rules.go:231`) — but a migrating script must get the answer
+    /// (`fs/filter/rules.go:250`) — but a migrating script must get the answer
     /// it was written against, and only one of the two is that answer.
     ///
     /// `clap`'s derive hands back each flag as its own `Vec`, which discards the
@@ -744,14 +744,24 @@ impl Builder {
     /// grammar.
     ///
     /// The flag rclone's own diagnostics recommend over `--include` and
-    /// `--exclude` (`fs/filter/rules.go:231`), because it is the only one whose
+    /// `--exclude` (`fs/filter/rules.go:250`), because it is the only one whose
     /// order is written down by the person using it rather than reconstructed.
     /// The grammar is exactly a rule file's, one line at a time, so a rule that
     /// works in a `--filter-from` file works as a `--filter` argument unchanged.
     ///
-    /// A `!` clears everything accumulated so far, including rules added by
+    /// A `!` clears every rule accumulated so far, including rules added by
     /// earlier flags — that is what the directive means, and scoping it to this
-    /// one argument would make it a quieter, different thing.
+    /// one argument would make it a quieter, different thing. It does **not**
+    /// disarm the implicit trailing exclusion; see [`Builder::rules_from`].
+    ///
+    /// A `+` here does **not** arm that exclusion either, and the asymmetry is
+    /// rclone's rather than an oversight: `addImplicitExclude` is set only by
+    /// the `--include` and `--include-from` loops (`fs/filter/rules.go:216,223`),
+    /// while `--filter` lines go through `addRule` and set nothing. So
+    /// `--filter '+ *.jpg'` on its own keeps everything, exactly as a
+    /// `--filter-from` file containing only `+ *.jpg` does — a rule list is an
+    /// ordered program whose author writes their own final `- **`, and that is
+    /// the whole reason to prefer this flag when the order matters.
     ///
     /// # Errors
     /// [`crate::exit::ExitCode::Usage`] for a line that is not a rule, or a rule
@@ -760,19 +770,12 @@ impl Builder {
         let origin = std::path::Path::new(FILTER_FLAG_FILTER);
         for directive in parse::rules_in(line, origin).map_err(from_file_problem)? {
             match directive {
-                Directive::Clear { .. } => {
-                    self.rules.clear();
-                    self.implicit_exclude = false;
-                }
+                Directive::Clear { .. } => self.rules.clear(),
                 Directive::Rule {
                     action, pattern, ..
-                } => {
-                    self.rules
-                        .push(compile(action, &pattern, FILTER_FLAG_FILTER)?);
-                    if action == Action::Include {
-                        self.implicit_exclude = true;
-                    }
-                }
+                } => self
+                    .rules
+                    .push(compile(action, &pattern, FILTER_FLAG_FILTER)?),
             }
         }
         Ok(self)
@@ -781,7 +784,7 @@ impl Builder {
     /// Append every pattern in an `--include-from` or `--exclude-from` file.
     ///
     /// The lines are bare patterns, not `+`/`-` rules: the flag supplies the
-    /// action, which is rclone's split (`fs/filter/rules.go:246,258` call `add`
+    /// action, which is rclone's split (`fs/filter/rules.go:216,232` call `add`
     /// with a fixed `Include`, while `--filter-from` goes through `addRule`).
     /// Comments and blank lines are skipped as they are everywhere else.
     ///
@@ -832,10 +835,13 @@ impl Builder {
     pub fn rules_from(mut self, source: &Path) -> Result<Self> {
         for directive in parse::rules_from_file(source).map_err(from_file_problem)? {
             match directive {
-                Directive::Clear { .. } => {
-                    self.rules.clear();
-                    self.implicit_exclude = false;
-                }
+                // The rules go, the implicit exclusion does not. rclone sets
+                // `addImplicitExclude` from the *flag* (`fs/filter/rules.go:216`)
+                // and appends `- /**` after every `Clear`, so `--include '*.jpg'
+                // --filter-from f` where `f` begins `!` selects nothing there.
+                // Disarming it here would make the same pair select everything —
+                // the widest possible disagreement about one command line.
+                Directive::Clear { .. } => self.rules.clear(),
                 Directive::Rule {
                     action,
                     pattern,
@@ -995,6 +1001,17 @@ mod tests {
 
     fn shows(set: &FilterSet, path: &str) -> bool {
         set.admits_file(path, 1024)
+    }
+
+    /// A filter built from a `--filter-from` file holding `text`.
+    ///
+    /// Lets a test assert that a `--filter` argument and the same line in a rule
+    /// file mean the same thing, which is the property the flag exists for.
+    fn rules_file_set(text: &str) -> FilterSet {
+        let dir = scratch("rules-file");
+        let path = dir.join("rules.txt");
+        std::fs::write(&path, text).expect("write the rule file");
+        filters(&["--filter-from", path.to_str().expect("path")])
     }
 
     fn scratch(name: &str) -> std::path::PathBuf {
@@ -1573,7 +1590,7 @@ mod tests {
     #[test]
     fn from_globals_orders_the_flags_the_way_rclone_orders_them() {
         // The correction this pass made, and the one with teeth: rclone's
-        // `parseRules` (`fs/filter/rules.go:238`) adds every `--include` before
+        // `parseRules` (`fs/filter/rules.go:212`) adds every `--include` before
         // any `--exclude`, so first-match-wins keeps `secret/a.txt`. DCTL led
         // with the exclusions and dropped it — a migrating `sync` would have
         // deleted at the destination exactly the files rclone had been keeping.
@@ -1590,12 +1607,19 @@ mod tests {
 
     #[test]
     fn a_filter_flag_is_read_as_one_line_of_a_rule_file() {
-        // Same grammar, so a rule that works in `--filter-from` works as an
-        // argument unchanged — including the implicit trailing exclusion that a
-        // `+` arms and the `!` that clears everything before it.
+        // Same grammar as a `--filter-from` file, and the same standing: a `+`
+        // here does **not** arm the implicit `- **`, because rclone arms that
+        // from the `--include` flags alone (`fs/filter/rules.go:216,223`) and a
+        // rule list is an ordered program whose author writes their own final
+        // rule. `--filter '+ *.jpg'` therefore keeps the `.txt` files too.
         let set = filters(&["--filter", "+ *.jpg"]);
         assert!(shows(&set, "a.jpg"));
-        assert!(!shows(&set, "a.txt"), "a '+' arms the implicit '- **'");
+        assert!(shows(&set, "a.txt"), "a '+' rule does not arm '- **'");
+        // …which is exactly what a rule *file* holding the same line does.
+        assert_eq!(
+            shows(&set, "a.txt"),
+            shows(&rules_file_set("+ *.jpg\n"), "a.txt")
+        );
 
         let cleared = filters(&["--exclude", "*.jpg", "--filter", "!", "--filter", "+ *.jpg"]);
         assert!(shows(&cleared, "a.jpg"), "'!' discarded the exclusion");
@@ -1603,6 +1627,48 @@ mod tests {
         // A line that is not a rule is a usage error, not a silently ignored
         // argument — the same standard a rule file is held to.
         assert!(FilterSet::from_globals(&globals(&["--filter", "*.jpg"])).is_err());
+    }
+
+    #[test]
+    fn a_clear_directive_discards_the_rules_and_keeps_the_implicit_exclusion() {
+        // The widest disagreement one command line can produce, and the one this
+        // nearly shipped. rclone appends `- /**` after every `Clear` because the
+        // flag armed it, not the rules — so `--include '*.jpg'` followed by a
+        // `!` selects **nothing** there. Disarming it here would have selected
+        // **everything**: not a near miss, the opposite answer.
+        let dir = scratch("clear-rules");
+        let bang = dir.join("bang.txt");
+        std::fs::write(&bang, "!\n").expect("write the rule file");
+        let from_file = filters(&[
+            "--include",
+            "*.jpg",
+            "--filter-from",
+            bang.to_str().expect("path"),
+        ]);
+
+        // Both flags that can carry a `!` — the argument form and the file form
+        // — have to answer the same way, or one of them is a quieter version of
+        // the other.
+        for cleared in [
+            filters(&["--include", "*.jpg", "--filter", "!"]),
+            filters(&["--include", "*.jpg", "--filter", "!", "--filter", "+ *.raw"]),
+            from_file,
+        ] {
+            assert!(!shows(&cleared, "a.txt"), "the implicit '- **' survives");
+            assert!(!shows(&cleared, "a.jpg"), "the include itself was cleared");
+        }
+        // The `+` after the clear is still a rule, and still wins over the
+        // implicit exclusion that follows it.
+        assert!(shows(
+            &filters(&["--include", "*.jpg", "--filter", "!", "--filter", "+ *.raw"]),
+            "a.raw"
+        ));
+        // With no inclusion flag anywhere there is nothing to survive, so a
+        // cleared list keeps everything.
+        assert!(shows(
+            &filters(&["--exclude", "*.jpg", "--filter", "!"]),
+            "a.jpg"
+        ));
     }
 
     #[test]
@@ -1632,7 +1698,7 @@ mod tests {
     #[test]
     fn include_from_and_exclude_from_read_bare_patterns_from_a_file() {
         // rclone's split: `--filter-from` lines carry their own `+`/`-`, while
-        // these two take the action from the flag (`fs/filter/rules.go:246`).
+        // these two take the action from the flag (`fs/filter/rules.go:216,232`).
         let dir = tempfile::tempdir().expect("temp dir");
         let includes = dir.path().join("in.txt");
         std::fs::write(

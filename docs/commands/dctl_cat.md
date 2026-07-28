@@ -90,9 +90,10 @@ the arguments are good; a dry run naming a missing file still fails with exit 4.
 
 **Path model.** An argument is either `REMOTE:PATH` or a local path, and local is
 a legitimate answer here — `cat` and `rcat` are the two commands in the tool that
-accept one. A remote name must be at least two characters, which is what makes
-`C:\media\clip.mkv` unambiguously a Windows drive path on every platform, not
-just on Windows; `\\server\share\clip.mkv` (UNC) is local; and a colon inside a
+accept one. A single ASCII letter before the colon is a drive letter on a
+platform that has drives, so `C:\media\clip.mkv` is a Windows drive path there
+and the remote `C` elsewhere; `\\server\share\clip.mkv` (UNC) is local on every
+platform; and a colon inside a
 directory name (`./odd:name/f`) leaves the argument local because a remote name
 may not contain a path separator. The two halves are normalised differently on
 purpose: a **remote** path is a logical vault path, so it is cleaned and
@@ -267,9 +268,10 @@ $ dctl cat /srv/media/a.mkv --tail 1M --dry-run
 warning: [dry-run] would read: /srv/media/a.mkv (bytes 4508667084..4509715660 of 4.20 GiB)
 ```
 
-On Windows, a drive letter is always a drive letter — a one-character prefix can
-never be a remote name — so `C:\...` is read as the local path it is, and a UNC
-share works the same way:
+On Windows a drive letter wins over any remote of the same name, and
+`dctl config create` refuses to mint such a name there in the first place — so
+`C:\...` is read as the local path it is, and a UNC share works the same way on
+every platform:
 
 ```console
 C:\> dctl cat C:\Media\clip.mkv --head 4K --discard

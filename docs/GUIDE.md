@@ -83,9 +83,15 @@ capability** — a backup operator can copy ciphertext to a second provider
 
 Every target is written `name:path`, rclone-style. `vault:photos/2024` is the
 `photos/2024` subtree inside the vault named `vault`; a bare `vault:` is the
-whole dataset. Remote names are **at least two characters**, so `C:\data`,
-`d:/data` and `\\server\share` always parse as **local paths on every platform**,
-never as a remote called `C`. A local operand is just an ordinary path.
+whole dataset. A single ASCII letter before the colon is a **drive letter on a
+platform that has drives**, so `C:\data` and `d:/data` are local paths on Windows
+and name the remotes `C` and `d` everywhere else — which is rclone's split, and
+the only one under which `dctl copy ./x r:` and `dctl mkdir r:photos` can agree.
+`\\server\share` is a local path everywhere. A one-character remote name is legal
+in a config file on every platform (rclone accepts one, so a config being
+migrated may contain one); what `dctl config create` refuses is *minting* a
+drive-letter name on a machine that has drives, because your own shell would take
+it away from you. A local operand is just an ordinary path.
 
 ### The index
 

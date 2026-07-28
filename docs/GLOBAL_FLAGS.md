@@ -79,8 +79,8 @@ The remote a command operates on when it is given no explicit target. Commands
 still accept `REMOTE:PATH` positionally and that always wins; this is the setting
 that lets a container or a cron job carry the destination in its environment
 instead of in every command line. A spec is `name:path` (`vault:photos/2024`), and
-remote names are at least two characters so that `C:\data` can never parse as a
-remote named `C`.
+a single ASCII letter before the colon is a drive letter on a platform that has
+drives, so `C:\data` is a local path on Windows and the remote `C` elsewhere.
 
 ### `--index PATH`
 
@@ -532,23 +532,29 @@ the same command continues from where it stopped.
 
 ## Filtering
 
-| Flag | Value | Default | Repeatable |
-|------|-------|---------|------------|
-| `--include` | `PATTERN` | none | yes |
-| `--exclude` | `PATTERN` | none | yes |
-| `--filter-from` | `PATH` | none | yes |
-| `--files-from` | `PATH` | none | yes |
-| `--min-size` | `SIZE` | none | no |
-| `--max-size` | `SIZE` | none | no |
-| `--max-depth` | `N` | `-1` (unlimited) | no |
+| Flag | Short | Value | Default | Repeatable |
+|------|-------|-------|---------|------------|
+| `--include` | | `PATTERN` | none | yes |
+| `--exclude` | | `PATTERN` | none | yes |
+| `--include-from` | | `PATH` | none | yes |
+| `--exclude-from` | | `PATH` | none | yes |
+| `--filter` | `-f` | `RULE` | none | yes |
+| `--filter-from` | | `PATH` | none | yes |
+| `--files-from` | | `PATH` | none | yes |
+| `--min-size` | | `SIZE` | none | no |
+| `--max-size` | | `SIZE` | none | no |
+| `--min-age` | | `AGE` | none | no |
+| `--max-age` | | `AGE` | none | no |
+| `--max-depth` | | `N` | `-1` (unlimited) | no |
 
 **One engine answers for every command that takes these flags.** The transfer
-family (`copy`, `copyto`, `move`, `moveto`, `sync`) and the recovery family
-(`backup`, `restore`) both evaluate them through `crate::filter`, so a rule means
-exactly the same thing wherever it is typed. Three implementations of one flag
-would eventually disagree, and the way they disagree is that a listing shows a
-file the transfer then omits — or, in a `sync`, that a rule reaching only one
-side turns an excluded destination file into an "extra" and deletes it.
+family (`copy`, `copyto`, `move`, `moveto`, `sync`), the recovery family
+(`backup`, `restore`) and every listing verb evaluate them through
+`crate::filter`, so a rule means exactly the same thing wherever it is typed.
+Three implementations of one flag would eventually disagree, and the way they
+disagree is that a listing shows a file the transfer then omits — or, in a
+`sync`, that a rule reaching only one side turns an excluded destination file
+into an "extra" and deletes it.
 
 **A filter is applied to both sides of a diff.** That is the property that makes
 `sync --exclude 'archive/**'` protect `archive/` at the destination rather than
@@ -556,20 +562,73 @@ empty it: the rule hides the tree on both sides, so it is neither transferred no
 deleted.
 
 **What is refused is a filter that will not compile** — a malformed pattern, an
-unreadable or unparseable rule file, a size that does not parse, a `--max-depth`
-that is not a depth. Those are usage errors (exit **1**) raised before anything
-is listed, because a run that proceeded with a rule the operator believes is in
-force is the data-loss case this whole group exists to prevent.
+unreadable or unparseable rule file, a size without a unit, an age that does not
+parse, a `--max-depth` that is not a depth, or a pair of bounds that cross. Those
+are usage errors (exit **1**) raised before anything is listed, because a run
+that proceeded with a rule the operator believes is in force is the data-loss
+case this whole group exists to prevent.
 
 `purge` is the exception that neither honours nor refuses: it removes a whole
 tree by definition, so it **warns** that filters are being ignored and points at
-`delete` instead. The listing family's own coverage is documented per command.
+`delete` instead. `replicate` refuses every one of them by name.
 
-**Precedence: `--exclude` wins.** An entry matching any exclusion is gone
-regardless of what else it matches, and `--include` then narrows whatever
-survived. The two flags can be written into a contradiction, and of the two
-possible readings, "showed less than asked" is recoverable by re-running while
-"showed a file the user told us to hide" is not.
+### Order: the rules are tried in rclone's order, and the first match wins
+
+This is the part most worth reading before writing a filter, because the obvious
+guess is wrong in both tools.
+
+The rules are assembled **by flag kind**, not by position on the command line —
+matching rclone's `parseRules` (`fs/filter/rules.go:212`):
+
+1. every `--include`, in the order given;
+2. every `--include-from` file, in file order;
+3. every `--exclude`;
+4. every `--exclude-from` file;
+5. every `--filter` rule and every `--filter-from` file, interleaved in flag order;
+6. an implicit `- **` at the end **if any inclusion was used**, from any of those flags.
+
+They are then evaluated top to bottom and **the first rule that matches decides**.
+So:
+
+```
+--include '**' --exclude 'private/**'      keeps private/a.jpg
+```
+
+because the inclusion is tried first. That surprises people, it is rclone's
+behaviour, and rclone's own code prints a warning recommending `--filter` when it
+sees both flags used together. Use `--filter` when the order matters:
+
+```
+--filter '- private/**' --filter '+ **'    drops private/a.jpg
+```
+
+A `--filter` argument is one line of a rule file: `+ pattern`, `- pattern`, or a
+lone `!` that discards every rule accumulated so far. A rule file keeps its
+**internal order exactly**, and unlike `--include` it does not append an implicit
+`- **`: a rule file is an ordered program whose author writes their own final
+rule.
+
+**The asymmetry `--include` introduces.** With no `--include` or
+`--include-from` anywhere, an unmatched file is *kept*. The moment one appears,
+the implicit `- **` is appended and an unmatched file is *dropped* — so
+`--include '*.jpg' --exclude '*.png'` means "the JPEGs only", and the `.txt`
+files nobody mentioned are gone.
+
+Three details of that rule are worth spelling out, because each one surprises
+somebody and all three are rclone's:
+
+* **The flag arms it, not the rules.** An `--include-from` file holding only
+  comments still arms it; a `+` inside `--filter` or `--filter-from` does not.
+  `--filter '+ *.jpg'` therefore keeps everything else, exactly as a rule file
+  containing that one line does.
+* **`!` clears the rules and leaves the implicit exclusion standing.** So
+  `--include '*.jpg' --filter '!'` selects **nothing**: the inclusion is gone and
+  the `- **` it armed is not. If you want a clean slate, do not pass an
+  inclusion flag in the first place.
+* **It is appended last**, after every rule from every flag, so any rule can beat
+  it.
+
+### Anchoring and the glob dialect
 
 **Anchoring** follows rclone's rules, because rclone's patterns are the ones
 users bring:
@@ -580,50 +639,68 @@ users bring:
   means what everyone assumes it means.
 * Anything else matches the root-relative path and every component-aligned suffix
   of it, so `tmp/*` finds `photos/tmp/a` as well as `tmp/a`.
+* A trailing `/` makes a rule match directories only. `--exclude 'cache/'` skips
+  the tree; to name the contents by pattern, write `cache/**`.
 
 **Glob dialect:** `*` within one path component, `**` across them, `?` for a
-single character, `[a-z]` and `[!abc]` for classes, `\` to escape. A malformed
-pattern is a usage error (exit **1**) naming the flag it came from.
+single character, `[a-z]` for a class and `[!a-z]` or `[^a-z]` for a negated one,
+`{a,b}` for an alternation (which nests), `\` to escape any of them. A malformed
+pattern is a usage error (exit **1**) naming the flag it came from and the
+position.
 
-**Size syntax** for `--min-size`/`--max-size` (and `--bwlimit`, `--max-transfer`):
-a bare number or an IEC spelling is **binary** (`10G` = `10Gi` = `10GiB` =
-2³⁰ × 10), while an explicit SI spelling is **decimal** (`10GB` = 10⁹ × 10) —
-because someone writing `--max-size 5TB` copied it off a provider's invoice and
-means the invoice's terabyte. `off` (or `0`) disables a limit.
+Two differences from rclone worth knowing if you are bringing patterns across:
 
-### `--include PATTERN`
+* rclone hands the inside of `[…]` to Go's regexp engine, so it accepts
+  `[[:alnum:]]`, `[\d]`, `[\s]` and `[\w]`. DCTL **refuses** those by name and
+  tells you the spelling to use (`[0-9a-zA-Z]`) rather than reading them as a set
+  of literal characters, which is what silently selecting the wrong files would
+  look like.
+* In rclone a class negates only with `^`, so `[!a-z]` there matches `!` *or* a
+  letter. Here `!` negates, as it does in a shell and in rsync.
 
-Show or transfer only paths matching this glob; repeat the flag to accept several
-patterns, and an entry matching any one of them is in scope. With no `--include`
-at all, everything not excluded is in scope — an empty include list is not an
-empty selection. Reach for it when the set you want is easier to describe than
-the set you do not.
+### Sizes and ages
 
-Honoured in full by the listing commands. The transfer commands and
-`backup`/`restore` **refuse** it with exit **7** in this build rather than run
-with the pattern dropped; narrow those runs with an explicit source path, or with
-`--min-size`/`--max-size`/`--max-depth`.
+**Size syntax.** A unit is **required** for `--min-size` and `--max-size`: `100B`
+is a hundred bytes and `100K` is a hundred kibibytes, and a bare `100` is a usage
+error naming both readings. That refusal exists because rclone reads a bare
+number as *kibibytes* (`fs/sizesuffix.go:141`) while every size DCTL prints is in
+bytes — a factor of 1024 on the flag that decides which files move, and on a
+`sync` the files in between are not merely absent from the copy but candidates
+for deletion at the destination. `off` needs no unit and removes the limit.
 
-### `--exclude PATTERN`
+An IEC spelling is binary (`10G` = `10Gi` = `10GiB` = 2³⁰ × 10) and an explicit
+SI spelling is decimal (`10GB` = 10⁹ × 10), because someone writing
+`--max-size 5TB` copied it off a provider's invoice and means the invoice's
+terabyte. The same syntax, without the unit requirement, applies to `--bwlimit`
+and `--max-transfer`.
 
-Drop paths matching this glob, repeatable in the same way, and applied before
-`--include`. This is the flag to use for anything you must never touch, precisely
-because it cannot be overridden by an include: caches, `node_modules`, editor
-droppings, another tool's staging directory.
+**Age syntax.** `ms`, `s`, `m`, `h`, `d`, `w`, `M` (30 days), `y` (365 days), or
+a bare number of seconds — rclone's table, including that `M` is a month and `m`
+is a minute. `off` removes the limit.
 
-Honoured by exactly the same commands as `--include`.
+Both pairs are **inclusive** at the boundary and both are refused if they cross
+(`--min-size 10G --max-size 1G` can never match, so it is a usage error rather
+than a run that reports success having moved nothing).
 
-### `--filter-from PATH`
+### `--include PATTERN` / `--exclude PATTERN`
 
-Read include/exclude rules from a file, one per line — the form that scales past
-what fits on a command line and can be version-controlled. Honoured by the
-listing, transfer and recovery families. A rule file keeps its **internal order
-exactly**,
-because that order is the whole reason the form exists, and unlike the `--include`
-flag it does **not** append an implicit `- **`: a rule file is an ordered program
-whose author is expected to write their own final rule. A file that cannot be read
-or parsed is a usage error rather than a run with the rules dropped, because a
-transfer whose filter file was silently ignored *looks* complete.
+Include only paths matching this glob, or drop paths matching it; repeat either
+flag to accept several patterns. See the ordering section above before mixing
+them — the two are not tried in the order you wrote them.
+
+### `--include-from PATH` / `--exclude-from PATH`
+
+The same, read from a file, one **bare pattern** per line — the flag supplies the
+`+`/`-`. Blank lines and lines starting `#` or `;` are skipped. Use these when
+the list is longer than a command line or wants version-controlling.
+
+### `--filter RULE` / `--filter-from PATH`
+
+`+ pattern`, `- pattern` or `!`, one rule per argument or per line. The only form
+whose order is the order you wrote, which is why it is the one to reach for when
+an exclusion has to beat an inclusion. A file that cannot be read or parsed is a
+usage error rather than a run with the rules dropped, because a transfer whose
+filter file was silently ignored *looks* complete.
 
 ### `--files-from PATH`
 
@@ -631,32 +708,46 @@ Transfer only the paths named in this file, one per line, skipping the directory
 walk entirely — the right tool when an upstream process already knows exactly
 which files changed. Repeatable; several lists are merged into one set.
 
-Honoured by the listing, transfer and recovery families. It is more than a
-convenience in `backup` and `restore`, where it is the way to give a restore
-drill an exact path set. Blank lines and `#` comments are skipped, and every
-surviving line is
-canonicalised the same way an index key is (`/`-separated, NFC), so a list
-written on Windows with backslashes selects the same objects as one written on
-Linux. A line containing `..` is a usage error (exit **1**) naming the file and
-line number, rather than a path quietly resolved outside the transfer root.
+It is more than a convenience in `backup` and `restore`, where it is the way to
+give a restore drill an exact path set. Blank lines and `#` comments are skipped,
+and every surviving line is canonicalised the same way an index key is
+(`/`-separated, NFC), so a list written on Windows with backslashes selects the
+same objects as one written on Linux. A line containing `..` is a usage error
+(exit **1**) naming the file and line number, rather than a path quietly resolved
+outside the transfer root.
+
+Unlike rclone, which refuses `--files-from` combined with any other filter, DCTL
+applies the **intersection**: the list narrows what a walk would have found and
+the other rules narrow it further. That can only ever select a subset of the
+list, which is recoverable by re-running.
 
 A listing verb applies the list as an exact filter rather than as a way to skip
 a walk: an index range scan and a provider listing are already flat, so there is
 no directory recursion to be skipped. The **set of objects shown is the same set
 a transfer would take**, which is the property that matters.
 
-### `--min-size SIZE`
+### `--min-size SIZE` / `--max-size SIZE`
 
-Skip files smaller than this. Applied to objects only, never to directories: a
-directory's size is an aggregate, and filtering directories on it would hide
-every small file inside a large one. Useful for skipping the long tail of tiny
-files whose per-file overhead dominates a transfer.
+Skip files smaller, or larger, than this. Applied to objects only, never to
+directories: a directory's size is an aggregate, and filtering directories on it
+would hide every small file inside a large one. A file whose size was never
+measured — a row written by `dctl index rebuild`, which is a list-only pass — is
+**not** filtered, because both ways of guessing at the size are wrong in a
+direction the operator cannot see.
 
-### `--max-size SIZE`
+### `--min-age AGE` / `--max-age AGE`
 
-Skip files larger than this — the flag that keeps a video or a disk image out of
-a run meant for documents, and a cheap way to bound what an unattended job can
-cost. Directories are exempt for the same reason as `--min-size`.
+`--min-age 7d` keeps files at least seven days old; `--max-age 7d` keeps files
+modified within the last seven days. The window is fixed once when the run starts,
+so a transfer that takes an hour selects the same set at the end as at the
+beginning — and a `sync` sees the same window on both sides.
+
+A file whose modification time nobody recorded is **kept**, not dropped. This is
+a deliberate difference from rclone, which treats an absent time as older than
+every floor: a vault index rebuilt from object headers records no times at all,
+so rclone's rule would hide the entire vault from `--max-age`, including objects
+that plainly qualify. Directories carry no time either — a directory's timestamp
+moves when a child is added, which says nothing about the age of what is inside.
 
 ### `--max-depth N`
 

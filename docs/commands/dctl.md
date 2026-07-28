@@ -78,12 +78,14 @@ earns the exception. Applying the drive rule everywhere meant that on Linux
 exited **0** — a backup landing somewhere nobody named, silently, on the platform
 DCTL is most likely to run on.
 
-What makes the split safe rather than merely rclone-compatible is that remote
-names must be **at least two characters**, enforced when the configuration is
-written, on every platform. A one-character remote can never be declared, so off
-Windows a single-character reference resolves to nothing and fails *by name*: it
-cannot quietly address a remote you did not mean. The two platforms differ in
-which truthful answer they give, never in whether data goes somewhere unasked.
+What makes the split safe rather than merely rclone-compatible is the rule at the
+other end, which is also rclone's (`fs/config/ui.go:577`): **`dctl config create`
+refuses a drive-letter name on a platform that has drives**. So a Windows machine
+can never hold a configuration whose name Windows itself would hide. A
+configuration carried over from Linux may contain one — it loads, it is listed,
+it can be verified and repaired by name — it simply is not reachable as `c:`
+there. That is exactly rclone's position, and it is stated here rather than left
+to be discovered.
 
 Names are 2–64 characters of ASCII letters, digits, `-`, `_` and `.`, and must
 **start** with a letter or a digit — which is also why an argument beginning with

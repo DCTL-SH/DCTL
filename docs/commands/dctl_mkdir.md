@@ -67,9 +67,10 @@ with no credentials exported and no vault password to hand.
 **Target resolution is the directory family's strict parse**, shared with
 [`touch`](dctl_touch.md):
 
-* The target is `REMOTE:PATH`. A remote name is at least two characters, so
-  `C:\photos\2024` is a Windows drive path, `\\server\share\x` is a UNC path, and
-  both are local and refused. A string with no colon at all is local too. Your
+* The target is `REMOTE:PATH`, read by the same rule every other verb uses.
+  `\\server\share\x` is a UNC path on every platform and `C:\photos\2024` is a
+  drive path where drives exist; both are local and refused there. Off Windows
+  `C:photos` names the remote `C`. A string with no colon at all is local too. Your
   operating system's own `mkdir(1)` already handles local paths; to create a
   directory through DCTL, address a remote that names one.
 * `..` components are refused rather than resolved: a target may not climb out of

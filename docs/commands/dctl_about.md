@@ -146,9 +146,10 @@ Three ways a name resolves, tried in this order:
 
 1. **A filesystem path** — `./photos`, `/srv/data`, `C:\data`, `\\server\share`,
    or anything written with the explicit `local:` prefix — is the local
-   provider. The rule is applied identically on every platform, never under
-   `#[cfg(windows)]`, so a drive letter is never mistaken for a remote called
-   `C` even when a remote genuinely called `C` is configured.
+   provider. The UNC half is applied identically on every platform; the drive
+   half is applied where drives exist, which is where rclone applies it. On such
+   a platform a drive letter wins over a remote of the same name, and
+   `dctl config create` refuses to mint one there.
 2. **A configured remote** wins next, and its vault chain is followed to the
    remote that stores bytes. `vault:` reports `provider = vault` and
    `storage_provider = b2`, because a capability report that answered "vault"
@@ -165,8 +166,9 @@ reporting on nothing.
 
 **A name with no colon is a path, not a remote.** `dctl about b2` describes a
 local directory called `b2`; `dctl about b2:` describes the Backblaze backend.
-The colon is what makes a name a remote, and remote names must be at least two
-characters — which is precisely what makes the drive-letter rule unambiguous.
+The colon is what makes a name a remote. A one-character name is legal, as
+rclone's is; what decides `c:` is the platform, and on one with drives the drive
+wins.
 
 ### Where the default remote comes from
 

@@ -211,7 +211,7 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 
 | Code | Name | When |
 |------|------|------|
-| 1 | `usage` | Unparseable command line; a local, UNC, too-short-remote, empty or `..`-containing target; **a run with neither `--force` nor `--interactive` nor `--dry-run`**; `--interactive` with no terminal to prompt on. |
+| 1 | `usage` | Unparseable command line; a local, UNC, malformed-remote, empty or `..`-containing target; **a run with neither `--force` nor `--interactive` nor `--dry-run`**; `--interactive` with no terminal to prompt on. |
 | 3 | `dir_not_found` | The path holds nothing, so there is nothing to purge. |
 | 7 | `fatal_error` | The remote is not configured and is not a known provider. |
 | 22 | `vault_locked` | Wrong password or recovery phrase, or a damaged envelope. |

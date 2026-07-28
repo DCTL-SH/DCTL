@@ -263,7 +263,7 @@ mod tests {
 
     #[test]
     fn inclusions_are_tried_before_exclusions_because_rclone_tries_them_first() {
-        // Corrected against `fs/filter/rules.go:238`. rclone walks its flags by
+        // Corrected against `fs/filter/rules.go:212`. rclone walks its flags by
         // kind — every include, then every exclude — so an inclusion that also
         // covers the excluded tree wins, and `private/a.jpg` is kept. DCTL led
         // with the exclusions and dropped it, which on a listing is a file the

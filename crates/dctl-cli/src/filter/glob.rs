@@ -28,6 +28,29 @@
 //! which is what every shell does and what lets `--include 'a}b'` name the file
 //! a person actually has.
 //!
+//! ## Where this dialect is not rclone's, exactly
+//!
+//! The anchoring and the wildcards match — checked against
+//! `fs/filter/glob.go`'s `globToRegexp`, which maps `*`, `**` and `?` to
+//! `[^/]*`, `.*` and `[^/]`, prefixes `(^|/)` for an unanchored pattern and `^`
+//! for one starting `/`, and always suffixes `$`. Three things about
+//! **character classes** do not, because rclone passes the contents of `[…]`
+//! through to Go's regexp engine verbatim rather than parsing them:
+//!
+//! * **`[!a-z]` negates here and does not there.** In Go's regexp a class
+//!   negates only with `^`, so rclone reads `[!a-z]` as a literal class matching
+//!   `!` *or* a letter. This is the one divergence that can silently select a
+//!   different set of files, and it is kept deliberately: `!` is what shell and
+//!   rsync users mean by negation, every DCTL pattern already assumes it, and a
+//!   class whose author wanted a literal `!` would be written `[a-z!]`. It is
+//!   recorded in `HANDOVER.md` §11.4 so a buyer meets it in the comparison
+//!   rather than in a backup.
+//! * **Named classes are not supported.** rclone accepts `[[:alnum:]]`, `[\d]`
+//!   and `\s`/`\w` (`docs/content/filtering.md:71-77`); a pattern using one is
+//!   a pattern error here, not a silent mismatch.
+//! * **`{{regexp}}` raw sections are not supported.** Same: refused, not
+//!   misread.
+//!
 //! ## `\` is an escape, never a separator
 //!
 //! Worth stating because it is the one place a pattern and a *path* are read
@@ -95,6 +118,18 @@ pub enum PatternProblem {
     TooDeep { limit: usize },
     /// Compiles to more than [`GLOB_MAX_INSTRUCTIONS`] steps.
     TooComplex { limit: usize },
+    /// A POSIX or Perl character class rclone accepts and this dialect does not.
+    ///
+    /// `[[:alnum:]]`, `[\d]`, `[\s]`, `[\w]` and their negated forms are legal
+    /// in rclone, which hands the contents of `[…]` to Go's regexp engine
+    /// verbatim (`docs/content/filtering.md:71-77`). This parser reads a class
+    /// as a set of characters and ranges, so it would read `[[:alnum:]]` as the
+    /// eight characters `[`, `:`, `a`, `l`, `n`, `u`, `m`, `:` followed by a
+    /// literal `]` — a pattern that compiles, matches, and matches the wrong
+    /// files. Refusing is the only honest answer: an unsupported syntax that
+    /// silently means something else is the failure this whole module is
+    /// written to avoid.
+    UnsupportedClass { syntax: &'static str },
 }
 
 impl fmt::Display for PatternProblem {
@@ -118,6 +153,11 @@ impl fmt::Display for PatternProblem {
             Self::TooComplex { limit } => {
                 write!(f, "the pattern needs more than {limit} matching steps")
             }
+            Self::UnsupportedClass { syntax } => write!(
+                f,
+                "'{syntax}' is a named character class, which this dialect does not \
+                 support — spell the characters out, as in '[0-9a-zA-Z]'"
+            ),
         }
     }
 }
@@ -360,6 +400,29 @@ impl<'a> Parser<'a> {
         Ok(Node::Alternation(branches))
     }
 
+    /// The named-class syntax starting at the cursor, if any.
+    ///
+    /// `[:` inside a class opens a POSIX class in rclone's dialect and `\d`,
+    /// `\s`, `\w` (and their upper-case negations) are Perl classes. All are
+    /// refused by the caller rather than read as literal characters — see
+    /// [`PatternProblem::UnsupportedClass`].
+    fn named_class_at(&self) -> Option<&'static str> {
+        match (self.peek()?, self.at(1)) {
+            (GLOB_CLASS_OPEN, Some(':')) => Some("[:...:]"),
+            (GLOB_ESCAPE, Some(letter @ ('d' | 'D' | 's' | 'S' | 'w' | 'W'))) => {
+                Some(match letter {
+                    'd' => "\\d",
+                    'D' => "\\D",
+                    's' => "\\s",
+                    'S' => "\\S",
+                    'w' => "\\w",
+                    _ => "\\W",
+                })
+            }
+            _ => None,
+        }
+    }
+
     /// Parse `[abc]`, positioned on the opening bracket.
     fn class(&mut self) -> Result<Node, PatternError> {
         let open = self.index;
@@ -385,6 +448,13 @@ impl<'a> Parser<'a> {
                 return Ok(Node::Class { negated, items });
             }
             first = false;
+
+            // Syntax rclone accepts and this dialect cannot express. Checked
+            // before the character is taken as a literal, because taking it as a
+            // literal is exactly the silent mismatch being prevented.
+            if let Some(syntax) = self.named_class_at() {
+                return self.fail(self.index, PatternProblem::UnsupportedClass { syntax });
+            }
 
             let low = if current == GLOB_ESCAPE {
                 let Some(escaped) = self.at(1) else {
@@ -991,5 +1061,57 @@ mod tests {
     fn an_exhausted_state_set_stops_the_scan() {
         // A long path that diverges immediately must not be walked to the end.
         assert!(!matches("zzz*", &format!("a{}", "b".repeat(10_000))));
+    }
+
+    #[test]
+    fn a_named_character_class_is_refused_rather_than_read_as_literals() {
+        // The silent mismatch this prevents: rclone hands the contents of `[…]`
+        // to Go's regexp engine, so `[[:alnum:]]` there is "any letter or
+        // digit". This parser reads a class as characters and ranges, so it
+        // would have read the same pattern as the eight characters `[ : a l n
+        // u m :` followed by a literal `]` — a pattern that compiles, matches,
+        // and matches the wrong files.
+        for pattern in [
+            "[[:alnum:]].txt",
+            "[[:punct:]]",
+            "x[[:digit:]]y",
+            "[\\d]",
+            "[\\D]",
+            "[\\s]",
+            "[\\w]",
+            "[^[:space:]]",
+            "[![:space:]]",
+        ] {
+            let error = Glob::compile(pattern)
+                .expect_err(&format!("'{pattern}' must be refused, not misread"));
+            assert!(
+                matches!(error.problem(), PatternProblem::UnsupportedClass { .. }),
+                "'{pattern}' gave {error}"
+            );
+            // The message has to say what to write instead, or the refusal is
+            // just a wall.
+            assert!(
+                error.to_string().contains("[0-9a-zA-Z]"),
+                "'{pattern}': {error}"
+            );
+            assert!(!error.hint().is_empty());
+        }
+    }
+
+    #[test]
+    fn an_ordinary_class_still_compiles_and_a_literal_bracket_still_works() {
+        // The refusal must not catch the classes people actually write, and
+        // must not catch a `[` that is merely a member of one.
+        for pattern in ["[a-z]", "[0-9a-fA-F]", "[!abc]", "[^abc]", "[]a]", "[a[b]"] {
+            assert!(
+                Glob::compile(pattern).is_ok(),
+                "'{pattern}' should still compile"
+            );
+        }
+        // `[a[b]` is a class of three characters, one of which is `[`.
+        let glob = Glob::compile("[a[b]").expect("compiles");
+        assert!(glob.matches("["));
+        assert!(glob.matches("a"));
+        assert!(!glob.matches("c"));
     }
 }

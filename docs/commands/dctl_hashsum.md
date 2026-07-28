@@ -54,10 +54,9 @@ certificate would outlive the incident.
 The target must be a remote. Hashes come from the vault's integrity manifest; a
 local path has none, and quietly hashing local files instead would answer a
 different question from the one that was asked (use `sha256sum` for that).
-Following rclone's rule, `C:\data`, `d:/data` and `\\server\share` are treated
-as **local** on every platform, so a script written on Windows behaves the same
-on a Linux build agent; remote names must be at least two characters, which is
-what makes the drive-letter rule unambiguous. Paths inside a vault are
+Following rclone's rule, `\\server\share` is treated as **local** on every
+platform and `C:\data` and `d:/data` are local where drives exist; off Windows
+they name the remotes `C` and `d`. Paths inside a vault are
 canonicalised (`/`-separated, NFC, no `.` or `..`); a `..` component is rejected.
 
 Paths may contain spaces, and they survive the round trip: only the *first*

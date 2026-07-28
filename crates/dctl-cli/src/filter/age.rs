@@ -2,7 +2,7 @@
 //!
 //! The two flags a migrating rclone user reaches for after `--exclude`, and the
 //! pair whose direction is easiest to get backwards. rclone's reading, kept
-//! exactly (`fs/filter/filter.go:205,527`):
+//! exactly (`fs/filter/filter.go:205,532`):
 //!
 //! * **`--min-age 7d`** keeps files that are *at least* seven days old. It is a
 //!   floor on **age**, which is a ceiling on modification time: rclone computes
@@ -56,7 +56,7 @@ pub enum AgeProblem {
     ///
     /// `--min-age 30d --max-age 7d` asks for files both older than a month and
     /// younger than a week. rclone refuses the same pair
-    /// (`fs/filter/filter.go:211`), and for the reason `PLAN.md` §6 cares about:
+    /// (`fs/filter/filter.go:210`), and for the reason `PLAN.md` §6 cares about:
     /// a run that can only ever move nothing must not report success.
     Crossed { min: i64, max: i64 },
 }

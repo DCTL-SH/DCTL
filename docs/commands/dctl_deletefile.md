@@ -177,7 +177,7 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 
 | Code | Name | When |
 |------|------|------|
-| 1 | `usage` | Unparseable command line; a target that names a directory (trailing separator) or the vault root (`REMOTE:`); a local, UNC or too-short-remote target; a target containing `..`; `--interactive` with no terminal to prompt on. |
+| 1 | `usage` | Unparseable command line; a target that names a directory (trailing separator) or the vault root (`REMOTE:`); a local, UNC or malformed-remote target; a target containing `..`; `--interactive` with no terminal to prompt on. |
 | 4 | `file_not_found` | The named object does not exist. |
 | 7 | `fatal_error` | The remote is not configured and is not a known provider. |
 | 22 | `vault_locked` | Wrong password or recovery phrase, or a damaged envelope. |

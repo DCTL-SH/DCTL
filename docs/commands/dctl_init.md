@@ -408,10 +408,10 @@ created       false
 registered    false
 ```
 
-A Windows drive path is a local location, on every platform. `C:` is always a
-drive letter and never a remote name — remote names are at least two characters
-precisely so this can never be ambiguous — so the whole argument is handed to
-the filesystem as typed:
+A Windows drive path is a local location on a platform that has drives, which is
+where rclone treats it as one. `C:` is a drive letter there and wins over any
+remote of the same name — and `dctl config create` refuses to mint such a name on
+such a machine — so the whole argument is handed to the filesystem as typed:
 
 ```console
 C:\> dctl init --name main --base C:\vaults\main --index C:\vaults\main.redb --dry-run

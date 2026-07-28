@@ -34,9 +34,10 @@ object. To sweep empty directories independently of a delete, use
 [`rmdirs`](dctl_rmdirs.md).
 
 **Target resolution.** `REMOTE:PATH` is parsed strictly, and anything ambiguous
-is refused rather than guessed at. A remote name must be at least two characters
-— which is what makes `C:\data` unambiguously a Windows drive path on every
-platform, not just on Windows — and UNC paths (`\\server\share`), bare local
+is refused rather than guessed at. `C:\data` is a Windows drive path where drives
+exist and the remote `C` elsewhere, which is rclone's rule and the same rule the
+transfer verbs apply — a removal that refused a remote `copy` had just written to
+would be the worst possible disagreement. UNC paths (`\\server\share`), bare local
 paths (`/srv/data`), and any path containing a `..` component are all rejected
 with exit code 1. The surviving path is cleaned and NFC-normalised, so
 `vault:./photos//2024/`, `vault:photos\2024` and `vault:photos/2024` are one

@@ -42,9 +42,23 @@ flight, and nothing in the object itself says which. The age is the *only* thing
 standing between a cleanup and a concurrent run's live data. It defaults to
 `24h` — comfortably longer than any single verified write — and lowering it on a
 machine where other DCTL processes may be running risks deleting their staged
-parts. Ages are written `24h`, `7d`, `90m`, `30s`, or as a bare number of
-seconds; the suffixes are exactly the ones DCTL prints, so anything it shows you
-can be typed back at it. `0` is legal and means no margin at all.
+parts.
+
+It is the **global** `--min-age`, documented in
+[GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md#sizes-and-ages), not a flag of this command.
+That is a correction: `cleanup` used to declare its own `--min-age` with its own
+parser behind it, in which `1M` meant one *minute* while the same string means
+one *month* to rclone and to every other age DCTL reads. Two dialects for one
+flag name inside one binary is how a sweep comes to leave a margin thirty times
+smaller than the operator intended, against a class of object that is
+indistinguishable from another process's live work. There is one parser now:
+`ms`, `s`, `m`, `h`, `d`, `w`, `M` (30 days), `y` (365 days), or a bare number of
+seconds. `off` and `0` are legal and mean no margin at all, which the plan prints
+as `0s` above the destructive gate rather than leaving you to infer.
+
+The 24-hour default is applied by this command rather than by the flag, because
+an absent `--min-age` on `copy` means "no age filter" while an absent `--min-age`
+here has to mean the safety margin.
 
 **Scope.** The positional argument is written `REMOTE:`. A path may be given and
 scopes the sweep to the objects beneath it where the provider can list by
@@ -52,8 +66,8 @@ prefix; abandoned multipart uploads and object versions are provider-level
 concepts, so treat a path as a hint rather than a hard boundary. **Filters are
 ignored** — debris has no logical path for a pattern to match, so `--include`
 and `--exclude` cannot narrow this command. Target parsing is the family's
-strict one: at least two characters before the colon (so `C:\data` is a local
-path and is refused), no UNC paths, no `..`.
+strict one: the same rule every other verb applies (a drive letter is a drive on
+a platform that has drives, and a remote everywhere else), no UNC paths, no `..`.
 
 **Reclaimed space is reported through the ordinary counters.** What was removed
 is counted through the same `file_deleted` statistic and end-of-run summary rows
@@ -168,8 +182,9 @@ $ echo $?
 1
 ```
 
-A local path is not a remote. On Windows, `C:` is a drive letter — a remote name
-is at least two characters, which is what keeps the two apart on every platform:
+A local path is not a remote. On Windows `C:` is a drive letter and is refused
+here as a local path; off Windows the same argument names the remote `C`, which,
+unconfigured, fails by name:
 
 ```console
 $ dctl cleanup C:\Users\me\vault --force
@@ -193,9 +208,10 @@ error: invalid value 'everything' for '--class <CLASS>'
       --class <CLASS>  Class of debris to reclaim. Repeatable; every class by
                        default [possible values: multipart, staging, orphans,
                        versions]
-      --min-age <AGE>  Leave anything younger than this alone — it may still be
-                       in flight [default: 24h]
 ```
+
+`--min-age` is inherited from the global Filtering group and defaults to `24h`
+for this command; see the note above.
 
 The positional argument is `<REMOTE:>`: the remote to sweep. A path scopes the
 sweep to the objects beneath it, where the provider can list by prefix.
@@ -223,7 +239,7 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 
 | Code | Name | When |
 |------|------|------|
-| 1 | `usage` | Unparseable command line, including an unknown `--class`; an unparseable or overflowing `--min-age`; a local, UNC, too-short-remote, empty or `..`-containing target; `--interactive` with no terminal to prompt on. |
+| 1 | `usage` | Unparseable command line, including an unknown `--class`; an unparseable `--min-age`; a local, UNC, malformed-remote, empty or `..`-containing target; `--interactive` with no terminal to prompt on. |
 | 7 | `fatal_error` | The remote is not configured and is not a known provider. |
 | 22 | `vault_locked` | Wrong password or recovery phrase, or a damaged envelope. |
 | 23 | `index_error` | The encrypted index or its journal could not be read or written. |

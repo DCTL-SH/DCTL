@@ -166,7 +166,7 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 
 | Code | Name | When |
 |------|------|------|
-| 1 | `usage` | Unparseable command line; a local, UNC, too-short-remote, empty or `..`-containing target; `--interactive` with no terminal to prompt on. A bare `REMOTE:` is **not** an error here. |
+| 1 | `usage` | Unparseable command line; a local, UNC, malformed-remote, empty or `..`-containing target; `--interactive` with no terminal to prompt on. A bare `REMOTE:` is **not** an error here. |
 | 7 | `fatal_error` | The remote is not configured and is not a known provider. |
 | 22 | `vault_locked` | Wrong password or recovery phrase, or a damaged envelope. |
 | 23 | `index_error` | The encrypted index or its journal could not be read or written. |

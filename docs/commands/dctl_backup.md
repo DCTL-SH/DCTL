@@ -128,12 +128,11 @@ same reason: no file can satisfy both, so the run would report a clean success
 having stored nothing.
 
 **Paths.** The vault side is written `REMOTE:PATH`; the local side is an ordinary
-path. Following rclone's rule, `C:\data`, `d:/data` and `\\server\share` are
-treated as **local on every platform**, so a script written on Windows behaves
-identically on a Linux build agent. Remote names are at least two characters,
-which is exactly what makes the drive-letter rule unambiguous — `C:\vault` as the
-`REMOTE` operand is rejected as a usage error rather than resolving to a remote
-called `C`. Logical paths inside the vault are canonicalised (`/`-separated, NFC,
+path. Following rclone's rule, `\\server\share` is local on every platform and
+`C:\data` and `d:/data` are local on a platform that has drives — off Windows
+they name the remotes `C` and `d`, exactly as rclone reads them, and a remote
+that is not configured fails by name rather than becoming a directory nobody
+asked for. Logical paths inside the vault are canonicalised (`/`-separated, NFC,
 no `.` or `..`), so a name typed on a Mac and a name typed on Linux address the
 same object.
 
@@ -207,8 +206,8 @@ error: 2 name(s) would not restore on every supported platform
 
 Back up a Windows tree into a Backblaze B2 vault, as one named snapshot. The
 local side is an ordinary Windows path, drive letter and all; the vault side must
-be `REMOTE:PATH`, and a remote name of at least two characters is what keeps the
-two unambiguous:
+be `REMOTE:PATH`, and on Windows the drive letter wins over any remote of the
+same name, so the two are never confused:
 
 ```
 dctl backup C:\Users\jo\Documents b2prod:bucket/laptop --snapshot --snapshot-name pre-upgrade

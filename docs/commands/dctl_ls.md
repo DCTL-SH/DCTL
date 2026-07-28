@@ -131,11 +131,11 @@ command falls back to `--remote` / `DCTL_REMOTE`, which goes through the same
 grammar and may itself carry a path (`--remote vault:photos`). With neither, the
 command is a usage error rather than a guess.
 
-`C:\data`, `d:/data` and `\\nas\share\photos` are **local** paths on every
-platform, checked before the colon split, so a script written on Windows behaves
-identically on a Linux build agent. Remote names need at least two characters —
-one character before a colon is always read as a drive letter — and may use
-letters, digits, `-`, `_` and `.`. The path half is canonicalised on the way in:
+`\\nas\share\photos` is a **local** path on every platform and `C:\data` and
+`d:/data` are local where drives exist, both checked before the colon split. Off
+Windows those two name the remotes `C` and `d`, which is rclone's rule. Remote
+names may be one character or more and may use letters, digits, `-`, `_` and `.`.
+The path half is canonicalised on the way in:
 `photos//2024/`, `photos/./2024` and `photos/2024` address the same prefix, an
 NFD spelling typed on macOS finds the NFC records an index written on Linux
 holds, and a `..` component is rejected rather than allowed to walk out of the
