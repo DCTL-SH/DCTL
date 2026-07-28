@@ -51,7 +51,6 @@
 //!    file count as gone. [`remove`] documents the ordering in full, including
 //!    what a crash at each point leaves behind and which command repairs it.
 
-pub mod age;
 pub mod dirs;
 pub mod engine;
 pub mod filters;
@@ -65,7 +64,6 @@ pub mod report;
 pub mod selection;
 pub mod target;
 
-pub use age::parse_age;
 pub use filters::Filters;
 pub use flow::{Removal, execute};
 pub use operation::Operation;

@@ -743,17 +743,28 @@ pub const CONFIG_FILE_MODE: u32 = 0o600;
 
 /// Minimum length of a remote name a **config file** may declare.
 ///
-/// Two, not one, so a declared name can never be mistaken for a Windows drive
-/// letter: `c:\data` must always parse as a path, never as a remote called `c`.
+/// **One.** rclone's `configNameRe` — `fs/fspath/path.go:16`, the `+` quantifier
+/// on the leading character class — accepts a one-character name, and
+/// `CheckConfigName` (`:45`) applies that pattern on every platform. A remote
+/// called `r` is therefore something an rclone user can already have, and a
+/// migration that refused to import it would fail on the config file rather than
+/// on any data.
 ///
-/// This is a rule about what may be *written down*, and it holds on every
-/// platform so one config file means one thing everywhere. It is deliberately
-/// **not** the rule for classifying a command-line argument — see
-/// [`DRIVE_LETTERS_EXIST`] — and the two together are what make a
-/// single-character reference safe to treat as a remote off Windows: it parses
-/// as one, and no configuration can ever supply it, so the outcome is always
-/// "unknown remote 'r'" and never somewhere the user did not name.
-pub const MIN_REMOTE_NAME_LEN: usize = 2;
+/// This used to be two, on the argument that `c:\data` must never read as a
+/// remote called `c`. That property is real and is still enforced — but by
+/// [`DRIVE_LETTERS_EXIST`] at *classification* time, which is where rclone
+/// enforces it too (`driveletter.IsDriveLetter`, consulted in `Parse` at
+/// `fs/fspath/path.go:163`). Enforcing it a second time at *declaration* time
+/// bought nothing and cost a name rclone allows: on Windows `c:` is a drive
+/// before the config is ever consulted, and off Windows there is no drive to be
+/// confused with.
+///
+/// The rule that remains at declaration time is platform-independent, so one
+/// config file still means one thing everywhere: any name of one character or
+/// more may be written down. What a *Windows* machine additionally refuses is
+/// **creating** a name that a drive letter would shadow — see
+/// [`crate::config::drive_letter_conflict`], which is rclone's `ui.go:577` rule.
+pub const MIN_REMOTE_NAME_LEN: usize = 1;
 
 /// Whether this platform has drive letters, and therefore whether `r:` is a
 /// path rather than a reference to a remote called `r`.
@@ -767,14 +778,13 @@ pub const MIN_REMOTE_NAME_LEN: usize = 2;
 /// so on Linux `r:` is a remote reference there too.
 ///
 /// The usual objection to a `cfg`-gated rule — that one command line then means
-/// two things depending on where it runs — is answered by
-/// [`MIN_REMOTE_NAME_LEN`] rather than waved away. A one-character remote cannot
-/// be declared in any configuration on any platform, so off Windows a
-/// single-character reference resolves to nothing and **fails**. The two
-/// platforms therefore differ only in *which error or path* they produce for an
-/// argument that is a drive specifier on one and an undefined remote on the
-/// other; neither silently addresses a place the user did not ask for, which is
-/// the property that actually matters.
+/// two things depending on where it runs — is answered where rclone answers it,
+/// at the point a name is *created*: [`crate::config::drive_letter_conflict`]
+/// refuses a single-letter remote on a platform that has drives, so a config
+/// written on Windows can never contain a name Windows cannot address. A config
+/// written on Linux may, and then names a remote that a Windows reader can load,
+/// list and repair but not reach through `r:` — exactly rclone's position, and
+/// stated rather than discovered.
 ///
 /// Consumed through [`crate::remote::spec`], which takes it as a parameter so
 /// both platforms' behaviour is asserted by the test suite on either.
@@ -4190,12 +4200,14 @@ pub const CLEANUP_DEFAULT_MIN_AGE: &str = "24h";
 // name a staged object wears, and `cleanup` reports that value directly. A
 // constant here would be a second opinion that could drift from the writers'.
 
-/// Hint appended to an age-parsing failure, showing one example of each shape.
-///
-/// Mirrors [`SIZE_PARSE_EXAMPLES`]: the accepted spellings are exactly the ones
-/// [`crate::output::size::duration`] prints, so anything DCTL shows can be
-/// typed back at it.
-pub const CLEANUP_AGE_PARSE_EXAMPLES: &str = "24h, 7d, 90m, or 30s";
+// `CLEANUP_AGE_PARSE_EXAMPLES` used to live here, beside a second age parser
+// that `dctl cleanup --min-age` owned. Both are gone. That parser folded case,
+// so `1M` meant one *minute* to `cleanup` and one *month* to rclone and to
+// [`AGE_SUFFIX_SECONDS`] — two dialects for one flag name inside one binary,
+// and a sweep that could delete parts thirty times younger than the operator
+// meant to spare. `cleanup` now reads the global `--min-age` through
+// [`crate::filter::parse_age`], and [`AGE_PARSE_EXAMPLES`] is the only list of
+// spellings there is.
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Utility family — `about`, `version`, `completion`
@@ -4745,6 +4757,12 @@ pub const FILTER_FLAG_INCLUDE: &str = "--include";
 /// See [`FILTER_FLAG_INCLUDE`].
 pub const FILTER_FLAG_EXCLUDE: &str = "--exclude";
 /// See [`FILTER_FLAG_INCLUDE`].
+pub const FILTER_FLAG_INCLUDE_FROM: &str = "--include-from";
+/// See [`FILTER_FLAG_INCLUDE`].
+pub const FILTER_FLAG_EXCLUDE_FROM: &str = "--exclude-from";
+/// See [`FILTER_FLAG_INCLUDE`].
+pub const FILTER_FLAG_FILTER: &str = "--filter";
+/// See [`FILTER_FLAG_INCLUDE`].
 pub const FILTER_FLAG_FILTER_FROM: &str = "--filter-from";
 /// See [`FILTER_FLAG_INCLUDE`].
 pub const FILTER_FLAG_FILES_FROM: &str = "--files-from";
@@ -4753,7 +4771,45 @@ pub const FILTER_FLAG_MIN_SIZE: &str = "--min-size";
 /// See [`FILTER_FLAG_INCLUDE`].
 pub const FILTER_FLAG_MAX_SIZE: &str = "--max-size";
 /// See [`FILTER_FLAG_INCLUDE`].
+pub const FILTER_FLAG_MIN_AGE: &str = "--min-age";
+/// See [`FILTER_FLAG_INCLUDE`].
+pub const FILTER_FLAG_MAX_AGE: &str = "--max-age";
+/// See [`FILTER_FLAG_INCLUDE`].
 pub const FILTER_FLAG_MAX_DEPTH: &str = "--max-depth";
+
+/// Age suffixes accepted by `--min-age` and `--max-age`, and what each is worth
+/// in seconds.
+///
+/// rclone's table verbatim (`fs/parseduration.go:39` and `time.ParseDuration`):
+/// a month is thirty days and a year is 365, neither being a calendar month or a
+/// leap-aware year, because an age filter is a rolling window rather than a date
+/// and an operator writing `--max-age 1M` means "the last month or so".
+///
+/// Ordered longest-suffix-first so `ms` is matched before `m`; the parser walks
+/// this table in order and a shorter suffix listed first would swallow the longer
+/// one and silently turn 500 milliseconds into 500 minutes.
+///
+/// The empty suffix is last and means **seconds**, which is rclone's default and
+/// not an arbitrary choice — `--max-age 3600` is an hour in both tools.
+pub const AGE_SUFFIX_SECONDS: &[(&str, f64)] = &[
+    ("ms", 0.001),
+    ("s", 1.0),
+    ("m", 60.0),
+    ("h", 3600.0),
+    ("d", 86_400.0),
+    ("w", 604_800.0),
+    ("M", 2_592_000.0),
+    ("y", 31_536_000.0),
+    ("", 1.0),
+];
+
+/// The spelling that turns an age limit off, matching [`SIZE_LIMIT_OFF`] and
+/// rclone's `fs.DurationOff`.
+pub const AGE_LIMIT_OFF: &str = "off";
+
+/// Examples shown when an age cannot be parsed.
+pub const AGE_PARSE_EXAMPLES: &str = "'30s', '90m', '2h', '7d', '1w', '6M', '1y'; a bare number is \
+     seconds";
 
 /// Advice attached to a pattern that failed to compile.
 ///
@@ -4786,13 +4842,15 @@ mod tests {
     }
 
     #[test]
-    fn remote_names_cannot_collide_with_drive_letters() {
-        const {
-            assert!(
-                MIN_REMOTE_NAME_LEN >= 2,
-                "a one-character remote name would be ambiguous with C:\\"
-            );
-        }
+    fn a_one_character_remote_name_is_declarable_as_rclone_declares_one() {
+        // rclone's `configNameRe` accepts a single character (`fs/fspath/path.go:16`)
+        // and `CheckConfigName` applies it on every platform. The `c:\data`
+        // ambiguity is settled at classification time by DRIVE_LETTERS_EXIST,
+        // which is where rclone settles it too — not by forbidding the name.
+        assert_eq!(
+            MIN_REMOTE_NAME_LEN, 1,
+            "a name rclone accepts must be importable"
+        );
     }
 
     #[test]
@@ -4989,7 +5047,8 @@ mod tests {
         // would make `config providers` print the same row twice.
         for (index, (name, description)) in REMOTE_PROVIDER_TYPES.iter().enumerate() {
             assert_eq!(*name, name.to_ascii_lowercase(), "'{name}' is unmatchable");
-            // A one-character type could not be used as a remote name either.
+            // A type name is also a reserved remote name, so it has to be a
+            // legal one — the floor is one character, as rclone's is.
             assert!(name.len() >= MIN_REMOTE_NAME_LEN, "'{name}' is too short");
             assert!(!description.is_empty(), "'{name}' has no description");
             for (other, _) in &REMOTE_PROVIDER_TYPES[index + 1..] {
@@ -5965,8 +6024,15 @@ mod tests {
     }
 
     #[test]
-    fn the_cleanup_age_examples_include_the_default() {
-        assert!(CLEANUP_AGE_PARSE_EXAMPLES.contains(CLEANUP_DEFAULT_MIN_AGE));
+    fn the_cleanup_default_margin_is_a_spelling_the_shared_parser_accepts() {
+        // It used to be checked against a second, `cleanup`-only list of
+        // examples. The list is gone; what matters now is that the default is
+        // readable by the one parser every age goes through, and that it is a
+        // real margin rather than zero.
+        assert_eq!(
+            crate::filter::parse_age(CLEANUP_DEFAULT_MIN_AGE),
+            Ok(Some(24 * 60 * 60))
+        );
     }
 
     #[test]

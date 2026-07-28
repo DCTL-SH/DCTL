@@ -125,14 +125,22 @@ impl Selection {
         }
     }
 
-    /// Whether a file at this path and size survives every rule.
+    /// Whether a file at this path, size and modification time survives every
+    /// rule.
     ///
     /// The single question a walk should ask, because the pattern rules, the
-    /// path list and the size bounds are one decision: asking them separately is
-    /// how a caller applies one and forgets another.
+    /// path list, the size bounds and the age window are one decision: asking
+    /// them separately is how a caller applies one and forgets another.
+    ///
+    /// `modified` is unix seconds, and [`None`] where the side genuinely does
+    /// not know — a vault index row written by a rebuild, or a filesystem that
+    /// records no times. It is a parameter rather than an option the filter
+    /// carries because only the caller has the value, and that is what makes
+    /// `--max-age` doing nothing here a compile error rather than a silence.
     #[must_use]
-    pub fn admits_file(&self, path: &str, size: u64) -> bool {
-        self.filter.admits_file(path, size)
+    pub fn admits_file(&self, path: &str, size: u64, modified: Option<i64>) -> bool {
+        self.filter
+            .admits(&crate::filter::Candidate::file(path, size).at(modified))
     }
 
     /// Whether a walk may descend into this directory.
@@ -182,8 +190,8 @@ mod tests {
     #[test]
     fn an_unfiltered_run_admits_everything() {
         let selection = resolve(&[]).unwrap();
-        assert!(selection.admits_file("anything", 0));
-        assert!(selection.admits_file("anything", u64::MAX));
+        assert!(selection.admits_file("anything", 0, None));
+        assert!(selection.admits_file("anything", u64::MAX, None));
         assert!(selection.may_descend("anything/at/all"));
         assert!(!selection.is_restricting());
     }
@@ -193,10 +201,10 @@ mod tests {
         let selection = resolve(&["--min-size", "1k", "--max-size", "2k"]).unwrap();
         assert_eq!(selection.min_size, Some(1024));
         assert_eq!(selection.max_size, Some(2048));
-        assert!(!selection.admits_file("a", 1023));
-        assert!(selection.admits_file("a", 1024));
-        assert!(selection.admits_file("a", 2048));
-        assert!(!selection.admits_file("a", 2049));
+        assert!(!selection.admits_file("a", 1023, None));
+        assert!(selection.admits_file("a", 1024, None));
+        assert!(selection.admits_file("a", 2048, None));
+        assert!(!selection.admits_file("a", 2049, None));
     }
 
     #[test]
@@ -230,8 +238,8 @@ mod tests {
     #[test]
     fn depth_one_is_the_top_level_only() {
         let selection = resolve(&["--max-depth", "1"]).unwrap();
-        assert!(selection.admits_file("a.txt", 1));
-        assert!(!selection.admits_file("sub/a.txt", 1));
+        assert!(selection.admits_file("a.txt", 1, None));
+        assert!(!selection.admits_file("sub/a.txt", 1, None));
         // A directory *at* the limit is still entered — the limit applies to
         // what is inside it, not to the act of opening it.
         assert!(selection.may_descend(""));
@@ -246,16 +254,16 @@ mod tests {
         let selection = resolve(&["--exclude", "*.iso"]).unwrap();
         assert_eq!(selection.rules, 1);
         assert!(selection.is_restricting());
-        assert!(selection.admits_file("photo.jpg", 10));
-        assert!(!selection.admits_file("ubuntu.iso", 10));
+        assert!(selection.admits_file("photo.jpg", 10, None));
+        assert!(!selection.admits_file("ubuntu.iso", 10, None));
     }
 
     #[test]
     fn an_include_drops_everything_it_did_not_name() {
         // rclone's asymmetry, honoured here as it is in the transfer family.
         let selection = resolve(&["--include", "*.jpg"]).unwrap();
-        assert!(selection.admits_file("photo.jpg", 10));
-        assert!(!selection.admits_file("notes.txt", 10));
+        assert!(selection.admits_file("photo.jpg", 10, None));
+        assert!(!selection.admits_file("notes.txt", 10, None));
     }
 
     #[test]
@@ -266,8 +274,8 @@ mod tests {
         let arg = rules.display().to_string();
 
         let selection = resolve(&["--filter-from", arg.as_str()]).unwrap();
-        assert!(!selection.admits_file("build/out.tmp", 1));
-        assert!(selection.admits_file("build/out.o", 1));
+        assert!(!selection.admits_file("build/out.tmp", 1, None));
+        assert!(selection.admits_file("build/out.o", 1, None));
     }
 
     #[test]
@@ -291,10 +299,10 @@ mod tests {
         let list_arg = list.display().to_string();
         let selection = resolve(&["--files-from", list_arg.as_str()]).unwrap();
         assert_eq!(selection.only.as_ref().map(BTreeSet::len), Some(2));
-        assert!(selection.admits_file("photos/2024/a.jpg", 1));
+        assert!(selection.admits_file("photos/2024/a.jpg", 1, None));
         // Noise in the spelling must not produce a path that matches nothing.
-        assert!(selection.admits_file("photos/2024/b.jpg", 1));
-        assert!(!selection.admits_file("photos/2024/c.jpg", 1));
+        assert!(selection.admits_file("photos/2024/b.jpg", 1, None));
+        assert!(!selection.admits_file("photos/2024/c.jpg", 1, None));
     }
 
     #[test]
@@ -325,7 +333,7 @@ mod tests {
         let list_arg = list.display().to_string();
         let selection = resolve(&["--files-from", list_arg.as_str()]).unwrap();
         // Addressed from Linux: composed. Both must be the same object.
-        assert!(selection.admits_file("caf\u{e9}/a.jpg", 1));
+        assert!(selection.admits_file("caf\u{e9}/a.jpg", 1, None));
     }
 
     #[test]
@@ -350,7 +358,10 @@ mod tests {
         let selection = resolve(&["--exclude", "*.iso", "--min-size", "1k"]).unwrap();
         assert_eq!(selection.rules, 1);
         assert_eq!(selection.min_size, Some(1024));
-        assert!(!selection.admits_file("ubuntu.iso", 4096));
-        assert!(!selection.admits_file("tiny.txt", 10), "below --min-size");
+        assert!(!selection.admits_file("ubuntu.iso", 4096, None));
+        assert!(
+            !selection.admits_file("tiny.txt", 10, None),
+            "below --min-size"
+        );
     }
 }

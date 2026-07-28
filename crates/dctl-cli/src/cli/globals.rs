@@ -309,9 +309,15 @@ pub struct GlobalArgs {
 
     // ── Filtering ────────────────────────────────────────────────────────
     /// Include only paths matching this glob. Repeatable.
+    ///
+    /// `allow_hyphen_values` because a pattern may legitimately begin with `-`
+    /// (`--exclude '-old*'`), and because rclone's parser consumes the next
+    /// argument as the value whatever it starts with. Without it a pattern a
+    /// migrating script already contains is reported as an unknown flag.
     #[arg(
         long,
         global = true,
+        allow_hyphen_values = true,
         value_name = "PATTERN",
         help_heading = "Filtering"
     )]
@@ -321,12 +327,38 @@ pub struct GlobalArgs {
     #[arg(
         long,
         global = true,
+        allow_hyphen_values = true,
         value_name = "PATTERN",
         help_heading = "Filtering"
     )]
     pub exclude: Vec<String>,
 
-    /// Read include/exclude rules from a file. Repeatable.
+    /// Read include patterns from a file, one per line. Repeatable.
+    #[arg(long, global = true, value_name = "PATH", help_heading = "Filtering")]
+    pub include_from: Vec<PathBuf>,
+
+    /// Read exclude patterns from a file, one per line. Repeatable.
+    #[arg(long, global = true, value_name = "PATH", help_heading = "Filtering")]
+    pub exclude_from: Vec<PathBuf>,
+
+    /// One rule, written '+ pattern', '- pattern' or '!'. Repeatable.
+    ///
+    /// The flag whose order is written down rather than reconstructed; prefer it
+    /// to mixing --include and --exclude.
+    ///
+    /// `allow_hyphen_values` is not optional here: every exclusion rule begins
+    /// with `-`, so without it the flag could only ever express inclusions.
+    #[arg(
+        short = 'f',
+        long,
+        global = true,
+        allow_hyphen_values = true,
+        value_name = "RULE",
+        help_heading = "Filtering"
+    )]
+    pub filter: Vec<String>,
+
+    /// Read '+'/'-' rules from a file. Repeatable.
     #[arg(long, global = true, value_name = "PATH", help_heading = "Filtering")]
     pub filter_from: Vec<PathBuf>,
 
@@ -334,13 +366,21 @@ pub struct GlobalArgs {
     #[arg(long, global = true, value_name = "PATH", help_heading = "Filtering")]
     pub files_from: Vec<PathBuf>,
 
-    /// Skip files smaller than this.
+    /// Skip files smaller than this. A unit is required, e.g. 100K.
     #[arg(long, global = true, value_name = "SIZE", help_heading = "Filtering")]
     pub min_size: Option<String>,
 
-    /// Skip files larger than this.
+    /// Skip files larger than this. A unit is required, e.g. 100K.
     #[arg(long, global = true, value_name = "SIZE", help_heading = "Filtering")]
     pub max_size: Option<String>,
+
+    /// Only files at least this old, e.g. 7d. A bare number is seconds.
+    #[arg(long, global = true, value_name = "AGE", help_heading = "Filtering")]
+    pub min_age: Option<String>,
+
+    /// Only files modified within this long, e.g. 7d.
+    #[arg(long, global = true, value_name = "AGE", help_heading = "Filtering")]
+    pub max_age: Option<String>,
 
     /// Recursion depth limit; -1 for unlimited.
     #[arg(

@@ -41,6 +41,13 @@ pub struct ScannedFile {
     pub native: PathBuf,
     /// Size in bytes at the time of the scan.
     pub size: u64,
+    /// Last modification in unix seconds, when the filesystem reports one.
+    ///
+    /// Carried on the scanned file rather than read again later, so the value
+    /// `--min-age`/`--max-age` were applied to is the value the same `stat` call
+    /// produced — a second read could straddle a write and select a file the
+    /// filter had already excluded.
+    pub modified_unix: Option<i64>,
 }
 
 /// Something the walk could not do, kept rather than swallowed.
@@ -126,6 +133,7 @@ pub fn walk(root: &Path, selection: &Selection, follow_links: bool) -> Scan {
                         logical: name,
                         native: root.to_path_buf(),
                         size: metadata.len(),
+                        modified_unix: modified_unix(&metadata),
                     },
                 ),
                 Some(Err(issue)) => scan.problems.push(not_representable(root, issue)),
@@ -226,6 +234,7 @@ pub fn walk(root: &Path, selection: &Selection, follow_links: bool) -> Scan {
                     logical: relative,
                     native: entry,
                     size: resolved.len(),
+                    modified_unix: modified_unix(&resolved),
                 },
             );
         }
@@ -258,6 +267,22 @@ pub fn walk(root: &Path, selection: &Selection, follow_links: bool) -> Scan {
     scan
 }
 
+/// A file's last modification in unix seconds, when the filesystem records one.
+///
+/// [`None`] rather than a substituted zero, which the age window admits instead
+/// of guessing at — see [`crate::filter::AgeBounds`]. A negative value is a
+/// pre-epoch timestamp and is kept as such, because clamping it to zero would
+/// move the file forward in time and change which side of `--min-age` it lands.
+fn modified_unix(metadata: &std::fs::Metadata) -> Option<i64> {
+    let modified = metadata.modified().ok()?;
+    match modified.duration_since(std::time::SystemTime::UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_secs()).ok(),
+        Err(before) => i64::try_from(before.duration().as_secs())
+            .ok()
+            .and_then(i64::checked_neg),
+    }
+}
+
 /// Apply the filters to one candidate file.
 ///
 /// One question, not three. The depth limit, the size bounds, the pattern rules
@@ -266,7 +291,7 @@ pub fn walk(root: &Path, selection: &Selection, follow_links: bool) -> Scan {
 /// applies one and forgets another, and the forgotten one is always the
 /// `--exclude` somebody wrote to keep an archive out of a backup.
 fn consider(scan: &mut Scan, selection: &Selection, file: ScannedFile) {
-    if selection.admits_file(&file.logical, file.size) {
+    if selection.admits_file(&file.logical, file.size, file.modified_unix) {
         scan.files.push(file);
     } else {
         scan.filtered += 1;
@@ -422,7 +447,7 @@ mod tests {
     #[test]
     fn size_bounds_exclude_without_losing_the_count() {
         let dir = tree();
-        let scan = walk(dir.path(), &selection(&["--min-size", "3"]), false);
+        let scan = walk(dir.path(), &selection(&["--min-size", "3B"]), false);
         assert_eq!(paths(&scan), vec!["a.txt", "nested/c.txt"]);
         assert_eq!(scan.filtered, 2);
     }
@@ -541,6 +566,7 @@ mod tests {
                 logical: logical.into(),
                 native: PathBuf::from(logical),
                 size: u64::MAX,
+                modified_unix: None,
             });
         }
         assert_eq!(scan.total_bytes(), u64::MAX);

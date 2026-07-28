@@ -352,6 +352,23 @@ pub fn looks_like_unc(spec: &str) -> bool {
     spec.starts_with("\\\\")
 }
 
+/// Whether `name` — a bare remote **name**, with no colon and no path — has the
+/// shape of a Windows drive letter.
+///
+/// rclone's `driveletter.IsDriveLetter` (`fs/driveletter/driveletter_windows.go:8`)
+/// exactly: one character, and that character an ASCII letter. Digits are not
+/// drives, so `1` is not one; `é` is not one either, which is why the test is on
+/// bytes rather than on `char::is_alphabetic`.
+///
+/// Like [`looks_like_windows_drive`] this is a shape test and says nothing about
+/// the platform. Whether the shape *matters* is the caller's decision, taken
+/// through [`crate::constants::DRIVE_LETTERS_EXIST`], so that both answers are
+/// reachable from a test run on either kind of machine.
+#[must_use]
+pub fn is_drive_letter(name: &str) -> bool {
+    name.len() == 1 && name.as_bytes()[0].is_ascii_alphabetic()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -558,6 +575,19 @@ mod tests {
         assert!(looks_like_unc(r"\\server\share\file"));
         assert!(looks_like_unc(r"\\?\C:\very\long\path"));
         assert!(!looks_like_unc(r"C:\normal"));
+    }
+
+    #[test]
+    fn a_drive_letter_is_one_ascii_letter_and_nothing_else() {
+        // rclone's rule verbatim (`fs/driveletter/driveletter_windows.go:8`):
+        // length one, ASCII letter. A digit names no drive, and a two-character
+        // name is a remote everywhere.
+        for name in ["c", "C", "z", "A"] {
+            assert!(is_drive_letter(name), "'{name}' is a drive letter");
+        }
+        for name in ["", "1", "cd", "é", "_", "c:"] {
+            assert!(!is_drive_letter(name), "'{name}' is not a drive letter");
+        }
     }
 
     #[test]

@@ -25,6 +25,21 @@
 //! [`CLEANUP_DEFAULT_MIN_AGE`], comfortably longer than any single verified
 //! write, and lowering it risks deleting a concurrent run's staged parts.
 //!
+//! It is the **global** `--min-age` ([`crate::filter`]), not one of this
+//! command's own, and that is a correction. This command used to declare a
+//! second flag of the same name with a second parser behind it, in which `1M`
+//! meant one *minute* while the same string means one *month* to rclone and to
+//! every other age DCTL reads. Two dialects for one flag name inside one binary
+//! is the drift that ends with a sweep deleting parts thirty times younger than
+//! the operator intended, so there is now one spelling, one parser
+//! ([`crate::filter::parse_age`]) and one meaning: "at least this old".
+//!
+//! The default survives the merge and is applied here rather than by `clap`,
+//! because the global flag has no default and must not acquire one — an absent
+//! `--min-age` on `copy` means "no age filter", while an absent `--min-age` on
+//! `cleanup` has to mean [`CLEANUP_DEFAULT_MIN_AGE`] or the safety margin
+//! disappears the moment somebody stops typing it.
+//!
 //! ## Two classes cannot be swept, and say so
 //!
 //! [`dctl_store::Backend`] exposes no way to list a provider's in-progress
@@ -43,16 +58,18 @@
 
 use clap::Args;
 
+use std::time::Duration;
+
 use crate::constants::{
-    CLEANUP_DEFAULT_MIN_AGE, REMOTE_ROOT_VALUE_NAME, REMOVAL_ACTION_CLEANUP, REMOVAL_LABEL_CLASSES,
-    REMOVAL_LABEL_MIN_AGE, REMOVAL_LIST_SEPARATOR,
+    AGE_PARSE_EXAMPLES, CLEANUP_DEFAULT_MIN_AGE, FILTER_FLAG_MIN_AGE, REMOTE_ROOT_VALUE_NAME,
+    REMOVAL_ACTION_CLEANUP, REMOVAL_LABEL_CLASSES, REMOVAL_LABEL_MIN_AGE, REMOVAL_LIST_SEPARATOR,
 };
 use crate::ctx::Ctx;
-use crate::error::Result;
+use crate::error::{CliError, Result};
 use crate::output::size;
 use serde::Serialize;
 
-use super::removal::{Operation, PlanOptions, Removal, Row, Target, execute, parse_age};
+use super::removal::{Operation, PlanOptions, Removal, Row, Target, execute};
 
 /// Stable command name. Must match `Command::name()` in `cli/mod.rs`.
 const COMMAND: &str = "cleanup";
@@ -81,10 +98,6 @@ pub struct CleanupArgs {
     /// Class of debris to reclaim. Repeatable; every class by default.
     #[arg(long = "class", value_enum, value_name = "CLASS")]
     pub classes: Vec<CleanupClass>,
-
-    /// Leave anything younger than this alone — it may still be in flight.
-    #[arg(long, value_name = "AGE", default_value = CLEANUP_DEFAULT_MIN_AGE)]
-    pub min_age: String,
 }
 
 impl CleanupArgs {
@@ -151,7 +164,7 @@ impl PlanOptions for CleanupOptions {
 /// [`crate::exit::ExitCode::PartialFailure`] when it was asked for by name.
 pub async fn run(ctx: &Ctx, args: &CleanupArgs) -> Result<()> {
     let target = Target::parse(&args.path)?;
-    let min_age = parse_age(&args.min_age)?;
+    let min_age = safety_margin(ctx.globals.min_age.as_deref())?;
 
     let removal = Removal {
         command: COMMAND,
@@ -172,6 +185,27 @@ pub async fn run(ctx: &Ctx, args: &CleanupArgs) -> Result<()> {
     };
 
     execute(ctx, &removal).await
+}
+
+/// The margin this sweep will leave, from the global `--min-age`.
+///
+/// An absent flag is [`CLEANUP_DEFAULT_MIN_AGE`]; an explicit `off` or `0` is a
+/// margin of zero, which is a thing an operator may legitimately ask for after
+/// stopping every other writer and is not silently substituted with the default.
+/// The plan prints whichever it got, so a zero margin is visible on the line
+/// above the destructive gate rather than discovered afterwards.
+///
+/// # Errors
+/// [`crate::exit::ExitCode::Usage`] for an age that will not parse.
+fn safety_margin(flag: Option<&str>) -> Result<Duration> {
+    let written = flag.unwrap_or(CLEANUP_DEFAULT_MIN_AGE);
+    let seconds = crate::filter::parse_age(written).map_err(|detail| {
+        CliError::usage(format!("{FILTER_FLAG_MIN_AGE}: {detail}"))
+            .with_hint(format!("Ages are written as {AGE_PARSE_EXAMPLES}."))
+    })?;
+    Ok(Duration::from_secs(
+        seconds.unwrap_or(0).try_into().unwrap_or(0),
+    ))
 }
 
 #[cfg(test)]
@@ -203,7 +237,9 @@ mod tests {
         let parsed = parse(args);
         CleanupOptions {
             classes: parsed.args.selected(),
-            min_age_secs: parse_age(&parsed.args.min_age).unwrap().as_secs(),
+            min_age_secs: safety_margin(parsed.globals.min_age.as_deref())
+                .unwrap()
+                .as_secs(),
             staging_marker: dctl_store::STAGING_NAME_PREFIX,
         }
     }
@@ -212,7 +248,13 @@ mod tests {
     fn the_target_is_positional_and_the_defaults_are_the_constants() {
         let parsed = parse(&["vault:"]);
         assert_eq!(parsed.args.path, "vault:");
-        assert_eq!(parsed.args.min_age, CLEANUP_DEFAULT_MIN_AGE);
+        assert_eq!(
+            safety_margin(parsed.globals.min_age.as_deref())
+                .unwrap()
+                .as_secs(),
+            24 * 60 * 60,
+            "an absent --min-age must still leave the default safety margin"
+        );
         assert!(parsed.args.classes.is_empty());
         assert!(Harness::try_parse_from(["dctl"]).is_err());
     }

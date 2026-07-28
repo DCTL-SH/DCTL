@@ -7,10 +7,12 @@
 //! and `/srv/photos` are plainly local. Getting that wrong is not a cosmetic
 //! bug: a `sync` that mistook `C:` for a remote would write to the wrong side.
 //!
-//! The disambiguation rules live in [`crate::platform::path`] because they must
-//! be identical on every operating system — a script written on Windows has to
-//! behave the same when it runs on a Linux build agent — and this module only
-//! applies them.
+//! The disambiguation rules live in [`crate::remote::spec`], and this module
+//! calls them rather than restating them. Every rule but one is identical on
+//! every operating system; the exception is the drive letter, which is a drive
+//! only where drives exist, because that is the only arrangement in which
+//! `dctl ls r:` and `dctl copy ./x r:` can agree about what `r:` is. rclone
+//! splits it in the same place (`fs/fspath/path.go:163`).
 //!
 //! The path half is canonicalised through
 //! [`clean_logical`](crate::platform::path::clean_logical) on the way in, so
@@ -22,12 +24,12 @@
 use std::path::PathBuf;
 
 use crate::constants::{
-    LISTING_TARGET_HINT, MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, REMOTE_NAME_EXTRA_CHARS,
-    REMOTE_SEPARATOR,
+    LISTING_TARGET_HINT, PATH_SEPARATOR, REMOTE_NAME_EXTRA_CHARS, REMOTE_SEPARATOR,
 };
 use crate::error::{CliError, Result};
 use crate::platform::path;
 use crate::remote::RemoteSpec;
+use crate::remote::spec::{looks_local, names_a_remote, not_a_remote_name};
 
 /// A resolved listing target.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -103,9 +105,9 @@ impl Target {
     /// Two grammars exist because two families needed one: the transfer commands
     /// parse a [`RemoteSpec`] from a positional argument, and the listing verbs
     /// parse a [`Target`] from an optional one that falls back to `--remote`.
-    /// They agree on every rule that matters — a drive letter is a path on every
-    /// platform, a logical prefix is NFC and `..`-free — and this is the single
-    /// conversion between them.
+    /// They agree on every rule that matters — because both ask
+    /// [`crate::remote::spec`] rather than deciding for themselves — and this is
+    /// the single conversion between them.
     ///
     /// Doing it here rather than in [`super::source`] is deliberate: a second
     /// place that turns "what the user typed" into a remote is a second place
@@ -135,9 +137,10 @@ impl Target {
 
     /// Apply the grammar to a non-empty spec.
     fn parse_spec(spec: &str) -> Result<Self> {
-        // A Windows drive or UNC path is local on every platform, checked before
-        // the colon split so `C:\data` never becomes a remote called `C`.
-        if path::looks_like_windows_drive(spec) || path::looks_like_unc(spec) {
+        // A UNC path is local everywhere and a drive is local where drives
+        // exist, checked before the colon split so `C:\data` on Windows never
+        // becomes a remote called `C`.
+        if looks_local(spec) {
             return Ok(Self::Local(PathBuf::from(spec)));
         }
 
@@ -169,15 +172,9 @@ impl Target {
 /// character, instead of a "no such remote" three layers down that leaves the
 /// user comparing their spec against the config by eye.
 fn validate_remote_name(name: &str, spec: &str) -> Result<()> {
-    if name.chars().count() < MIN_REMOTE_NAME_LEN {
-        return Err(CliError::usage(format!(
-            "'{spec}' is not a valid remote spec: a remote name needs at least \
-             {MIN_REMOTE_NAME_LEN} characters"
-        ))
-        .with_hint(
-            "One character before the colon is read as a Windows drive letter, \
-             so it can never name a remote.",
-        ));
+    if !names_a_remote(name) {
+        let (reason, hint) = not_a_remote_name(name);
+        return Err(CliError::usage(format!("'{spec}': {reason}")).with_hint(hint));
     }
 
     if let Some(bad) = name
@@ -243,10 +240,17 @@ mod tests {
     #[test]
     fn drive_letters_and_unc_paths_stay_local() {
         // The bug this prevents: `C:\data` parsed as remote `C`, path `\data`.
-        for spec in [r"C:\data", "d:/data", r"\\nas\share\photos"] {
-            let target = Target::parse(Some(spec), None).unwrap();
-            assert_eq!(target, Target::Local(PathBuf::from(spec)), "{spec}");
-            assert!(!target.is_remote());
+        let target = Target::parse(Some(r"\\nas\share\photos"), None).unwrap();
+        assert_eq!(target, Target::Local(PathBuf::from(r"\\nas\share\photos")));
+        assert!(!target.is_remote());
+        // The drive half is platform-conditional, and must land wherever the
+        // transfer verbs land it — never in between.
+        for spec in [r"C:\data", "d:/data"] {
+            assert_eq!(
+                Target::parse(Some(spec), None).unwrap().spec(),
+                RemoteSpec::parse(spec).unwrap(),
+                "{spec}"
+            );
         }
     }
 
@@ -314,9 +318,10 @@ mod tests {
 
     #[test]
     fn an_illegal_remote_name_is_rejected_before_any_lookup() {
-        // A one-character name is too short, and a space could never have come
-        // out of a config file.
-        for spec in ["1:photos", "my remote:photos", "vault/old:x"] {
+        // A space or a separator could never have come out of a config file.
+        // `1:photos` is *not* on this list any more: a digit is not a drive
+        // letter on any platform, so rclone reads it as a remote and so do we.
+        for spec in ["my remote:photos", "vault/old:x", ".hidden:x"] {
             let error = Target::parse(Some(spec), None).unwrap_err();
             assert_eq!(error.code(), ExitCode::Usage, "{spec}");
         }
@@ -327,14 +332,22 @@ mod tests {
     }
 
     #[test]
-    fn a_single_letter_before_the_colon_is_a_drive_not_a_short_remote() {
-        // The subtlety behind MIN_REMOTE_NAME_LEN: `v:photos` never reaches the
-        // length check, because a letter followed by a colon is a Windows
-        // drive-relative path on every platform. That is deliberate — a script
-        // written on Windows must behave the same on a Linux build agent.
+    fn a_single_letter_before_the_colon_follows_the_platform() {
+        // Corrected this pass. `v:photos` is the V: drive on Windows and the
+        // remote `v` everywhere else, which is rclone's rule — and, more to the
+        // point, the rule `dctl copy` was already applying while this verb
+        // applied a different one.
         assert_eq!(
-            Target::parse(Some("v:photos"), None).unwrap(),
-            Target::Local(PathBuf::from("v:photos"))
+            Target::parse(Some("v:photos"), None).unwrap().spec(),
+            RemoteSpec::parse("v:photos").unwrap()
+        );
+        // A digit is not a drive letter anywhere, so it is a remote everywhere.
+        assert_eq!(
+            Target::parse(Some("1:photos"), None).unwrap(),
+            Target::Remote {
+                remote: "1".into(),
+                prefix: "photos".into(),
+            }
         );
     }
 
@@ -363,10 +376,11 @@ mod tests {
             Target::parse(Some("/srv/photos"), None).unwrap().spec(),
             RemoteSpec::Local(PathBuf::from("/srv/photos"))
         );
-        // The drive-letter rule survives the conversion on every platform.
+        // The drive-letter rule survives the conversion, however this platform
+        // answers it.
         assert_eq!(
             Target::parse(Some(r"C:\data"), None).unwrap().spec(),
-            RemoteSpec::Local(PathBuf::from(r"C:\data"))
+            RemoteSpec::parse(r"C:\data").unwrap()
         );
     }
 

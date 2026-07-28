@@ -86,6 +86,7 @@
 // needed is a diagnostic nobody reviewed.
 #![allow(dead_code)]
 
+mod age;
 mod depth;
 mod glob;
 mod parse;
@@ -96,11 +97,13 @@ mod size;
 // a rule-file failure are both turned into a [`CliError`] before they leave this
 // module — classification is the one thing a command must never have to redo —
 // so their own types stay internal.
+pub use age::{AgeBounds, parse_age};
 pub use depth::{DepthLimit, depth_of};
 pub use parse::{Directive, FileProblem};
 pub use rule::{Action, Rule};
 pub use size::SizeBounds;
 
+use age::AgeProblem;
 use depth::DepthProblem;
 use size::SizeProblem;
 
@@ -109,8 +112,9 @@ use std::path::Path;
 
 use crate::cli::globals::GlobalArgs;
 use crate::constants::{
-    FILTER_FLAG_EXCLUDE, FILTER_FLAG_FILES_FROM, FILTER_FLAG_FILTER_FROM, FILTER_FLAG_INCLUDE,
-    GLOB_RECURSIVE_SEQUENCE, PATH_SEPARATOR,
+    FILTER_FLAG_EXCLUDE, FILTER_FLAG_EXCLUDE_FROM, FILTER_FLAG_FILES_FROM, FILTER_FLAG_FILTER,
+    FILTER_FLAG_FILTER_FROM, FILTER_FLAG_INCLUDE, FILTER_FLAG_INCLUDE_FROM, FILTER_FLAG_MAX_AGE,
+    FILTER_FLAG_MIN_AGE, GLOB_RECURSIVE_SEQUENCE, PATH_SEPARATOR,
 };
 use crate::error::{CliError, Result};
 
@@ -126,17 +130,38 @@ use crate::error::{CliError, Result};
 pub struct Candidate<'a> {
     path: &'a str,
     size: Option<u64>,
+    /// Last modification, in unix seconds, when the side that offered this
+    /// entry knows one.
+    ///
+    /// [`None`] is "nobody measured it", never "the epoch". The age bounds
+    /// then do not apply — see [`super::age`] for the whole argument, which is
+    /// the same one `size` makes and has to be, or `dctl ls --max-age` and the
+    /// `copy` after it would select different files out of one rebuilt index.
+    modified: Option<i64>,
     is_dir: bool,
 }
 
 impl<'a> Candidate<'a> {
-    /// A file at `path`, of `size` bytes.
+    /// A file at `path`, of `size` bytes, whose modification time is unknown.
+    ///
+    /// Use [`Candidate::at`] to attach one. Kept as a separate step rather than
+    /// a fourth parameter because most call sites in the test suite are about
+    /// patterns and sizes, and a `None` typed a thousand times is a `None` that
+    /// eventually gets typed where a real time was available.
     pub const fn file(path: &'a str, size: u64) -> Self {
         Self {
             path,
             size: Some(size),
+            modified: None,
             is_dir: false,
         }
+    }
+
+    /// The same candidate, carrying the modification time its side reported.
+    #[must_use]
+    pub const fn at(mut self, modified: Option<i64>) -> Self {
+        self.modified = modified;
+        self
     }
 
     /// A file whose size nothing has measured.
@@ -159,6 +184,7 @@ impl<'a> Candidate<'a> {
         Self {
             path,
             size: None,
+            modified: None,
             is_dir: false,
         }
     }
@@ -168,10 +194,17 @@ impl<'a> Candidate<'a> {
     /// Carries no size: a directory's size is the total beneath it, and letting
     /// that number reach the size bounds would hide every small file in a large
     /// tree.
+    ///
+    /// Carries no time either. A directory's modification time is a property of
+    /// the local filesystem rather than of the data, and it changes whenever a
+    /// child is added — so letting `--max-age` see it would keep a directory of
+    /// year-old files because one new file landed in it, and drop one whose
+    /// files are new because nothing was added to it recently.
     pub const fn directory(path: &'a str) -> Self {
         Self {
             path,
             size: None,
+            modified: None,
             is_dir: true,
         }
     }
@@ -185,6 +218,11 @@ impl<'a> Candidate<'a> {
     /// size was never measured.
     pub const fn size(&self) -> Option<u64> {
         self.size
+    }
+
+    /// The last modification time in unix seconds, when one is known.
+    pub const fn modified(&self) -> Option<i64> {
+        self.modified
     }
 
     /// Whether this entry is a directory.
@@ -219,6 +257,10 @@ pub enum Reason<'a> {
     TooSmall { size: u64, limit: u64 },
     /// Larger than `--max-size`.
     TooLarge { size: u64, limit: u64 },
+    /// Modified before the floor `--max-age` set.
+    TooOld { modified: i64, floor: i64 },
+    /// Modified after the ceiling `--min-age` set.
+    TooNew { modified: i64, ceiling: i64 },
     /// The first rule that matched, and its position in the list.
     Matched { rule: &'a Rule, position: usize },
     /// No rule matched, so the default applied. See the asymmetry described in
@@ -270,6 +312,12 @@ impl<'a> Decision<'a> {
             Reason::TooLarge { size, limit } => {
                 format!("{verdict}: {size} bytes is above the maximum of {limit}")
             }
+            Reason::TooOld { modified, floor } => format!(
+                "{verdict}: modified at {modified}, before the {FILTER_FLAG_MAX_AGE} floor of {floor}"
+            ),
+            Reason::TooNew { modified, ceiling } => format!(
+                "{verdict}: modified at {modified}, after the {FILTER_FLAG_MIN_AGE} ceiling of {ceiling}"
+            ),
             Reason::Matched { rule, position } => format!(
                 "{verdict}: rule {} '{} {}'",
                 position + 1,
@@ -293,6 +341,7 @@ pub struct FilterSet {
     /// module documentation.
     default_action: Action,
     sizes: SizeBounds,
+    ages: AgeBounds,
     depth: DepthLimit,
     /// The exact paths named by `--files-from`, if any.
     only: Option<BTreeSet<String>>,
@@ -311,6 +360,7 @@ impl FilterSet {
             rules: Vec::new(),
             default_action: Action::Include,
             sizes: SizeBounds::open(),
+            ages: AgeBounds::open(),
             depth: DepthLimit::unlimited(),
             only: None,
         }
@@ -325,46 +375,66 @@ impl FilterSet {
     ///
     /// # Ordering
     ///
-    /// The engine evaluates rules in the order it is given them, and rclone
-    /// orders them by their position on the command line. `clap`'s derive hands
-    /// back `--include` and `--exclude` as two separate `Vec<String>`, which
-    /// discards that interleaving before this function is reached, so the order
-    /// applied here is a deterministic reconstruction rather than the literal
-    /// command line:
+    /// The engine evaluates rules in the order it is given them, and it is given
+    /// them in **rclone's** order — which is *not* the order they appear on the
+    /// command line, and this module used to say it was. rclone's `parseRules`
+    /// (`fs/filter/rules.go:238`) walks the flags by kind:
     ///
-    /// 1. every `--exclude`, in the order given;
-    /// 2. every `--filter-from` file, in the order given, lines in file order;
-    /// 3. every `--include`, in the order given;
-    /// 4. an implicit `- **` if any `--include` was used.
+    /// 1. every `--include`, then every `--include-from`;
+    /// 2. every `--exclude`, then every `--exclude-from`;
+    /// 3. every `--filter`, then every `--filter-from`;
+    /// 4. an implicit `- **` if any inclusion was used, from any of those flags.
     ///
-    /// Exclusions lead because they are the rules whose failure is
-    /// unrecoverable. Of the two ways a reconstruction can be wrong, "showed or
-    /// copied less than asked" is fixed by re-running, while "copied a file the
-    /// operator told us to leave behind" cannot be taken back — and during a
-    /// `sync` the same mistake deletes at the destination. A rule *file* keeps
-    /// its internal order exactly, because that order is the whole reason the
-    /// form exists.
+    /// This matters, and not subtly. Under rclone's order `--include '*.jpg'
+    /// --exclude 'private/**'` **keeps** `private/a.jpg`, because the inclusion
+    /// is tried first and first match wins. DCTL used to lead with the
+    /// exclusions and dropped it. Neither answer is obviously right — rclone's
+    /// own code logs "using --filter is recommended instead of both --include
+    /// and --exclude as the order they are parsed in is indeterminate"
+    /// (`fs/filter/rules.go:231`) — but a migrating script must get the answer
+    /// it was written against, and only one of the two is that answer.
     ///
-    /// Recovering the true command-line order needs the flag layer to record it
-    /// — a `clap` value parser that stamps each pattern with its argument index,
-    /// after which [`FilterSet::builder`] can be fed the merged sequence and
-    /// this reconstruction disappears. The builder is already the engine's real
-    /// interface for exactly that reason.
+    /// `clap`'s derive hands back each flag as its own `Vec`, which discards the
+    /// interleaving. That costs nothing here, because rclone discards it too.
+    /// A rule *file* keeps its internal order exactly, because that order is the
+    /// whole reason the form exists.
     ///
     /// # Errors
-    /// [`crate::exit::ExitCode::Usage`] for a malformed pattern, size or depth,
-    /// or for a filter file that cannot be read or understood.
+    /// [`crate::exit::ExitCode::Usage`] for a malformed pattern, size, age or
+    /// depth, or for a filter file that cannot be read or understood.
     pub fn from_globals(globals: &GlobalArgs) -> Result<Self> {
+        Self::from_globals_at(globals, now_unix())
+    }
+
+    /// [`FilterSet::from_globals`] with the clock supplied.
+    ///
+    /// `--min-age` and `--max-age` are relative to a single instant, fixed here
+    /// for the whole run (see [`age`]). Injecting it is what makes the age
+    /// window assertable: a test that read the real clock could only check that
+    /// the window moved, never that it landed where rclone puts it.
+    ///
+    /// # Errors
+    /// As [`FilterSet::from_globals`].
+    pub fn from_globals_at(globals: &GlobalArgs, now: i64) -> Result<Self> {
         let mut builder = Builder::new();
 
+        for pattern in &globals.include {
+            builder = builder.include(pattern)?;
+        }
+        for source in &globals.include_from {
+            builder = builder.patterns_from(source, Action::Include)?;
+        }
         for pattern in &globals.exclude {
             builder = builder.exclude(pattern)?;
         }
+        for source in &globals.exclude_from {
+            builder = builder.patterns_from(source, Action::Exclude)?;
+        }
+        for line in &globals.filter {
+            builder = builder.filter_line(line)?;
+        }
         for source in &globals.filter_from {
             builder = builder.rules_from(source)?;
-        }
-        for pattern in &globals.include {
-            builder = builder.include(pattern)?;
         }
 
         for source in &globals.files_from {
@@ -375,6 +445,11 @@ impl FilterSet {
             .sizes(SizeBounds::parse(
                 globals.min_size.as_deref(),
                 globals.max_size.as_deref(),
+            )?)
+            .ages(AgeBounds::parse(
+                globals.min_age.as_deref(),
+                globals.max_age.as_deref(),
+                now,
             )?)
             .depth(DepthLimit::from_flag(globals.max_depth)?);
 
@@ -402,6 +477,21 @@ impl FilterSet {
         if let Some(limit) = self.depth.limit() {
             if depth > limit {
                 return Decision::new(Action::Exclude, Reason::TooDeep { depth, limit });
+            }
+        }
+
+        // Files only, and only files whose time somebody recorded: see the
+        // notes on `Candidate::directory` and `super::age`.
+        if let Some(modified) = candidate.modified() {
+            if let Some(floor) = self.ages.from()
+                && modified < floor
+            {
+                return Decision::new(Action::Exclude, Reason::TooOld { modified, floor });
+            }
+            if let Some(ceiling) = self.ages.to()
+                && modified > ceiling
+            {
+                return Decision::new(Action::Exclude, Reason::TooNew { modified, ceiling });
             }
         }
 
@@ -529,6 +619,11 @@ impl FilterSet {
         self.sizes
     }
 
+    /// The modification-time window in force.
+    pub const fn ages(&self) -> AgeBounds {
+        self.ages
+    }
+
     /// The depth limit in force.
     pub const fn depth(&self) -> DepthLimit {
         self.depth
@@ -549,6 +644,7 @@ impl FilterSet {
         !self.rules.is_empty()
             || self.only.is_some()
             || self.sizes.is_limited()
+            || self.ages.is_limited()
             || self.depth.is_limited()
     }
 }
@@ -613,6 +709,7 @@ pub struct Builder {
     /// rule file.
     implicit_exclude: bool,
     sizes: SizeBounds,
+    ages: AgeBounds,
     depth: DepthLimit,
     only: Option<BTreeSet<String>>,
 }
@@ -643,6 +740,85 @@ impl Builder {
         Ok(self)
     }
 
+    /// Append one `--filter` line, in rclone's `+ pattern` / `- pattern` / `!`
+    /// grammar.
+    ///
+    /// The flag rclone's own diagnostics recommend over `--include` and
+    /// `--exclude` (`fs/filter/rules.go:231`), because it is the only one whose
+    /// order is written down by the person using it rather than reconstructed.
+    /// The grammar is exactly a rule file's, one line at a time, so a rule that
+    /// works in a `--filter-from` file works as a `--filter` argument unchanged.
+    ///
+    /// A `!` clears everything accumulated so far, including rules added by
+    /// earlier flags — that is what the directive means, and scoping it to this
+    /// one argument would make it a quieter, different thing.
+    ///
+    /// # Errors
+    /// [`crate::exit::ExitCode::Usage`] for a line that is not a rule, or a rule
+    /// whose pattern will not compile.
+    pub fn filter_line(mut self, line: &str) -> Result<Self> {
+        let origin = std::path::Path::new(FILTER_FLAG_FILTER);
+        for directive in parse::rules_in(line, origin).map_err(from_file_problem)? {
+            match directive {
+                Directive::Clear { .. } => {
+                    self.rules.clear();
+                    self.implicit_exclude = false;
+                }
+                Directive::Rule {
+                    action, pattern, ..
+                } => {
+                    self.rules
+                        .push(compile(action, &pattern, FILTER_FLAG_FILTER)?);
+                    if action == Action::Include {
+                        self.implicit_exclude = true;
+                    }
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    /// Append every pattern in an `--include-from` or `--exclude-from` file.
+    ///
+    /// The lines are bare patterns, not `+`/`-` rules: the flag supplies the
+    /// action, which is rclone's split (`fs/filter/rules.go:246,258` call `add`
+    /// with a fixed `Include`, while `--filter-from` goes through `addRule`).
+    /// Comments and blank lines are skipped as they are everywhere else.
+    ///
+    /// An `--include-from` file arms the implicit trailing exclusion exactly as
+    /// `--include` does, even when the file turns out to be empty — rclone sets
+    /// `addImplicitExclude` from the *flag*, before reading a line, and a file
+    /// that happened to hold only comments must not silently turn a whitelist
+    /// into "everything".
+    ///
+    /// # Errors
+    /// [`crate::exit::ExitCode::Usage`] if the file cannot be read or holds a
+    /// pattern that will not compile.
+    pub fn patterns_from(mut self, source: &Path, action: Action) -> Result<Self> {
+        let flag = match action {
+            Action::Include => FILTER_FLAG_INCLUDE_FROM,
+            Action::Exclude => FILTER_FLAG_EXCLUDE_FROM,
+        };
+        let text = std::fs::read_to_string(source).map_err(|error| {
+            from_file_problem(FileProblem::Unreadable {
+                source: source.to_path_buf(),
+                detail: error.to_string(),
+            })
+        })?;
+        for (offset, raw) in text.lines().enumerate() {
+            let pattern = raw.trim();
+            if pattern.is_empty() || pattern.starts_with(crate::constants::FILTER_COMMENT_MARKERS) {
+                continue;
+            }
+            let origin = format!("{flag} {}:{}", source.display(), offset + 1);
+            self.rules.push(compile(action, pattern, &origin)?);
+        }
+        if action == Action::Include {
+            self.implicit_exclude = true;
+        }
+        Ok(self)
+    }
+
     /// Append the rules in a `--filter-from` file, in file order.
     ///
     /// A `!` line in the file discards everything accumulated so far, including
@@ -656,7 +832,10 @@ impl Builder {
     pub fn rules_from(mut self, source: &Path) -> Result<Self> {
         for directive in parse::rules_from_file(source).map_err(from_file_problem)? {
             match directive {
-                Directive::Clear { .. } => self.rules.clear(),
+                Directive::Clear { .. } => {
+                    self.rules.clear();
+                    self.implicit_exclude = false;
+                }
                 Directive::Rule {
                     action,
                     pattern,
@@ -705,6 +884,12 @@ impl Builder {
         self
     }
 
+    /// Set the modification-time window.
+    pub fn ages(mut self, ages: AgeBounds) -> Self {
+        self.ages = ages;
+        self
+    }
+
     /// Set the depth limit.
     pub fn depth(mut self, depth: DepthLimit) -> Self {
         self.depth = depth;
@@ -730,10 +915,24 @@ impl Builder {
             rules: self.rules,
             default_action,
             sizes: self.sizes,
+            ages: self.ages,
             depth: self.depth,
             only: self.only,
         }
     }
+}
+
+/// The wall clock, in unix seconds, read once per run.
+///
+/// Lives here rather than in [`age`] so that module stays pure and testable
+/// without a clock; the one place that needs the real time is the one place a
+/// filter is built from flags.
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| {
+            i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX)
+        })
 }
 
 /// Compile one rule, turning a pattern failure into a usage error that names
@@ -753,6 +952,12 @@ fn from_file_problem(problem: FileProblem) -> CliError {
 
 impl From<SizeProblem> for CliError {
     fn from(problem: SizeProblem) -> Self {
+        Self::usage(problem.to_string()).with_hint(problem.hint())
+    }
+}
+
+impl From<AgeProblem> for CliError {
+    fn from(problem: AgeProblem) -> Self {
         Self::usage(problem.to_string()).with_hint(problem.hint())
     }
 }
@@ -1366,13 +1571,116 @@ mod tests {
     // ── Composition ──────────────────────────────────────────────────────
 
     #[test]
-    fn from_globals_applies_exclusions_before_the_reconstructed_includes() {
-        // The documented reconstruction: `clap` discards the command-line
-        // interleaving, and of the two ways to be wrong, keeping a file the
-        // operator excluded is the one that cannot be taken back.
+    fn from_globals_orders_the_flags_the_way_rclone_orders_them() {
+        // The correction this pass made, and the one with teeth: rclone's
+        // `parseRules` (`fs/filter/rules.go:238`) adds every `--include` before
+        // any `--exclude`, so first-match-wins keeps `secret/a.txt`. DCTL led
+        // with the exclusions and dropped it — a migrating `sync` would have
+        // deleted at the destination exactly the files rclone had been keeping.
         let set = filters(&["--include", "**", "--exclude", "secret/**"]);
-        assert!(!shows(&set, "secret/a.txt"));
+        assert!(shows(&set, "secret/a.txt"), "rclone keeps this one");
         assert!(shows(&set, "public/a.txt"));
+
+        // …and the flag rclone recommends instead expresses the other reading,
+        // because its order is the order it was written in.
+        let ordered = filters(&["--filter", "- secret/**", "--filter", "+ **"]);
+        assert!(!shows(&ordered, "secret/a.txt"));
+        assert!(shows(&ordered, "public/a.txt"));
+    }
+
+    #[test]
+    fn a_filter_flag_is_read_as_one_line_of_a_rule_file() {
+        // Same grammar, so a rule that works in `--filter-from` works as an
+        // argument unchanged — including the implicit trailing exclusion that a
+        // `+` arms and the `!` that clears everything before it.
+        let set = filters(&["--filter", "+ *.jpg"]);
+        assert!(shows(&set, "a.jpg"));
+        assert!(!shows(&set, "a.txt"), "a '+' arms the implicit '- **'");
+
+        let cleared = filters(&["--exclude", "*.jpg", "--filter", "!", "--filter", "+ *.jpg"]);
+        assert!(shows(&cleared, "a.jpg"), "'!' discarded the exclusion");
+
+        // A line that is not a rule is a usage error, not a silently ignored
+        // argument — the same standard a rule file is held to.
+        assert!(FilterSet::from_globals(&globals(&["--filter", "*.jpg"])).is_err());
+    }
+
+    #[test]
+    fn the_age_window_reaches_the_engine_from_the_flags() {
+        // `--min-age`/`--max-age` parsed and then never consulted is the exact
+        // shape of the eleven inert flags (§13). The clock is injected so the
+        // window is asserted rather than merely observed to have moved.
+        const NOW: i64 = 1_700_000_000;
+        let set = FilterSet::from_globals_at(&globals(&["--max-age", "7d"]), NOW).unwrap();
+        assert!(set.is_restricting());
+        assert!(set.admits(&Candidate::file("new.txt", 1).at(Some(NOW - 86_400))));
+        assert!(!set.admits(&Candidate::file("old.txt", 1).at(Some(NOW - 30 * 86_400))));
+        // A file whose time nobody recorded is admitted rather than guessed at.
+        assert!(set.admits(&Candidate::file("unknown.txt", 1)));
+
+        let floor = FilterSet::from_globals_at(&globals(&["--min-age", "7d"]), NOW).unwrap();
+        assert!(!floor.admits(&Candidate::file("new.txt", 1).at(Some(NOW - 86_400))));
+        assert!(floor.admits(&Candidate::file("old.txt", 1).at(Some(NOW - 30 * 86_400))));
+
+        // And a crossed pair is refused rather than selecting nothing.
+        assert!(
+            FilterSet::from_globals_at(&globals(&["--min-age", "30d", "--max-age", "7d"]), NOW)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn include_from_and_exclude_from_read_bare_patterns_from_a_file() {
+        // rclone's split: `--filter-from` lines carry their own `+`/`-`, while
+        // these two take the action from the flag (`fs/filter/rules.go:246`).
+        let dir = tempfile::tempdir().expect("temp dir");
+        let includes = dir.path().join("in.txt");
+        std::fs::write(
+            &includes,
+            "# only the photographs
+*.jpg
+
+*.raw
+",
+        )
+        .expect("write");
+        let excludes = dir.path().join("out.txt");
+        std::fs::write(
+            &excludes,
+            "thumbs/**
+",
+        )
+        .expect("write");
+
+        let set = filters(&[
+            "--include-from",
+            includes.to_str().expect("path"),
+            "--exclude-from",
+            excludes.to_str().expect("path"),
+        ]);
+        assert!(shows(&set, "a.jpg"));
+        assert!(shows(&set, "a.raw"));
+        assert!(
+            !shows(&set, "a.txt"),
+            "an include-from arms the implicit '- **'"
+        );
+        // rclone's order again: the inclusion is tried first, so a `.jpg` under
+        // `thumbs/` survives the exclusion below it.
+        assert!(shows(&set, "thumbs/a.jpg"));
+        assert!(!shows(&set, "thumbs/a.txt"));
+
+        // A file holding only comments still arms the implicit exclusion,
+        // because rclone arms it from the *flag* before reading a line — a
+        // whitelist that silently became "everything" is the worst outcome here.
+        let empty = dir.path().join("empty.txt");
+        std::fs::write(
+            &empty,
+            "# nothing yet
+",
+        )
+        .expect("write");
+        let armed = filters(&["--include-from", empty.to_str().expect("path")]);
+        assert!(!shows(&armed, "a.jpg"));
     }
 
     #[test]
@@ -1382,7 +1690,10 @@ mod tests {
             vec!["--exclude", "*.tmp"],
             vec!["--min-size", "1K"],
             vec!["--max-size", "1K"],
+            vec!["--min-age", "1d"],
+            vec!["--max-age", "1d"],
             vec!["--max-depth", "2"],
+            vec!["--filter", "- *.tmp"],
         ] {
             assert!(
                 filters(&args).is_restricting(),
@@ -1433,7 +1744,10 @@ mod tests {
             !set.admits_file("a/b/c/photo.jpg", 4096),
             "past --max-depth"
         );
-        assert!(!set.admits_file("thumbs/photo.jpg", 4096), "excluded");
+        // Under rclone's order the inclusion is tried first, so a `.jpg` here
+        // survives the exclusion — that is the behaviour a migrating script was
+        // written against, and `--filter` is how the other reading is written.
+        assert!(set.admits_file("thumbs/photo.jpg", 4096));
         assert!(!set.admits_file("a/b/photo.raw", 4096), "not included");
     }
 }

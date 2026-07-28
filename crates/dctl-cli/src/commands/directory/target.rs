@@ -6,13 +6,18 @@
 //! two directories, and on macOS — where the shell hands over decomposed
 //! Unicode — that happens without the user typing anything unusual at all.
 //!
-//! The disambiguation rules are the ones documented in
-//! [`crate::platform::path`]: a single character before the colon is a Windows
-//! drive letter, a `\\`-prefixed string is a UNC share, and both are *local*
-//! paths. Local paths are refused rather than guessed at, because the operating
-//! system already has `mkdir(1)` and `touch(1)` and a DCTL that silently created
-//! a local directory when the user meant a vault one would be worse than one
-//! that says so.
+//! The disambiguation rules are [`crate::remote::spec`]'s, consulted rather than
+//! re-derived: a single ASCII letter before the colon is a Windows drive letter
+//! *on a platform that has drives*, a `\\`-prefixed string is a UNC share, and
+//! both are *local* paths. Local paths are refused rather than guessed at,
+//! because the operating system already has `mkdir(1)` and `touch(1)` and a DCTL
+//! that silently created a local directory when the user meant a vault one would
+//! be worse than one that says so.
+//!
+//! This module used to carry its own copy of those rules, and the copy had
+//! drifted: it applied the drive-letter test on every platform, so
+//! `dctl mkdir r:photos` was a "local path" refusal on Linux while
+//! `dctl copy ./x r:photos` on the same machine addressed the remote `r`.
 //!
 //! The family's own rule, on top of those: a target always names something
 //! *inside* a remote. `vault:` is the root, the root always exists, and neither
@@ -22,10 +27,11 @@ use std::fmt;
 
 use serde::Serialize;
 
-use crate::constants::{MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, REMOTE_SEPARATOR};
+use crate::constants::REMOTE_SEPARATOR;
 use crate::error::{CliError, Result};
 use crate::platform::path;
 use crate::remote::RemoteSpec;
+use crate::remote::spec::{looks_local, names_a_remote, not_a_remote_name};
 
 /// A resolved directory-family target: a named remote plus a canonical logical
 /// path that is guaranteed non-empty.
@@ -60,7 +66,7 @@ impl Target {
 
         // Local paths are rejected before the colon split, because `C:\data`
         // *does* contain a colon and would otherwise parse as a remote.
-        if path::looks_like_unc(spec) || path::looks_like_windows_drive(spec) {
+        if looks_local(spec) {
             return Err(local_path_error(spec));
         }
 
@@ -68,24 +74,9 @@ impl Target {
             return Err(local_path_error(spec));
         };
 
-        if remote.chars().count() < MIN_REMOTE_NAME_LEN {
-            return Err(
-                CliError::usage(format!("'{remote}' is too short to be a remote name")).with_hint(
-                    format!(
-                        "Remote names are at least {MIN_REMOTE_NAME_LEN} characters, so a \
-                         one-letter prefix is always a Windows drive."
-                    ),
-                ),
-            );
-        }
-
-        if remote.contains(PATH_SEPARATOR) || remote.contains('\\') {
-            return Err(
-                CliError::usage(format!("'{remote}' is not a valid remote name")).with_hint(
-                    "A remote name is a bare name from the config file; it contains \
-                     no path separators.",
-                ),
-            );
+        if !names_a_remote(remote) {
+            let (reason, hint) = not_a_remote_name(remote);
+            return Err(CliError::usage(reason).with_hint(hint));
         }
 
         let Some(path) = path::clean_logical(rest) else {
@@ -199,13 +190,7 @@ mod tests {
 
     #[test]
     fn local_paths_are_refused_rather_than_guessed_at() {
-        for spec in [
-            r"C:\Users\me",
-            "c:/data",
-            r"\\server\share\x",
-            "/tmp/x",
-            "x",
-        ] {
+        for spec in [r"\\server\share\x", "/tmp/x", "x"] {
             let error = parse(spec).unwrap_err();
             assert_eq!(error.code(), ExitCode::Usage, "accepted '{spec}'");
             assert!(error.hint().is_some(), "'{spec}' failed without advice");
@@ -213,9 +198,24 @@ mod tests {
     }
 
     #[test]
-    fn a_one_character_remote_is_always_a_drive_letter() {
-        // The rule that keeps `C:\data` unambiguous on Linux too.
-        assert_eq!(parse("x:y").unwrap_err().code(), ExitCode::Usage);
+    fn one_letter_specs_follow_the_same_platform_rule_the_transfer_verbs_use() {
+        // The drift this closed: `mkdir` applied the drive-letter test on every
+        // platform, so `dctl mkdir r:photos` was refused as a local path on
+        // Linux while `dctl copy ./x r:photos` on the same machine wrote to the
+        // remote `r`. One binary, one argument, two readings.
+        let mkdir = parse("r:photos");
+        let copy = RemoteSpec::parse("r:photos").expect("the transfer verbs classify it");
+        match copy {
+            RemoteSpec::Named { remote, path } => {
+                let target = mkdir.expect("mkdir must agree that this is a remote");
+                assert_eq!(target.remote, remote);
+                assert_eq!(target.path, path);
+            }
+            RemoteSpec::Local(_) => {
+                assert!(mkdir.is_err(), "mkdir must agree that this is a path");
+            }
+        }
+        // A two-character name is a remote everywhere and always was.
         assert!(parse("xy:z").is_ok());
     }
 

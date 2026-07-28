@@ -27,7 +27,12 @@
 //! to start working.
 
 use crate::cli::GlobalArgs;
-use crate::constants::{MAX_DEPTH_UNLIMITED, REPLICATE_FILTER_HINT};
+use crate::constants::{
+    FILTER_FLAG_EXCLUDE, FILTER_FLAG_EXCLUDE_FROM, FILTER_FLAG_FILES_FROM, FILTER_FLAG_FILTER,
+    FILTER_FLAG_FILTER_FROM, FILTER_FLAG_INCLUDE, FILTER_FLAG_INCLUDE_FROM, FILTER_FLAG_MAX_AGE,
+    FILTER_FLAG_MAX_DEPTH, FILTER_FLAG_MAX_SIZE, FILTER_FLAG_MIN_AGE, FILTER_FLAG_MIN_SIZE,
+    MAX_DEPTH_UNLIMITED, REPLICATE_FILTER_HINT,
+};
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
 
@@ -68,25 +73,40 @@ pub fn refuse(globals: &GlobalArgs) -> Result<()> {
 fn requested(globals: &GlobalArgs) -> Vec<&'static str> {
     let mut given = Vec::new();
     if !globals.include.is_empty() {
-        given.push("--include");
+        given.push(FILTER_FLAG_INCLUDE);
     }
     if !globals.exclude.is_empty() {
-        given.push("--exclude");
+        given.push(FILTER_FLAG_EXCLUDE);
+    }
+    if !globals.include_from.is_empty() {
+        given.push(FILTER_FLAG_INCLUDE_FROM);
+    }
+    if !globals.exclude_from.is_empty() {
+        given.push(FILTER_FLAG_EXCLUDE_FROM);
+    }
+    if !globals.filter.is_empty() {
+        given.push(FILTER_FLAG_FILTER);
     }
     if !globals.filter_from.is_empty() {
-        given.push("--filter-from");
+        given.push(FILTER_FLAG_FILTER_FROM);
     }
     if !globals.files_from.is_empty() {
-        given.push("--files-from");
+        given.push(FILTER_FLAG_FILES_FROM);
     }
     if globals.min_size.is_some() {
-        given.push("--min-size");
+        given.push(FILTER_FLAG_MIN_SIZE);
     }
     if globals.max_size.is_some() {
-        given.push("--max-size");
+        given.push(FILTER_FLAG_MAX_SIZE);
+    }
+    if globals.min_age.is_some() {
+        given.push(FILTER_FLAG_MIN_AGE);
+    }
+    if globals.max_age.is_some() {
+        given.push(FILTER_FLAG_MAX_AGE);
     }
     if globals.max_depth != MAX_DEPTH_UNLIMITED {
-        given.push("--max-depth");
+        given.push(FILTER_FLAG_MAX_DEPTH);
     }
     given
 }
@@ -192,14 +212,24 @@ mod tests {
             "*",
             "--exclude",
             "*",
+            "--include-from",
+            "f",
+            "--exclude-from",
+            "f",
+            "--filter",
+            "- *",
             "--filter-from",
             "f",
             "--files-from",
             "f",
             "--min-size",
-            "1",
+            "1B",
             "--max-size",
-            "1",
+            "1B",
+            "--min-age",
+            "1d",
+            "--max-age",
+            "1d",
             "--max-depth",
             "1",
         ]))

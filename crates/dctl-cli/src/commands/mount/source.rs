@@ -1,10 +1,10 @@
 //! Turning the `REMOTE:` argument into what a mount would serve.
 //!
-//! `mount` reads a remote the same way every other command does — the rules live
-//! in [`crate::platform::path`] — with one difference that is the whole point of
-//! the command: an **empty path is the normal case**. `dctl mount vault: /mnt`
-//! serves the whole vault, and a path narrows it to a subtree, exactly as
-//! `rclone mount remote:path` does.
+//! `mount` reads a remote the same way every other command does — the rules are
+//! [`crate::remote::spec`]'s, consulted rather than copied — with one difference
+//! that is the whole point of the command: an **empty path is the normal case**.
+//! `dctl mount vault: /mnt` serves the whole vault, and a path narrows it to a
+//! subtree, exactly as `rclone mount remote:path` does.
 //!
 //! A local path is refused rather than guessed at. Mounting a local directory
 //! onto another local directory is `mount --bind`, not a job for an encrypted
@@ -13,9 +13,10 @@
 
 use std::fmt;
 
-use crate::constants::{MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, REMOTE_SEPARATOR};
+use crate::constants::REMOTE_SEPARATOR;
 use crate::error::{CliError, Result};
 use crate::platform::path;
+use crate::remote::spec::{looks_local, names_a_remote, not_a_remote_name};
 
 /// The remote, and optionally the subtree, a mount would serve.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -43,7 +44,7 @@ impl Source {
 
         // Local paths are rejected before the colon split, because `C:\data`
         // *does* contain a colon and would otherwise parse as a remote.
-        if path::looks_like_unc(spec) || path::looks_like_windows_drive(spec) {
+        if looks_local(spec) {
             return Err(local_source_error(spec));
         }
 
@@ -51,24 +52,9 @@ impl Source {
             return Err(local_source_error(spec));
         };
 
-        if remote.chars().count() < MIN_REMOTE_NAME_LEN {
-            return Err(
-                CliError::usage(format!("'{remote}' is too short to be a remote name")).with_hint(
-                    format!(
-                        "Remote names are at least {MIN_REMOTE_NAME_LEN} characters, so a \
-                         one-letter prefix is always a Windows drive."
-                    ),
-                ),
-            );
-        }
-
-        if remote.contains(PATH_SEPARATOR) || remote.contains('\\') {
-            return Err(
-                CliError::usage(format!("'{remote}' is not a valid remote name")).with_hint(
-                    "A remote name is a bare name from the config file; it contains \
-                     no path separators.",
-                ),
-            );
+        if !names_a_remote(remote) {
+            let (reason, hint) = not_a_remote_name(remote);
+            return Err(CliError::usage(reason).with_hint(hint));
         }
 
         let Some(path) = path::clean_logical(rest) else {
@@ -134,7 +120,7 @@ mod tests {
 
     #[test]
     fn local_paths_are_refused_rather_than_guessed_at() {
-        for spec in [r"C:\Users\me", r"\\server\share", "/mnt/vault", "vault"] {
+        for spec in [r"\\server\share", "/mnt/vault", "vault"] {
             let error = Source::parse(spec).unwrap_err();
             assert_eq!(error.code(), ExitCode::Usage, "accepted '{spec}'");
             assert!(error.hint().is_some(), "'{spec}' failed without advice");
@@ -142,8 +128,20 @@ mod tests {
     }
 
     #[test]
-    fn a_one_character_remote_is_always_a_drive_letter() {
-        assert_eq!(Source::parse("x:").unwrap_err().code(), ExitCode::Usage);
+    fn one_letter_specs_follow_the_same_platform_rule_the_transfer_verbs_use() {
+        // `mount` used to apply the drive-letter test on every platform, so
+        // `dctl mount r: /mnt` was refused on Linux for a drive that machine
+        // does not have — while `dctl copy` on the same machine read `r:` as a
+        // remote. One rule now, consulted from both places.
+        let mounted = Source::parse("r:");
+        match crate::remote::RemoteSpec::parse("r:").expect("the transfer verbs classify it") {
+            crate::remote::RemoteSpec::Named { remote, .. } => {
+                assert_eq!(mounted.expect("mount must agree").remote, remote);
+            }
+            crate::remote::RemoteSpec::Local(_) => {
+                assert_eq!(mounted.unwrap_err().code(), ExitCode::Usage);
+            }
+        }
         assert!(Source::parse("xy:").is_ok());
     }
 

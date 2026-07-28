@@ -211,10 +211,15 @@ pub const FLAGS: &[Flag] = &[
     // ── Filtering ────────────────────────────────────────────────────────
     Flag::honoured("--include", "include"),
     Flag::honoured("--exclude", "exclude"),
+    Flag::honoured("--include-from", "include_from"),
+    Flag::honoured("--exclude-from", "exclude_from"),
+    Flag::honoured("--filter", "filter"),
     Flag::honoured("--filter-from", "filter_from"),
     Flag::honoured("--files-from", "files_from"),
     Flag::honoured("--min-size", "min_size"),
     Flag::honoured("--max-size", "max_size"),
+    Flag::honoured("--min-age", "min_age"),
+    Flag::honoured("--max-age", "max_age"),
     Flag::honoured("--max-depth", "max_depth"),
     // ── Output ───────────────────────────────────────────────────────────
     Flag::honoured("--format", "format"),

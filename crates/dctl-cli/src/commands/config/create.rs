@@ -72,6 +72,7 @@ pub async fn run(ctx: &Ctx, args: &CreateArgs) -> Result<()> {
     // Name rules come from the configuration layer, not from here: a second
     // copy would drift from what the file itself accepts on load.
     config::validate_remote_name(&args.name)?;
+    refuse_drive_letter(&args.name)?;
 
     let assignments = settings::parse_assignments(&args.settings)?;
     let remote = settings::build(&args.remote_type, &assignments)?;
@@ -116,6 +117,46 @@ pub async fn run(ctx: &Ctx, args: &CreateArgs) -> Result<()> {
             vec![(report.name.clone(), report.kind.to_string())],
         )
     })
+}
+
+/// Refuse a name that this machine's own path syntax would take away.
+///
+/// The one platform-dependent rule in the naming layer, and it lives at
+/// *creation* rather than at load so a configuration stays portable: a file
+/// written on Linux with a remote called `r` opens on Windows, is listed, and
+/// can be repaired — it simply cannot be reached as `r:`, because there `r:` is
+/// the R: drive. rclone draws the line in the same place
+/// (`fs/config/ui.go:577`), and this is the non-interactive equivalent.
+///
+/// # Errors
+/// [`ExitCode::Usage`] naming the drive the name would collide with.
+fn refuse_drive_letter(name: &str) -> Result<()> {
+    refuse_drive_letter_on(name, constants::DRIVE_LETTERS_EXIST)
+}
+
+/// [`refuse_drive_letter`], with the platform stated rather than compiled in.
+///
+/// # Errors
+/// [`ExitCode::Usage`] naming the drive the name would collide with.
+fn refuse_drive_letter_on(name: &str, drive_letters: bool) -> Result<()> {
+    if !config::drive_letter_conflict(name, drive_letters) {
+        return Ok(());
+    }
+    Err(CliError::new(
+        ExitCode::Usage,
+        format!(
+            "'{name}' is a drive letter on this platform, so a remote called \
+                 '{name}' could never be addressed"
+        ),
+    )
+    .with_hint(format!(
+        "'{name}{}' names the {}{} drive before any configuration is consulted. \
+             Choose a longer name. A configuration written on a platform without \
+             drive letters may still contain this name and will load here.",
+        constants::REMOTE_SEPARATOR,
+        name.to_ascii_uppercase(),
+        constants::REMOTE_SEPARATOR,
+    )))
 }
 
 #[cfg(test)]
@@ -285,13 +326,48 @@ mod tests {
     async fn an_unusable_name_is_rejected_before_anything_is_written() {
         let (_dir, path) = empty();
         let ctx = ctx(&path, &[]);
-        for name in ["c", "b2:prod", "a/b", "my remote"] {
+        for name in ["b2:prod", "a/b", "my remote", ".hidden"] {
             assert!(
                 run(&ctx, &args(name, "b2", &["bucket=x"])).await.is_err(),
                 "'{name}' was accepted"
             );
         }
         assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn a_one_character_name_is_created_where_no_drive_could_shadow_it() {
+        // rclone accepts the name and addresses it off Windows; refusing it here
+        // was the whole of the gap. The Windows half is asserted below through
+        // the stated-platform entry point, because this suite runs on Linux.
+        let (_dir, path) = empty();
+        let ctx = ctx(&path, &[]);
+        let outcome = run(&ctx, &args("r", "b2", &["bucket=x"])).await;
+        if config::drive_letter_conflict("r", constants::DRIVE_LETTERS_EXIST) {
+            let error = outcome.expect_err("a drive letter must be refused where drives exist");
+            assert_eq!(error.code(), ExitCode::Usage);
+            assert!(error.hint().unwrap_or_default().contains("drive"));
+        } else {
+            outcome.expect("a one-character remote must be creatable off Windows");
+            assert!(config::load(&path).unwrap().get("r").is_some());
+        }
+    }
+
+    #[test]
+    fn the_drive_letter_refusal_names_the_drive_and_the_way_out() {
+        // Asserted through the rule rather than through `run`, so the Windows
+        // behaviour is exercised by a test run on any machine — the failure mode
+        // of a cfg-gated rule is that only one half is ever executed.
+        assert!(config::drive_letter_conflict("r", true));
+        assert!(!config::drive_letter_conflict("r2", true));
+        let error = refuse_drive_letter_on("r", true).expect_err("must be refused");
+        assert_eq!(error.code(), ExitCode::Usage);
+        assert!(error.message().contains("drive letter"), "{error}");
+        let hint = error.hint().unwrap_or_default();
+        assert!(hint.contains("R:"), "the hint must name the drive: {hint}");
+        assert!(hint.contains("longer name"), "{hint}");
+        // Off Windows the same name passes untouched.
+        assert!(refuse_drive_letter_on("r", false).is_ok());
     }
 
     #[tokio::test]

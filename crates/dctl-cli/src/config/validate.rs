@@ -31,6 +31,7 @@ use crate::constants::{
     REMOTE_PROVIDER_TYPES,
 };
 use crate::logging::redact::is_sensitive_key;
+use crate::platform::path::is_drive_letter;
 
 use super::error::{ConfigError, Result};
 use super::location::Location;
@@ -39,12 +40,18 @@ use super::model::{Config, RemoteDef};
 /// Check one remote name against every naming rule.
 ///
 /// The rules exist to keep `remote:path` unambiguous, in this order of
-/// importance: a name is at least [`MIN_REMOTE_NAME_LEN`] characters so it can
-/// never be read as a Windows drive letter; it contains only ASCII letters,
-/// digits and [`REMOTE_NAME_EXTRA_CHARS`], so it can never be read as a path or
-/// need shell quoting; it starts with a letter or a digit, so it can never be
-/// read as a flag; and it is not the name of a provider type, so `b2:` cannot
-/// mean both "the remote called b2" and "the b2 backend".
+/// importance: a name is at least [`MIN_REMOTE_NAME_LEN`] characters, which is
+/// one, as rclone's `configNameRe` is; it contains only ASCII letters, digits
+/// and [`REMOTE_NAME_EXTRA_CHARS`], so it can never be read as a path or need
+/// shell quoting; it starts with a letter or a digit, so it can never be read as
+/// a flag; and it is not the name of a provider type, so `b2:` cannot mean both
+/// "the remote called b2" and "the b2 backend".
+///
+/// **Platform-independent, deliberately.** A config file is carried between
+/// machines, so what it may contain cannot depend on where it is read. The one
+/// rule that *is* platform-dependent — that a Windows machine must not create a
+/// remote a drive letter would shadow — lives in [`drive_letter_conflict`] and
+/// applies when a name is chosen, not when a file is loaded.
 ///
 /// # Errors
 /// One of [`ConfigError::NameEmpty`], [`ConfigError::NameTooShort`],
@@ -99,6 +106,33 @@ pub fn validate_remote_name(name: &str) -> Result<()> {
 /// Whether a character may appear inside a remote name.
 fn is_name_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || REMOTE_NAME_EXTRA_CHARS.contains(&c)
+}
+
+/// Whether creating a remote called `name` on **this** machine would produce a
+/// remote nothing on this machine could address.
+///
+/// rclone's `NewRemoteName` refuses a drive-letter name outright
+/// (`fs/config/ui.go:577`), and for the reason that matters here: on Windows
+/// `c:` is the C: drive before any configuration is consulted, so a remote
+/// called `c` could be listed and repaired by name but never reached through
+/// `c:path`. Off Windows there is no drive to be shadowed by and the name is
+/// ordinary — which is why this is asked at creation time, on the machine doing
+/// the creating, and never on load.
+///
+/// A config carried from Linux to Windows may therefore contain such a name.
+/// That is rclone's position too, and `dctl config list` still shows it; what
+/// this prevents is a Windows operator *choosing* a name their own shell will
+/// take away from them.
+///
+/// `drive_letters` is [`crate::constants::DRIVE_LETTERS_EXIST`] in production and
+/// is a parameter
+/// for the same reason [`crate::remote::RemoteSpec::classify`]'s is: the failure
+/// mode of a `cfg`-gated rule is that only one half of it is ever executed, and
+/// the half nobody runs here is the one that decides what a Windows operator may
+/// call their vault.
+#[must_use]
+pub fn drive_letter_conflict(name: &str, drive_letters: bool) -> bool {
+    drive_letters && is_drive_letter(name)
 }
 
 /// Whether a name is already taken by a provider type.
@@ -328,6 +362,7 @@ fn walk_for_secrets<'a>(table: &'a toml::Table, path: &mut Vec<&'a str>) -> Resu
 mod tests {
     use super::*;
     use crate::config::model::{B2Def, LocalDef, RemoteDef, VaultDef};
+    use crate::constants::DRIVE_LETTERS_EXIST;
     use crate::constants::PROVIDER_VAULT;
     use std::path::PathBuf;
 
@@ -403,12 +438,41 @@ mod tests {
     }
 
     #[test]
-    fn a_one_character_name_would_be_a_drive_letter() {
-        // The rule MIN_REMOTE_NAME_LEN exists for: `c:\data` must always be a
-        // path, so no remote may ever be called `c`.
-        let error = validate_remote_name("c").expect_err("must be rejected");
-        assert!(matches!(error, ConfigError::NameTooShort { .. }));
-        assert!(validate_remote_name("").is_err());
+    fn a_one_character_name_is_legal_because_rclone_makes_one_legal() {
+        // rclone's `configNameRe` (`fs/fspath/path.go:16`) accepts a single
+        // character and `CheckConfigName` applies it on every platform, so a
+        // config being migrated can already contain one. Refusing it here made
+        // the import, not the data, the thing that failed.
+        for name in ["r", "c", "1", "x"] {
+            assert!(
+                validate_remote_name(name).is_ok(),
+                "'{name}' must be declarable"
+            );
+        }
+        // Empty is still nothing at all.
+        assert!(matches!(
+            validate_remote_name(""),
+            Err(ConfigError::NameEmpty)
+        ));
+    }
+
+    #[test]
+    fn a_drive_letter_name_is_refused_only_where_drives_exist() {
+        // rclone's `ui.go:577` rule, and the reason the length rule above could
+        // safely be dropped: on Windows `c:` is the C: drive before any config
+        // is read, so choosing `c` there gives you a remote your own shell hides.
+        assert!(drive_letter_conflict("c", true));
+        assert!(drive_letter_conflict("Z", true));
+        assert!(!drive_letter_conflict("c", false));
+        // Not every one-character name is a drive: rclone requires a single
+        // ASCII letter, so a digit is a perfectly reachable remote on Windows.
+        assert!(!drive_letter_conflict("1", true));
+        assert!(!drive_letter_conflict("cd", true));
+        // And this platform's own answer is one of the two, never a third.
+        assert_eq!(
+            drive_letter_conflict("c", DRIVE_LETTERS_EXIST),
+            DRIVE_LETTERS_EXIST
+        );
     }
 
     #[test]
@@ -629,11 +693,16 @@ mod tests {
 
     #[test]
     fn a_bad_name_in_the_file_is_caught_by_whole_config_validation() {
-        let config = config_of(&[("c", local())]);
+        // A name too long is the shape that survives: the floor is one character
+        // now, so shortness is no longer a fault a file can have.
+        let config = config_of(&[(&"a".repeat(MAX_REMOTE_NAME_LEN + 1), local())]);
         assert!(matches!(
             validate(&config),
-            Err(ConfigError::NameTooShort { .. })
+            Err(ConfigError::NameTooLong { .. })
         ));
+        // And a one-character section loads, on every platform, which is the
+        // point of the change: a Linux-authored config opens on Windows too.
+        assert!(validate(&config_of(&[("r", local())])).is_ok());
     }
 
     #[test]

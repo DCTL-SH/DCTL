@@ -293,7 +293,12 @@ fn select(
             let relative = target.relative(&object.logical).to_string();
             // The tree's own name, if it is itself an object, has no place
             // beneath the destination: there is nothing left to call it.
-            if relative.is_empty() || !selection.admits_file(&relative, object.size) {
+            // `Modified::Now` cannot appear on a stored record — it is
+            // resolved at the commit — so `resolve` here is the recorded time
+            // or nothing, which is exactly what the age window wants.
+            if relative.is_empty()
+                || !selection.admits_file(&relative, object.size, object.modified.resolve())
+            {
                 return None;
             }
             let native = logical::from_logical(destination, &relative);

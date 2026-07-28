@@ -71,7 +71,9 @@ pub use model::{Config, RemoteDef};
 pub use namespace::VaultNamespace;
 pub use pair::VaultPair;
 pub use save::save;
-pub use validate::{validate, validate_remote_name, vault_chain, vault_only_locations};
+pub use validate::{
+    drive_letter_conflict, validate, validate_remote_name, vault_chain, vault_only_locations,
+};
 
 /// The parts of the layer only its tests reach for.
 ///
@@ -219,6 +221,7 @@ mod tests {
             config
         );
         assert!(validate_remote_name("b2prod").is_ok());
-        assert!(validate_remote_name("c").is_err());
+        assert!(validate_remote_name("c").is_ok(), "rclone accepts one char");
+        assert!(validate_remote_name("my/remote").is_err());
     }
 }

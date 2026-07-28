@@ -44,6 +44,7 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::Path;
     use std::sync::Arc;
+    use std::time::{Duration, SystemTime};
 
     use clap::Parser;
     use dctl_core::Vault;
@@ -85,6 +86,15 @@ mod tests {
         ("private/secret.txt", 40),
     ];
 
+    /// How far back the *aged* half of the fixture is stamped.
+    ///
+    /// Comfortably outside the `--min-age`/`--max-age` values the table uses, so
+    /// the split is decided by the flag rather than by how long the suite took.
+    const AGED_BY: Duration = Duration::from_secs(60 * 86_400);
+
+    /// The files [`tree`] backdates, so an age filter has two sides to separate.
+    const AGED: &[&str] = &["notes.txt", "photos/b.jpg", "tmp/scratch.txt"];
+
     /// Write [`TREE`] into a fresh temporary directory.
     fn tree() -> TempDir {
         let root = TempDir::new().expect("a temporary directory");
@@ -94,6 +104,19 @@ mod tests {
                 std::fs::create_dir_all(parent).expect("the parent directory is created");
             }
             std::fs::write(&path, vec![b'x'; *size]).expect("the fixture file is written");
+        }
+        // Half the tree is made old, or `--min-age` and `--max-age` would each
+        // select all of it or none of it and the agreement they proved would be
+        // vacuous — which is exactly what `the_rule_sets_actually_separate_the_tree`
+        // is there to catch.
+        let then = SystemTime::now() - AGED_BY;
+        for relative in AGED {
+            let file = std::fs::File::options()
+                .write(true)
+                .open(root.path().join(relative))
+                .expect("the fixture file opens");
+            file.set_times(std::fs::FileTimes::new().set_modified(then))
+                .expect("this filesystem records modification times");
         }
         root
     }
@@ -155,14 +178,23 @@ mod tests {
                 vec!["--include", "*.jpg", "--exclude", "*.png"],
             ),
             (
-                "an include and an exclude that overlap",
-                vec!["--include", "**", "--exclude", "private/**"],
+                "an exclusion written after an inclusion, in one --filter list",
+                vec![
+                    "--filter",
+                    "- private/**",
+                    "--filter",
+                    "+ **",
+                    "--filter",
+                    "- **",
+                ],
             ),
             (
                 "two includes as a union",
                 vec!["--include", "*.jpg", "--include", "notes.txt"],
             ),
             ("a minimum size", vec!["--min-size", "1K"]),
+            ("an age floor", vec!["--min-age", "30d"]),
+            ("an age ceiling", vec!["--max-age", "30d"]),
             ("a maximum size", vec!["--max-size", "1K"]),
             (
                 "both size bounds",

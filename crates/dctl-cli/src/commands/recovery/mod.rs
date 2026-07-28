@@ -65,7 +65,7 @@ mod tests {
         // The default has to admit everything: a `Selection` that quietly
         // restricted would make a backup store less than it was asked to.
         let selection = Selection::default();
-        assert!(selection.admits_file("anything/at/all.bin", u64::MAX));
+        assert!(selection.admits_file("anything/at/all.bin", u64::MAX, None));
         assert!(!selection.is_restricting());
     }
 }

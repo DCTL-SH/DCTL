@@ -419,11 +419,24 @@ mod tests {
     #[test]
     fn an_illegal_remote_name_is_caught_on_load() {
         let error = parse(
-            "[remotes.c]\ntype = \"local\"\npath = \"/srv\"\n",
+            "[remotes.\"my remote\"]\ntype = \"local\"\npath = \"/srv\"\n",
             &any_path(),
         )
         .expect_err("must be refused");
-        assert!(matches!(error, ConfigError::NameTooShort { .. }), "{error}");
+        assert!(matches!(error, ConfigError::NameCharset { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_one_character_remote_name_loads_on_every_platform() {
+        // The portability half of the rclone-parity fix: a config written on a
+        // machine without drive letters must open on one that has them, or a
+        // name rclone allows becomes a file DCTL refuses to read at all.
+        let config = parse(
+            "[remotes.c]\ntype = \"local\"\npath = \"/srv\"\n",
+            &any_path(),
+        )
+        .expect("a one-character section must load");
+        assert!(config.get("c").is_some());
     }
 
     #[test]

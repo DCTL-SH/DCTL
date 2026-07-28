@@ -260,30 +260,31 @@ mod tests {
     }
 
     #[test]
-    fn a_config_can_never_declare_the_remote_a_drive_letter_would_collide_with() {
-        // The sharpest edge in the CLI, exercised end to end. A file declaring
-        // `[remotes.C]` is refused when it is *read*, on every platform, which
-        // is what makes `crate::remote::spec`'s platform split safe: off Windows
-        // `C:` is a reference to the remote `C`, and no configuration can ever
-        // supply one.
+    fn a_one_letter_remote_loads_and_is_addressable_where_no_drive_shadows_it() {
+        // The sharpest edge in the CLI, exercised end to end, and corrected this
+        // pass: a file declaring `[remotes.C]` now *loads* on every platform,
+        // because rclone's `configNameRe` accepts the name and a config that
+        // could not be imported was the whole of the gap. What differs by
+        // platform is only whether `C:\Users\me` reaches it.
         let (_dir, ctx) = ctx_with_config("[remotes.C]\ntype = \"b2\"\nbucket = \"wrong\"\n");
+        let described = Described::resolve(&ctx, Some("C:x")).expect("the remote is declared");
+        if crate::constants::DRIVE_LETTERS_EXIST {
+            // `C:x` is a drive-relative path there, so it never reaches B2.
+            assert_eq!(described.provider, PROVIDER_LOCAL);
+        } else {
+            assert_eq!(described.provider, PROVIDER_B2);
+            assert_eq!(described.chain, vec!["C".to_string()]);
+        }
+
+        // And a name nothing declares is still a hard failure, never a
+        // directory quietly created next to the working tree.
         let error = Described::resolve(&ctx, Some("some-remote:x")).unwrap_err();
         assert_ne!(error.code(), ExitCode::Success);
-        assert!(error.message().contains('C'), "{}", error.message());
-
-        // …so `C:\Users\me` never reaches a bucket. Which of the two truthful
-        // answers it gets depends on the platform, and both are asserted
-        // platform-independently in `crate::remote::spec` and
-        // `crate::remote::resolve`; this checks only that neither is "a bucket
-        // called C".
-        let outcome = Described::resolve(&ctx, Some(r"C:\Users\me"));
-        match outcome {
-            Ok(described) => assert_eq!(
-                described.provider, PROVIDER_LOCAL,
-                "where drives exist it is a path"
-            ),
-            Err(error) => assert_ne!(error.code(), ExitCode::Success),
-        }
+        assert!(
+            error.message().contains("some-remote"),
+            "{}",
+            error.message()
+        );
     }
 
     #[test]

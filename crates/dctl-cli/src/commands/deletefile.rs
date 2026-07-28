@@ -133,10 +133,23 @@ mod tests {
 
     #[tokio::test]
     async fn a_local_path_is_refused() {
+        // A bare path has no colon at all, so it is a local path on every
+        // platform and there is nothing platform-conditional to reason about.
+        let error = run_with(&["/home/me/a.jpg", "--force"]).await.unwrap_err();
+        assert_eq!(error.code(), ExitCode::Usage);
+
+        // A drive specifier is a path only where drives exist. Off Windows it
+        // is a reference to the remote `C`, which is not configured here — a
+        // hard failure by name, never a file quietly deleted somewhere else.
         let error = run_with(&[r"C:\Users\me\a.jpg", "--force"])
             .await
             .unwrap_err();
-        assert_eq!(error.code(), ExitCode::Usage);
+        if crate::constants::DRIVE_LETTERS_EXIST {
+            assert_eq!(error.code(), ExitCode::Usage);
+        } else {
+            assert_eq!(error.code(), ExitCode::FatalError);
+            assert!(error.message().contains('C'), "{}", error.message());
+        }
     }
 
     #[tokio::test]

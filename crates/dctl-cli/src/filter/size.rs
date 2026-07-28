@@ -16,6 +16,23 @@
 //! Sizes are parsed by [`crate::output::size::parse_size`], not here: the
 //! spellings DCTL *accepts* and the spellings it *prints* are one contract, and
 //! a second parser would be free to drift from it.
+//!
+//! ## A number with no unit is refused, and that is deliberate
+//!
+//! This is the one place these flags **refuse** an input rclone accepts, and it
+//! exists because the two tools disagree about what the input means by a factor
+//! of 1024. rclone's `SizeSuffix.Set` (`fs/sizesuffix.go:141`) gives a bare
+//! number the *kibibyte* multiplier — `--max-size 1024` there is one mebibyte —
+//! while [`parse_size`] reads it as bytes, which is what every other size in
+//! DCTL's own output means.
+//!
+//! Either reading is defensible; silently applying one to a command line written
+//! for the other is not. `--max-size 100` would carry files up to 100 KiB for an
+//! rclone user and up to 100 bytes here, and on `sync` the files in between are
+//! not merely absent from the copy — they are candidates for deletion at the
+//! destination. So a unitless bound is a usage error naming both readings, and
+//! `--max-size 100B` and `--max-size 100K` are the two unambiguous ways to say
+//! what was meant. `off` still needs no unit, because it is not a quantity.
 
 use std::fmt;
 
@@ -29,6 +46,8 @@ use crate::output::size::parse_size;
 pub enum SizeProblem {
     /// One of the two values is not a size.
     Unreadable { flag: &'static str, detail: String },
+    /// A quantity with no unit, which DCTL and rclone read 1024 apart.
+    Unitless { flag: &'static str, value: String },
     /// The bounds cross, so nothing can satisfy both.
     Crossed { min: u64, max: u64 },
 }
@@ -42,6 +61,12 @@ impl SizeProblem {
                     "Sizes are written as {SIZE_PARSE_EXAMPLES}; '{SIZE_LIMIT_OFF}' removes a limit."
                 )
             }
+            Self::Unitless { value, .. } => format!(
+                "Write '{value}B' for {value} bytes or '{value}K' for {value} kibibytes. \
+                 rclone reads a bare number as kibibytes and every size DCTL prints is \
+                 in bytes, so the two disagree by 1024 — on a sync that difference is \
+                 not files missing from a copy, it is files deleted at the destination."
+            ),
             Self::Crossed { .. } => {
                 "No file can satisfy both bounds, so the run would move nothing \
                  and still report success. Swap them, or drop one."
@@ -55,6 +80,11 @@ impl fmt::Display for SizeProblem {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Unreadable { flag, detail } => write!(f, "{flag}: {detail}"),
+            Self::Unitless { flag, value } => write!(
+                f,
+                "{flag}: '{value}' has no unit, and a bare number means different \
+                 things to different tools"
+            ),
             Self::Crossed { min, max } => write!(
                 f,
                 "{FILTER_FLAG_MIN_SIZE} ({min} bytes) is larger than \
@@ -140,10 +170,27 @@ impl SizeBounds {
 
 /// Parse one bound, attributing any failure to the flag it came from.
 fn parse_one(value: Option<&str>, flag: &'static str) -> Result<Option<u64>, SizeProblem> {
-    match value {
-        None => Ok(None),
-        Some(text) => parse_size(text).map_err(|detail| SizeProblem::Unreadable { flag, detail }),
+    let Some(text) = value else {
+        return Ok(None);
+    };
+    if is_unitless(text) {
+        return Err(SizeProblem::Unitless {
+            flag,
+            value: text.trim().to_string(),
+        });
     }
+    parse_size(text).map_err(|detail| SizeProblem::Unreadable { flag, detail })
+}
+
+/// Whether `text` is a quantity with no unit letter after it.
+///
+/// A shape test, not a parse: anything containing an ASCII letter carries a unit
+/// (or is unparseable, which [`parse_size`] will say better). `off` therefore
+/// passes straight through, and so does a malformed `10X`, whose real problem is
+/// the suffix rather than the absence of one.
+fn is_unitless(text: &str) -> bool {
+    let trimmed = text.trim();
+    !trimmed.is_empty() && !trimmed.contains(|c: char| c.is_ascii_alphabetic())
 }
 
 #[cfg(test)]
@@ -201,9 +248,61 @@ mod tests {
     }
 
     #[test]
+    fn a_bare_number_is_refused_because_rclone_and_dctl_read_it_1024_apart() {
+        // The silent divergence this closes. rclone's `SizeSuffix.Set` gives a
+        // unitless value the kibibyte multiplier (`fs/sizesuffix.go:141`), so
+        // `--max-size 100` selects files up to 100 KiB there and would have
+        // selected files up to 100 bytes here. On a sync the files in between
+        // are deletion candidates at the destination, not merely absent.
+        for flag in [FILTER_FLAG_MIN_SIZE, FILTER_FLAG_MAX_SIZE] {
+            let error = if flag == FILTER_FLAG_MIN_SIZE {
+                SizeBounds::parse(Some("100"), None)
+            } else {
+                SizeBounds::parse(None, Some("100"))
+            }
+            .expect_err("a unitless bound must be refused");
+            match &error {
+                SizeProblem::Unitless { flag: named, value } => {
+                    assert_eq!(*named, flag);
+                    assert_eq!(value, "100");
+                }
+                other => panic!("expected a unitless refusal, got {other}"),
+            }
+            // The remediation has to spell both readings, or the reader has to
+            // guess which one DCTL meant.
+            let hint = error.hint();
+            assert!(hint.contains("100B"), "{hint}");
+            assert!(hint.contains("100K"), "{hint}");
+        }
+        // A decimal with no unit is the same mistake and gets the same answer.
+        assert!(matches!(
+            SizeBounds::parse(Some("1.5"), None),
+            Err(SizeProblem::Unitless { .. })
+        ));
+        // Both unambiguous spellings work, and mean what they say.
+        assert_eq!(bounds(Some("100B"), None).min(), Some(100));
+        assert_eq!(bounds(Some("100K"), None).min(), Some(100 * 1024));
+        // `off` is not a quantity, so it needs no unit.
+        assert!(SizeBounds::parse(None, Some(SIZE_LIMIT_OFF)).is_ok());
+        // And a bad *suffix* is still reported as a bad suffix, not as a
+        // missing one — that would send the reader to the wrong half.
+        assert!(matches!(
+            SizeBounds::parse(None, Some("10X")),
+            Err(SizeProblem::Unreadable { .. })
+        ));
+    }
+
+    #[test]
     fn a_zero_with_a_unit_is_a_real_limit() {
         // `--max-size 0K` asked for a size and must come back as one, or
-        // "match nothing" silently becomes "match everything".
+        // "match nothing" silently becomes "match everything". A bare `0` is
+        // refused with everything else that carries no unit, so the one
+        // spelling that used to mean "unlimited" can no longer be typed by
+        // accident where a limit was meant.
+        assert!(matches!(
+            SizeBounds::parse(None, Some("0")),
+            Err(SizeProblem::Unitless { .. })
+        ));
         let window = bounds(None, Some("0K"));
         assert!(window.is_limited());
         assert!(window.admits(0));

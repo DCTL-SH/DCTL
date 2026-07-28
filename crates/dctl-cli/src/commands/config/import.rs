@@ -371,7 +371,10 @@ mod tests {
         // A silently-adjusted name is one the operator will not recognise in
         // their own configuration.
         let (dir, config) = workspace();
-        let store = dir.path().join("v");
+        // A directory whose name is not a legal remote name. One character is
+        // legal now (rclone accepts it), so the case has to be a real one: a
+        // name that starts with a dot could never come out of a config file.
+        let store = dir.path().join(".vault");
         store_with_vault(&store, 1);
 
         let error = run(

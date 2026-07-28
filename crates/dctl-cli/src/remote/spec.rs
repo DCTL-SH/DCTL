@@ -42,18 +42,24 @@
 //! `dctl copy /srv/data r:` on Linux created a **local directory named `r:`**
 //! and exited 0 — a backup landing somewhere nobody named, silently, on the
 //! platform DCTL is most likely to run on. rclone treats `r` as a remote
-//! everywhere except Windows for exactly this reason.
+//! everywhere except Windows for exactly this reason
+//! (`fs/fspath/path.go:163` consults `driveletter.IsDriveLetter`, which is a
+//! constant `false` off Windows).
 //!
-//! What makes the split safe rather than merely rclone-compatible is
-//! [`MIN_REMOTE_NAME_LEN`]: a one-character remote cannot be *declared* in any
-//! configuration, on any platform. So off Windows a single-character reference
-//! parses as a remote, resolves to nothing, and fails by name — it can never
-//! quietly address a remote the user did not mean. The two platforms differ in
-//! which diagnosis they give, never in whether data goes somewhere unasked.
+//! Off Windows a single-character reference now resolves to a remote that can
+//! genuinely be configured, so `r:` addresses `r`. What keeps that safe is the
+//! rule at the other end: [`crate::config::drive_letter_conflict`] refuses to
+//! *create* a one-letter remote on a platform that has drives, so a Windows
+//! machine can never hold a config whose name Windows itself would shadow. A
+//! config carried over from Linux may, and then `r:` on Windows is the R: drive
+//! while the remote `r` is still listed, verified and repaired by name — which
+//! is precisely rclone's position, stated instead of discovered.
 //!
 //! [`classify`] therefore takes the platform as an argument instead of reading
 //! the `cfg` itself, so both behaviours are asserted by the test suite whichever
-//! machine runs it.
+//! machine runs it. [`looks_local`] and [`names_a_remote`] are the same two
+//! rules exported for the command families that parse a `REMOTE:PATH` argument
+//! of their own; there is no second implementation of either.
 //!
 //! ## Two path vocabularies, deliberately not mixed
 //!
@@ -76,8 +82,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::constants::{
-    DRIVE_LETTERS_EXIST, MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, PROVIDER_LOCAL, RELATIVE_PATH_MARKER,
-    REMOTE_SEPARATOR, WINDOWS_PATH_SEPARATOR,
+    DRIVE_LETTERS_EXIST, PATH_SEPARATOR, PROVIDER_LOCAL, RELATIVE_PATH_MARKER, REMOTE_SEPARATOR,
+    WINDOWS_PATH_SEPARATOR,
 };
 use crate::error::{CliError, Result};
 use crate::platform::path::{
@@ -139,15 +145,15 @@ impl RemoteSpec {
         // because both of them contain colons of their own. A UNC path is a
         // Windows path shape on any platform — nothing else begins `\\` — but a
         // drive specifier is only a drive where drives exist.
-        if looks_like_unc(input) || (drive_letters && looks_like_windows_drive(input)) {
+        if looks_local_on(input, drive_letters) {
             return Ok(Self::Local(PathBuf::from(input)));
         }
 
-        // Rule 3, and rule 4 via `is_remote_name`.
+        // Rule 3, and rule 4 via `names_a_remote`.
         let Some((candidate, rest)) = input.split_once(REMOTE_SEPARATOR) else {
             return Ok(Self::Local(PathBuf::from(input)));
         };
-        if !is_remote_name(candidate, drive_letters) {
+        if !names_a_remote(candidate) {
             return Ok(Self::Local(PathBuf::from(input)));
         }
 
@@ -237,37 +243,86 @@ impl RemoteSpec {
     }
 }
 
+/// Whether `spec` has a **local path shape** that must win before any colon in
+/// it is considered.
+///
+/// The platform-aware half of rules 1 and 2, exported so that every command
+/// family which parses a `REMOTE:PATH` argument of its own asks the same
+/// question. Five of them used to test `looks_like_windows_drive` directly and
+/// unconditionally, which made `dctl mkdir r:photos` a "local path" refusal on
+/// Linux while `dctl copy ./x r:photos` on the same machine addressed the remote
+/// `r` — one argument, two meanings, inside one binary.
+#[must_use]
+pub fn looks_local(spec: &str) -> bool {
+    looks_local_on(spec, DRIVE_LETTERS_EXIST)
+}
+
+/// [`looks_local`], with the platform stated rather than compiled in.
+#[must_use]
+pub fn looks_local_on(spec: &str, drive_letters: bool) -> bool {
+    looks_like_unc(spec) || (drive_letters && looks_like_windows_drive(spec))
+}
+
 /// Whether `candidate` — the text before the first colon — really names a
 /// remote, or is just the first component of a path that happens to contain one.
 ///
 /// Each rejection is a real filename that would otherwise be misread:
-/// `photos/x:y` (a directory), `./x:y` and `..:y` (relative-path markers), and —
-/// where drives exist — `a:b`, whose leading `a` is a drive letter.
+/// `photos/x:y` (a directory), and `./x:y` and `..:y` (relative-path markers).
 ///
-/// An **empty** candidate is never a name on either platform: `:leading-colon`
-/// is a relative filename, and nothing can be configured under the empty name.
+/// An **empty** candidate is never a name: `:leading-colon` is a relative
+/// filename, and nothing can be configured under the empty name.
 ///
-/// The minimum-length rule is `drive_letters`-conditional and the other two are
-/// not, because only that one is about drives. Off Windows a single character is
-/// an ordinary remote reference that no configuration can satisfy, which is the
-/// arrangement the module docs set out.
-fn is_remote_name(candidate: &str, drive_letters: bool) -> bool {
-    // Length in characters, not bytes: a single non-ASCII character is still one
-    // character, and a byte count would let `é:x` through as a two-byte "name"
-    // on a platform that means to exclude one-character names.
-    let length = candidate.chars().count();
-    let minimum = if drive_letters {
-        MIN_REMOTE_NAME_LEN
-    } else {
-        1
-    };
-    if length < minimum {
+/// This rule is **platform-independent**, and that is the change rclone parity
+/// required. The drive-letter question is asked once, earlier, by
+/// [`looks_local_on`] — which is where rclone asks it too
+/// (`fs/fspath/path.go:163`) — so a length rule here would only ever catch names
+/// that are *not* drives: `1:file` and `é:x` name no drive on any Windows
+/// machine, and rclone reads both as remotes because its `IsDriveLetter`
+/// requires a single ASCII letter.
+///
+/// The `..` rejection is DCTL going further than rclone rather than matching it:
+/// rclone's `configNameRe` admits `.` and `..` as config names, so `..:y` parses
+/// there as a remote called `..`. A path that climbs is the one spelling worth
+/// refusing outright, so it stays refused.
+#[must_use]
+pub fn names_a_remote(candidate: &str) -> bool {
+    if candidate.is_empty() {
         return false;
     }
     if candidate.starts_with(RELATIVE_PATH_MARKER) {
         return false;
     }
     !candidate.contains([PATH_SEPARATOR, WINDOWS_PATH_SEPARATOR])
+}
+
+/// Why `candidate` is not a remote name, phrased as a refusal.
+///
+/// Returns `(reason, hint)` for the command families that must *refuse* a spec
+/// rather than fall back to reading it as a local path. One constructor so the
+/// five of them cannot drift into five different explanations of one rule — the
+/// failure that produced "'r' is too short to be a remote name; remote names are
+/// at least 2 characters" on a Linux box where two characters was never the
+/// rule that applied.
+#[must_use]
+pub fn not_a_remote_name(candidate: &str) -> (String, &'static str) {
+    if candidate.is_empty() {
+        return (
+            format!("a remote name is missing before the '{REMOTE_SEPARATOR}'"),
+            "Write the target as REMOTE:PATH, for example 'vault:photos/2024'.",
+        );
+    }
+    if candidate.starts_with(RELATIVE_PATH_MARKER) {
+        return (
+            format!("'{candidate}' begins with '{RELATIVE_PATH_MARKER}', so it is a path"),
+            "A remote name is a bare name from the config file. '.' and '..' are \
+             path components on every platform and can never name one.",
+        );
+    }
+    (
+        format!("'{candidate}' is not a valid remote name"),
+        "A remote name is a bare name from the config file; it contains no path \
+         separators.",
+    )
 }
 
 /// Renders back to something [`RemoteSpec::parse`] accepts.
@@ -297,6 +352,7 @@ impl FromStr for RemoteSpec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constants::MIN_REMOTE_NAME_LEN;
 
     /// Classification on a platform that has drive letters.
     const WINDOWS: bool = true;
@@ -375,18 +431,23 @@ mod tests {
     }
 
     #[test]
-    fn a_single_letter_remote_can_never_be_configured_on_either_platform() {
-        // This is what makes the platform split safe rather than merely
-        // rclone-compatible: off Windows `r:` parses as a remote, and no config
-        // file may declare a one-character name, so it resolves to nothing and
-        // fails by name. It cannot silently address a remote the user did not
-        // mean, which is the only outcome that would actually matter.
-        const {
-            assert!(
-                MIN_REMOTE_NAME_LEN > 1,
-                "a declarable one-character name would reopen the ambiguity"
-            );
-        }
+    fn a_single_letter_remote_is_declarable_and_addressable_off_windows() {
+        // The gap this closed: `MIN_REMOTE_NAME_LEN` used to be 2, so `r:`
+        // parsed as a remote on Linux and then resolved to nothing, on every
+        // platform, for ever. rclone accepts the name (`configNameRe`) and
+        // addresses it off Windows, so an rclone user migrating a config that
+        // contains one had no path forward at all.
+        assert_eq!(
+            MIN_REMOTE_NAME_LEN, 1,
+            "a name rclone accepts must be declarable"
+        );
+        assert!(crate::config::validate_remote_name("r").is_ok());
+        assert_eq!(remote_on("r:photos", POSIX), "r");
+        // And on Windows the same string is the R: drive, which is why creating
+        // the name there is refused rather than silently shadowed.
+        assert_eq!(local_on("r:photos", WINDOWS), PathBuf::from("r:photos"));
+        assert!(crate::config::drive_letter_conflict("r", true));
+        assert!(!crate::config::drive_letter_conflict("r", false));
     }
 
     #[test]
@@ -400,17 +461,26 @@ mod tests {
     }
 
     #[test]
-    fn a_two_character_name_is_a_remote_on_both_platforms() {
-        // Everything a config file can actually declare classifies identically
-        // wherever it runs, which is the property the old blanket rule was
-        // protecting and the only one worth protecting.
-        for spec in ["vault:photos", "b2:bucket", "local:/srv/data"] {
+    fn every_name_that_is_not_a_drive_letter_means_one_thing_on_both_platforms() {
+        // The property worth protecting, and it now covers more than it did: a
+        // single *digit* and a single non-ASCII letter name no drive on any
+        // Windows machine, so rclone reads both as remotes and so does this.
+        for spec in [
+            "vault:photos",
+            "b2:bucket",
+            "local:/srv/data",
+            "1:file",
+            "é:x",
+        ] {
             assert_eq!(
                 RemoteSpec::classify(spec, WINDOWS).unwrap(),
                 RemoteSpec::classify(spec, POSIX).unwrap(),
                 "'{spec}' must mean the same thing on both platforms"
             );
         }
+        // Only an ASCII letter differs, and only there.
+        assert!(RemoteSpec::classify("r:x", WINDOWS).unwrap().is_local());
+        assert!(!RemoteSpec::classify("r:x", POSIX).unwrap().is_local());
     }
 
     #[test]
@@ -426,14 +496,17 @@ mod tests {
     }
 
     #[test]
-    fn a_name_shorter_than_the_minimum_is_a_path_where_drives_exist() {
-        // The rule that keeps drive letters unambiguous, applied to the
-        // non-alphabetic cases the drive check does not catch. Off Windows all
-        // three are one-character remote references that resolve to nothing.
-        assert_eq!(local_on("1:file", WINDOWS), PathBuf::from("1:file"));
-        // Counted in characters: one accented letter is one character.
-        assert_eq!(local_on("é:x", WINDOWS), PathBuf::from("é:x"));
+    fn only_an_ascii_letter_is_a_drive_and_the_rest_are_remotes() {
+        // Corrected against rclone this pass. `IsDriveLetter` requires a single
+        // ASCII letter, so a digit and an accented letter are remotes on Windows
+        // too — the old rule made both local paths there, which meant a config
+        // named `1` was unreachable on the one platform that has drives, for a
+        // drive that cannot exist.
+        assert_eq!(remote_on("1:file", WINDOWS), "1");
+        assert_eq!(remote_on("é:x", WINDOWS), "é");
         assert_eq!(remote_on("1:file", POSIX), "1");
+        // The letter itself still yields to the drive, which is the whole point.
+        assert_eq!(local_on("c:file", WINDOWS), PathBuf::from("c:file"));
     }
 
     #[test]

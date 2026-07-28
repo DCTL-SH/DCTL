@@ -492,23 +492,31 @@ mod tests {
     }
 
     #[test]
-    fn no_configuration_can_declare_the_one_character_remote_that_would_be_ambiguous() {
-        // What makes the platform split safe: off Windows `C:` parses as remote
-        // `C`, and a catalog that could answer to that name is unreachable —
-        // `config::validate` refuses it when the file is read. This asserts the
-        // dangerous shape *would* resolve if it ever existed, so that the
-        // refusal upstream is understood to be load-bearing rather than tidy.
+    fn a_one_character_remote_is_declarable_and_resolves_off_windows() {
+        // Corrected this pass. `config::validate` used to refuse the name, so
+        // the shape below was unreachable and the platform split was defended by
+        // a rule rclone does not have. It is reachable now: off Windows `C:` is
+        // the remote `C`, and a config may declare it, exactly as rclone's may.
         let config = catalog(&[(
             "C",
             RemoteEntry::new(PROVIDER_B2).with_setting(CONFIG_KEY_BUCKET, "wrong"),
         )]);
+        assert!(crate::config::validate_remote_name("C").is_ok());
         let posix = RemoteSpec::classify(r"C:\Users\me", false).unwrap();
         assert_eq!(
             resolve(&posix, &config).unwrap().provider_type(),
-            PROVIDER_B2,
-            "if this ever stops being unreachable, the guard is config::validate"
+            PROVIDER_B2
         );
-        assert!(crate::config::validate_remote_name("C").is_err());
+
+        // On a platform with drives the same argument is a path and never
+        // reaches the catalog at all, which is what makes declaring the name
+        // safe there: `config create` refuses to mint it in the first place.
+        let windows = RemoteSpec::classify(r"C:\Users\me", true).unwrap();
+        assert_eq!(
+            windows.local_path(),
+            Some(std::path::Path::new(r"C:\Users\me"))
+        );
+        assert!(crate::config::drive_letter_conflict("C", true));
     }
 
     #[test]

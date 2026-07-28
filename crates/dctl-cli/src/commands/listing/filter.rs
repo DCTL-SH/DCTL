@@ -149,12 +149,13 @@ impl Filter {
 fn candidate(entry: &Entry) -> Candidate<'_> {
     match (entry.is_dir(), entry.size()) {
         (true, _) => Candidate::directory(entry.relative()),
-        (false, Some(size)) => Candidate::file(entry.relative(), size),
+        (false, Some(size)) => Candidate::file(entry.relative(), size).at(entry.modified_unix()),
         // A row from a rebuilt vault index. The engine is told the size is
         // unknown rather than handed a zero, because a zero would answer
         // `--min-size`/`--max-size` confidently and wrongly; see
-        // [`Candidate::unmeasured_file`].
-        (false, None) => Candidate::unmeasured_file(entry.relative()),
+        // [`Candidate::unmeasured_file`]. The same row has no time either, and
+        // `--min-age`/`--max-age` are told so for the same reason.
+        (false, None) => Candidate::unmeasured_file(entry.relative()).at(entry.modified_unix()),
     }
 }
 
@@ -261,13 +262,22 @@ mod tests {
     }
 
     #[test]
-    fn exclusions_are_applied_before_the_reconstructed_inclusions() {
-        // `clap` discards the command-line interleaving; of the two ways the
-        // reconstruction can be wrong, showing a file the operator excluded is
-        // the one that cannot be taken back.
-        let filter = filter(&["--include", "**", "--exclude", "private/**"]);
-        assert!(shows(&filter, "holiday/a.jpg"));
-        assert!(!shows(&filter, "private/a.jpg"));
+    fn inclusions_are_tried_before_exclusions_because_rclone_tries_them_first() {
+        // Corrected against `fs/filter/rules.go:238`. rclone walks its flags by
+        // kind — every include, then every exclude — so an inclusion that also
+        // covers the excluded tree wins, and `private/a.jpg` is kept. DCTL led
+        // with the exclusions and dropped it, which on a listing is a file the
+        // operator is told is not stored.
+        let mixed = filter(&["--include", "**", "--exclude", "private/**"]);
+        assert!(shows(&mixed, "holiday/a.jpg"));
+        assert!(shows(&mixed, "private/a.jpg"), "rclone keeps this one");
+
+        // `--filter` is the flag whose order is written down, and it is how the
+        // other reading is expressed. rclone's own diagnostics recommend it for
+        // exactly this reason.
+        let ordered = filter(&["--filter", "- private/**", "--filter", "+ **"]);
+        assert!(shows(&ordered, "holiday/a.jpg"));
+        assert!(!shows(&ordered, "private/a.jpg"));
     }
 
     // ── Size and depth ───────────────────────────────────────────────────

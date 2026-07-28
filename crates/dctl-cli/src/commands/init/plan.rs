@@ -405,7 +405,7 @@ mod tests {
     #[test]
     fn an_unusable_name_is_refused_before_anything_happens() {
         let ctx = ctx(&["--index", "/tmp/dctl-test.redb"]);
-        for name in ["c", "b2", "my remote"] {
+        for name in [".hidden", "b2", "my remote"] {
             assert!(
                 InitPlan::resolve(&ctx, &args(Some(name), Some("local:/srv/vault"))).is_err(),
                 "'{name}' was accepted"

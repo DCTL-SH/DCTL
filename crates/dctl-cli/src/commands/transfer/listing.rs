@@ -123,9 +123,16 @@ impl ListOptions {
     /// For the walking side the ancestor check is redundant rather than wrong:
     /// every file it offers has already come out of a directory it chose to
     /// enter, so the extra question can only agree.
+    ///
+    /// `modified` is the file's own last-modified time in unix seconds, when the
+    /// side reporting it has one. It is a parameter rather than something the
+    /// filter looks up because only the caller has it, and `--min-age` and
+    /// `--max-age` silently doing nothing is exactly the failure this signature
+    /// prevents: adding the flags without threading the time would have compiled.
     #[must_use]
-    pub fn accepts_file(&self, path: &str, size: u64) -> bool {
-        self.filter.admits_enumerated_file(path, size)
+    pub fn accepts_file(&self, path: &str, size: u64, modified: Option<i64>) -> bool {
+        self.filter
+            .admits_enumerated(&crate::filter::Candidate::file(path, size).at(modified))
     }
 
     /// Whether a file whose size nothing has measured is in scope.
@@ -137,9 +144,9 @@ impl ListOptions {
     /// not apply here; see [`crate::filter::Candidate::unmeasured_file`] for the
     /// full argument, which is the same one the listing family follows so that
     /// `dctl ls --min-size` and the `copy` after it select the same files.
-    pub fn accepts_unmeasured_file(&self, path: &str) -> bool {
+    pub fn accepts_unmeasured_file(&self, path: &str, modified: Option<i64>) -> bool {
         self.filter
-            .admits_enumerated(&crate::filter::Candidate::unmeasured_file(path))
+            .admits_enumerated(&crate::filter::Candidate::unmeasured_file(path).at(modified))
     }
 
     /// Whether a walk may descend into this directory.
@@ -297,7 +304,7 @@ async fn walk_remote(
             continue;
         }
         let relative = relative_to(prefix, &object.path);
-        if accepts(options, &relative, object.size) {
+        if accepts(options, &relative, object.size, object.modified_unix) {
             listing
                 .entries
                 .push(remote_entry(relative, &object, options));
@@ -313,7 +320,7 @@ async fn walk_remote(
         listing.entries.clear();
 
         let leaf = logical::file_name(prefix).to_string();
-        if accepts(options, &leaf, object.size) {
+        if accepts(options, &leaf, object.size, object.modified_unix) {
             listing.entries.push(remote_entry(leaf, &object, options));
         }
     }
@@ -327,10 +334,10 @@ async fn walk_remote(
 /// Ask the filter about one enumerated remote object, measured or not.
 ///
 /// One place, so the two call sites above cannot answer the question two ways.
-fn accepts(options: &ListOptions, path: &str, size: Option<u64>) -> bool {
+fn accepts(options: &ListOptions, path: &str, size: Option<u64>, modified: Option<i64>) -> bool {
     size.map_or_else(
-        || options.accepts_unmeasured_file(path),
-        |size| options.accepts_file(path, size),
+        || options.accepts_unmeasured_file(path, modified),
+        |size| options.accepts_file(path, size, modified),
     )
 }
 
@@ -365,6 +372,25 @@ fn remote_entry(relative: String, object: &crate::source::Entry, options: &ListO
 /// `None` for a value no clock can represent, which keeps "unknown" and "the
 /// epoch" distinguishable — a side that reported no usable time must not make
 /// every file look older than every local file and invert `--update`.
+/// A local file's modification time in unix seconds, when the filesystem has one.
+///
+/// The inverse of [`unix_seconds`], and the reason the age filter can be applied
+/// during the walk rather than after it: a file `--max-age` excludes is one this
+/// side never opens, hashes or reports.
+///
+/// A filesystem that records no time, or a time before the epoch that will not
+/// fit, yields [`None`] — which the age bounds admit rather than guess at. See
+/// [`crate::filter::AgeBounds`].
+fn local_modified(metadata: &fs::Metadata) -> Option<i64> {
+    let modified = metadata.modified().ok()?;
+    match modified.duration_since(SystemTime::UNIX_EPOCH) {
+        Ok(since) => i64::try_from(since.as_secs()).ok(),
+        Err(before) => i64::try_from(before.duration().as_secs())
+            .ok()
+            .and_then(i64::checked_neg),
+    }
+}
+
 fn unix_seconds(seconds: i64) -> Option<SystemTime> {
     if seconds >= 0 {
         u64::try_from(seconds)
@@ -448,7 +474,7 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
         listing.is_single_file = true;
         match root.file_name().map(logical::to_logical_component) {
             Some(Ok(name)) => {
-                if options.accepts_file(&name, metadata.len()) {
+                if options.accepts_file(&name, metadata.len(), local_modified(&metadata)) {
                     listing
                         .entries
                         .push(file_entry(name, root, &metadata, options)?);
@@ -516,7 +542,9 @@ fn walk_local(root: &Path, options: &ListOptions) -> Result<Listing> {
                 if options.may_descend(&path) {
                     stack.push((child.path(), path));
                 }
-            } else if metadata.is_file() && options.accepts_file(&path, metadata.len()) {
+            } else if metadata.is_file()
+                && options.accepts_file(&path, metadata.len(), local_modified(&metadata))
+            {
                 collisions.observe(&path, &child.path());
                 listing
                     .entries
@@ -670,7 +698,7 @@ mod tests {
         let listing = source(
             &ctx(&[]),
             &endpoint,
-            &options(&["--min-size", "10", "--max-size", "100"]),
+            &options(&["--min-size", "10B", "--max-size", "100B"]),
         )
         .await
         .unwrap();
@@ -928,9 +956,45 @@ mod tests {
             ListOptions::resolve(&globals(&["--min-size", "1k", "--max-depth", "3"]), true)
                 .unwrap();
         assert!(options.include_empty_dirs);
-        assert!(!options.accepts_file("a.txt", 1023));
-        assert!(options.accepts_file("a.txt", 1024));
-        assert!(!options.accepts_file("a/b/c/d.txt", 4096));
+        assert!(!options.accepts_file("a.txt", 1023, None));
+        assert!(options.accepts_file("a.txt", 1024, None));
+        assert!(!options.accepts_file("a/b/c/d.txt", 4096, None));
+    }
+
+    #[test]
+    fn the_age_flags_reach_the_walk_rather_than_compiling_and_doing_nothing() {
+        // The failure this test exists for: `--max-age` parsed, validated, and
+        // then never consulted, because the walk had no time to give it. That
+        // shape compiles, passes every filter-engine test, and quietly copies
+        // the whole tree.
+        let options = ListOptions::resolve(&globals(&["--max-age", "1d"]), true).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        assert!(options.accepts_file("fresh.txt", 1, Some(now - 60)));
+        assert!(!options.accepts_file("stale.txt", 1, Some(now - 3 * 86_400)));
+        // An unmeasured row carries no time and is not guessed at.
+        assert!(options.accepts_unmeasured_file("rebuilt.bin", None));
+    }
+
+    #[test]
+    fn a_local_file_reports_the_time_the_age_filter_needs() {
+        // The other half: a walk that read a time but handed the filter `None`
+        // would pass the test above and still copy everything.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("a.txt");
+        File::create(&path).unwrap().write_all(b"x").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        let seconds = local_modified(&metadata).expect("this filesystem records times");
+        let now = std::time::SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        assert!(
+            (now - seconds).abs() < 300,
+            "a file created just now reported {seconds} against a clock of {now}"
+        );
     }
 
     #[test]

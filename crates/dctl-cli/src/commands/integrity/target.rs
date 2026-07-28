@@ -9,13 +9,17 @@
 //! The disambiguation follows rclone's, because that is what a user porting a
 //! script already has in their fingers:
 //!
-//! * anything that looks like a Windows drive (`C:`, `d:/data`) or a UNC path
-//!   (`\\server\share`) is **local**, on every platform — a script written on
-//!   Windows has to behave the same on a Linux build agent;
-//! * otherwise, a colon before the first path separator introduces a remote,
-//!   whose name must be at least [`MIN_REMOTE_NAME_LEN`] characters — which is
-//!   precisely what makes the drive-letter rule unambiguous;
+//! * a UNC path (`\\server\share`) is **local** on every platform — nothing else
+//!   begins `\\` — and a Windows drive (`C:`, `d:/data`) is local on a platform
+//!   that has drives, which is where rclone draws the same line
+//!   (`fs/fspath/path.go:163`);
+//! * otherwise, a colon before the first path separator introduces a remote, of
+//!   any length from one character up, exactly as rclone's `configNameRe` does;
 //! * everything else is a local path.
+//!
+//! All three are [`crate::remote::spec`]'s, called rather than re-implemented.
+//! The copy that used to live here applied the drive test on every platform, so
+//! `dctl check r:photos ./photos` refused on Linux a remote `dctl copy` accepted.
 //!
 //! The path half of a remote spec is canonicalised to a logical vault path
 //! (`/`-separated, NFC, no `.` or `..`) by [`crate::platform::path`], so two
@@ -34,10 +38,11 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use crate::constants::{MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, REMOTE_SEPARATOR};
+use crate::constants::{PATH_SEPARATOR, REMOTE_SEPARATOR};
 use crate::error::{CliError, Result};
 use crate::platform::path as logical;
 use crate::remote::RemoteSpec;
+use crate::remote::spec::{looks_local, names_a_remote, not_a_remote_name};
 
 /// Windows' path separator, accepted in a spec typed by a Windows user.
 const WINDOWS_SEPARATOR: char = '\\';
@@ -70,22 +75,17 @@ impl Target {
                 .with_hint("Write a remote path as 'REMOTE:PATH', for example 'vault:photos'."));
         }
 
-        // Local shapes that must never be read as a remote, on any platform.
-        if logical::looks_like_windows_drive(spec) || logical::looks_like_unc(spec) {
+        // Local shapes that must never be read as a remote here.
+        if looks_local(spec) {
             return Ok(Self::local(spec));
         }
 
         match split_remote(spec) {
             None => Ok(Self::local(spec)),
             Some((name, rest)) => {
-                if name.chars().count() < MIN_REMOTE_NAME_LEN {
-                    return Err(CliError::usage(format!(
-                        "'{name}' is too short to be a remote name"
-                    ))
-                    .with_hint(
-                        "Remote names are at least two characters, so that a single \
-                         letter before a colon is always a Windows drive.",
-                    ));
+                if !names_a_remote(name) {
+                    let (reason, hint) = not_a_remote_name(name);
+                    return Err(CliError::usage(reason).with_hint(hint));
                 }
                 let tree = rest.is_empty() || ends_with_separator(rest);
                 let path = logical::clean_logical(rest).ok_or_else(|| {
@@ -272,11 +272,16 @@ mod tests {
     }
 
     #[test]
-    fn windows_drive_letters_stay_local() {
+    fn drive_letters_stay_local_exactly_where_drives_exist() {
         for spec in [r"C:\Users\me", "c:", "d:/data"] {
             let target = Target::parse(spec).unwrap();
-            assert!(!target.is_remote(), "{spec} was read as a remote");
-            assert_eq!(target.local_path(), Some(PathBuf::from(spec)));
+            assert_eq!(
+                target.is_remote(),
+                !crate::constants::DRIVE_LETTERS_EXIST,
+                "{spec} classified differently from the transfer verbs"
+            );
+            // Whatever it is, it is the same thing `dctl copy` would make of it.
+            assert_eq!(target.spec(), RemoteSpec::parse(spec).unwrap());
         }
     }
 
@@ -311,11 +316,13 @@ mod tests {
     }
 
     #[test]
-    fn a_one_character_remote_name_that_is_not_a_drive_is_rejected() {
-        // `1:x` cannot be a drive (drives are alphabetic) and cannot be a remote
-        // (too short) — accepting it would make the rule unpredictable.
-        let error = Target::parse("1:x").unwrap_err();
-        assert_eq!(error.code(), ExitCode::Usage);
+    fn a_one_character_name_that_is_not_a_drive_is_a_remote_on_every_platform() {
+        // Corrected against rclone: `IsDriveLetter` needs a single *ASCII
+        // letter*, so `1:` names no drive anywhere and rclone reads it as the
+        // remote `1`. Refusing it here made a legal rclone config unusable.
+        let target = Target::parse("1:x").expect("a digit names no drive");
+        assert_eq!(target.remote(), Some("1"));
+        assert_eq!(target.path(), "x");
     }
 
     #[test]
@@ -388,10 +395,11 @@ mod tests {
         assert_eq!(local.spec(), RemoteSpec::Local(PathBuf::from("./photos")));
         assert_eq!(local.prefix(), "");
 
-        // The drive-letter rule survives the conversion on every platform.
+        // The drive-letter rule survives the conversion, whichever way this
+        // platform answers it — the two parsers must never disagree.
         assert_eq!(
             Target::parse(r"C:\data").unwrap().spec(),
-            RemoteSpec::Local(PathBuf::from(r"C:\data"))
+            RemoteSpec::parse(r"C:\data").unwrap()
         );
     }
 

@@ -264,9 +264,11 @@ mod tests {
         // check happens here — before any envelope is written — because a vault
         // created and then found to be unaddressable is the expensive order.
         assert!(matches!(
-            VaultPair::new("c", "c-store", store(), None),
-            Err(ConfigError::NameTooShort { .. })
+            VaultPair::new("my vault", "my vault-store", store(), None),
+            Err(ConfigError::NameCharset { .. })
         ));
+        // And a one-character pair is legal, because rclone's names are.
+        assert!(VaultPair::new("c", "c-store", store(), None).is_ok());
         assert!(matches!(
             VaultPair::new("archive", "b2", store(), None),
             Err(ConfigError::ReservedName { .. })
