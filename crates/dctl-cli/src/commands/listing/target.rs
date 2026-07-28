@@ -148,9 +148,12 @@ impl Target {
         validate_remote_name(remote, spec)?;
 
         let prefix = path::clean_logical(rest).ok_or_else(|| {
-            CliError::usage(format!("'{spec}' escapes its own root")).with_hint(
-                "A listing path may not contain '..'; name the directory you want directly.",
-            )
+            // Shared with `RemoteSpec::parse` so one spelling of `..` cannot be
+            // refused two different ways depending on which verb saw it, and so
+            // the wording — which used to say a path escaped a root it plainly
+            // stayed inside — is written once. See `path::parent_dir_refusal`.
+            let (reason, hint) = path::parent_dir_refusal(spec, remote, rest, REMOTE_SEPARATOR);
+            CliError::usage(reason).with_hint(hint)
         })?;
 
         Ok(Self::Remote {

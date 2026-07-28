@@ -62,7 +62,7 @@ use crate::constants::{
 };
 use crate::error::{CliError, Result};
 use crate::platform::path::{
-    clean_logical, looks_like_unc, looks_like_windows_drive, normalize_unicode,
+    clean_logical, looks_like_unc, looks_like_windows_drive, normalize_unicode, parent_dir_refusal,
 };
 
 /// One command-line argument, classified.
@@ -124,10 +124,8 @@ impl RemoteSpec {
         }
 
         let path = clean_logical(rest).ok_or_else(|| {
-            CliError::usage(format!("'{input}' climbs above the root of '{candidate}'")).with_hint(
-                "A logical path is always relative to the remote's root, so '..' \
-                 has nowhere to go. Address the parent directly instead.",
-            )
+            let (reason, hint) = parent_dir_refusal(input, candidate, rest, REMOTE_SEPARATOR);
+            CliError::usage(reason).with_hint(hint)
         })?;
 
         Ok(Self::Named {

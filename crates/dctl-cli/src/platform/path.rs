@@ -64,9 +64,9 @@ pub enum Unrepresentable {
     /// The name contains a character that separates path components somewhere
     /// (see the backslash rule above), so it has no single logical reading.
     Separator(char),
-    /// The path climbs above its own root with `..`. Not a name at all, and a
-    /// logical path that began with one would address something outside the
-    /// vault entirely.
+    /// The name contains `..`. Not a name at all — a filesystem walk that
+    /// produced one would be reporting a directory entry that addresses its own
+    /// parent rather than a file.
     ParentDir,
 }
 
@@ -82,7 +82,11 @@ impl std::fmt::Display for Unrepresentable {
                 "the name contains '{c}', which separates path components on other platforms, \
                  so it has no single logical vault path"
             ),
-            Self::ParentDir => write!(f, "the path climbs above its root with '..'"),
+            Self::ParentDir => write!(
+                f,
+                "the name is '..', which addresses a directory rather \
+                 than naming one"
+            ),
         }
     }
 }
@@ -199,6 +203,96 @@ pub fn clean_logical(input: &str) -> Option<String> {
     ))
 }
 
+/// What the `..` components in a logical path actually do.
+///
+/// [`clean_logical`] refuses every `..`, which is the right policy — a logical
+/// path is a key, not a filesystem path, and silently rewriting the argument a
+/// user typed into a different one is how data gets written to the wrong place.
+/// The *message* was another matter: `vault:x/../y` was refused with "climbs
+/// above the root", which is not what `x/../y` does. It names `y`.
+///
+/// So the refusal now says which case it is, and for the harmless one it can
+/// name the path the user meant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ParentDirUse {
+    /// The `..` components cancel out; the path names something inside the
+    /// remote after all, spelled here without them. `""` is the remote's root.
+    Inside(String),
+    /// A `..` reaches past the root, so there is nothing for it to name.
+    Escapes,
+}
+
+/// Classify the `..` components in `input`, or [`None`] if it has none.
+///
+/// Resolution is textual and that is correct here: a logical path has no
+/// symlinks and no mount points, so `a/../b` and `b` address the same object by
+/// construction. Nothing in this function decides whether to accept the path —
+/// it only decides what to *say* about it.
+#[must_use]
+pub fn classify_parent_dir(input: &str) -> Option<ParentDirUse> {
+    let mut resolved: Vec<&str> = Vec::new();
+    let mut saw_parent = false;
+    for part in input.split(LOGICAL_PATH_SEPARATORS) {
+        match part {
+            "" | "." => {}
+            ".." => {
+                saw_parent = true;
+                if resolved.pop().is_none() {
+                    return Some(ParentDirUse::Escapes);
+                }
+            }
+            other => resolved.push(other),
+        }
+    }
+    saw_parent.then(|| {
+        ParentDirUse::Inside(normalize_unicode(
+            &resolved.join(SEPARATOR.to_string().as_str()),
+        ))
+    })
+}
+
+/// The two halves of a refusal for a spec whose logical path contains `..`.
+///
+/// Returned as strings rather than as a built error so both the spec parser and
+/// the listing parser can raise it in their own error type, and so the wording —
+/// which is the entire point of this function — is written once.
+///
+/// The wording had to change because it was wrong. `vault:x/../y` was refused
+/// with *"climbs above the root of 'vault'"*, and `x/../y` does not climb above
+/// anything: it names `y`. A reader told their path escaped the root looks for
+/// the escape, finds none, and concludes the tool is confused — which it was.
+/// Now the message says what happened, and when the path resolves to somewhere
+/// real it names the spelling that would have worked.
+///
+/// The refusal itself is unchanged. A logical path is a key, and resolving `..`
+/// on the user's behalf means acting on a path they did not type; the value here
+/// is telling them the one they meant, not typing it for them.
+#[must_use]
+pub fn parent_dir_refusal(
+    spec: &str,
+    remote: &str,
+    path: &str,
+    separator: char,
+) -> (String, String) {
+    match classify_parent_dir(path) {
+        Some(ParentDirUse::Escapes) | None => (
+            format!("'{spec}' climbs above the root of '{remote}'"),
+            "A logical path is always relative to the remote's root, so a '..' that \
+             reaches past it has nothing to name. Address the directory directly."
+                .to_string(),
+        ),
+        Some(ParentDirUse::Inside(resolved)) => (
+            format!("'{spec}' contains '..', which a logical path does not resolve"),
+            format!(
+                "'..' is refused wherever it appears, including where it cancels out: a \
+                 logical path is a key rather than a filesystem path, and rewriting the \
+                 one you typed into a different one is how data reaches the wrong place. \
+                 Name it directly as '{remote}{separator}{resolved}'."
+            ),
+        ),
+    }
+}
+
 /// Whether `child` lies under `prefix` in logical-path terms.
 ///
 /// Compares whole components, so `photos/2024` is *not* considered a parent of
@@ -279,6 +373,68 @@ mod tests {
             Err(Unrepresentable::ParentDir)
         );
         assert_eq!(clean_logical("a/../../b"), None);
+    }
+
+    #[test]
+    fn a_parent_dir_that_cancels_out_is_told_apart_from_one_that_escapes() {
+        // The distinction the refusal message was getting wrong: `x/../y` names
+        // `y` and does not climb above anything.
+        assert_eq!(
+            classify_parent_dir("x/../y"),
+            Some(ParentDirUse::Inside("y".to_string()))
+        );
+        assert_eq!(
+            classify_parent_dir("a/b/../c/d"),
+            Some(ParentDirUse::Inside("a/c/d".to_string()))
+        );
+        // Cancelling back to the remote's own root is still inside it.
+        assert_eq!(
+            classify_parent_dir("a/b/../.."),
+            Some(ParentDirUse::Inside(String::new()))
+        );
+        // These genuinely leave.
+        assert_eq!(classify_parent_dir("../y"), Some(ParentDirUse::Escapes));
+        assert_eq!(
+            classify_parent_dir("a/../../b"),
+            Some(ParentDirUse::Escapes)
+        );
+        // And a path with no `..` at all is not this function's business.
+        assert_eq!(classify_parent_dir("a/b/c"), None);
+        assert_eq!(classify_parent_dir("a/./b"), None);
+    }
+
+    #[test]
+    fn the_refusal_says_what_the_path_actually_did() {
+        // `vault:x/../y` was refused with "climbs above the root of 'vault'",
+        // which is a statement about a path that does no such thing. A reader
+        // told their path escaped goes looking for the escape, finds none, and
+        // stops trusting the message.
+        let (reason, hint) = parent_dir_refusal("vault:x/../y", "vault", "x/../y", ':');
+        assert!(
+            !reason.contains("climbs above"),
+            "a path that resolves inside the root must not be told it left it: {reason}"
+        );
+        assert!(reason.contains("'..'"), "{reason}");
+        // And the hint names the spelling that would have worked, which is the
+        // whole practical value of telling the two cases apart.
+        assert!(hint.contains("'vault:y'"), "{hint}");
+
+        // The genuine escape keeps the words that were always true of it.
+        let (reason, hint) = parent_dir_refusal("vault:../y", "vault", "../y", ':');
+        assert!(
+            reason.contains("climbs above the root of 'vault'"),
+            "{reason}"
+        );
+        assert!(!hint.contains("Name it directly"), "{hint}");
+    }
+
+    #[test]
+    fn a_path_that_cancels_back_to_the_root_is_pointed_at_the_root() {
+        // The degenerate case the hint has to render sensibly rather than as
+        // `'vault:'` followed by nothing meaningful — it *is* the remote's root,
+        // and `vault:` is exactly how that is spelled.
+        let (_, hint) = parent_dir_refusal("vault:a/..", "vault", "a/..", ':');
+        assert!(hint.contains("'vault:'"), "{hint}");
     }
 
     #[test]
