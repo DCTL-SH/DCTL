@@ -267,6 +267,47 @@ pub trait Source: Send + Sync {
         length: Option<u64>,
     ) -> Result<Zeroizing<Vec<u8>>>;
 
+    /// The BLAKE3 of one object's **plaintext**, when this source can establish
+    /// one, or [`None`] when the object is not there.
+    ///
+    /// The value `--checksum` compares, and the reason it is a method rather
+    /// than a field on [`Entry`] is that the two implementations pay wildly
+    /// different prices for it. A vault already knows: it recorded the digest at
+    /// write time under the verified-write contract, and answering costs an
+    /// index lookup. A plain store has to **read the object** — and it can,
+    /// because a plain store's bytes *are* the plaintext, so the hash of what it
+    /// holds is exactly the hash a vault would have recorded for the same file.
+    ///
+    /// # Why the price is worth paying rather than refusing the flag
+    ///
+    /// `--checksum` into a plain destination used to work exactly once. The
+    /// first run into an empty destination exited 0 because there was nothing to
+    /// compare; every run after it exited **7** with
+    /// `--checksum: no content hash for '<file>'` (`HANDOVER.md` §11.2). A
+    /// nightly job that succeeds on the first night and fails every night after
+    /// is worse than one that never worked.
+    ///
+    /// Reading to answer is not a new cost model, it is the *existing* one:
+    /// `--checksum` already reads and hashes every file on the local side, and
+    /// `super::super::commands::transfer::checksum` already documents that
+    /// comparing two local trees costs a full pass over both. What was missing
+    /// was the other half of that pass. Where the plain side is a network
+    /// remote the cost is real and is announced once per run rather than
+    /// discovered on an invoice — see
+    /// [`CHECKSUM_READS_DESTINATION_NOTE`](crate::constants::CHECKSUM_READS_DESTINATION_NOTE).
+    ///
+    /// The alternative — refusing `--checksum` at the flag — was the other
+    /// option on the table and is the weaker one: it makes a nightly
+    /// `--checksum sync` to a plain remote work zero times instead of once, and
+    /// rclone answers the same question by negotiating a hash both sides can
+    /// produce (`fs/operations/operations.go:60-66`) rather than by refusing.
+    ///
+    /// # Errors
+    /// Whatever reading the object reported. A `--checksum` run that cannot read
+    /// one object has to say which, because the alternative is a comparison
+    /// silently made on incomplete information.
+    async fn content_hash(&self, path: &str) -> Result<Option<Vec<u8>>>;
+
     /// Warm whatever this source caches for `[offset, offset + length)`, ahead of
     /// a read that has not happened yet.
     ///

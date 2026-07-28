@@ -633,6 +633,15 @@ mod tests {
 
     #[async_trait]
     impl Source for Fixture {
+        /// The fixture stores plaintext, so hashing what it holds is the same
+        /// answer a plain store gives — which is the point of the method.
+        async fn content_hash(&self, path: &str) -> Result<Option<Vec<u8>>> {
+            match self.read(path).await {
+                Ok(bytes) => Ok(Some(blake3::hash(&bytes).as_bytes().to_vec())),
+                Err(_) => Ok(None),
+            }
+        }
+
         async fn stream_to(
             &self,
             path: &str,

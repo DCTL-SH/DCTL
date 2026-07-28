@@ -2447,18 +2447,38 @@ pub const CHECKSUM_STREAM_BUFFER_BYTES: usize = 128 * 1024;
 
 /// Remediation hint when `--checksum` cannot be answered by one of the sides.
 ///
-/// The wording has to keep two things apart, because the remedy differs. A vault
-/// records a BLAKE3 of the plaintext at write time and can always answer; a
-/// local file can be read and hashed, so it can always answer too. What cannot
-/// answer is a **plain object store**, which knows only the provider's checksum
-/// of whatever bytes it happens to be holding — a different claim entirely.
-/// Comparing the two would produce a confident wrong verdict, and silently
-/// falling back to size-and-time would answer a question the user did not ask
-/// (`PLAN.md` §6).
-pub const CHECKSUM_UNAVAILABLE_HINT: &str = "A plain object store reports the provider's checksum of the bytes it holds, \
-     which is not the plaintext hash a vault records, so the two cannot be \
-     compared. Address the vault through its own remote, or compare by size and \
-     modification time (drop --checksum, or add --size-only).";
+/// Three of the four sides can always answer. A vault records a BLAKE3 of the
+/// plaintext at write time; a local file is read and hashed; and a plain object
+/// store is read and hashed too, because a plain store holds the plaintext and
+/// the hash of what it is holding *is* the digest the comparison needs. That
+/// last one is the fix in `HANDOVER.md` §11.2 — before it, a `--checksum sync`
+/// into a plain remote succeeded on the first night and exited 7 on every night
+/// after.
+///
+/// What is left, and what this hint is now for, is an object nobody has read: a
+/// vault index row written by `dctl index rebuild` carries an empty digest, and
+/// an empty digest is *unknown* rather than a hash. Comparing an unknown would
+/// produce a confident wrong verdict, and silently falling back to size-and-time
+/// would answer a question the user did not ask (`PLAN.md` §6).
+pub const CHECKSUM_UNAVAILABLE_HINT: &str = "One side has no recorded content hash for this object, which is what a vault \
+     index row looks like before anything has read the file — `dctl index \
+     rebuild` lists objects without hashing them. Read the object once (`dctl \
+     verify`, or any transfer out of the vault) to fill the row in, or compare \
+     by size and modification time instead (drop --checksum, or add \
+     --size-only).";
+
+/// Said once per run, on stderr, when `--checksum` is about to read a remote
+/// side in order to hash it.
+///
+/// A warning rather than a note, and therefore visible without `-v`, because it
+/// is a cost paid on **every** run of a scheduled job and one an operator would
+/// otherwise meet on an invoice. rclone announces its own `--checksum`
+/// degradation exactly once per run for the same reason
+/// (`fs/operations/operations.go:274-278`).
+pub const CHECKSUM_READS_DESTINATION_NOTE: &str = "--checksum has to read this side to hash it: a plain store keeps no plaintext \
+     digest of its own. That is a full pass over the objects being compared, and \
+     on a metered provider it is egress. `--size-only`, or the default \
+     size-and-modification-time comparison, reads nothing.";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Point-in-time arguments — `--at`, `--since`, `--until`

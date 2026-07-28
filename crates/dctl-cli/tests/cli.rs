@@ -1301,11 +1301,7 @@ fn sync_into_a_plain_remote_is_incremental_and_check_agrees_with_it() {
         .stderr(predicates::str::contains("Files: 0 / 0"));
 
     // `check --checksum` reads both sides and hashes them, so it sees the edit
-    // the metadata comparison cannot. `sync --checksum` against a plain store
-    // still refuses — the transfer listing does not read object bodies, and a
-    // provider's own checksum is not a BLAKE3 of the plaintext — which is a
-    // refusal with a reason rather than a wrong answer. Both are asserted, so
-    // neither can change without this test noticing.
+    // the metadata comparison cannot.
     sandbox
         .dctl()
         .arg("--no-ask-password")
@@ -1316,10 +1312,46 @@ fn sync_into_a_plain_remote_is_incremental_and_check_agrees_with_it() {
         .assert()
         .failure()
         .stdout(predicates::str::contains("differ  a.txt"));
+
+    // …and so does `sync --checksum`, which used to exit **7** here with
+    // `--checksum: no content hash for 'a.txt'` (`HANDOVER.md` §11.2). A plain
+    // store holds the plaintext, so reading an object and hashing it is exactly
+    // the digest the comparison needs; it costs a read, and the run says so
+    // once.
     sync(&["--checksum"])
         .assert()
-        .failure()
-        .stderr(predicates::str::contains("no content hash"));
+        .success()
+        .stderr(predicates::str::contains("Files: 1 / 1"))
+        .stderr(predicates::str::contains("has to read this side"));
+
+    // The half that makes it a *nightly* job rather than a one-night one: with
+    // both sides identical again, the very next `--checksum` run transfers
+    // nothing. This is the assertion the old behaviour could not have made,
+    // because there was no second run — the first repeat exited 7.
+    sync(&["--checksum"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 0 / 0"));
+
+    // And it still sees an edit that the default comparison cannot: same
+    // length, same timestamp, different bytes. A `--checksum` that had quietly
+    // fallen back to size-and-time would pass every assertion above and fail
+    // this one.
+    sandbox.edit_keeping_time("src/a.txt", b"THIRD");
+    sync(&["--checksum"])
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("Files: 1 / 1"));
+
+    // The warning is emitted once per run and not once per object, which is what
+    // keeps it readable on a ten-thousand-file sync.
+    let output = sync(&["--checksum"]).assert().success();
+    let stderr = String::from_utf8_lossy(&output.get_output().stderr).into_owned();
+    assert_eq!(
+        stderr.matches("has to read this side").count(),
+        1,
+        "the cost note must be said once, not per object:\n{stderr}"
+    );
 }
 
 #[test]

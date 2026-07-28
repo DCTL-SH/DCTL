@@ -55,6 +55,7 @@ use dctl_store::links::{
 };
 
 use crate::cli::GlobalArgs;
+use crate::constants::CHECKSUM_READS_DESTINATION_NOTE;
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -321,7 +322,7 @@ async fn walk_remote(
         if accepts(options, &relative, object.size, object.modified_unix) {
             listing
                 .entries
-                .push(remote_entry(relative, &object, options));
+                .push(remote_entry(ctx, source.as_ref(), relative, &object, options).await?);
         }
     }
 
@@ -335,7 +336,9 @@ async fn walk_remote(
 
         let leaf = logical::file_name(prefix).to_string();
         if accepts(options, &leaf, object.size, object.modified_unix) {
-            listing.entries.push(remote_entry(leaf, &object, options));
+            listing
+                .entries
+                .push(remote_entry(ctx, source.as_ref(), leaf, &object, options).await?);
         }
     }
 
@@ -365,11 +368,24 @@ fn accepts(options: &ListOptions, path: &str, size: Option<u64>, modified: Optio
 
 /// Build a transfer entry from one enumerated object.
 ///
-/// The content hash is carried across only when `--checksum` asked for one. It
-/// costs nothing to read from a vault's index, but attaching it unconditionally
-/// would make a plan's JSON differ between a vault side and a local side for
-/// reasons that have nothing to do with the transfer.
-fn remote_entry(relative: String, object: &crate::source::Entry, options: &ListOptions) -> Entry {
+/// The content hash is carried across only when `--checksum` asked for one.
+/// Attaching it unconditionally would make a plan's JSON differ between a vault
+/// side and a local side for reasons that have nothing to do with the transfer —
+/// and, since a plain store has to *read* an object to answer, would put a full
+/// pass over the remote behind a flag nobody set.
+///
+/// Where the digest comes from is [`Source::content_hash`]'s business and not
+/// this function's, and the difference between the two implementations is the
+/// whole of the fix: the listing itself carries one only for a vault, so reading
+/// `object.content_hash` and stopping there is what made `--checksum` into a
+/// plain remote fail on every run after the first (`HANDOVER.md` §11.2).
+async fn remote_entry(
+    ctx: &Ctx,
+    source: &dyn crate::source::Source,
+    relative: String,
+    object: &crate::source::Entry,
+    options: &ListOptions,
+) -> Result<Entry> {
     // An object the index never measured becomes an entry that says so, rather
     // than one claiming zero bytes: see `Entry::size` for what comparing that
     // zero would have skipped.
@@ -381,12 +397,42 @@ fn remote_entry(relative: String, object: &crate::source::Entry, options: &ListO
         entry = entry.with_modified(modified);
     }
     if options.hash_contents {
-        // `None` here is not an omission: a plain object store genuinely does
-        // not know the plaintext hash, and `super::compare` refuses rather than
-        // inventing one.
-        entry.hash = object.content_hash.as_deref().map(checksum::encode);
+        // The listing's own digest first — a vault index row carries one and
+        // costs nothing. Only when it does not is the source asked, which for a
+        // plain store means reading the object.
+        entry.hash = match object.content_hash.as_deref() {
+            Some(digest) => Some(checksum::encode(digest)),
+            None => {
+                announce_destination_read(ctx, source);
+                source
+                    .content_hash(&object.path)
+                    .await?
+                    .as_deref()
+                    .map(checksum::encode)
+            }
+        };
     }
-    entry
+    Ok(entry)
+}
+
+/// Say once, on stderr, that `--checksum` is about to read the remote side.
+///
+/// A warning rather than a note, and therefore visible without `-v`, because it
+/// is a cost the operator is about to pay on every run of a scheduled job: a
+/// full read of the destination tree, which on a metered provider is an egress
+/// bill. rclone announces its own `--checksum` degradation exactly once per run
+/// for the same reason (`fs/operations/operations.go:274-278`), and once is the
+/// right number — a line per object would be noise nobody reads.
+///
+/// Not emitted for a source that answers from an index: a vault costs nothing
+/// and a warning about it would be false.
+fn announce_destination_read(ctx: &Ctx, source: &dyn crate::source::Source) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static ANNOUNCED: AtomicBool = AtomicBool::new(false);
+    let _ = source;
+    if !ANNOUNCED.swap(true, Ordering::Relaxed) {
+        ctx.out.warn(CHECKSUM_READS_DESTINATION_NOTE);
+    }
 }
 
 /// Turn a unix timestamp into a [`SystemTime`], including before the epoch.

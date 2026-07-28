@@ -297,6 +297,23 @@ impl Source for VaultSource {
         }))
     }
 
+    /// The digest the index already holds, for free.
+    ///
+    /// A vault recorded the plaintext BLAKE3 at write time, under the same
+    /// verified-write contract that refused to commit unless the stored bytes
+    /// matched. Nothing is read to obtain it — which is exactly the asymmetry
+    /// [`Source::content_hash`] exists to make explicit, because the plain side
+    /// pays a full read for the same answer.
+    ///
+    /// A rebuilt index row carries an *empty* digest, which
+    /// [`Entry::with_content_hash`](super::entry::Entry::with_content_hash) maps
+    /// to [`None`]. That absence travels: the comparison then refuses rather
+    /// than treating "nobody has read this object yet" as a hash, and the remedy
+    /// is a read that fills the row in.
+    async fn content_hash(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        Ok(self.stat(path).await?.and_then(|entry| entry.content_hash))
+    }
+
     async fn verify(&self, path: &str) -> Result<()> {
         // The read that makes the *whole-object* statement, which is exactly what
         // a windowed read cannot: `Vault::verify_file` stream-decrypts into a

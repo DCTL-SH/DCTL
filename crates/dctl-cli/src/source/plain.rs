@@ -21,12 +21,18 @@
 //!
 //! ## What is not known here
 //!
-//! A plain store reports a key, a size and usually a modification time. It does
-//! **not** report a plaintext BLAKE3, so [`Entry::content_hash`] stays [`None`]
+//! A plain store reports a key, a size and usually a modification time. Its
+//! *listing* carries no digest, so [`Entry::content_hash`] stays [`None`] there
 //! — a provider's own checksum is a statement about the bytes it happens to be
 //! holding, which is a different claim from "this is the hash of the file that
 //! was written", and rendering one where the other is expected would make
 //! `dctl hashsum` quietly wrong.
+//!
+//! What this side *can* answer, and now does, is [`Source::content_hash`]: a
+//! plain store holds the plaintext, so reading an object and hashing it produces
+//! exactly the digest a vault would have recorded for the same file. It costs a
+//! read, which is why it is a method a caller asks for rather than a field every
+//! listing pays for.
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -191,6 +197,59 @@ impl Source for PlainSource {
             Err(StoreError::NotFound(_)) => Ok(None),
             Err(error) => Err(error.into()),
         }
+    }
+
+    /// Read the object and hash it, one window at a time.
+    ///
+    /// A plain store holds the plaintext, so the BLAKE3 of what it is holding is
+    /// the BLAKE3 a vault would have recorded for the same file — which is what
+    /// makes the two sides of `--checksum` comparable at all.
+    ///
+    /// Windowed for the reason [`Source::verify`] is windowed: the point is to
+    /// touch every byte, and a whole-object `get` would buffer a fifty-gigabyte
+    /// file to do it. `PLAN.md` §16.2 caps memory at O(concurrency), and a
+    /// `--checksum` that materialised a huge file *in order to decide whether to
+    /// copy it* would be the most absurd possible way to break that rule.
+    async fn content_hash(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        let key = ObjectKey::new(path);
+        let meta = match self.backend.head(&key).await {
+            Ok(meta) => meta,
+            Err(StoreError::NotFound(_)) => return Ok(None),
+            Err(error) => return Err(error.into()),
+        };
+
+        let mut hasher = blake3::Hasher::new();
+        let mut offset = 0;
+        while offset < meta.size {
+            let window = READ_BACK_WINDOW_BYTES.min(meta.size - offset);
+            let bytes = self
+                .backend
+                .get_range(&key, ByteRange::new(offset, Some(window)))
+                .await?;
+
+            // The same disagreement `verify` refuses to paper over: a store that
+            // hands back nothing while claiming there is more has contradicted
+            // its own `head`. Believing the loop condition would spin forever;
+            // believing the provider would hash a prefix and call it the file.
+            if bytes.is_empty() {
+                return Err(CliError::new(
+                    ExitCode::IntegrityFailure,
+                    format!(
+                        "'{path}' ended after {offset} bytes but the remote reports \
+                         {} — the object is truncated",
+                        meta.size
+                    ),
+                )
+                .with_hint(
+                    "The remote's own metadata disagrees with what it will serve. \
+                     Restore this object from another copy.",
+                ));
+            }
+            hasher.update(&bytes);
+            offset += bytes.len() as u64;
+        }
+
+        Ok(Some(hasher.finalize().as_bytes().to_vec()))
     }
 
     async fn verify(&self, path: &str) -> Result<()> {
