@@ -476,14 +476,15 @@ mod tests {
     }
 
     #[test]
-    fn a_drive_letter_path_never_becomes_a_remote_lookup() {
-        // The end-to-end version of the module's reason for existing: even with
-        // a remote genuinely called `C` in the config, `C:\Users\me` is a path.
-        let config = catalog(&[(
-            "C",
-            RemoteEntry::new(PROVIDER_B2).with_setting(CONFIG_KEY_BUCKET, "wrong"),
-        )]);
-        let resolved = resolve_str(r"C:\Users\me", &config).unwrap();
+    fn a_drive_letter_path_is_resolved_the_way_its_platform_means_it() {
+        // The end-to-end version of `super::spec`'s reason for existing, and now
+        // of its one platform-dependent rule. Both halves are asserted, on
+        // whichever machine runs the test, because a rule only one platform ever
+        // exercises is a rule only one platform is protected by.
+        //
+        // On Windows: a path, whatever the config says.
+        let windows = RemoteSpec::classify(r"C:\Users\me", true).unwrap();
+        let resolved = resolve(&windows, &()).unwrap();
         assert_eq!(resolved.provider_type(), PROVIDER_LOCAL);
         assert_eq!(
             resolved.target(),
@@ -491,6 +492,34 @@ mod tests {
                 root: PathBuf::from(r"C:\Users\me")
             }
         );
+
+        // Elsewhere: a reference to a remote called `C`, which resolves to
+        // nothing and *fails by name*. It cannot become a directory literally
+        // called `C:\Users\me` — that behaviour is what made
+        // `dctl copy /srv/data r:` write into `./r:` and exit 0.
+        let posix = RemoteSpec::classify(r"C:\Users\me", false).unwrap();
+        let error = resolve(&posix, &()).unwrap_err();
+        assert!(error.message().contains('C'), "{}", error.message());
+    }
+
+    #[test]
+    fn no_configuration_can_declare_the_one_character_remote_that_would_be_ambiguous() {
+        // What makes the platform split safe: off Windows `C:` parses as remote
+        // `C`, and a catalog that could answer to that name is unreachable —
+        // `config::validate` refuses it when the file is read. This asserts the
+        // dangerous shape *would* resolve if it ever existed, so that the
+        // refusal upstream is understood to be load-bearing rather than tidy.
+        let config = catalog(&[(
+            "C",
+            RemoteEntry::new(PROVIDER_B2).with_setting(CONFIG_KEY_BUCKET, "wrong"),
+        )]);
+        let posix = RemoteSpec::classify(r"C:\Users\me", false).unwrap();
+        assert_eq!(
+            resolve(&posix, &config).unwrap().provider_type(),
+            PROVIDER_B2,
+            "if this ever stops being unreachable, the guard is config::validate"
+        );
+        assert!(crate::config::validate_remote_name("C").is_err());
     }
 
     #[test]

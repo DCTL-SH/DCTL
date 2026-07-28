@@ -247,7 +247,10 @@ mod tests {
     #[test]
     fn a_filesystem_path_resolves_with_no_config_at_all() {
         let (_dir, ctx) = ctx_without_config();
-        for spec in ["/srv/data", "./photos", r"C:\Users\me", "local:/srv/data"] {
+        // `C:\Users\me` is deliberately not on this list: it is a path on
+        // Windows and a reference to the remote `C` elsewhere, and the pair is
+        // asserted on its own below.
+        for spec in ["/srv/data", "./photos", "local:/srv/data"] {
             let described = Described::resolve(&ctx, Some(spec)).unwrap();
             assert_eq!(described.provider, PROVIDER_LOCAL, "{spec}");
             assert_eq!(described.storage_provider, PROVIDER_LOCAL, "{spec}");
@@ -257,12 +260,30 @@ mod tests {
     }
 
     #[test]
-    fn a_drive_letter_is_never_looked_up_as_a_remote() {
-        // The sharpest edge in the CLI, exercised end to end: even with a remote
-        // genuinely called `C`, a drive path stays a path.
+    fn a_config_can_never_declare_the_remote_a_drive_letter_would_collide_with() {
+        // The sharpest edge in the CLI, exercised end to end. A file declaring
+        // `[remotes.C]` is refused when it is *read*, on every platform, which
+        // is what makes `crate::remote::spec`'s platform split safe: off Windows
+        // `C:` is a reference to the remote `C`, and no configuration can ever
+        // supply one.
         let (_dir, ctx) = ctx_with_config("[remotes.C]\ntype = \"b2\"\nbucket = \"wrong\"\n");
-        let described = Described::resolve(&ctx, Some(r"C:\Users\me")).unwrap();
-        assert_eq!(described.provider, PROVIDER_LOCAL);
+        let error = Described::resolve(&ctx, Some("some-remote:x")).unwrap_err();
+        assert_ne!(error.code(), ExitCode::Success);
+        assert!(error.message().contains('C'), "{}", error.message());
+
+        // …so `C:\Users\me` never reaches a bucket. Which of the two truthful
+        // answers it gets depends on the platform, and both are asserted
+        // platform-independently in `crate::remote::spec` and
+        // `crate::remote::resolve`; this checks only that neither is "a bucket
+        // called C".
+        let outcome = Described::resolve(&ctx, Some(r"C:\Users\me"));
+        match outcome {
+            Ok(described) => assert_eq!(
+                described.provider, PROVIDER_LOCAL,
+                "where drives exist it is a path"
+            ),
+            Err(error) => assert_ne!(error.code(), ExitCode::Success),
+        }
     }
 
     #[test]
@@ -332,12 +353,26 @@ mod tests {
     }
 
     #[test]
-    fn a_drive_letter_outranks_even_a_provider_collision_check() {
-        // `C` is not a provider shorthand, so the drive-letter rule is what
-        // decides here — and it decides before any config lookup happens.
+    fn a_drive_letter_is_a_path_or_an_error_and_never_a_silent_directory() {
+        // `C` is not a provider shorthand, so `crate::remote::spec`'s
+        // platform rule is what decides. Whichever way it decides, the one
+        // outcome that must never happen is the one that used to: creating a
+        // directory literally named `C:\data` and reporting success.
         let (_dir, ctx) = ctx_without_config();
-        let described = Described::resolve(&ctx, Some(r"C:\data")).unwrap();
-        assert_eq!(described.provider, PROVIDER_LOCAL);
+        match Described::resolve(&ctx, Some(r"C:\data")) {
+            Ok(described) => {
+                assert_eq!(described.provider, PROVIDER_LOCAL);
+                assert_eq!(
+                    described.spec.local_path(),
+                    Some(std::path::Path::new(r"C:\data")),
+                    "a drive path keeps every byte the user typed"
+                );
+            }
+            Err(error) => {
+                assert_eq!(error.code(), ExitCode::FatalError);
+                assert!(error.message().contains('C'), "{}", error.message());
+            }
+        }
     }
 
     #[test]

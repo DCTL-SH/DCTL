@@ -227,11 +227,17 @@ impl Progress {
         }
     }
 
-    /// Emit the one-line status used by [`Mode::Plain`] and `--stats-one-line`.
+    /// The periodic status record, as `--stats-one-line` asked for it.
     ///
-    /// Fixed-width fields throughout, because this line is written repeatedly
-    /// into a log that a human or a script later reads top to bottom; columns
-    /// that shift as the numbers grow make it unreadable either way.
+    /// The condensed form. Fixed-width fields throughout, because this line is
+    /// written repeatedly into a log that a human or a script later reads top to
+    /// bottom; columns that shift as the numbers grow make it unreadable either
+    /// way.
+    ///
+    /// This used to be the *only* form, which is what made `--stats-one-line`
+    /// indistinguishable from its absence: the flag asked for something it
+    /// already had. [`Progress::block`] is now the default and this is what the
+    /// flag selects, which is also rclone's arrangement.
     #[must_use]
     pub fn one_line(&self, snapshot: &Snapshot) -> String {
         let pct = snapshot.percent().map_or_else(
@@ -248,6 +254,21 @@ impl Progress {
             snapshot.files_total,
             snapshot.errors,
         )
+    }
+
+    /// The periodic status record in its default, multi-line form.
+    ///
+    /// The same rows as the end-of-run summary, in the same order, carrying the
+    /// same numbers — because it *is* the summary, taken mid-run. A watcher
+    /// reading a log at 3 a.m. should not have to learn a second format to find
+    /// out how many errors there have been, and the condensed line cannot carry
+    /// every row without becoming unreadable.
+    ///
+    /// Rendered in this run's units, so a status record and the report that
+    /// follows it never disagree about whether a gigabyte is 10^9 or 2^30.
+    #[must_use]
+    pub fn block(&self, snapshot: &Snapshot) -> Vec<String> {
+        crate::output::summary::lines(snapshot, self.units)
     }
 
     /// Tear down the bars. Call before printing a summary or an error.

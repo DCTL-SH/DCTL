@@ -589,14 +589,22 @@ The destination already holds objects the run would replace or delete.
 `--immutable`) to see exactly which paths triggered it, then point elsewhere or
 drop the flag.
 
-### Flags that "do nothing"
+### A flag was refused with exit 7
 
-Several flags **parse and validate but are not yet honoured** in this build — the
-whole [Transfer group](GLOBAL_FLAGS.md#transfer) (`--transfers`, `--bwlimit`,
-`--retries`, `--timeout`, …) and `--verify-samples`. They never silently degrade
-a guarantee; where honouring a flag matters for correctness (`--key-file`), the
-command **fails** instead of proceeding. See
-[Global flags → Flags that parse but do not yet act](GLOBAL_FLAGS.md).
+No global flag in this build parses and then does nothing. Every one either acts
+or **fails the run before anything is read or written**, naming itself and saying
+which layer owes the capability. If you meet one, the message tells you what DCTL
+does instead.
+
+Refused today: `--key-file`, `--verify-samples`, `--low-level-retries`,
+`--timeout`, `--contimeout`, `--dump`, and `--transfers`/`--checkers` for any
+value above `1`. See
+[Global flags → Flags that are refused](GLOBAL_FLAGS.md#flags-that-are-refused).
+
+Two flags that used to be on that list now work and are worth knowing about,
+because they are the ones that bound what a run can cost: `--bwlimit RATE` paces
+a run to an average byte rate, and `--max-transfer SIZE` stops it at a ceiling
+with exit **8** without ever exceeding it.
 
 ### Exit codes
 

@@ -174,7 +174,12 @@ pub(super) fn mentions_on(line: &str) -> Vec<String> {
 }
 
 /// Every `.rs` file under `root`, recursively.
-fn rust_files(root: &Path) -> Vec<PathBuf> {
+///
+/// `pub(super)` because [`super::reach`] scans the same corpus for a different
+/// claim — that every flag declared honoured is read by something — and two
+/// directory walks would be two chances for one of them to quietly stop
+/// reaching the crate.
+pub(super) fn rust_files(root: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     let Ok(entries) = std::fs::read_dir(root) else {
         return files;

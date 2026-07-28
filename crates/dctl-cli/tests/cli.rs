@@ -3253,3 +3253,334 @@ fn a_run_that_failed_partway_still_prints_what_it_moved() {
         "the file counters are the record of what landed:\n{stderr}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The flags that used to parse and do nothing
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Eleven global flags were accepted, listed in `--help`, and had no effect on
+// any run. The measurements that found them were made against this binary, so
+// the tests that close them are made against this binary too: a unit test on a
+// limiter proves the limiter, and only a process proves the flag reaches it.
+//
+// Each of the four implemented flags is asserted by its *effect* — elapsed time,
+// an exit status, a byte count on disk, a line of output — never by a counter
+// that a stage could increment without doing the work.
+
+/// Bytes of test data that make a rate limit measurable without making the
+/// suite slow: eight files of 32 KiB is 256 KiB, which at 128 KiB/s is about
+/// two seconds of pacing.
+const PACED_FILE_BYTES: usize = 32 * 1024;
+const PACED_FILE_COUNT: usize = 8;
+
+#[test]
+fn bwlimit_actually_slows_the_run_down() {
+    // The measurement that exposed the defect was a throughput one — `--bwlimit
+    // 1k` moved 10 MiB at 32.9 MiB/s, about 34 000x the requested rate — so the
+    // test that closes it is a throughput one. Nothing here inspects a field.
+    //
+    // The assertion is a *floor* on elapsed time, never a ceiling: a loaded CI
+    // machine can always be slower, and a test that failed for being slow would
+    // be turned off within a month.
+    let sandbox = Sandbox::new();
+    let payload = vec![b'p'; PACED_FILE_BYTES];
+    for index in 0..PACED_FILE_COUNT {
+        sandbox.write(&format!("src/f{index}.bin"), &payload);
+    }
+
+    // First, unpaced, to establish that the fixture itself is fast. If copying
+    // 256 KiB locally took two seconds anyway, the paced run below would prove
+    // nothing at all.
+    let started = std::time::Instant::now();
+    sandbox
+        .dctl()
+        .args(["copy", "src", "dst-fast"])
+        .assert()
+        .success();
+    let unpaced = started.elapsed();
+    assert!(
+        unpaced < std::time::Duration::from_secs(2),
+        "the fixture must be fast when unpaced, took {unpaced:?}"
+    );
+
+    // 128 KiB/s over 256 KiB is ~2 s of debt, of which the first file's share is
+    // never waited for (see `limits::bandwidth`) — so the floor is set at 1 s,
+    // comfortably above the unpaced run and comfortably below the ideal.
+    let started = std::time::Instant::now();
+    sandbox
+        .dctl()
+        .args(["--bwlimit", "128k", "copy", "src", "dst-slow"])
+        .assert()
+        .success();
+    let paced = started.elapsed();
+
+    assert!(
+        paced >= std::time::Duration::from_secs(1),
+        "--bwlimit 128k over {} KiB must take at least a second; took {paced:?} \
+         against {unpaced:?} unpaced",
+        (PACED_FILE_BYTES * PACED_FILE_COUNT) / 1024
+    );
+
+    // And it must still have moved every byte: a limiter that worked by
+    // transferring less would pass a timing assertion and fail the product.
+    for index in 0..PACED_FILE_COUNT {
+        assert_eq!(
+            sandbox.read(&format!("dst-slow/f{index}.bin")).len(),
+            PACED_FILE_BYTES
+        );
+    }
+}
+
+#[test]
+fn bwlimit_off_is_not_paced() {
+    // The other half: `off` must mean off. A limiter that paced an unlimited run
+    // would be a performance regression nobody could switch back.
+    let sandbox = Sandbox::new();
+    let payload = vec![b'p'; PACED_FILE_BYTES];
+    for index in 0..PACED_FILE_COUNT {
+        sandbox.write(&format!("src/f{index}.bin"), &payload);
+    }
+
+    let started = std::time::Instant::now();
+    sandbox
+        .dctl()
+        .args(["--bwlimit", "off", "copy", "src", "dst"])
+        .assert()
+        .success();
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+}
+
+#[test]
+fn a_malformed_bandwidth_limit_is_a_usage_error_not_an_unlimited_run() {
+    // The failure that makes a cost control worthless: a value that does not
+    // parse, accepted, and the run proceeding at full speed.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", b"data");
+    sandbox
+        .dctl()
+        .args(["--bwlimit", "10Q", "copy", "src", "dst"])
+        // 1 = usage (docs/EXIT_CODES.md).
+        .assert()
+        .code(1);
+    assert!(
+        !sandbox.exists("dst/a.txt"),
+        "a refused command line must transfer nothing"
+    );
+}
+
+#[test]
+fn max_transfer_stops_the_run_and_reaches_exit_8() {
+    // Exit code 8 was unreachable in every build: `--max-transfer 1M` moved the
+    // whole 10 MiB and exited 0. This is the test that makes the published
+    // contract real.
+    let sandbox = Sandbox::new();
+    // Three files of 64 KiB against a 100 KiB ceiling: the first fits, the
+    // second does not, and the run stops there.
+    let payload = vec![b'm'; 64 * 1024];
+    for name in ["a.bin", "b.bin", "c.bin"] {
+        sandbox.write(&format!("src/{name}"), &payload);
+    }
+
+    let stopped = sandbox
+        .dctl()
+        .args(["--max-transfer", "100k", "copy", "src", "dst"])
+        // 8 = transfer_limit_exceeded (docs/EXIT_CODES.md).
+        .assert()
+        .code(8);
+    let stderr = String::from_utf8_lossy(&stopped.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("--max-transfer"),
+        "the stop must name the flag that caused it:\n{stderr}"
+    );
+
+    // Cautious, not hard: the limit is not exceeded by a byte, and no
+    // partially-written object is left behind. Exactly one file landed, whole.
+    let landed: Vec<PathBuf> = all_files(&sandbox.path("dst"));
+    assert_eq!(
+        landed.len(),
+        1,
+        "one file fits under 100 KiB, got {landed:?}"
+    );
+    assert_eq!(
+        std::fs::metadata(&landed[0])
+            .expect("the file exists")
+            .len(),
+        64 * 1024,
+        "what landed must be whole"
+    );
+}
+
+#[test]
+fn max_transfer_smaller_than_the_first_file_moves_nothing() {
+    // The documented consequence of the cautious cutoff, pinned so nobody
+    // "fixes" it into a partial write later: `--max-transfer 1M` against a
+    // 10 MiB file transfers nothing rather than 1 MiB of it.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/big.bin", &vec![b'x'; 256 * 1024]);
+
+    sandbox
+        .dctl()
+        .args(["--max-transfer", "64k", "copy", "src", "dst"])
+        .assert()
+        .code(8);
+
+    assert!(
+        all_files(&sandbox.path("dst")).is_empty(),
+        "a file that does not fit is never started, so nothing may be on disk"
+    );
+}
+
+#[test]
+fn max_transfer_off_transfers_everything() {
+    let sandbox = Sandbox::new();
+    for name in ["a.bin", "b.bin", "c.bin"] {
+        sandbox.write(&format!("src/{name}"), &vec![b'm'; 64 * 1024]);
+    }
+    sandbox
+        .dctl()
+        .args(["--max-transfer", "off", "copy", "src", "dst"])
+        .assert()
+        .success();
+    assert_eq!(all_files(&sandbox.path("dst")).len(), 3);
+}
+
+#[test]
+fn stats_one_line_condenses_a_record_that_is_otherwise_a_block() {
+    // The flag was indistinguishable from its absence, because the periodic
+    // record only ever had one shape. Both shapes are now asserted against the
+    // real binary, from the same run length, so "it does something" is measured
+    // rather than asserted.
+    //
+    // `--stats 1` with output redirected (which it always is here) is what makes
+    // the ticker emit at all; the copy is slowed by `--bwlimit` so that at least
+    // one interval elapses while it runs.
+    let sandbox = Sandbox::new();
+    let payload = vec![b's'; PACED_FILE_BYTES];
+    for index in 0..PACED_FILE_COUNT {
+        sandbox.write(&format!("src/f{index}.bin"), &payload);
+    }
+
+    let block = sandbox
+        .dctl()
+        .args(["--stats", "1", "--bwlimit", "128k", "copy", "src", "dst-a"])
+        .assert()
+        .success();
+    let block = String::from_utf8_lossy(&block.get_output().stderr).into_owned();
+
+    let condensed = sandbox
+        .dctl()
+        .args([
+            "--stats",
+            "1",
+            "--stats-one-line",
+            "--bwlimit",
+            "128k",
+            "copy",
+            "src",
+            "dst-b",
+        ])
+        .assert()
+        .success();
+    let condensed = String::from_utf8_lossy(&condensed.get_output().stderr).into_owned();
+
+    // The condensed form carries `files` and a percentage on one line; the block
+    // carries labelled rows. Counting `Errors:` occurrences separates them
+    // without depending on how many intervals elapsed: the block emits one per
+    // record *plus* the end-of-run summary, the condensed form only the summary.
+    let block_rows = block.matches("Errors:").count();
+    let condensed_rows = condensed.matches("Errors:").count();
+    assert!(
+        block_rows > condensed_rows,
+        "the default record must be the block and --stats-one-line must not be:\n\
+         block ({block_rows}):\n{block}\ncondensed ({condensed_rows}):\n{condensed}"
+    );
+    assert!(
+        condensed.contains("files"),
+        "the condensed record must still report progress:\n{condensed}"
+    );
+}
+
+#[test]
+fn every_inert_flag_is_now_refused_by_name_before_anything_runs() {
+    // The seven that cannot be honoured. Each must fail the run, name itself,
+    // explain what the tool does instead, and leave the destination untouched —
+    // the `--key-file` contract, applied to every one of them.
+    //
+    // Driven through the binary rather than through `cli::reach`'s unit guard on
+    // purpose: the unit test proves the table refuses, and this proves the table
+    // is *reached* by a real command line. Those are different claims, and the
+    // second one is what `--key-file` got wrong for a whole release.
+    let cases: &[(&[&str], &str)] = &[
+        (&["--transfers", "8"], "--transfers"),
+        (&["--checkers", "16"], "--checkers"),
+        (&["--low-level-retries", "5"], "--low-level-retries"),
+        (&["--timeout", "30"], "--timeout"),
+        (&["--contimeout", "10"], "--contimeout"),
+        (&["--verify-samples", "4"], "--verify-samples"),
+        (&["--dump", "headers"], "--dump"),
+    ];
+
+    for (flag, name) in cases {
+        let sandbox = Sandbox::new();
+        sandbox.write("src/a.txt", b"data");
+
+        let mut command = sandbox.dctl();
+        command.args(*flag).args(["copy", "src", "dst"]);
+        // 7 = fatal_error: a configuration the engine cannot satisfy.
+        let refused = command.assert().code(7);
+        let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
+
+        assert!(
+            stderr.contains(name),
+            "the refusal must name {name}:\n{stderr}"
+        );
+        assert!(
+            stderr.contains("dctl copy"),
+            "and what the user was doing:\n{stderr}"
+        );
+        assert!(
+            !sandbox.exists("dst/a.txt"),
+            "{name} must be refused before anything is written"
+        );
+    }
+}
+
+#[test]
+fn the_honest_value_of_a_sequential_engine_is_accepted() {
+    // `--transfers 1` is a true statement about this executor, so it runs.
+    // Refusing a request for the behaviour you already have would be a worse
+    // tool, not a more honest one.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", b"data");
+    sandbox
+        .dctl()
+        .args(["--transfers", "1", "--checkers", "1", "copy", "src", "dst"])
+        .assert()
+        .success();
+    assert_eq!(sandbox.read("dst/a.txt"), b"data");
+}
+
+#[test]
+fn a_single_letter_remote_is_a_remote_and_never_a_directory_named_r_colon() {
+    // On Linux `dctl copy /srv/data r:` created a local directory literally
+    // named `r:` and exited 0 — a backup landing somewhere nobody named. rclone
+    // treats `r` as a remote everywhere except Windows.
+    //
+    // On Windows the same argument is a drive-relative path, which is a
+    // different but equally non-silent answer; the assertion below is written to
+    // hold on both, because what must never happen is the third outcome.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", b"data");
+
+    let outcome = sandbox.dctl().args(["copy", "src", "r:"]).assert();
+    let code = outcome.get_output().status.code().unwrap_or_default();
+    assert_ne!(
+        code, 0,
+        "a reference to an undefined remote is not a success"
+    );
+
+    assert!(
+        !sandbox.exists("r:"),
+        "nothing may be created under a directory literally named 'r:'"
+    );
+}

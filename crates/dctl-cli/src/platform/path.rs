@@ -328,14 +328,10 @@ pub fn parent(logical: &str) -> &str {
 
 /// Whether a string looks like a Windows drive specifier such as `C:` or `C:\`.
 ///
-/// This is the disambiguation rule for `remote:path` syntax. `C:\Users\me` is a
-/// local path on Windows, not a remote named `C`; DCTL follows rclone and treats
-/// **any single-character prefix** before the colon as a drive letter. Remote
-/// names are therefore required to be two characters or longer (enforced when
-/// the config is written).
-///
-/// The check is applied on every platform, not just Windows, so that a script
-/// written on Windows behaves the same when it runs on a Linux build agent.
+/// A shape test and nothing more: it answers "could this be a drive letter",
+/// never "is it one here". Whether the shape *wins* is
+/// [`crate::remote::spec`]'s decision, and it is the one rule in that module
+/// that depends on the platform — see [`DRIVE_LETTERS_EXIST`].
 #[must_use]
 pub fn looks_like_windows_drive(spec: &str) -> bool {
     let mut chars = spec.chars();

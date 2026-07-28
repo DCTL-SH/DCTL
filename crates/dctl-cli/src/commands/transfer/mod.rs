@@ -57,6 +57,7 @@ pub mod pipeline;
 pub mod plan;
 pub mod prepare;
 pub mod report;
+pub mod retry;
 pub mod staged;
 
 // Only the vocabulary a *command body* writes is re-exported. Everything else

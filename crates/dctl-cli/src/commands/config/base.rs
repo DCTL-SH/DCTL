@@ -301,15 +301,24 @@ mod tests {
     }
 
     #[test]
-    fn a_windows_path_is_a_directory_and_never_a_remote_called_c() {
+    fn a_windows_path_is_never_a_bucket_called_c() {
         // The shared spec rule, not a second copy of it: `dctl init` must not
-        // disagree with `dctl copy` about what `C:\vaults` means.
-        let base = parsed(r"C:\vaults\main");
-        assert_eq!(base.store.type_name(), PROVIDER_LOCAL);
-        assert_eq!(
-            local_path_of(&base.store),
-            Some(PathBuf::from(r"C:\vaults\main"))
-        );
+        // disagree with `dctl copy` about what `C:\vaults` means. Which of the
+        // two truthful readings applies depends on the platform — a directory
+        // where drives exist, a reference to the undeclarable remote `C`
+        // elsewhere — and `crate::remote::spec` asserts both on either machine.
+        // What this pins is that `dctl init` gets the *same* reading, and that
+        // neither of them is a provider.
+        match BaseLocation::parse(r"C:\vaults\main") {
+            Ok(base) => {
+                assert_eq!(base.store.type_name(), PROVIDER_LOCAL);
+                assert_eq!(
+                    local_path_of(&base.store),
+                    Some(PathBuf::from(r"C:\vaults\main"))
+                );
+            }
+            Err(error) => assert!(error.message().contains('C'), "{}", error.message()),
+        }
     }
 
     #[test]

@@ -14,33 +14,37 @@
 // Concurrency & transfer policy
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Parallel file transfers (`--transfers`).
+/// Files this build transfers at once (`--transfers`).
 ///
-/// Four keeps a single large-file stream near line rate on a home connection
-/// without starving interactive use. Raising it helps many-small-files runs and
-/// hurts nothing but provider rate limits.
-pub const DEFAULT_TRANSFERS: usize = 4;
+/// **One**, and this is a measurement of the executor rather than a preference.
+/// [`crate::commands::transfer::execute`] walks the plan in plan order on one
+/// task, so that what `--dry-run` printed and what the machine performs are
+/// provably the same list rather than two traversals that happen to agree.
+///
+/// It was `4` — the number a concurrent executor would have wanted — and was the
+/// clap default of a flag nothing read, so `dctl --help` published a parallelism
+/// this build has never had. The value now says what happens, and `--transfers`
+/// accepts exactly it; see [`crate::cli::reach`] for why anything larger is
+/// refused rather than ignored.
+pub const TRANSFERS_PERFORMED: usize = 1;
 
-/// Parallel metadata checkers (`--checkers`).
+/// Metadata checks this build runs at once (`--checkers`).
 ///
-/// Higher than [`DEFAULT_TRANSFERS`] because a check is one cheap round trip,
-/// so the pipeline should stay ahead of the transfers it feeds.
-pub const DEFAULT_CHECKERS: usize = 8;
+/// One, for a sharper reason than [`TRANSFERS_PERFORMED`]: there is no checker
+/// stage to make parallel. Comparison happens once, while
+/// [`crate::commands::transfer::plan`] is built from two listings that are
+/// already in hand, so a "checker pool" has nothing to pool. The old default of
+/// `8` described a pipeline shape that does not exist.
+pub const CHECKERS_PERFORMED: usize = 1;
 
 /// High-level retries of a whole failed file (`--retries`).
-pub const DEFAULT_RETRIES: u32 = 3;
-
-/// Retries of an individual HTTP request (`--low-level-retries`).
 ///
-/// Higher than [`DEFAULT_RETRIES`] because most failures are a single transient
-/// 5xx or reset that succeeds immediately on repeat.
-pub const DEFAULT_LOW_LEVEL_RETRIES: u32 = 10;
-
-/// Inactivity timeout on a transfer (`--timeout`).
-pub const DEFAULT_TIMEOUT_SECS: u64 = 300;
-
-/// Connection establishment timeout (`--contimeout`).
-pub const DEFAULT_CONNECT_TIMEOUT_SECS: u64 = 60;
+/// Three. A transient failure — a reset connection, a 503 — usually clears on
+/// the first repeat, and a file that has failed three times is failing for a
+/// reason that a fourth attempt will not change. Applied by
+/// [`crate::commands::transfer::retry`], per file, and only to the failures it
+/// classifies as worth repeating.
+pub const DEFAULT_RETRIES: u32 = 3;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Listing & pagination
@@ -727,11 +731,49 @@ pub const INDEX_FILE_NAME: &str = "vault.redb";
 #[cfg(unix)]
 pub const CONFIG_FILE_MODE: u32 = 0o600;
 
-/// Minimum length of a remote name.
+/// Minimum length of a remote name a **config file** may declare.
 ///
-/// Two, not one, so a name can never be mistaken for a Windows drive letter:
-/// `c:\data` must always parse as a path, never as a remote called `c`.
+/// Two, not one, so a declared name can never be mistaken for a Windows drive
+/// letter: `c:\data` must always parse as a path, never as a remote called `c`.
+///
+/// This is a rule about what may be *written down*, and it holds on every
+/// platform so one config file means one thing everywhere. It is deliberately
+/// **not** the rule for classifying a command-line argument — see
+/// [`DRIVE_LETTERS_EXIST`] — and the two together are what make a
+/// single-character reference safe to treat as a remote off Windows: it parses
+/// as one, and no configuration can ever supply it, so the outcome is always
+/// "unknown remote 'r'" and never somewhere the user did not name.
 pub const MIN_REMOTE_NAME_LEN: usize = 2;
+
+/// Whether this platform has drive letters, and therefore whether `r:` is a
+/// path rather than a reference to a remote called `r`.
+///
+/// The single `cfg`-conditional classification rule in the CLI, and it earns the
+/// exception because the alternative was measured and is worse. Applying the
+/// drive rule everywhere made `dctl copy /srv/data r:` create a local directory
+/// literally named `r:` on Linux and exit **0** — a backup landing somewhere
+/// nobody named, with nothing on either stream to say so. rclone's
+/// `driveletter.IsDriveLetter` returns `false` off Windows for the same reason,
+/// so on Linux `r:` is a remote reference there too.
+///
+/// The usual objection to a `cfg`-gated rule — that one command line then means
+/// two things depending on where it runs — is answered by
+/// [`MIN_REMOTE_NAME_LEN`] rather than waved away. A one-character remote cannot
+/// be declared in any configuration on any platform, so off Windows a
+/// single-character reference resolves to nothing and **fails**. The two
+/// platforms therefore differ only in *which error or path* they produce for an
+/// argument that is a drive specifier on one and an undefined remote on the
+/// other; neither silently addresses a place the user did not ask for, which is
+/// the property that actually matters.
+///
+/// Consumed through [`crate::remote::spec`], which takes it as a parameter so
+/// both platforms' behaviour is asserted by the test suite on either.
+#[cfg(windows)]
+pub const DRIVE_LETTERS_EXIST: bool = true;
+
+/// Whether this platform has drive letters. See the Windows definition.
+#[cfg(not(windows))]
+pub const DRIVE_LETTERS_EXIST: bool = false;
 
 /// Separator between a remote name and its path in a spec (`vault:photos/a`).
 pub const REMOTE_SEPARATOR: char = ':';
@@ -841,6 +883,113 @@ pub const KEY_FILE_UNSUPPORTED_REASON: &str = "This build derives the key-encryp
      applied. dctl_core::Vault::init and ::unlock take no factor parameter; \
      PLAN.md §8 (the auth/key model of phase 0, §11) is where the missing half \
      is specified.";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Flags this build cannot honour (`crate::cli::reach`)
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// One sentence each, and every one names the layer that owes the capability —
+// the same rule `KEY_FILE_UNSUPPORTED_REASON` follows, and for the same reason:
+// a refusal that does not say *what is missing* is indistinguishable from a
+// tool that does not want to.
+//
+// These are quoted in the hint of a refusal, not in a log line. An operator sees
+// one only because they asked for something this build will not do, so each is
+// written to answer the question they are about to ask — "then what does it
+// actually do?" — rather than merely to say no.
+
+/// Why `--transfers N` is refused for any `N` above [`TRANSFERS_PERFORMED`].
+///
+/// Not a missing dial: the executor is sequential by construction, and making it
+/// concurrent is a change to the durability contract rather than to a number.
+/// Three things depend on the single-task walk — the audit chain is appended in
+/// plan order, `is_fatal` stops the run rather than emitting one error per
+/// remaining file, and `--dry-run` prints the very list the executor consumes —
+/// and every one of them needs its own answer before a second file may be in
+/// flight. Accepting the flag and running sequentially anyway is what this build
+/// used to do, and it published a parallelism nobody had.
+pub const TRANSFERS_UNSUPPORTED_REASON: &str = "This build transfers one file at a time: \
+     crate::commands::transfer::execute walks the plan on a single task, so \
+     that the list --dry-run prints and the list the machine performs are the \
+     same one. --transfers 1 is accepted because it is what happens. A \
+     concurrent executor has to answer for the audit chain's ordering and for \
+     the fatal-error stop first, so it is not a value this flag can set.";
+
+/// Why `--checkers N` is refused for any `N` above [`CHECKERS_PERFORMED`].
+pub const CHECKERS_UNSUPPORTED_REASON: &str = "This build has no checker stage to make parallel: \
+     comparison happens once, in crate::commands::transfer::plan, over two \
+     listings that are already in hand. --checkers 1 is accepted because it is \
+     what happens. Parallel checking would be a different pipeline, not a \
+     larger number.";
+
+/// Why `--low-level-retries` is refused.
+///
+/// The retry layer is real and B2-only. Honouring the flag there and dropping it
+/// everywhere else is precisely the arrangement [`KEY_FILE_UNSUPPORTED_REASON`]
+/// argues against: the operator cannot tell which of their runs was protected.
+pub const LOW_LEVEL_RETRIES_UNSUPPORTED_REASON: &str = "Request-level retries exist for Backblaze B2 only \
+     (dctl_store::b2::retry), on a schedule that flag cannot reach, and there \
+     is no such layer for sftp, S3, R2 or the local filesystem. Honouring this \
+     on one backend and silently dropping it on four would leave you unable to \
+     tell which runs were protected. Whole-file retries are honoured on every \
+     backend — see --retries.";
+
+/// Why `--timeout` is refused.
+pub const TIMEOUT_UNSUPPORTED_REASON: &str = "No backend in this build applies an inactivity timeout: \
+     dctl_store constructs its HTTP clients and its ssh session without one, so \
+     there is nothing for this to set. It cannot honestly be approximated by a \
+     deadline on the whole operation either — that would abort a large transfer \
+     that is progressing perfectly, which is the opposite of what an idle \
+     timeout is for.";
+
+/// Why `--contimeout` is refused. Separate from [`TIMEOUT_UNSUPPORTED_REASON`]
+/// because the missing piece is a different one — connection establishment, not
+/// stream inactivity — and a shared sentence would be true of neither.
+pub const CONTIMEOUT_UNSUPPORTED_REASON: &str = "No backend in this build sets a connection-establishment \
+     timeout: dctl_store's HTTP clients take reqwest's default and the sftp \
+     backend takes ssh's, neither of which this flag is wired to. Connecting \
+     therefore takes as long as the platform allows.";
+
+/// Why `--verify-samples` is refused.
+///
+/// Worth stating plainly rather than as "not wired": on the vault path
+/// `--verify sample` reads *every* chunk, so a sample depth is not merely
+/// unhonoured, it has nothing to describe.
+pub const VERIFY_SAMPLES_UNSUPPORTED_REASON: &str = "There is no sampled read to set a depth on: \
+     dctl_core::Vault::verify_file reads and authenticates the whole object, so \
+     --verify sample costs a full egress and this number would describe \
+     nothing. Use --verify checksum for the metadata comparison, or --verify \
+     strict, which is what sample currently does.";
+
+/// Why `--dump` is refused.
+pub const DUMP_UNSUPPORTED_REASON: &str = "The protocol tracing layer this selects from is not installed: \
+     nothing in dctl_store or crate::logging captures headers, bodies, requests \
+     or retry decisions, so every target would produce silence. Raise -vvv for \
+     the tracing this build does emit.";
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Cost controls (`--max-transfer`, `--bwlimit`)
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Opening words of the `--max-transfer` stop.
+///
+/// A *stop*, and worded as one. Everything before this point transferred and
+/// committed normally, so the message states the ceiling and what was moved
+/// rather than implying anything went wrong. Exit 8 is the machine-readable half
+/// of the same statement.
+pub const MAX_TRANSFER_LIMIT_REACHED: &str = "stopped at the --max-transfer limit";
+
+/// What to do about a run that stopped at its ceiling.
+///
+/// Names the resumption property explicitly, because it is the operator's first
+/// question and the answer is *good news* they have no other way to learn: the
+/// transfer verbs compare on size and modification time, so re-running the same
+/// command moves only what did not land. It also says what was not left behind,
+/// since a run that halted mid-tree invites exactly that worry.
+pub const MAX_TRANSFER_LIMIT_HINT: &str = "Everything already transferred is committed and verified, and no \
+     partially-written object was left anywhere: a file is never started unless \
+     the whole of it fits within the limit. Re-run the same command to continue \
+     — it will move only what has not landed yet — or raise --max-transfer.";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Vault initialisation (`dctl init`)
@@ -4579,17 +4728,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn checkers_outpace_transfers() {
-        // The check pipeline must stay ahead of the transfers it feeds.
+    fn the_concurrency_constants_describe_the_engine_that_exists() {
+        // These used to be `4` and `8`, and the test that stood here asserted
+        // the checkers outpaced the transfers — a relationship between two
+        // numbers nothing read, in a build whose executor walks the plan on one
+        // task. Both flags published a parallelism that had never existed. The
+        // assertion is now about the engine rather than about the pair.
         const {
-            assert!(DEFAULT_CHECKERS > DEFAULT_TRANSFERS);
-        }
-    }
-
-    #[test]
-    fn low_level_retries_exceed_high_level_retries() {
-        const {
-            assert!(DEFAULT_LOW_LEVEL_RETRIES > DEFAULT_RETRIES);
+            assert!(TRANSFERS_PERFORMED == 1, "the executor is sequential");
+            assert!(CHECKERS_PERFORMED == 1, "there is no checker stage");
         }
     }
 

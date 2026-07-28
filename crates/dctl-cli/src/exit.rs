@@ -11,11 +11,13 @@
 //! ## Why this module allows dead code
 //!
 //! The enum is an *inventory of the contract*, not an inventory of what this
-//! build happens to emit. Two codes — 8 and 10 — belong to `--max-transfer` and
-//! `--max-duration`, which are rclone's and which DCTL has not wired to its
-//! engine yet. (9 was on that list until a scrub that covered nothing needed a
-//! non-zero status to say so, and it is now produced by
-//! [`crate::commands::scrub`].)
+//! build happens to emit. One code — 10 — belongs to `--max-duration`, which is
+//! rclone's and which DCTL has no flag for. (9 was on that list until a scrub
+//! that covered nothing needed a non-zero status to say so, and it is now
+//! produced by [`crate::commands::scrub`]. 8 was on it too, for longer than it
+//! should have been: `--max-transfer` parsed and was never enforced, so a run
+//! capped at 1 MiB moved 10 MiB and exited 0. [`crate::limits::budget`] produces
+//! it now, and `tests/cli.rs` asserts a process really exits with it.)
 //!
 //! [`ExitCode::all`] and [`ExitCode::describe`] have no caller outside this
 //! file's own tests. They exist so the contract can be enumerated rather than

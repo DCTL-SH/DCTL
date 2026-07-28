@@ -14,27 +14,46 @@
 //! The same trap catches any relative path containing a colon, which POSIX
 //! filesystems allow and photo tools produce: `photos/holiday:2024`.
 //!
-//! Every rule below is applied on **every platform**, never under
-//! `#[cfg(windows)]`. A script written on a laptop must behave identically when
-//! it runs on a Linux build agent; a `cfg`-gated rule would make one string mean
-//! two different things depending on where it ran, which is the class of bug
-//! that is only ever discovered in production, on the restore that mattered.
-//!
 //! ## The rules, in order
 //!
 //! An argument is a **local path** when it:
 //!
 //! 1. is a UNC or extended-length path — `\\server\share`, `\\?\C:\...`;
 //! 2. starts with a drive specifier — `C:`, `c:/x`, `C:\x`, and even the rare
-//!    drive-relative `C:relative`;
+//!    drive-relative `C:relative` — *on a platform that has drive letters*;
 //! 3. contains no [`REMOTE_SEPARATOR`] at all;
-//! 4. has a candidate name that is really a path component: shorter than
-//!    [`MIN_REMOTE_NAME_LEN`], containing a path separator, or beginning with
-//!    [`RELATIVE_PATH_MARKER`].
+//! 4. has a candidate name that is really a path component: containing a path
+//!    separator, beginning with [`RELATIVE_PATH_MARKER`], or — again only where
+//!    drive letters exist — a single character.
 //!
 //! Otherwise it names a remote, and everything after the *first* colon is a
 //! logical path — so `vault:a:b` is the remote `vault` holding `a:b`, because a
 //! colon is a legal filename character and only the first one is structural.
+//!
+//! ## The one platform-dependent rule, and why it is the safe arrangement
+//!
+//! Rules 2 and 4's single-character clause are the only classifications that
+//! consult the platform, through [`DRIVE_LETTERS_EXIST`]. This module used to
+//! apply them everywhere and argued the case at length: a script written on a
+//! laptop should behave identically on a Linux build agent, and a `cfg`-gated
+//! rule makes one string mean two things.
+//!
+//! That argument was measured against what it actually produced, and it lost.
+//! `dctl copy /srv/data r:` on Linux created a **local directory named `r:`**
+//! and exited 0 — a backup landing somewhere nobody named, silently, on the
+//! platform DCTL is most likely to run on. rclone treats `r` as a remote
+//! everywhere except Windows for exactly this reason.
+//!
+//! What makes the split safe rather than merely rclone-compatible is
+//! [`MIN_REMOTE_NAME_LEN`]: a one-character remote cannot be *declared* in any
+//! configuration, on any platform. So off Windows a single-character reference
+//! parses as a remote, resolves to nothing, and fails by name — it can never
+//! quietly address a remote the user did not mean. The two platforms differ in
+//! which diagnosis they give, never in whether data goes somewhere unasked.
+//!
+//! [`classify`] therefore takes the platform as an argument instead of reading
+//! the `cfg` itself, so both behaviours are asserted by the test suite whichever
+//! machine runs it.
 //!
 //! ## Two path vocabularies, deliberately not mixed
 //!
@@ -57,8 +76,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::constants::{
-    MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, PROVIDER_LOCAL, RELATIVE_PATH_MARKER, REMOTE_SEPARATOR,
-    WINDOWS_PATH_SEPARATOR,
+    DRIVE_LETTERS_EXIST, MIN_REMOTE_NAME_LEN, PATH_SEPARATOR, PROVIDER_LOCAL, RELATIVE_PATH_MARKER,
+    REMOTE_SEPARATOR, WINDOWS_PATH_SEPARATOR,
 };
 use crate::error::{CliError, Result};
 use crate::platform::path::{
@@ -96,6 +115,20 @@ impl RemoteSpec {
     /// is not a remote is, by definition, a filename — and refusing to open a
     /// legally-named file would be the worse failure.
     pub fn parse(input: &str) -> Result<Self> {
+        Self::classify(input, DRIVE_LETTERS_EXIST)
+    }
+
+    /// [`RemoteSpec::parse`], with the platform stated rather than compiled in.
+    ///
+    /// `drive_letters` is [`DRIVE_LETTERS_EXIST`] in production. It is a
+    /// parameter so that a Linux test run can assert the Windows classification
+    /// and vice versa: the whole risk of a platform-dependent rule is that only
+    /// one half of it is ever exercised, and a `cfg` in the body would guarantee
+    /// exactly that.
+    ///
+    /// # Errors
+    /// As [`RemoteSpec::parse`].
+    pub fn classify(input: &str, drive_letters: bool) -> Result<Self> {
         if input.is_empty() {
             return Err(CliError::usage("empty remote spec").with_hint(format!(
                 "Give a path, or a configured remote as 'name{REMOTE_SEPARATOR}path'."
@@ -103,8 +136,10 @@ impl RemoteSpec {
         }
 
         // Rules 1 and 2: Windows path shapes win before any colon is considered,
-        // because both of them contain colons of their own.
-        if looks_like_unc(input) || looks_like_windows_drive(input) {
+        // because both of them contain colons of their own. A UNC path is a
+        // Windows path shape on any platform — nothing else begins `\\` — but a
+        // drive specifier is only a drive where drives exist.
+        if looks_like_unc(input) || (drive_letters && looks_like_windows_drive(input)) {
             return Ok(Self::Local(PathBuf::from(input)));
         }
 
@@ -112,7 +147,7 @@ impl RemoteSpec {
         let Some((candidate, rest)) = input.split_once(REMOTE_SEPARATOR) else {
             return Ok(Self::Local(PathBuf::from(input)));
         };
-        if !is_remote_name(candidate) {
+        if !is_remote_name(candidate, drive_letters) {
             return Ok(Self::Local(PathBuf::from(input)));
         }
 
@@ -206,12 +241,27 @@ impl RemoteSpec {
 /// remote, or is just the first component of a path that happens to contain one.
 ///
 /// Each rejection is a real filename that would otherwise be misread:
-/// `a:b` (drive-letter ambiguity, already excluded by length), `photos/x:y`
-/// (a directory), `./x:y` and `..:y` (relative-path markers).
-fn is_remote_name(candidate: &str) -> bool {
+/// `photos/x:y` (a directory), `./x:y` and `..:y` (relative-path markers), and —
+/// where drives exist — `a:b`, whose leading `a` is a drive letter.
+///
+/// An **empty** candidate is never a name on either platform: `:leading-colon`
+/// is a relative filename, and nothing can be configured under the empty name.
+///
+/// The minimum-length rule is `drive_letters`-conditional and the other two are
+/// not, because only that one is about drives. Off Windows a single character is
+/// an ordinary remote reference that no configuration can satisfy, which is the
+/// arrangement the module docs set out.
+fn is_remote_name(candidate: &str, drive_letters: bool) -> bool {
     // Length in characters, not bytes: a single non-ASCII character is still one
-    // character, and a byte count would let `é:x` through as a two-byte "name".
-    if candidate.chars().count() < MIN_REMOTE_NAME_LEN {
+    // character, and a byte count would let `é:x` through as a two-byte "name"
+    // on a platform that means to exclude one-character names.
+    let length = candidate.chars().count();
+    let minimum = if drive_letters {
+        MIN_REMOTE_NAME_LEN
+    } else {
+        1
+    };
+    if length < minimum {
         return false;
     }
     if candidate.starts_with(RELATIVE_PATH_MARKER) {
@@ -248,6 +298,11 @@ impl FromStr for RemoteSpec {
 mod tests {
     use super::*;
 
+    /// Classification on a platform that has drive letters.
+    const WINDOWS: bool = true;
+    /// Classification on a platform that does not.
+    const POSIX: bool = false;
+
     fn parse(input: &str) -> RemoteSpec {
         RemoteSpec::parse(input).unwrap()
     }
@@ -266,8 +321,24 @@ mod tests {
         }
     }
 
+    /// The path a spec classifies to on a stated platform.
+    fn local_on(input: &str, drive_letters: bool) -> PathBuf {
+        match RemoteSpec::classify(input, drive_letters).unwrap() {
+            RemoteSpec::Local(path) => path,
+            other => panic!("'{input}' should be a local path, got {other:?}"),
+        }
+    }
+
+    /// The remote name a spec classifies to on a stated platform.
+    fn remote_on(input: &str, drive_letters: bool) -> String {
+        match RemoteSpec::classify(input, drive_letters).unwrap() {
+            RemoteSpec::Named { remote, .. } => remote,
+            other => panic!("'{input}' should be a named remote, got {other:?}"),
+        }
+    }
+
     #[test]
-    fn every_drive_letter_form_is_a_local_path() {
+    fn every_drive_letter_form_is_a_local_path_where_drives_exist() {
         // The bug this whole module exists to prevent. `C:relative` is the rare
         // drive-relative form: still a path, still never a remote called `C`.
         for spec in [
@@ -279,19 +350,67 @@ mod tests {
             r"C:\Users\me",
             "C:relative",
         ] {
-            assert_eq!(local(spec), PathBuf::from(spec), "'{spec}' must be a path");
-            assert!(parse(spec).is_local());
-            assert_eq!(parse(spec).remote_name(), None);
+            assert_eq!(
+                local_on(spec, WINDOWS),
+                PathBuf::from(spec),
+                "'{spec}' must be a path on Windows"
+            );
+            let parsed = RemoteSpec::classify(spec, WINDOWS).unwrap();
+            assert!(parsed.is_local());
+            assert_eq!(parsed.remote_name(), None);
         }
     }
 
     #[test]
-    fn drive_letters_are_paths_on_every_platform() {
-        // Not #[cfg(windows)]: a script written on Windows and run on a Linux CI
-        // runner must classify its arguments identically, or the same backup
-        // command means two different things on two machines.
-        assert!(parse(r"D:\data").is_local());
-        assert!(parse("d:/data").is_local());
+    fn a_single_letter_reference_is_a_remote_where_drives_do_not() {
+        // rclone's `IsDriveLetter` is false off Windows, so `r:` means the
+        // remote `r` there. DCTL matched Windows everywhere and therefore made
+        // `dctl copy /srv/data r:` create a directory literally named `r:` and
+        // exit 0 — the backup went somewhere nobody named.
+        assert_eq!(remote_on("r:", POSIX), "r");
+        assert_eq!(remote_on("r:data", POSIX), "r");
+        assert_eq!(remote_on(r"C:\Users\me", POSIX), "C");
+        // And it is still a path where drives exist, on the same test run.
+        assert_eq!(local_on("r:", WINDOWS), PathBuf::from("r:"));
+    }
+
+    #[test]
+    fn a_single_letter_remote_can_never_be_configured_on_either_platform() {
+        // This is what makes the platform split safe rather than merely
+        // rclone-compatible: off Windows `r:` parses as a remote, and no config
+        // file may declare a one-character name, so it resolves to nothing and
+        // fails by name. It cannot silently address a remote the user did not
+        // mean, which is the only outcome that would actually matter.
+        const {
+            assert!(
+                MIN_REMOTE_NAME_LEN > 1,
+                "a declarable one-character name would reopen the ambiguity"
+            );
+        }
+    }
+
+    #[test]
+    fn unc_paths_are_local_on_every_platform() {
+        // Unlike a drive specifier, nothing but a Windows path begins `\\`, so
+        // this rule has no platform half to get wrong.
+        for spec in [r"\\server\share", r"\\?\C:\very\long\path"] {
+            assert_eq!(local_on(spec, WINDOWS), PathBuf::from(spec));
+            assert_eq!(local_on(spec, POSIX), PathBuf::from(spec));
+        }
+    }
+
+    #[test]
+    fn a_two_character_name_is_a_remote_on_both_platforms() {
+        // Everything a config file can actually declare classifies identically
+        // wherever it runs, which is the property the old blanket rule was
+        // protecting and the only one worth protecting.
+        for spec in ["vault:photos", "b2:bucket", "local:/srv/data"] {
+            assert_eq!(
+                RemoteSpec::classify(spec, WINDOWS).unwrap(),
+                RemoteSpec::classify(spec, POSIX).unwrap(),
+                "'{spec}' must mean the same thing on both platforms"
+            );
+        }
     }
 
     #[test]
@@ -304,6 +423,17 @@ mod tests {
         ] {
             assert_eq!(local(spec), PathBuf::from(spec), "'{spec}' must be a path");
         }
+    }
+
+    #[test]
+    fn a_name_shorter_than_the_minimum_is_a_path_where_drives_exist() {
+        // The rule that keeps drive letters unambiguous, applied to the
+        // non-alphabetic cases the drive check does not catch. Off Windows all
+        // three are one-character remote references that resolve to nothing.
+        assert_eq!(local_on("1:file", WINDOWS), PathBuf::from("1:file"));
+        // Counted in characters: one accented letter is one character.
+        assert_eq!(local_on("é:x", WINDOWS), PathBuf::from("é:x"));
+        assert_eq!(remote_on("1:file", POSIX), "1");
     }
 
     #[test]
@@ -367,13 +497,18 @@ mod tests {
     }
 
     #[test]
-    fn a_name_shorter_than_the_minimum_is_a_path() {
-        // The rule that keeps drive letters unambiguous, applied to the
-        // non-alphabetic cases the drive check does not catch.
-        assert_eq!(local("1:file"), PathBuf::from("1:file"));
-        assert_eq!(local(":leading-colon"), PathBuf::from(":leading-colon"));
-        // Counted in characters: one accented letter is one character.
-        assert_eq!(local("é:x"), PathBuf::from("é:x"));
+    fn an_empty_candidate_is_a_path_on_every_platform() {
+        // `:leading-colon` is a relative filename. Nothing can be configured
+        // under the empty name, so there is no platform on which it is a
+        // reference to anything.
+        assert_eq!(
+            local_on(":leading-colon", WINDOWS),
+            PathBuf::from(":leading-colon")
+        );
+        assert_eq!(
+            local_on(":leading-colon", POSIX),
+            PathBuf::from(":leading-colon")
+        );
     }
 
     #[test]

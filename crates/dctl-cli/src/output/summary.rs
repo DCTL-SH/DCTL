@@ -183,6 +183,26 @@ pub fn rows(snapshot: &Snapshot, units: Units) -> Vec<Row> {
     rows
 }
 
+/// The report as plain, unstyled lines.
+///
+/// The periodic status record `--stats` emits, which is the same report as the
+/// end-of-run one and is deliberately built from the same [`rows`]. Two
+/// renderers over one row list rather than two independent formatters: a
+/// periodic line that disagreed with the summary it precedes would make a reader
+/// distrust both, and the disagreement would arrive the first time a row was
+/// added to one of them.
+///
+/// Unstyled because this is written into a log a machine or a human reads later,
+/// where escape sequences are noise. The end-of-run [`render`] keeps its colour;
+/// it is read on a terminal, once.
+#[must_use]
+pub fn lines(snapshot: &Snapshot, units: Units) -> Vec<String> {
+    rows(snapshot, units)
+        .iter()
+        .map(|row| format!("{:>SUMMARY_LABEL_WIDTH$}: {}", row.label, row.value))
+        .collect()
+}
+
 /// Paint one row into a finished line.
 ///
 /// Split out of [`render`] so the styling decision is inspectable without a

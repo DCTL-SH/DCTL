@@ -15,6 +15,7 @@ use crate::audit::sink::Sink;
 use crate::cli::globals::{GlobalArgs, VerifyMode};
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
+use crate::limits::Limits;
 use crate::output::{Out, Progress, Stats};
 
 /// How a command body ended, as far as the end-of-run summary is concerned.
@@ -39,6 +40,16 @@ pub struct Ctx {
     pub stats: Arc<Stats>,
     /// The progress display.
     pub progress: Arc<Progress>,
+    /// The two cost controls in force for this run — `--bwlimit` and
+    /// `--max-transfer`.
+    ///
+    /// On the context rather than threaded through each command for the reason
+    /// the counters are: they are *per run*, not per file or per destination,
+    /// and "do not move more than 10 GB" is a statement about the whole
+    /// invocation. A command that had to construct its own would be a command
+    /// that could forget to, which is how eleven flags came to do nothing.
+    pub limits: Limits,
+
     /// The tamper-evident log every data-changing operation appends to
     /// (`PLAN.md` §7).
     ///
@@ -56,6 +67,7 @@ impl Ctx {
     #[must_use]
     pub fn new(globals: GlobalArgs) -> Self {
         let audit = Sink::new(&globals);
+        let limits = Limits::resolve(&globals);
         let out = Out::new(
             globals.effective_format(),
             globals.color,
@@ -80,6 +92,7 @@ impl Ctx {
             out,
             stats,
             progress,
+            limits,
             audit,
         }
     }

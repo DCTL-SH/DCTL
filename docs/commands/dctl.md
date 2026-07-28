@@ -64,29 +64,43 @@ structural.
 
 ### The Windows drive-letter rule
 
-**`C:\data` is a local path. It is never a remote named `C`.** Any
-single-character prefix before a colon is read as a drive letter, so `C:`,
+**On Windows, `C:\data` is a local path and never a remote named `C`.** Any
+single-character prefix before a colon is read as a drive letter there, so `C:`,
 `c:/x`, `C:\Users\me` and `C:relative` are all filesystem paths.
 
-Remote names are therefore required to be **at least two characters** — the
-rule is enforced when the configuration is written, so a remote named `c` cannot
-exist to be confused with drive `C:` in the first place. Names are 2–64
-characters of ASCII letters, digits, `-`, `_` and `.`, and must **start** with a
-letter or a digit — which is also why an argument beginning with `.` is read as a
-relative path rather than a remote. Provider type names (`local`, `b2`, `s3`,
-`r2`) are reserved, because each is also a shorthand: `b2:bucket` cannot be
-allowed to mean both "the remote called b2" and "the b2 backend". `vault` is
-**not** reserved — a vault stores nothing and so has no shorthand form, which
-leaves `vault:photos/2024` free to mean the obvious thing. See
-[dctl config](dctl_config.md) for the full rule.
+**Everywhere else there are no drive letters, so `r:` is a reference to the
+remote `r`** — which resolves to nothing and fails with `unknown remote 'r'`.
+This matches rclone, whose `IsDriveLetter` returns false off Windows.
 
-This check runs on **every platform, not just Windows**. A `#[cfg(windows)]`
-rule would make one string mean two different things depending on where it ran,
-so a backup script written on a laptop would classify its arguments differently
-on a Linux build agent — the class of bug that is only ever discovered during
-the restore that mattered. `looks_like_windows_drive` and its tests live in
-`crates/dctl-cli/src/platform/path.rs`; `RemoteSpec::parse` applies it in
-`crates/dctl-cli/src/remote/spec.rs`.
+This is the one classification rule in DCTL that depends on the platform, and it
+earns the exception. Applying the drive rule everywhere meant that on Linux
+`dctl copy /srv/data r:` created a local directory literally named `r:` and
+exited **0** — a backup landing somewhere nobody named, silently, on the platform
+DCTL is most likely to run on.
+
+What makes the split safe rather than merely rclone-compatible is that remote
+names must be **at least two characters**, enforced when the configuration is
+written, on every platform. A one-character remote can never be declared, so off
+Windows a single-character reference resolves to nothing and fails *by name*: it
+cannot quietly address a remote you did not mean. The two platforms differ in
+which truthful answer they give, never in whether data goes somewhere unasked.
+
+Names are 2–64 characters of ASCII letters, digits, `-`, `_` and `.`, and must
+**start** with a letter or a digit — which is also why an argument beginning with
+`.` is read as a relative path rather than a remote. Provider type names
+(`local`, `b2`, `s3`, `r2`) are reserved, because each is also a shorthand:
+`b2:bucket` cannot be allowed to mean both "the remote called b2" and "the b2
+backend". `vault` is **not** reserved — a vault stores nothing and so has no
+shorthand form, which leaves `vault:photos/2024` free to mean the obvious thing.
+See [dctl config](dctl_config.md) for the full rule.
+
+Everything else about the rule runs identically on every platform: UNC paths,
+path separators in the candidate, the `.`/`..` markers, and `local:` as the
+escape hatch that forces the remainder to be read as a filesystem path.
+`RemoteSpec::classify` takes the platform as an argument rather than reading a
+`cfg`, so both behaviours are asserted by the test suite whichever machine runs
+it; it lives in `crates/dctl-cli/src/remote/spec.rs` beside
+`crate::constants::DRIVE_LETTERS_EXIST`, which states the reasoning.
 
 The same reasoning covers colons that are not drive letters: `photos/holiday:2024`
 is one relative directory, not a remote called `photos/holiday`, because the

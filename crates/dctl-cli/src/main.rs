@@ -36,6 +36,7 @@ mod dispatch;
 mod error;
 mod exit;
 mod filter;
+mod limits;
 mod logging;
 // The read-only FUSE filesystem, on the two platforms that have a FUSE layer.
 // Target-gated in one place rather than inside every file it contains: on
@@ -106,7 +107,8 @@ fn run(cli: Cli) -> ExitCode {
     runtime.block_on(execute(cli))
 }
 
-/// Told to the user when `--key-file` is refused before a command begins.
+/// Told to the user when a flag this build cannot honour is refused before a
+/// command begins.
 ///
 /// The refusal happens before anything is read, written or unlocked, so this is
 /// the complete account of the run's effects. Saying it explicitly stops the
@@ -133,13 +135,19 @@ async fn execute(cli: Cli) -> ExitCode {
 
     // Refused here, once, for every command — not inside the vault-unlock path.
     //
-    // It lived in `session::open`, which a local-to-local transfer never calls,
-    // so `dctl copy ./src ./dst --key-file kf` accepted the flag, ignored it and
-    // exited 0. A second factor that is silently dropped on some routes and
-    // honoured on others is worse than one that is never honoured at all: the
-    // operator cannot tell which run protected them. One chokepoint every
-    // command passes through is the only arrangement that cannot be bypassed by
-    // adding a new command later.
+    // The `--key-file` half lived in `session::open`, which a local-to-local
+    // transfer never calls, so `dctl copy ./src ./dst --key-file kf` accepted
+    // the flag, ignored it and exited 0. A second factor that is silently
+    // dropped on some routes and honoured on others is worse than one that is
+    // never honoured at all: the operator cannot tell which run protected them.
+    // One chokepoint every command passes through is the only arrangement that
+    // cannot be bypassed by adding a new command later.
+    //
+    // The same gate now carries the rest of the flags this build cannot honour
+    // (`cli::reach`), for the same reason and against a worse history: eleven of
+    // them parsed, appeared in `--help`, and did nothing at all. `--bwlimit 1k`
+    // moved 10 MiB at 32.9 MiB/s. Whatever else is true of a refusal, it is not
+    // that.
     //
     // What is passed is the *operation*, and only the operation: the flag and
     // the missing capability are appended by `refuse_if_present` itself. That
@@ -149,7 +157,7 @@ async fn execute(cli: Cli) -> ExitCode {
     // entirely implemented, shown to somebody whose only mistake was asking for
     // a second factor. Every other call site spelled the flag out by hand and
     // read correctly, which is why nothing noticed.
-    if let Err(error) = session::factor::refuse_if_present(
+    if let Err(error) = cli::refuse::refuse_if_present(
         &context.globals,
         &format!("dctl {}", cli.command.name()),
         NOTHING_ATTEMPTED,
@@ -169,8 +177,12 @@ async fn execute(cli: Cli) -> ExitCode {
     // would show smaller numbers than the report it follows, which reads as
     // though the run had gone backwards.
     let outcome = {
-        let _ticker =
-            output::progress::ticker::spawn(&context.progress, &context.stats, stats_interval);
+        let _ticker = output::progress::ticker::spawn(
+            &context.progress,
+            &context.stats,
+            stats_interval,
+            output::progress::ticker::Style::resolve(context.globals.stats_one_line),
+        );
 
         tokio::select! {
             result = dispatch::dispatch(&context, &cli.command) => Outcome::Finished(result),

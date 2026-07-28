@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use clap::Args;
 
 use crate::constants;
+use crate::limits::ByteLimit;
 use crate::logging::{LogFormat, LogLevel};
 use crate::output::{ColorChoice, Format, Units};
 
@@ -201,15 +202,15 @@ pub struct GlobalArgs {
     )]
     pub verify: VerifyMode,
 
-    /// Chunks to sample when --verify=sample.
-    #[arg(
-        long,
-        global = true,
-        default_value_t = 8,
-        value_name = "N",
-        help_heading = "Durability"
-    )]
-    pub verify_samples: u32,
+    /// Chunks to sample when --verify=sample. REFUSED in this build — sample
+    /// mode reads every chunk, so a depth would describe nothing.
+    ///
+    /// `Option` rather than a defaulted number, and the difference is the whole
+    /// point: a default would make `dctl --help` publish a sampling depth this
+    /// build has never applied, and would leave no way to tell "the user asked
+    /// for eight" from "nobody asked for anything". See [`crate::cli::reach`].
+    #[arg(long, global = true, value_name = "N", help_heading = "Durability")]
+    pub verify_samples: Option<u32>,
 
     /// Compare by checksum rather than size and modification time.
     #[arg(long, global = true, help_heading = "Durability")]
@@ -244,29 +245,37 @@ pub struct GlobalArgs {
     pub immutable: bool,
 
     // ── Transfer ─────────────────────────────────────────────────────────
-    /// Files transferred in parallel.
+    /// Files transferred at once. Only 1 is accepted: this build's executor is
+    /// sequential, and a larger value is refused rather than ignored.
+    ///
+    /// The default is the *measurement*, not an aspiration, which is why there
+    /// is no `Option` here as there is on the flags below: `1` is a true
+    /// statement about what happens, so `--help` may publish it and a run that
+    /// asks for it has asked for what it will get.
     #[arg(
         long,
         global = true,
-        default_value_t = constants::DEFAULT_TRANSFERS,
+        default_value_t = constants::TRANSFERS_PERFORMED,
         value_name = "N",
         help_heading = "Transfer"
     )]
     pub transfers: usize,
 
-    /// Metadata checks run in parallel.
+    /// Metadata checks run at once. Only 1 is accepted; see --transfers.
     #[arg(
         long,
         global = true,
-        default_value_t = constants::DEFAULT_CHECKERS,
+        default_value_t = constants::CHECKERS_PERFORMED,
         value_name = "N",
         help_heading = "Transfer"
     )]
     pub checkers: usize,
 
-    /// Bandwidth limit, e.g. 10M. 'off' for unlimited.
+    /// Bandwidth limit per second, e.g. 10M. 'off' for unlimited. Paced per
+    /// file: one large object is not split, so the run's average rate is what
+    /// is capped.
     #[arg(long, global = true, value_name = "RATE", help_heading = "Transfer")]
-    pub bwlimit: Option<String>,
+    pub bwlimit: Option<ByteLimit>,
 
     /// Retries of a whole failed file.
     #[arg(
@@ -278,39 +287,25 @@ pub struct GlobalArgs {
     )]
     pub retries: u32,
 
-    /// Retries of an individual network request.
-    #[arg(
-        long,
-        global = true,
-        default_value_t = constants::DEFAULT_LOW_LEVEL_RETRIES,
-        value_name = "N",
-        help_heading = "Transfer"
-    )]
-    pub low_level_retries: u32,
+    /// Retries of an individual network request. REFUSED in this build — the
+    /// request-level retry layer exists for B2 alone.
+    #[arg(long, global = true, value_name = "N", help_heading = "Transfer")]
+    pub low_level_retries: Option<u32>,
 
-    /// Inactivity timeout on a transfer, in seconds.
-    #[arg(
-        long,
-        global = true,
-        default_value_t = constants::DEFAULT_TIMEOUT_SECS,
-        value_name = "SECONDS",
-        help_heading = "Transfer"
-    )]
-    pub timeout: u64,
+    /// Inactivity timeout on a transfer, in seconds. REFUSED in this build —
+    /// no backend applies one.
+    #[arg(long, global = true, value_name = "SECONDS", help_heading = "Transfer")]
+    pub timeout: Option<u64>,
 
-    /// Connection timeout, in seconds.
-    #[arg(
-        long,
-        global = true,
-        default_value_t = constants::DEFAULT_CONNECT_TIMEOUT_SECS,
-        value_name = "SECONDS",
-        help_heading = "Transfer"
-    )]
-    pub contimeout: u64,
+    /// Connection timeout, in seconds. REFUSED in this build — no backend
+    /// applies one.
+    #[arg(long, global = true, value_name = "SECONDS", help_heading = "Transfer")]
+    pub contimeout: Option<u64>,
 
-    /// Stop after transferring this much, e.g. 100G.
+    /// Stop after transferring this much, e.g. 100G. Exits 8 at the limit,
+    /// without starting a file that would exceed it.
     #[arg(long, global = true, value_name = "SIZE", help_heading = "Transfer")]
-    pub max_transfer: Option<String>,
+    pub max_transfer: Option<ByteLimit>,
 
     // ── Filtering ────────────────────────────────────────────────────────
     /// Include only paths matching this glob. Repeatable.
@@ -470,8 +465,8 @@ pub struct GlobalArgs {
     )]
     pub log_file: Option<PathBuf>,
 
-    /// Dump protocol detail for debugging. Repeatable; secrets are always
-    /// redacted regardless of what is requested.
+    /// Dump protocol detail for debugging. REFUSED in this build — the tracing
+    /// layer these select from is not installed, so every target is silence.
     #[arg(
         long,
         global = true,
@@ -527,12 +522,13 @@ impl GlobalArgs {
 
     /// Whether a given dump target was requested.
     ///
-    /// No caller yet: `--dump` parses and validates, and the protocol tracing
-    /// layer it feeds is not written. Kept, rather than deleted and re-derived
-    /// later, so that the layer reads the flag through one predicate instead of
-    /// each capture site testing `dump.contains(…)` for itself — which is how
-    /// `--dump headers` ends up honoured by one call site and ignored by the
-    /// next. Its safe renderer is already in place too; see
+    /// No caller in this build, because the protocol tracing layer it feeds is
+    /// not written and [`crate::cli::reach`] therefore refuses `--dump` outright
+    /// rather than accepting it into silence. Kept, rather than deleted and
+    /// re-derived later, so that the layer reads the flag through one predicate
+    /// instead of each capture site testing `dump.contains(…)` for itself —
+    /// which is how `--dump headers` ends up honoured by one call site and
+    /// ignored by the next. Its safe renderer is already in place too; see
     /// [`crate::logging::redact::redact_header`].
     #[allow(dead_code)]
     #[must_use]
@@ -604,11 +600,24 @@ mod tests {
     #[test]
     fn defaults_match_the_constants_module() {
         let g = parse(&[]);
-        assert_eq!(g.transfers, constants::DEFAULT_TRANSFERS);
-        assert_eq!(g.checkers, constants::DEFAULT_CHECKERS);
+        assert_eq!(g.transfers, constants::TRANSFERS_PERFORMED);
+        assert_eq!(g.checkers, constants::CHECKERS_PERFORMED);
         assert_eq!(g.retries, constants::DEFAULT_RETRIES);
         assert_eq!(g.max_depth, constants::MAX_DEPTH_UNLIMITED);
         assert_eq!(g.verify, VerifyMode::Checksum);
+    }
+
+    #[test]
+    fn the_flags_this_build_cannot_honour_carry_no_default() {
+        // A default is a published claim. `--timeout` printing `[default: 300]`
+        // said this build applies a five-minute idle timeout, which it does
+        // not, and left no way to tell a user who asked from one who did not.
+        let g = parse(&[]);
+        assert_eq!(g.verify_samples, None);
+        assert_eq!(g.low_level_retries, None);
+        assert_eq!(g.timeout, None);
+        assert_eq!(g.contimeout, None);
+        assert!(g.dump.is_empty());
     }
 
     #[test]

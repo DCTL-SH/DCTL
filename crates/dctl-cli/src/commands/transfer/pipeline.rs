@@ -63,6 +63,7 @@ use crate::logging::fields;
 use crate::output::{FileHandle, Progress, Stage};
 
 use super::plan::PlanEntry;
+use super::retry;
 
 /// The stages a file passes through, in order.
 ///
@@ -204,15 +205,37 @@ pub trait Reaper {
 /// file is not stored, so the error propagates unchanged and the caller must not
 /// count the file as done: only [`run_stages`] increments the "files done"
 /// counter, and only after the commit returns.
+///
+/// [`ExitCode::TransferLimitExceeded`] when `--max-transfer` cannot afford this
+/// file. That one is raised *before* anything is attempted and returns without
+/// appending a record, because nothing happened: a log entry for a file the run
+/// declined to start would be a statement about work that does not exist.
 pub async fn transfer_file<D: StageDriver>(
     ctx: &Ctx,
     op: &str,
     driver: &D,
     entry: &PlanEntry,
 ) -> Result<()> {
+    afford(ctx, entry)?;
     let walked = walk(ctx, driver, entry).await;
     let moved = walked.as_ref().copied().unwrap_or_default();
     record(ctx, op, driver, entry, moved, walked.map(|_| ()))
+}
+
+/// Ask `--max-transfer` whether this file may be started.
+///
+/// The plan's figure is used rather than a measurement, because the only
+/// measurement available arrives after the bytes have already been sent — which
+/// is too late for a ceiling that must not be exceeded. The two are the same
+/// number except when the source changed under the run, and `spend` below
+/// records what really moved, so the budget self-corrects on the next file.
+///
+/// # Errors
+/// [`ExitCode::TransferLimitExceeded`] — exit 8. See [`crate::limits::budget`].
+fn afford(ctx: &Ctx, entry: &PlanEntry) -> Result<()> {
+    ctx.limits
+        .budget
+        .afford(entry.size.unwrap_or_default(), &entry.dest, ctx.out.units())
 }
 
 /// Steps 1–6 alone, with no audit record. Returns the bytes that moved.
@@ -220,6 +243,13 @@ pub async fn transfer_file<D: StageDriver>(
 /// Private, and that is the whole point: every public entry point below appends
 /// a record, so there is no route through this module that moves a file and
 /// leaves no trace of having done it.
+///
+/// This is also where `--retries` is applied, and the placement is what makes
+/// the retry honest: everything inside is re-attempted, so a repeat re-reads the
+/// source, re-encrypts and re-verifies rather than replaying a buffer, and the
+/// audit record that [`transfer_file`] appends afterwards describes how the file
+/// *ended* rather than how it first went. The counters are charged per attempt
+/// (see [`run_stages`]), because every attempt really did cross the wire.
 async fn walk<D: StageDriver>(ctx: &Ctx, driver: &D, entry: &PlanEntry) -> Result<u64> {
     let started = std::time::Instant::now();
     // A bar needs a number. An entry with no recorded size draws as a bar of
@@ -228,7 +258,19 @@ async fn walk<D: StageDriver>(ctx: &Ctx, driver: &D, entry: &PlanEntry) -> Resul
     let handle = ctx
         .progress
         .start_file(&entry.dest, entry.size.unwrap_or_default());
-    let outcome = run_stages(ctx, driver, entry, &handle).await;
+
+    let mut outcome = run_stages(ctx, driver, entry, &handle).await;
+    for attempt in 1..retry::attempts(ctx) {
+        let Err(error) = &outcome else {
+            break;
+        };
+        if !retry::is_worth_repeating(error) {
+            break;
+        }
+        retry::note(ctx, &entry.dest, attempt, error);
+        outcome = run_stages(ctx, driver, entry, &handle).await;
+    }
+
     // The row is retired whether the file succeeded or failed: a bar left behind
     // by a failed transfer would be redrawn over the error message explaining it.
     ctx.progress.finish_file(handle);
@@ -350,6 +392,18 @@ async fn run_stages<D: StageDriver>(
             Stage::Uploading => {
                 moved = driver.upload(entry).await?;
                 reporter.advance(moved);
+                // Both cost controls are charged here, with the *measured*
+                // count and in this order. The budget is recorded first because
+                // it must reflect the bytes even if the run is about to be
+                // cancelled mid-sleep; the pace is then paid, so the wait lands
+                // between this file and the next rather than inside a stage.
+                //
+                // A retried attempt charges again, deliberately: it used the
+                // link and it is on the invoice, and a cost control that
+                // discounted failed attempts would under-report exactly the
+                // runs that cost the most.
+                ctx.limits.budget.spend(moved);
+                ctx.limits.bandwidth.charge(moved).await;
             }
 
             // Step 4 is mandatory. Everything before this line moved bytes;
@@ -399,6 +453,7 @@ pub async fn move_file<D: StageDriver, R: Reaper>(
     source_reaper: &R,
     entry: &PlanEntry,
 ) -> Result<()> {
+    afford(ctx, entry)?;
     let (moved, outcome) = match walk(ctx, driver, entry).await {
         Ok(moved) => (moved, source_reaper.remove(&entry.source).await),
         Err(error) => (0, Err(error)),
@@ -438,6 +493,13 @@ pub fn record_failure(ctx: &Ctx, path: &str, error: &CliError) {
 /// message; and every one of those files would be transferred *unrecorded*,
 /// which `PLAN.md` §7 forbids outright. Stopping is the only outcome that leaves
 /// the vault and the log describing the same run.
+///
+/// [`ExitCode::TransferLimitExceeded`] is on it for the opposite reason: not
+/// because the run cannot continue but because the operator said it must not.
+/// Counting `--max-transfer` as a per-file error and carrying on would try every
+/// remaining file, fail every one of them at the same ceiling, and turn a
+/// deliberate stop into a wall of errors and exit 6 — instead of the one line
+/// and exit 8 the flag exists to produce.
 #[must_use]
 pub const fn is_fatal(error: &CliError) -> bool {
     matches!(
@@ -448,6 +510,7 @@ pub const fn is_fatal(error: &CliError) -> bool {
             | ExitCode::IndexError
             | ExitCode::Usage
             | ExitCode::AuditChainBroken
+            | ExitCode::TransferLimitExceeded
     )
 }
 
@@ -555,6 +618,205 @@ mod tests {
         fn remote(&self) -> &str {
             TEST_REMOTE
         }
+    }
+
+    /// A driver that fails the first `failures` attempts and then succeeds.
+    ///
+    /// The only way to observe `--retries` from inside the crate: a transient
+    /// failure cannot be provoked by copying a local file, and a test that
+    /// asserted the flag was *parsed* is precisely the kind that let it stay
+    /// inert for a whole release.
+    struct Flaky {
+        remaining: RefCell<u32>,
+        attempts: RefCell<u32>,
+        code: ExitCode,
+    }
+
+    impl Flaky {
+        fn failing(failures: u32, code: ExitCode) -> Self {
+            Self {
+                remaining: RefCell::new(failures),
+                attempts: RefCell::new(0),
+                code,
+            }
+        }
+
+        fn attempts(&self) -> u32 {
+            *self.attempts.borrow()
+        }
+    }
+
+    impl StageDriver for Flaky {
+        async fn read(&self, _entry: &PlanEntry) -> Result<()> {
+            *self.attempts.borrow_mut() += 1;
+            let mut remaining = self.remaining.borrow_mut();
+            if *remaining > 0 {
+                *remaining -= 1;
+                return Err(CliError::new(self.code, "flaky"));
+            }
+            Ok(())
+        }
+        async fn encrypt(&self, _entry: &PlanEntry) -> Result<()> {
+            Ok(())
+        }
+        async fn upload(&self, entry: &PlanEntry) -> Result<u64> {
+            Ok(entry.size.unwrap_or_default())
+        }
+        async fn verify(&self, _entry: &PlanEntry, _mode: VerifyMode) -> Result<()> {
+            Ok(())
+        }
+        async fn commit(&self, _entry: &PlanEntry) -> Result<()> {
+            Ok(())
+        }
+        async fn create_dir(&self, _entry: &PlanEntry) -> Result<()> {
+            Ok(())
+        }
+        fn remote(&self) -> &str {
+            TEST_REMOTE
+        }
+        fn direction(&self) -> AuditDirection {
+            AuditDirection::In
+        }
+        fn take_plaintext_hash(&self, _entry: &PlanEntry) -> String {
+            String::new()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_is_retried_until_the_file_lands() {
+        // `--retries` reached nothing at all before this: the summary carried a
+        // *Retries* row whose counter could never be anything but zero.
+        let ctx = ctx(&["--retries", "3"]);
+        let driver = Flaky::failing(2, ExitCode::TemporaryError);
+
+        transfer_file(&ctx, TEST_OP, &driver, &entry("a.txt", 100))
+            .await
+            .unwrap();
+
+        assert_eq!(driver.attempts(), 3, "two failures then one success");
+        let snapshot = ctx.stats.snapshot();
+        assert_eq!(
+            snapshot.retries, 2,
+            "and the summary must be able to say so"
+        );
+        assert_eq!(snapshot.files_done, 1);
+        assert_eq!(snapshot.errors, 0);
+    }
+
+    #[tokio::test]
+    async fn the_retry_budget_is_finite_and_the_failure_survives_it() {
+        // A file that fails forever must still fail, at its own code, after
+        // exactly the number of attempts asked for. An unbounded retry would
+        // turn one bad file into a hung run.
+        let ctx = ctx(&["--retries", "2"]);
+        let driver = Flaky::failing(u32::MAX, ExitCode::TemporaryError);
+
+        let error = transfer_file(&ctx, TEST_OP, &driver, &entry("a.txt", 100))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ExitCode::TemporaryError);
+        assert_eq!(driver.attempts(), 3, "the original plus two retries");
+        assert_eq!(ctx.stats.snapshot().retries, 2);
+    }
+
+    #[tokio::test]
+    async fn zero_retries_means_one_attempt_not_none() {
+        let ctx = ctx(&["--retries", "0"]);
+        let driver = Flaky::failing(1, ExitCode::TemporaryError);
+        assert!(
+            transfer_file(&ctx, TEST_OP, &driver, &entry("a.txt", 100))
+                .await
+                .is_err()
+        );
+        assert_eq!(driver.attempts(), 1);
+        assert_eq!(ctx.stats.snapshot().retries, 0);
+    }
+
+    #[tokio::test]
+    async fn a_failure_a_repeat_cannot_fix_is_not_repeated() {
+        // Retrying a missing file spends time to learn the same thing three
+        // times. The classification lives in `super::retry`; this asserts the
+        // pipeline consults it rather than repeating everything.
+        let ctx = ctx(&["--retries", "5"]);
+        let driver = Flaky::failing(u32::MAX, ExitCode::FileNotFound);
+        assert!(
+            transfer_file(&ctx, TEST_OP, &driver, &entry("a.txt", 100))
+                .await
+                .is_err()
+        );
+        assert_eq!(driver.attempts(), 1);
+        assert_eq!(ctx.stats.snapshot().retries, 0);
+    }
+
+    #[tokio::test]
+    async fn max_transfer_stops_before_a_file_that_would_breach_it() {
+        // Cautious, not hard: the file is never started, so the ceiling is not
+        // exceeded by a byte and nothing partial is anywhere.
+        let ctx = ctx(&["--max-transfer", "150"]);
+        let driver = Recording::default();
+
+        transfer_file(&ctx, TEST_OP, &driver, &entry("a.txt", 100))
+            .await
+            .unwrap();
+        let error = transfer_file(&ctx, TEST_OP, &driver, &entry("b.txt", 100))
+            .await
+            .unwrap_err();
+
+        assert_eq!(error.code(), ExitCode::TransferLimitExceeded);
+        assert!(
+            is_fatal(&error),
+            "the stop must end the run, not become one error per remaining file"
+        );
+        assert_eq!(
+            ctx.stats.snapshot().bytes_transferred,
+            100,
+            "only the file that fitted may have moved"
+        );
+        // The refused file walked no stage at all.
+        assert_eq!(driver.stages(), PIPELINE_STAGES);
+    }
+
+    #[tokio::test]
+    async fn max_transfer_leaves_no_audit_record_for_a_file_it_declined_to_start() {
+        // A record for work that does not exist would be a false statement in
+        // the one artefact whose entire value is being true.
+        let ctx = ctx(&["--max-transfer", "10"]);
+        let driver = Recording::default();
+        let error = transfer_file(&ctx, TEST_OP, &driver, &entry("big.bin", 1000))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), ExitCode::TransferLimitExceeded);
+        assert!(
+            driver.stages().is_empty(),
+            "nothing may have been attempted"
+        );
+        assert_eq!(ctx.stats.snapshot().files_done, 0);
+    }
+
+    #[tokio::test]
+    async fn an_uncapped_run_is_never_stopped() {
+        let ctx = ctx(&[]);
+        let driver = Recording::default();
+        for name in ["a", "b", "c"] {
+            transfer_file(&ctx, TEST_OP, &driver, &entry(name, u64::MAX / 4))
+                .await
+                .unwrap();
+        }
+        assert_eq!(ctx.stats.snapshot().files_done, 3);
+    }
+
+    #[tokio::test]
+    async fn every_retried_attempt_is_charged_to_the_cost_controls() {
+        // A retried file used the link on every attempt and is on the invoice
+        // for every attempt. A budget that discounted failures would
+        // under-report exactly the runs that cost the most.
+        let ctx = ctx(&["--retries", "2"]);
+        let driver = Flaky::failing(0, ExitCode::TemporaryError);
+        transfer_file(&ctx, TEST_OP, &driver, &entry("a.txt", 100))
+            .await
+            .unwrap();
+        assert_eq!(ctx.limits.budget.spent(), 100);
     }
 
     #[tokio::test]

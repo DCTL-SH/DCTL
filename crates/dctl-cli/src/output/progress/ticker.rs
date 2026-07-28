@@ -43,19 +43,47 @@ impl Drop for Ticker {
     }
 }
 
-/// Start emitting a status line every `interval_secs`, if this run wants one.
+/// Which shape the periodic record takes.
 ///
-/// Returns `None` — and spawns nothing — unless all three conditions hold:
+/// Two shapes because `--stats-one-line` has to *do* something. It used to be
+/// accepted and ignored — the ticker only ever emitted the condensed line, so
+/// asking for one line was asking for what you already had, and the flag was
+/// indistinguishable from its absence in every run. rclone's arrangement is the
+/// one restored here: a block by default, condensed on request.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Style {
+    /// The full report, mid-run: every row the end-of-run summary would show.
+    Block,
+    /// One line, for a log that will be read with `grep`.
+    OneLine,
+}
+
+impl Style {
+    /// The shape `--stats-one-line` selects.
+    #[must_use]
+    pub const fn resolve(one_line: bool) -> Self {
+        if one_line { Self::OneLine } else { Self::Block }
+    }
+}
+
+/// Start emitting a status record every `interval_secs`, if this run wants one.
+///
+/// Returns `None` — and spawns nothing — unless both conditions hold:
 ///
 /// * the display is in [`Mode::Plain`]. Bars already show live progress, and
 ///   [`Quiet`](Mode::Quiet) was an explicit request for silence.
 /// * `interval_secs` is non-zero. `--stats 0` is the documented way to turn the
-///   line off without turning off progress altogether.
+///   record off without turning off progress altogether.
 ///
 /// A `None` return is a normal outcome, not a failure: most runs are watched on
 /// a terminal.
 #[must_use]
-pub fn spawn(progress: &Arc<Progress>, stats: &Arc<Stats>, interval_secs: u64) -> Option<Ticker> {
+pub fn spawn(
+    progress: &Arc<Progress>,
+    stats: &Arc<Stats>,
+    interval_secs: u64,
+    style: Style,
+) -> Option<Ticker> {
     if progress.mode() != Mode::Plain || interval_secs == 0 {
         return None;
     }
@@ -67,11 +95,23 @@ pub fn spawn(progress: &Arc<Progress>, stats: &Arc<Stats>, interval_secs: u64) -
     Some(Ticker {
         handle: tokio::spawn(async move {
             loop {
-                // Sleep first. A line emitted at t=0 would report an empty
+                // Sleep first. A record emitted at t=0 would report an empty
                 // snapshot of a run that has not started moving bytes yet,
                 // which is noise at best and misleading at worst.
                 tokio::time::sleep(interval).await;
-                progress.println(progress.one_line(&stats.snapshot()));
+                let snapshot = stats.snapshot();
+                match style {
+                    Style::OneLine => progress.println(progress.one_line(&snapshot)),
+                    // Printed line by line rather than as one joined string, so
+                    // the bars-suspending `println` gets each record the way it
+                    // gets every other line and cannot interleave a bar into the
+                    // middle of a block.
+                    Style::Block => {
+                        for line in progress.block(&snapshot) {
+                            progress.println(line);
+                        }
+                    }
+                }
             }
         }),
     })
@@ -94,7 +134,7 @@ mod tests {
     #[tokio::test]
     async fn a_plain_run_gets_a_ticker() {
         let stats = Stats::shared();
-        assert!(spawn(&plain(), &stats, 1).is_some());
+        assert!(spawn(&plain(), &stats, 1, Style::Block).is_some());
     }
 
     #[tokio::test]
@@ -102,7 +142,7 @@ mod tests {
         // `--stats 0` is the documented off switch; it must not be confused
         // with `--quiet`, which turns the whole display off.
         let stats = Stats::shared();
-        assert!(spawn(&plain(), &stats, 0).is_none());
+        assert!(spawn(&plain(), &stats, 0, Style::Block).is_none());
     }
 
     #[tokio::test]
@@ -112,14 +152,46 @@ mod tests {
         let stats = Stats::shared();
         for mode in [Mode::Bars, Mode::Quiet] {
             let progress = Arc::new(Progress::new(mode, Units::Binary, false, Stats::shared()));
-            assert!(spawn(&progress, &stats, 1).is_none(), "{mode:?}");
+            assert!(
+                spawn(&progress, &stats, 1, Style::Block).is_none(),
+                "{mode:?}"
+            );
         }
+    }
+
+    #[test]
+    fn the_two_styles_really_are_two_shapes() {
+        // The check that `--stats-one-line` is not the flag it used to be. When
+        // the ticker only knew one shape, this assertion had nothing to compare
+        // and the flag could not be distinguished from its absence.
+        assert_eq!(Style::resolve(false), Style::Block);
+        assert_eq!(Style::resolve(true), Style::OneLine);
+
+        let stats = Stats::shared();
+        stats.set_total_bytes(1000);
+        stats.add_bytes(500);
+        let progress = plain();
+        let snapshot = stats.snapshot();
+
+        let block = progress.block(&snapshot);
+        let one_line = progress.one_line(&snapshot);
+        assert!(
+            block.len() > 1,
+            "the default record must be a block, got {block:?}"
+        );
+        assert!(!one_line.contains('\n'), "got: {one_line}");
+        // …and the block must carry what the condensed line cannot: the errors
+        // row is the reason somebody reads a status record at all.
+        assert!(
+            block.iter().any(|line| line.contains("Errors")),
+            "got {block:?}"
+        );
     }
 
     #[tokio::test]
     async fn dropping_the_guard_stops_the_task() {
         let stats = Stats::shared();
-        let ticker = spawn(&plain(), &stats, 1).expect("plain runs tick");
+        let ticker = spawn(&plain(), &stats, 1, Style::Block).expect("plain runs tick");
         let handle = ticker.handle.abort_handle();
         drop(ticker);
         // A line printed after the run ended would read as though it were

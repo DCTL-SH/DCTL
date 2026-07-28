@@ -15,6 +15,8 @@
 //! under [`crate::commands`] — this file only wires them together.
 
 pub mod globals;
+pub mod reach;
+pub mod refuse;
 pub mod window;
 
 // Tests and nothing else. `mentions` reads this crate's own source and

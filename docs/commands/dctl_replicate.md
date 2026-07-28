@@ -152,8 +152,9 @@ worse: the objects it had not reached yet are the ones with no second copy.
 plans, moves objects, verifies them, and reports. Two limits are worth knowing
 before scheduling it.
 
-* Objects move **one at a time**, so `--transfers` is accepted (it is a global
-  flag) and not yet honoured.
+* Objects move **one at a time**. `--transfers` accepts only `1` for that
+  reason, on this command and every other; a larger value is refused with exit 7
+  rather than accepted and ignored.
 * An object is moved in one piece, because the storage layer's `put` takes a
   whole buffer. An object larger than **1 GiB** is reported as a failure with
   reason `object-too-large` rather than attempted; the limit disappears when the
@@ -265,8 +266,12 @@ Every global flag is accepted. The ones that change what this command does are
 the store remotes are looked up), and the output flags
 `--format`/`--json`/`--units`/`--quiet`/`-v`/`--progress`. The filtering flags are
 accepted by the parser, because they are global, and **refused** by this command.
-`--transfers` is not yet honoured; see *Status in this build*. See
-[../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the full list.
+`--transfers` accepts only `1`; see *Status in this build*. The two cost
+controls — `--bwlimit` and `--max-transfer` — are **not** applied by this command:
+they are charged in the transfer pipeline, which `replicate` does not go through.
+That is a gap rather than a decision, and it is named here rather than left to be
+discovered on an invoice. See [../GLOBAL_FLAGS.md](../GLOBAL_FLAGS.md) for the
+full list.
 
 The authentication flags — `--password`, `--password-command`, `--password-file`
 — are accepted and never read. There is no code path in this command that opens a

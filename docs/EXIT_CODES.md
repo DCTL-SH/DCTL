@@ -446,10 +446,16 @@ seen this document.
 
 ## What is reachable in this build
 
-Codes 8 (`transfer_limit_exceeded`) and 10 (`duration_limit_exceeded`) are
-defined and reserved but not yet produced: `--max-transfer` is parsed but not
-enforced, and `--max-duration` is not yet a flag. They are listed here because
-the numbers are already committed to and will not be reused for anything else.
+Code 8 (`transfer_limit_exceeded`) **is** produced today, by the transfer verbs
+under `--max-transfer`. It was unreachable in every earlier build — the flag was
+parsed and never enforced, so a run capped at 1 MiB moved 10 MiB and exited 0.
+A file is now not *started* when moving it would take the run past the ceiling,
+so the limit is never exceeded and exit 8 is what a script sees when it is met.
+See [Global flags → `--max-transfer`](GLOBAL_FLAGS.md#--max-transfer-size).
+
+Code 10 (`duration_limit_exceeded`) remains defined and reserved but not
+produced: `--max-duration` is not a flag in this build. It is listed here because
+the number is already committed to and will not be reused for anything else.
 
 Code 9 (`no_files_transferred`) **is** produced today, by the three commands
 whose entire product is a claim that data is there:

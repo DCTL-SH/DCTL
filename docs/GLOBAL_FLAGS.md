@@ -30,15 +30,21 @@ failed rather than a deliberate choice.
 `-h`/`--help` and `-V`/`--version` are clap built-ins rather than members of the
 global block, and are not repeated below.
 
-> **Status.** Some flags below parse and validate but are not yet consumed by any
-> command in this build. They are marked *not yet honoured* on the flag, and
-> listed together under [Flags that parse but do not yet act](#flags-that-parse-but-do-not-yet-act).
-> Nothing on that list silently degrades a guarantee: where honouring a flag
-> matters for correctness (`--key-file`), the command **fails** rather than
-> proceeding without it. `--filter-from` and `--files-from` used to be on that
-> list for the listing verbs; they are now honoured by every command, through the
-> same engine, so a listing and the transfer that follows it select the same
-> files.
+> **Status.** Every flag on this page either **acts** or is **refused**. There is
+> no third state. A flag this build cannot honour fails the run before anything
+> is read or written, names itself, and says which layer owes the capability —
+> the way `--key-file` always has. They are listed together under
+> [Flags that are refused](#flags-that-are-refused).
+>
+> This replaces a *not yet honoured* category that eleven flags sat in, including
+> `--bwlimit` and `--max-transfer`. Both are cost controls — the flags an operator
+> sets so a runaway job cannot generate a bill — and both were accepted, listed
+> here, and silently ignored: `--bwlimit 1k` moved 10 MiB at 32.9 MiB/s, and
+> `--max-transfer 1M` moved the whole 10 MiB and exited 0. A flag in that state is
+> worse than one that does not exist, because the operator believes they capped
+> their egress. `crates/dctl-cli/src/cli/reach.rs` now holds the classification
+> for every global flag and a test fails the build if a new one is added without
+> either reaching an implementation or being explicitly refused.
 
 ---
 
@@ -215,7 +221,7 @@ before it has tried.
 | Flag | Value | Default | Environment |
 |------|-------|---------|-------------|
 | `--verify` | `checksum` \| `sample` \| `strict` | `checksum` | — |
-| `--verify-samples` | `N` | `8` | — |
+| `--verify-samples` | `N` | **refused** | — |
 | `--checksum` | — | off | — |
 | `--size-only` | — | off | — |
 | `--modify-window` | `SECONDS` | `1` | — |
@@ -230,7 +236,7 @@ and `dctl scrub` use when they re-ask the question later.
 | Mode | What it does | What it proves | Extra egress |
 |------|--------------|----------------|--------------|
 | `checksum` (default) | Compares the provider's stored checksum against the one computed locally. | The provider still holds the ciphertext DCTL sent. | none |
-| `sample` | Additionally Range-reads and decrypts `--verify-samples` chunks per object. | Those chunks decrypt and authenticate. | partial |
+| `sample` | Reads back and re-authenticates the object. **In this build it reads all of it**, so it costs what `strict` costs. | The stored object decrypts and authenticates. | **full** |
 | `strict` | Reads and decrypts every object in full and confirms its whole-file BLAKE3. | The plaintext is intact, end to end. | **full — a second copy of the data** |
 
 **Be clear about what `strict` costs.** A full read-back downloads everything it
@@ -240,7 +246,10 @@ bucket that is a doubled bill for the run, not a rounding error. Aimed at a
 50 TB vault is a 50 TB download, so the integrity commands warn before starting
 whenever a byte-reading mode meets a prefix. `sample` is the middle setting: it
 pays for `--verify-samples` chunks per object instead of all of them, which
-catches wholesale corruption without buying a second copy of the data.
+catches wholesale corruption without buying a second copy of the data — **which
+is what `sample` is meant to be and is not yet**. In this build it reads the whole
+object, so on a vault it costs the same egress as `strict` while proving less;
+`--verify-samples` is refused rather than accepted into that gap.
 
 **Why `checksum` is still a strong default.** It is not "no verification" — step 4
 of the write pipeline is mandatory and runs whatever `--verify` says: the provider
@@ -268,11 +277,13 @@ overrides the configured value.
 
 ### `--verify-samples N`
 
-How many chunks per object `--verify sample` reads back. Meaningless under
-`checksum` (nothing is read) and under `strict` (everything is). Raise it to buy
-more assurance per object at a proportional cost in egress; the default of 8 is
-chosen to catch wholesale corruption cheaply, not to be a statistical guarantee.
-*Not yet honoured* — the sampling read path is not wired up in this build.
+**Refused** (exit 7). There is no sampled read to set a depth on: the vault read
+path reads and authenticates the whole object, so `--verify sample` costs a full
+egress and this number would describe nothing. Use `--verify checksum` for the
+metadata comparison, or `--verify strict`, which is what `sample` currently does.
+
+It was previously accepted with a default of `8`, which published a sampling
+depth this build has never applied.
 
 ### `--checksum`
 
@@ -392,72 +403,107 @@ checked before anything is listed).
 
 | Flag | Value | Default | Environment |
 |------|-------|---------|-------------|
-| `--transfers` | `N` | `4` | — |
-| `--checkers` | `N` | `8` | — |
+| `--transfers` | `N` | `1` | — |
+| `--checkers` | `N` | `1` | — |
 | `--bwlimit` | `RATE` | unlimited | — |
 | `--retries` | `N` | `3` | — |
-| `--low-level-retries` | `N` | `10` | — |
-| `--timeout` | `SECONDS` | `300` | — |
-| `--contimeout` | `SECONDS` | `60` | — |
+| `--low-level-retries` | `N` | **refused** | — |
+| `--timeout` | `SECONDS` | **refused** | — |
+| `--contimeout` | `SECONDS` | **refused** | — |
 | `--max-transfer` | `SIZE` | unlimited | — |
 
-Every flag in this group parses and validates but is *not yet honoured* by the
-transfer engine in this build.
+Every flag in this group used to parse and do nothing. Three now act
+(`--bwlimit`, `--retries`, `--max-transfer`), two accept only the value that is
+true of this build (`--transfers 1`, `--checkers 1`), and three are **refused**
+with the reason — exit **7**, before anything is read or written, the way
+[`--key-file`](#--key-file-path) is. There is no fourth outcome; see
+[Flags that are refused](#flags-that-are-refused).
 
 ### `--transfers N`
 
-Files transferred in parallel. Four keeps a single large-file stream near line
-rate on a home connection without starving interactive use; raise it for
-many-small-files workloads, where the win is large and the only thing you risk is
-tripping a provider's rate limiter. Lower it when DCTL is sharing a link with
-something latency-sensitive.
+Files transferred at once. **Only `1` is accepted.** This build's executor walks
+the plan in plan order on a single task, so that the list `--dry-run` prints and
+the list the machine performs are provably the same one; `--transfers 2` is
+refused rather than accepted and ignored.
+
+The default used to be `4`, which was the number a concurrent executor would have
+wanted and which nothing read. Making it concurrent is a change to the durability
+contract rather than to a number: the audit chain is appended in plan order, a
+fatal error stops the run instead of failing every remaining file identically,
+and both need an answer before a second file may be in flight.
 
 ### `--checkers N`
 
-Metadata comparisons run in parallel — the pipeline stage that decides which
-files need transferring at all. Defaults higher than `--transfers` because a check
-is one cheap round trip and the checker pipeline should stay ahead of the
-transfers it feeds. Raising it speeds up the "nothing changed" case on a large
-tree, which is most of what a repeated `sync` does.
+Metadata comparisons run at once. **Only `1` is accepted**, for a sharper reason
+than `--transfers`: there is no checker stage to make parallel. Comparison happens
+once, while the transfer plan is built, over two listings that are already in
+hand. Parallel checking would be a different pipeline, not a larger number.
 
 ### `--bwlimit RATE`
 
 Bandwidth ceiling, written with the usual size suffixes (`10M`, `1.5MiB`) or
 `off` for unlimited. The rate is bytes per second, not bits — `10M` is roughly an
-80 Mbit/s link fully used. Use it to keep a long upload from making a shared
-connection unusable rather than as a cost control; `--max-transfer` is the one
-that bounds spend.
+80 Mbit/s link fully used. A value that does not parse is a **usage error** (exit
+1) before the command starts, never a silently unlimited run.
+
+**Granularity: one file.** Each file is charged for the bytes it actually moved,
+and the next file waits until that charge has been paid off at the configured
+rate. Over a run the average throughput is the limit; the first file is never
+delayed, because there is nothing before it to delay it. What this does *not* do
+is shape the wire — `--bwlimit 1M` will still put a 100 MiB file onto the link as
+fast as the link takes it and then wait about 100 s before the next one.
+
+The reason is structural rather than an oversight: this engine hands a whole
+object to the storage backend in one call and gets a byte count back at the end,
+so there is no per-buffer seam to charge. (rclone charges every read buffer and
+therefore shapes at kilobyte granularity.) The practical consequence:
+
+* **Capping a bill or a metered link** is served exactly. The average rate over
+  the run is the limit, so the bytes per month are the limit.
+* **Keeping a video call usable while a backup runs** is served only at file
+  granularity. A tree of small files behaves as you expect; one enormous file
+  will saturate the uplink for its duration.
 
 ### `--retries N`
 
-How many times a *whole failed file* is retried. This is the outer loop, and it
-exists for failures that survive the inner one — a file that fails three times in
-a row is usually failing for a reason that will not resolve on the fourth.
-Retries are counted and reported in the end-of-run summary so a run that
-succeeded only after fighting for it does not look identical to one that did not.
+How many times a *whole failed file* is retried — the original attempt plus `N`
+repeats, so `--retries 0` still transfers each file once. Everything inside is
+re-attempted: a repeat re-reads the source, re-encrypts and re-verifies rather
+than replaying a buffer.
+
+Only failures a repeat can fix are repeated: a temporary error (a reset
+connection, a 503, a dropped ssh session) and a checksum mismatch, which means
+the destination stored something other than what was sent and where nothing was
+committed. A missing file, a locked vault, an AEAD authentication failure and a
+`--max-transfer` stop are **not** repeated — the first three will answer the same
+way next time, and the fourth is the run being stopped on purpose.
+
+There is no sleep between attempts, matching rclone, whose `--retries-sleep`
+defaults to zero. Retries are counted and shown in the end-of-run summary, so a
+run that succeeded only after fighting for it does not look identical to one that
+did not.
 
 ### `--low-level-retries N`
 
-How many times an individual HTTP request is retried. Higher than `--retries`
-because most failures at this layer are a single transient 5xx, a reset, or a 429
-that succeeds immediately on repeat. Retries back off exponentially from 250 ms
-with jitter, capped at 30 s, so a long provider outage does not stretch one file
-into the next hour.
+**Refused** (exit 7). Request-level retries exist for Backblaze B2 only, on a
+schedule this flag cannot reach, and there is no such layer for sftp, S3, R2 or
+the local filesystem. Honouring it on one backend and dropping it on four would
+leave you unable to tell which runs were protected. Whole-file retries *are*
+honoured on every backend — see `--retries`.
 
 ### `--timeout SECONDS`
 
-Inactivity timeout on a transfer: how long a connection may produce no data
-before DCTL gives up on it and retries. Five minutes is generous on purpose —
-cloud providers stall mid-multipart under load, and a short timeout converts a
-recoverable pause into a churn of retried parts. Shorten it when you would rather
-fail fast than wait, for example inside a job with its own deadline.
+**Refused** (exit 7). No backend in this build applies an inactivity timeout: the
+storage layer constructs its HTTP clients and its ssh session without one, so
+there is nothing for this to set. It cannot honestly be approximated by a
+deadline on the whole operation either — that would abort a large transfer that
+is progressing perfectly, which is the opposite of what an idle timeout is for.
 
 ### `--contimeout SECONDS`
 
-Connection establishment timeout, separate from `--timeout` because the two
-failures mean different things: a connection that never opens is usually DNS, a
-firewall, or a wrong endpoint, none of which get better by waiting five minutes.
-One minute is long enough to survive a slow TLS handshake on a bad link.
+**Refused** (exit 7). No backend sets a connection-establishment timeout: the
+HTTP clients take the default and the sftp backend takes `ssh`'s, neither of
+which this flag is wired to.
 
 ### `--max-transfer SIZE`
 
@@ -466,6 +512,21 @@ budget flag: it is how you cap what a single run can cost on a metered provider,
 or stay under a daily cap. A run that stops for this reason is not a failure but
 it is not a completed sync either — it exits **8** (`transfer_limit_exceeded`) so a
 script can tell the difference.
+
+**The limit is never exceeded, not by a byte.** A file is not *started* when
+moving it would take the run past the ceiling. This is rclone's `cautious` cutoff
+mode rather than its default `hard` one, and the choice follows from the
+durability contract: this engine writes an object in one call, and a partial
+object at the destination is exactly what verified writes exist to prevent.
+
+The visible consequence, because somebody will meet it: `--max-transfer 1M`
+against a single 10 MiB file transfers **nothing** and exits 8. rclone would have
+moved 1 MiB of it and left that behind.
+
+What counts against the budget is bytes *measured leaving*, including every
+attempt of a retried file — because every attempt used the link and is on the
+invoice. Everything already transferred is committed and verified, so re-running
+the same command continues from where it stopped.
 
 ---
 
@@ -678,16 +739,26 @@ renders ANSI but fails the `isatty` test. `--quiet` beats it.
 
 ### `--stats SECONDS`
 
-How often the periodic status line is emitted when bars are unavailable. `0`
-disables it entirely. Sixty seconds is a readable cadence for a long transfer in a
-log file; shorten it if you are watching a CI job and want more evidence of life.
-*Not yet honoured.*
+How often the periodic status record is emitted when bars are unavailable — that
+is, whenever output is redirected. `0` disables it entirely. Sixty seconds is a
+readable cadence for a long transfer in a log file; shorten it if you are watching
+a CI job and want more evidence of life.
+
+The record is the **same report** the run prints at the end, taken mid-run: the
+same rows, in the same order, in the same units. A watcher reading a log at 3 a.m.
+should not have to learn a second format to find out how many errors there have
+been.
 
 ### `--stats-one-line`
 
-Condense each periodic status report onto a single line, which is what makes the
-output greppable and keeps a long-running job from dominating a log. *Not yet
-honoured.*
+Condense each periodic status record onto a single line — percentage, bytes,
+rate, ETA, files and errors — which is what makes the output greppable and keeps a
+long-running job from dominating a log.
+
+This used to be indistinguishable from its absence: the periodic record only ever
+had the condensed shape, so asking for one line was asking for what you already
+had. The block is now the default and this selects the condensed form, which is
+also rclone's arrangement.
 
 ### `-q`, `--quiet`
 
@@ -752,15 +823,17 @@ downgrade of what you were promised.
 
 ### `--dump TARGET`
 
-Dump protocol detail for debugging. Repeatable, so `--dump headers --dump retries`
-gives both. `headers` prints HTTP request and response headers with
-`Authorization` always redacted; `bodies` prints request and response bodies and
-never includes plaintext file content; `requests` gives one line per HTTP request
-(method, URL, status, duration); `retries` gives every retry decision with the
-classification that drove it; `filters` shows which rule included or excluded each
-path; `config` prints the resolved configuration with all secrets redacted. The
-tracing layer that produces this is not free and is installed only when at least
-one target is requested. *Not yet honoured.*
+**Refused** (exit 7). The protocol tracing layer these targets select from is not
+installed — nothing in the storage layer or the logging setup captures headers,
+bodies, requests or retry decisions — so every one of them would produce silence.
+Raise `-vvv` for the tracing this build does emit.
+
+The targets remain in `--help` and are validated, so the vocabulary does not
+change when the layer lands: `headers` (HTTP headers, `Authorization` always
+redacted), `bodies` (request and response bodies, never plaintext file content),
+`requests` (one line per request: method, URL, status, duration), `retries`
+(every retry decision with its classification), `filters` (which rule included or
+excluded each path), `config` (the resolved configuration with secrets redacted).
 
 ### `--log-source`
 
@@ -908,26 +981,35 @@ There is no flag equivalent; this variable exists only in the environment.
 
 ---
 
-## Flags that parse but do not yet act
+## Flags that are refused
 
-These are accepted, validated and reported by `--help`, but no command consumes
-them in this build. They are listed here so that nobody plans a job around one:
+These are accepted by the parser, shown by `--help`, and then **fail the run**
+with exit **7** before anything is read, written or unlocked. The message names
+the flag, what you were doing, why this build cannot do it, and what it does
+instead. Nothing here is silently ignored.
 
-* `--verify-samples` — the sampling read path is not wired up. `--verify sample`
-  itself is plumbed through to the integrity commands; the depth is not.
-* `--transfers`, `--checkers`, `--bwlimit`, `--retries`, `--low-level-retries`,
-  `--timeout`, `--contimeout`, `--max-transfer` — the transfer engine that would
-  read them is not complete.
-* `--stats`, `--stats-one-line` — the periodic status emitter is not installed.
-* `--dump` — the protocol tracing layer is not installed.
+* `--key-file` — the key-encryption key is derived from the password alone; there
+  is no parameter through which a second factor could be mixed in. See
+  [`--key-file PATH`](#--key-file-path).
+* `--verify-samples` — there is no sampled read to set a depth on. `--verify
+  sample` reads and authenticates the *whole* object on the vault path, so it
+  costs a full egress and a depth would describe nothing.
+* `--low-level-retries` — request-level retries exist for B2 only.
+* `--timeout`, `--contimeout` — no backend applies an inactivity or connection
+  timeout.
+* `--dump` — the protocol tracing layer these select from is not installed, so
+  every target would produce silence. Raise `-vvv` for the tracing this build
+  does emit.
+
+Two more are refused only for the values this build cannot deliver:
+
+* `--transfers N` and `--checkers N` accept `1`, which is a true statement about
+  a sequential executor, and refuse anything larger.
 
 The filtering flags are deliberately **not** on this list, because none of them is
 ever silently ignored: the transfer and recovery families evaluate all of them
 through one engine, and a rule that will not compile is a usage error rather than
-a run with the rule dropped. See [Filtering](#filtering). `--key-file` is likewise absent: rather
-than fall back to weaker protection than was asked for, it refuses everywhere
-with exit **7** — when creating a vault *and* when opening one. See
-[`--key-file PATH`](#--key-file-path).
+a run with the rule dropped. See [Filtering](#filtering).
 
 The one place a filter is neither honoured nor refused is `purge`, which removes
 a whole tree by definition and warns that it is ignoring them.
