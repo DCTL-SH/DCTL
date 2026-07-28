@@ -55,10 +55,7 @@ pub enum StoreError {
     /// itself reports nothing at all. See [`crate::local::root`] for the run
     /// this exists to stop reporting as a success.
     #[error("the store root {root} {detail}; nothing was written into it")]
-    RootChanged {
-        root: String,
-        detail: &'static str,
-    },
+    RootChanged { root: String, detail: &'static str },
 }
 
 impl StoreError {

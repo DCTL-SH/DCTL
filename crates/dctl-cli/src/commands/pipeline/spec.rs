@@ -363,13 +363,19 @@ mod tests {
 
         // A UNC share is local wherever it is written.
         for drives in [false, true] {
-            assert!(ObjectSpec::classify(r"\\server\share\f.bin", drives).unwrap().is_local());
+            assert!(
+                ObjectSpec::classify(r"\\server\share\f.bin", drives)
+                    .unwrap()
+                    .is_local()
+            );
         }
 
         // Two characters never depended on the platform.
         for drives in [false, true] {
             assert_eq!(
-                ObjectSpec::classify("rr:notes.md", drives).unwrap().remote(),
+                ObjectSpec::classify("rr:notes.md", drives)
+                    .unwrap()
+                    .remote(),
                 Some("rr")
             );
         }

@@ -549,9 +549,14 @@ async fn a_store_that_moves_out_from_under_a_run_is_a_failure_and_not_a_reported
     let fs = LocalFs::new(&root);
     let first = ObjectKey::new("a.bin");
     let data = Bytes::from_static(b"the first object, written while the store was there");
-    fs.put(&first, data.clone(), &blake3(&data), SourceModified::unknown())
-        .await
-        .expect("a write into the store as opened");
+    fs.put(
+        &first,
+        data.clone(),
+        &blake3(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("a write into the store as opened");
 
     // The store moves away, and something else takes its place — which is what
     // `create_dir_all` does, and why "is a directory there?" is the wrong
@@ -562,12 +567,20 @@ async fn a_store_that_moves_out_from_under_a_run_is_a_failure_and_not_a_reported
     let second = ObjectKey::new("b.bin");
     let more = Bytes::from_static(b"bytes that must not land in a directory nobody named");
     let error = fs
-        .put(&second, more.clone(), &blake3(&more), SourceModified::unknown())
+        .put(
+            &second,
+            more.clone(),
+            &blake3(&more),
+            SourceModified::unknown(),
+        )
         .await
         .expect_err("a write into a replaced store must fail");
     match &error {
         StoreError::RootChanged { root: named, .. } => {
-            assert!(named.contains("store"), "the refusal names no root: {named}");
+            assert!(
+                named.contains("store"),
+                "the refusal names no root: {named}"
+            );
         }
         other => panic!("expected RootChanged, got {other}"),
     }
@@ -606,8 +619,13 @@ async fn a_root_that_did_not_exist_yet_is_still_created_by_the_first_write() {
 
     let key = ObjectKey::new("nested/first.bin");
     let data = Bytes::from_static(b"the write that creates the store");
-    fs.put(&key, data.clone(), &blake3(&data), SourceModified::unknown())
-        .await
-        .expect("the first write creates the root");
+    fs.put(
+        &key,
+        data.clone(),
+        &blake3(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("the first write creates the root");
     assert_eq!(fs.get(&key).await.unwrap(), data);
 }

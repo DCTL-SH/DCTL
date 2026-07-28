@@ -331,7 +331,9 @@ mod tests {
         // A two-character name never depended on the platform and still does not.
         for drives in [false, true] {
             assert_eq!(
-                Target::classify("rr:photos", drives).expect("a remote").remote,
+                Target::classify("rr:photos", drives)
+                    .expect("a remote")
+                    .remote,
                 "rr"
             );
         }
