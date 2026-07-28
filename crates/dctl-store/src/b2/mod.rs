@@ -42,6 +42,9 @@ pub struct B2Backend {
     creds: B2Credentials,
     pub(crate) bucket_name: String,
     auth: Mutex<Option<AuthState>>,
+    /// Who is told about bytes as they cross the link, part by part and body
+    /// chunk by body chunk. See [`crate::meter`].
+    pub(crate) meter: std::sync::Arc<dyn crate::meter::Meter>,
 }
 
 impl B2Backend {
@@ -55,7 +58,16 @@ impl B2Backend {
             creds,
             bucket_name: bucket_name.into(),
             auth: Mutex::new(None),
+            meter: crate::meter::unmetered(),
         })
+    }
+
+    /// The same backend, declaring every part and body chunk it moves to
+    /// `meter`. A builder, for the reason [`crate::LocalFs::with_meter`] gives.
+    #[must_use]
+    pub fn with_meter(mut self, meter: std::sync::Arc<dyn crate::meter::Meter>) -> Self {
+        self.meter = meter;
+        self
     }
 
     /// Current authorization, authorizing on first call.
@@ -301,7 +313,10 @@ impl Backend for B2Backend {
         expected: &ContentHash,
         modified: SourceModified,
     ) -> Result<PutOutcome> {
-        upload::put(self, key, data, expected, modified).await
+        let moved = data.len() as u64;
+        let outcome = upload::put(self, key, data, expected, modified).await?;
+        crate::meter::charge(self.meter.as_ref(), moved).await;
+        Ok(outcome)
     }
 
     async fn put_from_path(
@@ -315,7 +330,9 @@ impl Backend for B2Backend {
     }
 
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
-        download::get(self, key).await
+        let bytes = download::get(self, key).await?;
+        crate::meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
+        Ok(bytes)
     }
 
     async fn get_to_path(&self, key: &ObjectKey, dest: &std::path::Path) -> Result<()> {
@@ -323,7 +340,9 @@ impl Backend for B2Backend {
     }
 
     async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Bytes> {
-        download::get_range(self, key, range).await
+        let bytes = download::get_range(self, key, range).await?;
+        crate::meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
+        Ok(bytes)
     }
 
     async fn head(&self, key: &ObjectKey) -> Result<ObjectMeta> {

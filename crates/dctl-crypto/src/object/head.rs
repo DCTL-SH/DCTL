@@ -22,7 +22,7 @@ pub struct Head {
 impl Head {
     /// Whether a whole-object BLAKE3 footer is present.
     #[must_use]
-    pub fn has_footer(&self) -> bool {
+    pub const fn has_footer(&self) -> bool {
         self.flags & FLAG_FOOTER != 0
     }
 }

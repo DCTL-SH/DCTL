@@ -36,6 +36,14 @@ impl S3Backend {
             client: S3Client::new(config)?,
         })
     }
+
+    /// The same backend, declaring every part and body chunk it moves to
+    /// `meter`. A builder, for the reason [`crate::LocalFs::with_meter`] gives.
+    #[must_use]
+    pub fn with_meter(mut self, meter: std::sync::Arc<dyn crate::meter::Meter>) -> Self {
+        self.client = self.client.with_meter(meter);
+        self
+    }
 }
 
 #[async_trait]

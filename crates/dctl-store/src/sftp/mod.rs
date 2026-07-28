@@ -67,6 +67,7 @@ use crate::backend::Backend;
 use crate::checksum::ContentHash;
 use crate::error::{Result, StoreError};
 use crate::links::{LinkPolicy, LinkReport};
+use crate::meter::{self, Meter};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
 
@@ -138,6 +139,12 @@ pub struct SftpBackend {
     /// backend's lifetime rather than passed per request, so a paged listing
     /// cannot follow on page two what it skipped on page one.
     links: LinkPolicy,
+    /// Who is told about bytes as they cross the link, chunk by chunk.
+    ///
+    /// See [`crate::meter`]. This backend is the one where the difference is
+    /// most visible: an SFTP transfer over a proxied tunnel is exactly the link
+    /// an operator wants to leave usable while a backup runs.
+    meter: Arc<dyn Meter>,
 }
 
 impl SftpBackend {
@@ -163,7 +170,19 @@ impl SftpBackend {
             sftp,
             base: normalize_base(&cfg.base),
             links: cfg.links,
+            meter: meter::unmetered(),
         })
+    }
+
+    /// The same backend, declaring every chunk it moves to `meter`.
+    ///
+    /// A builder for the reason [`SftpConfig::with_links`] gives: only the CLI
+    /// holds the run's `--bwlimit`, and every other construction here is an
+    /// internal read nobody is pacing.
+    #[must_use]
+    pub fn with_meter(mut self, meter: Arc<dyn Meter>) -> Self {
+        self.meter = meter;
+        self
     }
 }
 
@@ -188,7 +207,12 @@ impl Backend for SftpBackend {
         modified: SourceModified,
     ) -> Result<PutOutcome> {
         let remote = remote_path(&self.base, key)?;
-        write::put_bytes(self, &remote, &data, expected, modified).await
+        let moved = data.len() as u64;
+        let outcome = write::put_bytes(self, &remote, &data, expected, modified).await?;
+        // One window, because the whole object was one window — the buffered
+        // write is the path a small object takes.
+        meter::charge(self.meter.as_ref(), moved).await;
+        Ok(outcome)
     }
 
     /// The same write, fed from a file instead of memory, at `O(CHUNK_LEN)`
@@ -204,7 +228,16 @@ impl Backend for SftpBackend {
         let mut src = tokio::fs::File::open(source).await?;
         let total = src.metadata().await?.len();
         write::put_stream(
-            self, &remote, &mut src, total, CHUNK_LEN, expected, modified,
+            self,
+            &remote,
+            &mut src,
+            write::Incoming {
+                total,
+                chunk: CHUNK_LEN,
+                expected,
+                modified,
+            },
+            self.meter.as_ref(),
         )
         .await
     }
@@ -213,7 +246,11 @@ impl Backend for SftpBackend {
         let remote = remote_path(&self.base, key)?;
         let mut fs = self.sftp.fs();
         match fs.read(&remote).await {
-            Ok(buf) => Ok(buf.freeze()),
+            Ok(buf) => {
+                let bytes = buf.freeze();
+                meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
+                Ok(bytes)
+            }
             Err(e) => Err(map_sftp_err(&remote, e)),
         }
     }
@@ -255,6 +292,10 @@ impl Backend for SftpBackend {
                 let _ = tokio::fs::remove_file(&tmp).await;
                 return Err(e.into());
             }
+            // Charged per chunk, after it has landed. This loop is the whole
+            // reason `--bwlimit` can now pace one enormous restore: the download
+            // is already windowed, and it simply never said so.
+            meter::charge(self.meter.as_ref(), chunk.len() as u64).await;
         }
 
         if let Err(e) = writer.flush().await {
@@ -301,7 +342,9 @@ impl Backend for SftpBackend {
             .read_all(to_read as usize, BytesMut::with_capacity(to_read as usize))
             .await
             .map_err(|e| map_sftp_err(&remote, e))?;
-        Ok(buf.freeze())
+        let bytes = buf.freeze();
+        meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
+        Ok(bytes)
     }
 
     async fn head(&self, key: &ObjectKey) -> Result<ObjectMeta> {

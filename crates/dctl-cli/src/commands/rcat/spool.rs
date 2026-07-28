@@ -5,9 +5,8 @@
 //! neither, so one of the two has to be manufactured, and the choice decides
 //! what `pg_dump | dctl rcat archive:db.sql` can do:
 //!
-//! * **Buffer in memory** and refuse past
-//!   [`TRANSFER_WHOLE_FILE_LIMIT`](crate::constants::TRANSFER_WHOLE_FILE_LIMIT),
-//!   the way the transfer engine does. Simple, and it puts a hard ceiling on the
+//! * **Buffer in memory** and refuse past a fixed ceiling, the way the transfer
+//!   engine did before it learned to stream. Simple, and it puts a hard ceiling on the
 //!   one command whose whole purpose is a stream nobody measured. An operator
 //!   would have to know their dump's size in advance — which is exactly what a
 //!   pipe cannot tell them — and would discover the limit after the producer had

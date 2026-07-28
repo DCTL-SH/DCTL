@@ -275,16 +275,16 @@ pub struct GlobalArgs {
 
     /// Bandwidth limit per second, e.g. 10M. 'off' for unlimited.
     ///
-    /// Paced BETWEEN files, not inside one: the debt a file creates is paid off
-    /// before the next file starts, so a run of a single object is not paced at
-    /// all and the last file of any run is unpaced. 8 MiB as one file at
-    /// --bwlimit 1M takes 47 ms; the same 8 MiB as eight files takes 7 s. Pacing
-    /// a single large upload needs the streaming engine and this build does not
-    /// do it.
+    /// Paced INSIDE a file, not merely between files: every window of bytes is
+    /// charged as it crosses the wire, so one enormous object is capped for its
+    /// whole duration and so is the last file of a run. 8 MiB as a single object
+    /// at --bwlimit 1M takes ~8.5 s, which is the arithmetic.
     ///
-    /// The wording used to end "so the run's average rate is what is capped",
-    /// which is false whenever there is one object — and one huge sealed object
-    /// is what this tool is for.
+    /// It said the opposite until the streaming engine landed, and the gap was
+    /// the whole width of the flag: the debt was charged once per finished file,
+    /// so the same 8 MiB as one object took 47 ms and only a tree of small files
+    /// was paced at all. Both uses of the flag — capping a metered link's bill,
+    /// and keeping the uplink usable while a backup runs — are served now.
     #[arg(long, global = true, value_name = "RATE", help_heading = "Transfer")]
     pub bwlimit: Option<ByteLimit>,
 

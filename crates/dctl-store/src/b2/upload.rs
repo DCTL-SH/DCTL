@@ -370,6 +370,9 @@ async fn upload_and_finish(
         let chunk = &buf[..want];
         whole.update(chunk);
         upload_one_part(b2, auth, file_id, span.number, chunk, &mut part_sha1s).await?;
+        // Charged once the part is acknowledged, so a retried part is charged
+        // for every attempt — each one really did use the link.
+        crate::meter::charge(b2.meter.as_ref(), want as u64).await;
     }
 
     // Verify the streamed bytes hash to `expected` BEFORE finishing (which commits).

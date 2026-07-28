@@ -1959,6 +1959,15 @@ pub const ASSURANCE_READ_BACK: &str = "read-back";
 /// scrubbing. Eight mebibytes is large enough that the per-request overhead of a
 /// cloud `GET` is negligible against the transfer, and small enough that the
 /// ceiling is a constant a laptop does not notice however big the object is.
+///
+/// Three callers, one number, deliberately. A scrub's read-back, `dctl cat` of a
+/// whole plain object, and `--verify`'s re-hash of one just uploaded are the same
+/// operation seen from three commands — walk an object nobody wants to hold — and
+/// giving each its own constant would mean three ceilings to reason about and
+/// three places for one of them to be raised into a memory bug. The *sealed*
+/// path's window is genuinely different and is genuinely separate: it is counted
+/// in format chunks, not bytes, by
+/// [`STREAM_WINDOW_CHUNKS`](dctl_core::constants::STREAM_WINDOW_CHUNKS).
 pub const READ_BACK_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
 
 /// Why `--repair` cannot be honoured, and what would have to exist first.
@@ -2233,18 +2242,6 @@ pub const TRANSFER_COMMAND_COPYTO: &str = "copyto";
 /// See [`TRANSFER_COMMAND_COPY`].
 pub const TRANSFER_COMMAND_MOVETO: &str = "moveto";
 
-/// Remediation hint for a file the whole-buffer transfer engine will not attempt.
-///
-/// One constant, because the wording is a promise about *where* the limit is:
-/// the command parsed, the plan is real, and the only thing missing is a
-/// streaming path through the core. Five commands phrasing that differently
-/// would read as five separate bugs. `backup` does not use it — see
-/// [`crate::commands::backup::store`], which streams and therefore has no such
-/// ceiling.
-pub const TRANSFER_ENGINE_HINT: &str = "The current engine moves whole files through memory, so very large objects \
-     are refused rather than attempted. Streaming transfers (PLAN.md §6, §16.2) \
-     lift this limit. Use --dry-run to see exactly what would be transferred.";
-
 /// Missing capability reported for a transfer between two remotes, one of which
 /// is sealed.
 ///
@@ -2405,20 +2402,32 @@ pub const PLAIN_WRITE_INTO_VAULT_HINT: &str = "That directory holds a vault enve
      then write through its vault remote. DCTL never switches to sealed mode on \
      its own: what a command encrypts is decided by the remote name typed.";
 
-/// Largest file the whole-buffer transfer path will attempt, in bytes.
+/// How many bytes a transfer holds while moving a file, in one window.
 ///
-/// `dctl_core::Vault::put_file` and `get_file` take and return complete buffers,
-/// so one file's plaintext is resident while it moves. Attempting a 50 GB video
-/// through that path would be killed by the OOM killer or swap the machine to a
-/// standstill — and either way the user learns nothing actionable. Refusing
-/// beforehand, with a message that names the limit, is the honest behaviour.
+/// **This is the constant a transfer's memory is made of.** Every direction the
+/// engine moves bytes in reads a window, transforms it, writes it and drops it,
+/// so the peak resident cost of copying a file is this number and a small
+/// multiple of it — flat from a one-kilobyte text file to a ten-gigabyte video.
 ///
-/// One gibibyte is chosen to be comfortably servable on any machine that can run
-/// the tool at all, while still covering the overwhelming majority of documents,
-/// photographs and raw camera files. It disappears entirely when the streaming
-/// engine lands — at which point this constant and the check that reads it are
-/// deleted together, not raised.
-pub const TRANSFER_WHOLE_FILE_LIMIT: u64 = 1024 * 1024 * 1024;
+/// It replaces a *limit*. This engine used to refuse any file above one
+/// gibibyte, because `Vault::put_file`, `get_file` and `Backend::put` all took
+/// and returned whole buffers and a 50 GB video would have taken the machine
+/// down. That refusal was the honest response to the design and the wrong
+/// response to the problem: a backup tool that cannot store a film is not a
+/// backup tool. Measured before the change, on the release binary under a hard
+/// cgroup cap: `copy` of a 1 GiB object into a vault peaked at 3090 MiB of
+/// resident memory, out of one at 2064 MiB, and a 256 MiB object could not be
+/// moved inside a 512 MiB cap at all. The limit and the check that read it are
+/// deleted together, as the constant they replaced said they would be.
+///
+/// 128 KiB rather than something larger: this window bounds copies between two
+/// *local* files and hashing passes over them, where each read is a syscall and
+/// nothing is a round trip. It is the size at which per-call overhead has
+/// stopped mattering on every filesystem tested, and going further buys nothing
+/// while making the number harder to hold in one's head beside the sealed
+/// path's, which is set by
+/// [`STREAM_WINDOW_CHUNKS`](dctl_core::constants::STREAM_WINDOW_CHUNKS).
+pub const TRANSFER_STREAM_WINDOW_BYTES: usize = 128 * 1024;
 
 /// Working-buffer size for hashing a local file under `--checksum`.
 ///
@@ -2603,15 +2612,20 @@ pub const REPLICATE_REASON_TOO_LARGE: &str = "object-too-large";
 /// Largest object the replicator will move in one piece, in bytes.
 ///
 /// [`dctl_store::Backend::put`] takes a whole buffer, so one object's ciphertext
-/// is resident while it moves. The limit is the same order as
-/// [`TRANSFER_WHOLE_FILE_LIMIT`] and set for the same reason — a machine that
-/// cannot hold the object is better told so than OOM-killed halfway — but it is
-/// its own constant because it bounds a *different* quantity: a vault's stored
-/// objects are chunked ciphertext, not user files, so the two ceilings move
-/// independently and tying them together would make one of the two arbitrary.
+/// is resident while it moves — a machine that cannot hold the object is better
+/// told so than OOM-killed halfway.
 ///
-/// It disappears when the storage layer grows a streaming put; at that point
-/// this constant and the check that reads it are deleted together, not raised.
+/// **The transfer family used to carry a twin of this and no longer does.**
+/// `TRANSFER_WHOLE_FILE_LIMIT` was deleted with the streaming engine, because
+/// `copy`, `move` and `sync` now move every byte in bounded windows and there is
+/// no size at which they stop fitting in memory. `replicate` is a different
+/// path: it copies whole ciphertext objects between stores through
+/// `Backend::put`, which still takes a buffer, so this ceiling is still real and
+/// is still the honest thing to do about it.
+///
+/// It disappears the same way its twin did — when the copy behind it moves in
+/// windows — at which point this constant and the check that reads it are
+/// deleted together, not raised.
 pub const REPLICATE_WHOLE_OBJECT_LIMIT: u64 = 1024 * 1024 * 1024;
 
 /// Bytes read back from the destination under `--verify sample`.
@@ -5655,7 +5669,6 @@ mod tests {
         // An `unimplemented` error is still an error a user has to act on, so
         // every one of them carries a next step.
         for hint in [
-            TRANSFER_ENGINE_HINT,
             TRANSFER_SEALED_REMOTE_TO_REMOTE_HINT,
             TRANSFER_REMOTE_TO_REMOTE_HINT,
             CHECKSUM_UNAVAILABLE_HINT,

@@ -8,32 +8,35 @@
 //! at most one file: the first file is never delayed, because there is nothing
 //! before it to be delayed by.
 //!
-//! ## What it does not do, said plainly
+//! ## Where the charge is made, and why that used to be the whole problem
 //!
-//! It does not shape the wire. `--bwlimit 1M` will still put a 100 MiB file onto
-//! the link as fast as the link takes it, and then wait ~100 s before the next
-//! one. rclone's limiter is finer — it charges every buffer as `io.Reader.Read`
-//! returns it — and DCTL's cannot be, because this engine hands a whole object
-//! to `dctl_store::Backend::put` in one call and gets a byte count back at the
-//! end. There is no per-buffer seam to charge, and inventing one would mean
-//! rewriting the upload path rather than adding a limiter.
+//! At every **window**, as it crosses the wire — through
+//! [`dctl_store::Meter`], which the storage layer calls from inside each of its
+//! copy loops. This limiter is installed as that meter for the run, so one rate
+//! covers every backend a command touches.
 //!
-//! That limitation is stated in `--help`, in `docs/GLOBAL_FLAGS.md` and here,
-//! rather than hidden, because the two uses of this flag are affected very
-//! differently:
+//! It was charged once per **file**, and the consequence was not subtle: a run of
+//! one object was not paced at all. Measured, before the change: 8 MiB moved as a
+//! single file at `--bwlimit 1M` took **47 ms**; the same 8 MiB as eight files
+//! took **7051 ms**. The last file of every run was unpaced for the same reason —
+//! its debt was charged and then the process exited. `--help` said "one large
+//! object is not split, so the run's average rate is what is capped", and the
+//! second half of that was false whenever there was one object, which is DCTL's
+//! own headline case.
 //!
-//! * **Capping a bill or a metered link** — the thing an operator sets it for —
-//!   is served exactly. The average rate over the run is the limit, so the bytes
-//!   per month are the limit.
-//! * **Keeping a video call usable while a backup runs** is served only at file
-//!   granularity. A tree of small files behaves as expected; one enormous file
-//!   will saturate the uplink for its duration.
+//! The limiter was never wrong. Its arithmetic is unchanged; it was simply never
+//! asked often enough, because the engine handed a whole file to the storage
+//! layer in one call and got a byte count back at the end. Now that bytes move in
+//! bounded windows there is a seam every few megabytes, and this is charged at
+//! each one — which is the granularity rclone has always had
+//! (`fs/accounting/token_bucket.go`, charged per `io.Reader.Read`).
 //!
-//! Charging **after** the transfer rather than before is deliberate on both
-//! counts. The bytes are then a measurement rather than the plan's estimate, so
-//! a source that changed under the run is accounted for as it really was; and a
-//! file that failed and was retried is charged for every attempt, because every
-//! attempt really did use the link.
+//! Charging **after** each window rather than before is deliberate. The bytes are
+//! then a measurement rather than an intention, so a window that failed and was
+//! retried is charged for every attempt — because every attempt really did use
+//! the link — and the pause it produces lands between that window and the next
+//! rather than inside one. The first window of a run is therefore free, which
+//! costs one window's worth of burst at the very start and nothing after.
 //!
 //! ## Why not a token bucket with a burst
 //!
@@ -100,26 +103,15 @@ impl Bandwidth {
         self.rate.is_some()
     }
 
-    /// Account for `bytes` having been moved, and sleep off any resulting debt.
-    ///
-    /// Called after the bytes are on the wire, so the wait it produces is felt
-    /// by whatever comes next. Returns immediately when the run is unpaced or
-    /// nothing moved.
-    pub async fn charge(&self, bytes: u64) {
-        let Some(wait) = self.debt(bytes) else {
-            return;
-        };
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-    }
-
     /// Advance the virtual clock by what `bytes` cost, and return the wait that
     /// leaves for the caller.
     ///
     /// Split out of [`Bandwidth::charge`] so the arithmetic is testable without
     /// a runtime and without spending the wall-clock time it computes: a test
-    /// that had to sleep for the answer could only ever check small ones.
+    /// that had to sleep for the answer could only ever check small ones. It is
+    /// also exactly the shape [`dctl_store::Meter`] asks for — do the sums, hand
+    /// back the pause — which is why this type can be that meter without an
+    /// adapter.
     fn debt(&self, bytes: u64) -> Option<Duration> {
         let rate = self.rate?;
         if bytes == 0 {
@@ -151,6 +143,19 @@ impl Bandwidth {
         *next = start + cost;
 
         Some(wait)
+    }
+}
+
+impl dctl_store::Meter for Bandwidth {
+    /// The pause this window bought, for the storage layer's copy loop to take.
+    ///
+    /// [`dctl_store::Meter`] deliberately returns the wait instead of awaiting
+    /// it, because half the loops that must charge are not async — the `local:`
+    /// backend copies under `spawn_blocking` — and this limiter's arithmetic was
+    /// already written that way for its own reasons. The two shapes met without
+    /// either being bent.
+    fn moved(&self, bytes: u64) -> Option<Duration> {
+        self.debt(bytes)
     }
 }
 
@@ -230,12 +235,17 @@ mod tests {
     #[tokio::test]
     async fn charging_actually_spends_the_time_it_computed() {
         // The arithmetic tests above never sleep. This one does, because a
-        // limiter whose `charge` returned without awaiting would pass every one
-        // of them and limit nothing.
+        // limiter that computed a debt and never waited would pass every one of
+        // them and limit nothing.
+        //
+        // Driven through `dctl_store::meter::charge` rather than through a
+        // method of this type's own, because that is the call the storage layer
+        // makes: a limiter that is correct only when spent by a wrapper nothing
+        // in production uses is not a limiter.
         let bandwidth = limiter(KIBIBYTE_PER_SECOND);
-        bandwidth.charge(500).await;
+        dctl_store::meter::charge(&bandwidth, 500).await;
         let started = Instant::now();
-        bandwidth.charge(500).await;
+        dctl_store::meter::charge(&bandwidth, 500).await;
         assert!(
             started.elapsed() >= Duration::from_millis(400),
             "the second charge must have waited, took {:?}",
@@ -243,12 +253,34 @@ mod tests {
         );
     }
 
+    #[test]
+    fn the_limiter_is_the_meter_the_storage_layer_asks() {
+        // The join that makes any of this reach a copy loop. `Meter::moved` and
+        // `debt` must be the same answer; if the trait implementation ever
+        // stopped delegating, pacing would silently become a no-op everywhere
+        // while every arithmetic test above still passed.
+        use dctl_store::Meter as _;
+
+        let bandwidth = limiter(KIBIBYTE_PER_SECOND);
+        assert_eq!(bandwidth.moved(0), None, "nothing moved, nothing owed");
+        let first = bandwidth.moved(1000);
+        assert_eq!(first, Some(Duration::ZERO), "the first window is free");
+        let second = bandwidth.moved(1000).unwrap_or_default();
+        assert!(
+            second >= Duration::from_millis(900),
+            "1000 bytes at 1000 B/s must owe about a second, got {second:?}"
+        );
+
+        // And an unpaced run costs a branch and nothing else.
+        assert_eq!(Bandwidth::unlimited().moved(u64::MAX), None);
+    }
+
     #[tokio::test]
     async fn an_unlimited_run_spends_no_time_at_all() {
         let bandwidth = Bandwidth::unlimited();
         let started = Instant::now();
         for _ in 0..100 {
-            bandwidth.charge(u64::MAX / 2).await;
+            dctl_store::meter::charge(&bandwidth, u64::MAX / 2).await;
         }
         assert!(started.elapsed() < Duration::from_millis(200));
     }

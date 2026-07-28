@@ -138,9 +138,9 @@ separate gap (§7).
 | local → Vault (seal) / Vault → local (open) | 🟢 | verified write + index commit |
 | local ↔ plain remote | 🟢 | `PlainUpload` / `PlainDownload` directions |
 | **remote ↔ remote (general)** | ⬜ | refused loudly at connect; only ciphertext `replicate` works today |
-| Streaming transfers > 1 GiB | 🟡 | library streams cloud put/get; the CLI copy engine still enforces a 1 GiB whole-file limit |
+| Streaming transfers > 1 GiB | 🟢 | constant-memory both directions; peak RSS flat at ~144 MiB from 256 MiB to 4 GiB objects under a 512 MiB cap, on `local:`, `sftp:` and live B2 (HANDOVER §21) |
 | Server-side copy / move | ⬜ | needs a backend capability model |
-| Parallel transfers / bandwidth limit / retries | 🟡 | flags parse but are not yet consulted |
+| Parallel transfers / bandwidth limit / retries | 🟡 | `--bwlimit` paces per window inside a file (HANDOVER §21.8); parallelism and request-level retries outside B2 are still open |
 
 ---
 

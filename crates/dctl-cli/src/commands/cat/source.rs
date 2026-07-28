@@ -140,24 +140,38 @@ impl Source {
             return Ok(Reader::Local(file.take(self.slice.length)));
         };
 
-        // Whole-object and windowed reads are genuinely different calls, not one
-        // with default arguments, and the difference is not merely a saved
-        // allocation. A vault's whole-object read re-hashes the plaintext it
-        // decrypted against the object's own recorded BLAKE3 — a statement about
-        // the entire file that a windowed read cannot make, because it never sees
-        // the bytes outside its window. So asking for everything when everything
-        // is what was asked for buys the stronger check as well as one buffer
-        // instead of two. A plain store answers `read` with one request either
-        // way.
-        let bytes = if self.slice.start == 0 && self.slice.length == self.size {
-            source.read(self.spec.path()).await?
-        } else {
-            source
-                .read_range(self.spec.path(), self.slice.start, Some(self.slice.length))
-                .await?
-        };
+        // Only a *window* arrives here. A whole-object read never opens a
+        // reader at all — it is streamed straight into the sink by
+        // [`Source::stream_to`](crate::source::Source::stream_to), which makes
+        // the same whole-object integrity statement without the buffer that
+        // statement used to cost. See `whole_object_source`.
+        //
+        // A window is materialised, and that is not the same defect: its size is
+        // what the operator asked for on the command line, so it is bounded by
+        // the request rather than by the object.
+        let bytes = source
+            .read_range(self.spec.path(), self.slice.start, Some(self.slice.length))
+            .await?;
 
         Ok(Reader::Buffered { bytes, position: 0 })
+    }
+
+    /// The remote to stream through when this source's slice *is* the whole
+    /// object, and [`None`] otherwise.
+    ///
+    /// The condition is the same one [`Source::open`] uses to choose the
+    /// stronger read, and it is asked here rather than there because the two
+    /// answers now have different shapes: a whole-object read is streamed into
+    /// the sink and a windowed one is materialised, so the choice has to be made
+    /// where the writing happens. A local path answers [`None`] — the file is
+    /// already on this machine and reading it through a `File` costs a buffer,
+    /// not a copy of the file.
+    #[must_use]
+    pub fn whole_object_source(&self) -> Option<&Arc<dyn ReadSource>> {
+        if self.slice.start != 0 || self.slice.length != self.size {
+            return None;
+        }
+        self.origin.as_ref()
     }
 
     /// The specification this source came from.

@@ -64,7 +64,17 @@ impl PlainSource {
     /// for one whose settings are incomplete.
     pub fn open(config: &Config, spec: &RemoteSpec, links: LinkPolicy) -> Result<Self> {
         let resolved = crate::remote::resolve::resolve(spec, config)?;
-        Ok(Self::new(crate::remote::registry::build(&resolved, links)?))
+        // Unmetered: this is the *listing and reading* view, reached by `ls`,
+        // `size`, `tree` and `cat`. `cat` is the only one of those that moves a
+        // body, and it is opened through `crate::source::open`, which installs
+        // the run's meter — see there. A listing moves metadata, and pacing a
+        // listing against a bandwidth cap set for file transfers would make
+        // `dctl ls` mysteriously slow.
+        Ok(Self::new(crate::remote::registry::build(
+            &resolved,
+            links,
+            dctl_store::unmetered(),
+        )?))
     }
 
     /// Read an already-built backend.
@@ -102,6 +112,39 @@ impl Source for PlainSource {
     async fn read(&self, path: &str) -> Result<Zeroizing<Vec<u8>>> {
         let bytes = self.backend.get(&ObjectKey::new(path)).await?;
         Ok(Zeroizing::new(bytes.to_vec()))
+    }
+
+    async fn stream_to(
+        &self,
+        path: &str,
+        out: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    ) -> Result<u64> {
+        use tokio::io::AsyncWriteExt as _;
+
+        let key = ObjectKey::new(path.to_string());
+        let size = self.backend.head(&key).await?.size;
+
+        let mut at = 0_u64;
+        while at < size {
+            let want = READ_BACK_WINDOW_BYTES.min(size - at);
+            let window = self
+                .backend
+                .get_range(&key, ByteRange::new(at, Some(want)))
+                .await?;
+            if window.is_empty() {
+                // The object declared a length and stopped serving before it.
+                // Returning what arrived would report a truncated object as a
+                // complete read, which is the misreport `PLAN.md` §6 forbids.
+                return Err(CliError::new(
+                    ExitCode::IntegrityFailure,
+                    format!("'{path}' stopped serving bytes at {at} of the {size} it declares"),
+                ));
+            }
+            out.write_all(&window).await?;
+            at += window.len() as u64;
+        }
+        out.flush().await?;
+        Ok(at)
     }
 
     async fn read_range(

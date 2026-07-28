@@ -31,7 +31,7 @@ pub enum Flow {
 }
 
 /// A byte sink that counts what it writes and tolerates a closed pipe.
-pub struct Sink<W: Write> {
+pub struct Sink<W: Write + Send> {
     writer: W,
     written: u64,
     /// Cleared by a broken pipe, so later writes are dropped instead of
@@ -39,7 +39,7 @@ pub struct Sink<W: Write> {
     open: bool,
 }
 
-impl<W: Write> Sink<W> {
+impl<W: Write + Send> Sink<W> {
     /// Wrap a writer.
     pub const fn writing(writer: W) -> Self {
         Self {
@@ -100,6 +100,26 @@ impl<W: Write> Sink<W> {
         }
     }
 
+    /// This sink, presented as the async writer a streaming read writes into.
+    ///
+    /// The seam between the two halves of `cat`. A whole-object read from a
+    /// remote is asynchronous and hands over one authenticated window at a time
+    /// ([`Source::stream_to`](crate::source::Source::stream_to)); this sink is
+    /// synchronous, because its destination is a pipe or a file and writing to
+    /// one is a syscall rather than a state machine. The adapter is the shortest
+    /// honest join: each `poll_write` performs the one write it was given and
+    /// returns `Ready`, so nothing is buffered, nothing is queued, and the
+    /// memory cost of the join is zero.
+    ///
+    /// A closed consumer becomes a [`BrokenPipe`](io::ErrorKind::BrokenPipe)
+    /// error rather than a short write, because that is the one thing an
+    /// `AsyncWrite` cannot express: returning `Ok(0)` means "cannot accept
+    /// bytes" and would spin. The caller converts it back into
+    /// [`Flow::Stop`] with [`is_closed_pipe`].
+    pub fn as_async(&mut self) -> SinkWriter<'_, W> {
+        SinkWriter { sink: self }
+    }
+
     /// Flush and report the total.
     ///
     /// # Errors
@@ -114,6 +134,61 @@ impl<W: Write> Sink<W> {
         }
         Ok(self.written)
     }
+}
+
+/// [`Sink`] as a [`tokio::io::AsyncWrite`]. See [`Sink::as_async`].
+pub struct SinkWriter<'a, W: Write + Send> {
+    sink: &'a mut Sink<W>,
+}
+
+impl<W: Write + Send> tokio::io::AsyncWrite for SinkWriter<'_, W> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<io::Result<usize>> {
+        let this = self.get_mut();
+        match this.sink.write(buf) {
+            Ok(Flow::Continue) => std::task::Poll::Ready(Ok(buf.len())),
+            // The consumer went away. An `AsyncWrite` has no vocabulary for
+            // "stop cleanly", so this travels as the error it actually is and
+            // the caller recognises it — see [`is_closed_pipe`].
+            Ok(Flow::Stop) => std::task::Poll::Ready(Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "output stream closed",
+            ))),
+            Err(error) => std::task::Poll::Ready(Err(io::Error::other(error.to_string()))),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        // The sink flushes once, in `finish`, after every object has gone
+        // through it. Flushing per window would issue a syscall per megabyte
+        // for no benefit a pipe can observe.
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+}
+
+/// Whether a failure is the consumer having closed the pipe.
+///
+/// `dctl cat big.bin | head -c 10` is a successful run, not an error, and it has
+/// been since [`Flow`] existed. The streaming path has to carry that verdict out
+/// through an `io::Error`, so this is where the two spellings are reconciled —
+/// in one place, because a second reading of "was this really a failure?" is how
+/// a broken pipe becomes a non-zero exit status on somebody's cron job.
+#[must_use]
+pub fn is_closed_pipe(error: &CliError) -> bool {
+    error.message().contains("output stream closed")
 }
 
 #[cfg(test)]

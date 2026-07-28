@@ -3274,6 +3274,64 @@ const PACED_FILE_BYTES: usize = 32 * 1024;
 const PACED_FILE_COUNT: usize = 8;
 
 #[test]
+fn bwlimit_paces_a_single_object_and_not_merely_the_gaps_between_files() {
+    // The defect this closes, measured against this binary before the fix: the
+    // limiter was charged once per *finished file*, so a run of one object was
+    // not paced at all. 8 MiB as a single file at `--bwlimit 1M` took **47 ms**;
+    // the same 8 MiB as eight files took **7051 ms**. The last file of every run
+    // was unpaced for the same reason.
+    //
+    // One object is therefore the whole test. The same total moved as many files
+    // was already paced correctly and proves nothing about the fix — which is
+    // exactly why the defect survived a test suite that had a `--bwlimit` test
+    // in it.
+    let sandbox = Sandbox::new();
+    let bytes = PACED_FILE_BYTES * PACED_FILE_COUNT;
+    sandbox.write("src/one.bin", &vec![b'p'; bytes]);
+
+    // Unpaced first, so that a slow fixture cannot be mistaken for a working
+    // limiter. This is the number that was 47 ms.
+    let started = std::time::Instant::now();
+    sandbox
+        .dctl()
+        .args(["copy", "src", "dst-fast"])
+        .assert()
+        .success();
+    let unpaced = started.elapsed();
+    assert!(
+        unpaced < std::time::Duration::from_secs(1),
+        "the fixture must be fast when unpaced, took {unpaced:?}"
+    );
+
+    // 256 KiB at 128 KiB/s is two seconds of debt. The first window is free by
+    // construction — the charge is made after bytes move — so the floor is set
+    // at one second: far above the unpaced run, and far above what charging
+    // once at the end of the single file could ever produce.
+    let started = std::time::Instant::now();
+    sandbox
+        .dctl()
+        .args(["--bwlimit", "128k", "copy", "src", "dst-slow"])
+        .assert()
+        .success();
+    let paced = started.elapsed();
+
+    assert!(
+        paced >= std::time::Duration::from_secs(1),
+        "--bwlimit 128k over one {} KiB object must take at least a second; took \
+         {paced:?} against {unpaced:?} unpaced — the limiter is being charged \
+         once for the whole file rather than per window",
+        bytes / 1024
+    );
+
+    // And it moved every byte: a limiter that worked by transferring less would
+    // pass the timing assertion and fail the product.
+    assert_eq!(
+        std::fs::read(sandbox.path("dst-slow/one.bin")).expect("the object arrived"),
+        vec![b'p'; bytes]
+    );
+}
+
+#[test]
 fn bwlimit_actually_slows_the_run_down() {
     // The measurement that exposed the defect was a throughput one — `--bwlimit
     // 1k` moved 10 MiB at 32.9 MiB/s, about 34 000x the requested rate — so the

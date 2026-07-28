@@ -7,6 +7,7 @@ use bytes::Bytes;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::error::{Result, StoreError};
+use crate::meter::Meter;
 use crate::model::{ByteRange, ObjectKey};
 
 use super::LocalFs;
@@ -57,14 +58,22 @@ pub(super) async fn get_to_path(fs: &LocalFs, key: &ObjectKey, dest: &Path) -> R
     let src = fs.resolve(key)?;
     let key = key.to_string();
     let dest = dest.to_path_buf();
-    tokio::task::spawn_blocking(move || copy_streaming(&src, &dest, &key))
+    let meter = fs.meter();
+    tokio::task::spawn_blocking(move || copy_streaming(&src, &dest, &key, meter.as_ref()))
         .await
         .map_err(|e| StoreError::Backend(format!("streaming download task failed: {e}")))?
 }
 
 /// Buffered copy of `src` → `dest`, constant memory. A missing source maps to
 /// [`StoreError::NotFound`], matching [`get`].
-fn copy_streaming(src: &Path, dest: &Path, key: &str) -> Result<()> {
+///
+/// An explicit loop rather than `std::io::copy` so every block can be declared
+/// to `meter` as it lands — see [`crate::meter`] for why one opaque call is the
+/// shape a rate limit cannot be applied to.
+fn copy_streaming(src: &Path, dest: &Path, key: &str, meter: &dyn Meter) -> Result<()> {
+    use std::io::Read as _;
+    use std::io::Write as _;
+
     let file = match std::fs::File::open(src) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -78,7 +87,17 @@ fn copy_streaming(src: &Path, dest: &Path, key: &str) -> Result<()> {
     }
     let mut writer =
         std::io::BufWriter::with_capacity(STREAM_BUF_LEN, std::fs::File::create(dest)?);
-    std::io::copy(&mut reader, &mut writer)?;
+
+    let mut buf = vec![0u8; STREAM_BUF_LEN];
+    loop {
+        let read = reader.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&buf[..read])?;
+        crate::meter::charge_blocking(meter, read as u64);
+    }
+
     let file = writer
         .into_inner()
         .map_err(std::io::IntoInnerError::into_error)?;

@@ -405,18 +405,22 @@ async fn run_stages<D: StageDriver>(
             Stage::Uploading => {
                 moved = driver.upload(entry).await?;
                 reporter.advance(moved);
-                // Both cost controls are charged here, with the *measured*
-                // count and in this order. The budget is recorded first because
-                // it must reflect the bytes even if the run is about to be
-                // cancelled mid-sleep; the pace is then paid, so the wait lands
-                // between this file and the next rather than inside a stage.
+                // The budget is charged here, with the *measured* count: it is a
+                // ceiling on the run's total, so a file is the natural unit and
+                // the check that stops the run happens between files anyway.
                 //
                 // A retried attempt charges again, deliberately: it used the
                 // link and it is on the invoice, and a cost control that
                 // discounted failed attempts would under-report exactly the
                 // runs that cost the most.
                 ctx.limits.budget.spend(moved);
-                ctx.limits.bandwidth.charge(moved).await;
+                // Bandwidth is *not* charged here, and that is the fix rather
+                // than an omission. It is charged inside the storage layer's
+                // copy loops, window by window, through `dctl_store::Meter` —
+                // see `crate::limits::bandwidth`. Charging once per completed
+                // file is what left a run of one object entirely unpaced, and
+                // charging in both places would bill every byte twice and halve
+                // the configured rate.
             }
 
             // Step 4 is mandatory. Everything before this line moved bytes;

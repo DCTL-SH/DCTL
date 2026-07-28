@@ -150,7 +150,11 @@ impl Target {
 /// line. Only the two backends that walk a real filesystem can use it; passing
 /// it to the object stores would be offering a dial that does nothing, which is
 /// the class of defect `HANDOVER.md` §11.3 item 10 already tracks.
-pub fn build(resolved: &Resolved, links: LinkPolicy) -> Result<Arc<dyn Backend>> {
+pub fn build(
+    resolved: &Resolved,
+    links: LinkPolicy,
+    meter: Arc<dyn dctl_store::Meter>,
+) -> Result<Arc<dyn Backend>> {
     let target = resolved.target();
 
     tracing::debug!(
@@ -159,16 +163,16 @@ pub fn build(resolved: &Resolved, links: LinkPolicy) -> Result<Arc<dyn Backend>>
         "building backend"
     );
 
-    match target {
-        Target::Local { root } => Ok(Arc::new(LocalFs::new(root.clone()).with_links(links))),
+    let built = match target {
+        Target::Local { root } => Built::Local(LocalFs::new(root.clone()).with_links(links)),
 
         Target::B2 { bucket } => {
             let key_id = env_required(ENV_B2_KEY_ID)?;
             let app_key = env_required(ENV_B2_APP_KEY)?;
-            Ok(Arc::new(B2Backend::new(
+            Built::B2(B2Backend::new(
                 B2Credentials::new(key_id, app_key),
                 bucket.clone(),
-            )?))
+            )?)
         }
 
         Target::S3 {
@@ -183,7 +187,7 @@ pub fn build(resolved: &Resolved, links: LinkPolicy) -> Result<Arc<dyn Backend>>
             let secret_key = env_required(ENV_S3_SECRET_KEY)?;
             let config = S3Config::new(endpoint, region, bucket.clone(), access_key, secret_key)
                 .with_part_size(*chunk_size);
-            Ok(Arc::new(S3Backend::new(config)?))
+            Built::S3(S3Backend::new(config)?)
         }
 
         Target::R2 {
@@ -196,14 +200,57 @@ pub fn build(resolved: &Resolved, links: LinkPolicy) -> Result<Arc<dyn Backend>>
             let secret_key = env_required(ENV_R2_SECRET_KEY)?;
             let config = R2Backend::config(&account, bucket.clone(), access_key, secret_key)
                 .with_part_size(*chunk_size);
-            Ok(Arc::new(R2Backend::from_config(config)?))
+            Built::R2(R2Backend::from_config(config)?)
         }
 
         // No credential is read: `ssh` authenticates the transport from the
         // user's own config, which is the whole reason a cloudflared-proxied host
         // works. This is also the one arm that opens a connection to build, so it
         // is the one that bridges to the async `connect` — see [`connect_sftp`].
-        Target::Sftp { host, base } => connect_sftp(host, base, links),
+        Target::Sftp { host, base } => Built::Sftp(connect_sftp(host, base, links)?),
+    };
+    Ok(built.metered(meter))
+}
+
+/// A backend that has been constructed but not yet told who is watching it.
+///
+/// This type exists for one reason and it is worth stating, because the type
+/// itself does nothing: **installing the meter is a step every provider needs
+/// and no provider's constructor performs**, and while it was written into each
+/// arm of the match above, four of the five arms silently dropped it. `local:`
+/// was paced and B2, S3, R2 and SFTP were not — so `--bwlimit` was inert on
+/// every cloud provider this tool exists to talk to, with nothing to indicate
+/// it. That is precisely the failure `dctl_store::meter` warns about in its own
+/// documentation, made one layer higher up.
+///
+/// Splitting the two halves apart means the construction match cannot mention
+/// the meter at all, and [`Built::metered`] is one small match whose only job is
+/// to install it. A provider added later must add a variant here, and the
+/// compiler will not accept the variant without an arm — so the new backend
+/// cannot be unpaced by omission. It can still be unpaced *deliberately*, which
+/// is a different thing and has to be written down.
+enum Built {
+    Local(LocalFs),
+    B2(B2Backend),
+    S3(S3Backend),
+    R2(R2Backend),
+    Sftp(SftpBackend),
+}
+
+impl Built {
+    /// Install `meter` and hand back the finished backend.
+    ///
+    /// Exhaustive by construction: there is no `_ =>`, deliberately, because a
+    /// wildcard here would let a provider added later fall through unpaced and
+    /// compile perfectly.
+    fn metered(self, meter: Arc<dyn dctl_store::Meter>) -> Arc<dyn Backend> {
+        match self {
+            Self::Local(backend) => Arc::new(backend.with_meter(meter)),
+            Self::B2(backend) => Arc::new(backend.with_meter(meter)),
+            Self::S3(backend) => Arc::new(backend.with_meter(meter)),
+            Self::R2(backend) => Arc::new(backend.with_meter(meter)),
+            Self::Sftp(backend) => Arc::new(backend.with_meter(meter)),
+        }
     }
 }
 
@@ -225,14 +272,15 @@ pub fn build(resolved: &Resolved, links: LinkPolicy) -> Result<Arc<dyn Backend>>
 /// for the backend's lifetime. [`Handle::try_current`](tokio::runtime::Handle::try_current)
 /// is used rather than `current` so the "not on a runtime" case is a typed error
 /// rather than a panic, keeping this lib code panic-free.
-fn connect_sftp(host: &str, base: &str, links: LinkPolicy) -> Result<Arc<dyn Backend>> {
+fn connect_sftp(host: &str, base: &str, links: LinkPolicy) -> Result<SftpBackend> {
     let handle = tokio::runtime::Handle::try_current().map_err(|_| {
         CliError::fatal("the sftp backend must be built inside the async runtime")
             .with_hint("This is an internal error. Please report the command that produced it.")
     })?;
     let config = SftpConfig::new(host, base).with_links(links);
-    let backend = tokio::task::block_in_place(|| handle.block_on(SftpBackend::connect(config)))?;
-    Ok(Arc::new(backend))
+    Ok(tokio::task::block_in_place(|| {
+        handle.block_on(SftpBackend::connect(config))
+    })?)
 }
 
 /// Build a backend for a spec typed on the command line, without a config file.
@@ -259,7 +307,7 @@ fn connect_sftp(host: &str, base: &str, links: LinkPolicy) -> Result<Arc<dyn Bac
 pub fn build_backend(spec: &str, links: LinkPolicy) -> Result<Arc<dyn Backend>> {
     let parsed = RemoteSpec::parse(spec)?;
     let resolved = super::resolve::resolve(&parsed, &())?;
-    build(&resolved, links)
+    build(&resolved, links, dctl_store::unmetered())
 }
 
 /// Take a setting the config pinned, or fall back to its environment variable.
@@ -332,7 +380,7 @@ mod tests {
         // The only provider that must work on a machine with no environment set
         // up at all — `dctl copy a b` between two directories.
         let resolved = Resolved::new(PROVIDER_LOCAL, local_target(), String::new());
-        let backend = build(&resolved, LinkPolicy::default()).unwrap();
+        let backend = build(&resolved, LinkPolicy::default(), dctl_store::unmetered()).unwrap();
         assert_eq!(backend.name(), PROVIDER_LOCAL);
     }
 

@@ -388,13 +388,6 @@ correct answer to it.
   What never happens is DCTL deciding to encrypt for you. Encryption follows the
   remote name typed, so the same command means the same thing tomorrow as it
   does today, whatever has been created at the destination in between.
-* **Files above the whole-file limit.** `dctl-core` takes and returns complete
-  buffers, so a file's plaintext is resident in memory while it moves. Anything
-  over **1 GiB** (1073741824 bytes) is refused by name and size rather than
-  attempted, because attempting it would be killed by the OOM killer or swap the
-  machine to a standstill. The refusal is fatal: files earlier in plan order have
-  already been transferred, and the rest are not attempted. Streaming transfers
-  (`PLAN.md` §16.2) delete the limit rather than raise it.
 * **`--checksum` when a side genuinely cannot supply a hash.** Most sides can: a
   vault carries the plaintext BLAKE3 it recorded at write time, and a local file
   is read and hashed (streamed, never buffered). What cannot answer is a **plain
@@ -607,16 +600,15 @@ $ echo $?
 7
 ```
 
-A file too large for the whole-buffer engine is refused by name and size rather
-than attempted. The refusal is fatal, so the run stops there — `a-small.txt`,
-earlier in plan order, was already transferred:
+**There is no size limit.** This command used to refuse any file above 1 GiB,
+because the engine read each file whole into memory and attempting a 50 GB video
+would have taken the machine down. It now moves every byte in bounded windows in
+both directions — measured flat at ~144 MiB of resident memory from a 256 MiB
+object to a 4 GiB one, inside a 512 MiB hard cap — so the refusal and the limit
+behind it are gone rather than raised.
 
 ```console
 $ dctl copy /mnt/ingest /srv/archive
-error: 'z-huge.bin' is 2147483648 bytes, above the 1073741824 byte whole-file limit
-warning: The current engine moves whole files through memory, so very large
-objects are refused rather than attempted. Streaming transfers (PLAN.md §6,
-§16.2) lift this limit. Use --dry-run to see exactly what would be transferred.
 $ echo $?
 7
 ```
@@ -746,7 +738,7 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 3 | `dir_not_found` | `SOURCE` does not exist. A missing `DEST` is not an error — that is the ordinary first run. |
 | 5 | `temporary_error` | A cloud backend failed in a way worth retrying. Reachable wherever a cloud backend is contacted: reading a plain `b2:`/`s3:`/`r2:` source, **writing plain objects into one**, or a vault whose store is one of them. A purely local transfer does not produce it. |
 | 6 | `partial_failure` | The run finished, and at least one file failed. The successful files are stored; the failures were printed on stderr as they happened. This is the code to branch on. |
-| 7 | `fatal_error` | Two or more local source files share one vault path once their names are normalised, refused before anything is read (see [../RESTORE_DRILL.md](../RESTORE_DRILL.md#the-sharp-edge-two-files-one-path)); a file exceeded the whole-file limit; `DEST` is a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and the plan would replace something. Files already transferred before the refusal stay transferred; nothing further is attempted — except the `--immutable` refusal, which happens before any transfer at all. |
+| 7 | `fatal_error` | Two or more local source files share one vault path once their names are normalised, refused before anything is read (see [../RESTORE_DRILL.md](../RESTORE_DRILL.md#the-sharp-edge-two-files-one-path)); `DEST` is a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and the plan would replace something. Files already transferred before the refusal stay transferred; nothing further is attempted — except the `--immutable` refusal, which happens before any transfer at all. |
 | 20 | `checksum_mismatch` | The backend stored bytes other than the ones sent. Nothing was committed for that file. |
 | 21 | `integrity_failure` | `--verify sample`/`strict` read an object back and it did not authenticate, or a decrypted object did not match its recorded hash. It was written but must not be trusted. |
 | 22 | `vault_locked` | No password was available, or the envelope did not unwrap. Nothing was transferred. |

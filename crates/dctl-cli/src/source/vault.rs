@@ -194,6 +194,24 @@ impl Source for VaultSource {
         self.whole(path).await
     }
 
+    async fn stream_to(
+        &self,
+        path: &str,
+        out: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    ) -> Result<u64> {
+        // The core's window walk: one ranged request per window of chunks, each
+        // authenticated before a byte of it is written, and the assembled
+        // plaintext checked against the object's own recorded hash at the end.
+        // Same statement as `whole`, without the buffer that made it cost the
+        // file.
+        Ok(self
+            .session
+            .vault
+            .stream_file_to(path, &mut *out)
+            .await?
+            .bytes)
+    }
+
     async fn read_range(
         &self,
         path: &str,

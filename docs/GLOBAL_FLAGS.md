@@ -447,22 +447,35 @@ Bandwidth ceiling, written with the usual size suffixes (`10M`, `1.5MiB`) or
 1) before the command starts, never a silently unlimited run.
 
 **Granularity: one file.** Each file is charged for the bytes it actually moved,
-and the next file waits until that charge has been paid off at the configured
-rate. Over a run the average throughput is the limit; the first file is never
-delayed, because there is nothing before it to delay it. What this does *not* do
-is shape the wire — `--bwlimit 1M` will still put a 100 MiB file onto the link as
-fast as the link takes it and then wait about 100 s before the next one.
+and the next **window** waits until that charge has been paid off at the
+configured rate. A window is a few megabytes, so this shapes the wire rather than
+merely spacing out files: `--bwlimit 1M` holds one 100 MiB object to about 100 s
+*while it is being transferred*, instead of putting it on the link as fast as the
+link will take it and waiting afterwards.
 
-The reason is structural rather than an oversight: this engine hands a whole
-object to the storage backend in one call and gets a byte count back at the end,
-so there is no per-buffer seam to charge. (rclone charges every read buffer and
-therefore shapes at kilobyte granularity.) The practical consequence:
+It did exactly that until the streaming engine landed, and the gap was the whole
+width of the flag. The debt was charged once per **finished file**, because the
+engine handed a whole object to the storage backend in one call and got a byte
+count back at the end — there was no per-buffer seam to charge. So a run of one
+object was not paced at all, and neither was the last file of any run: 8 MiB
+moved as a single file at `--bwlimit 1M` took **47 ms**, while the same 8 MiB as
+eight files took **7051 ms**. Bytes now move in bounded windows in both
+directions, the limiter is installed as the storage layer's meter, and the same
+8 MiB as one object takes **8497 ms** against an 8000 ms target.
 
-* **Capping a bill or a metered link** is served exactly. The average rate over
-  the run is the limit, so the bytes per month are the limit.
-* **Keeping a video call usable while a backup runs** is served only at file
-  granularity. A tree of small files behaves as you expect; one enormous file
-  will saturate the uplink for its duration.
+Both uses of the flag are served:
+
+* **Capping a bill or a metered link.** The average rate over the run is the
+  limit, so the bytes per month are the limit.
+* **Keeping a video call usable while a backup runs.** One enormous file is now
+  paced for its duration rather than saturating the uplink until it finishes.
+
+Two details worth knowing. The first window of a run is free — the charge is made
+*after* bytes move, so that it is a measurement rather than an intention — which
+costs a few megabytes of burst at the very start and nothing after. And a sealed
+destination is charged for **ciphertext**, which is what actually crosses the
+link and is a percent or so larger than the plaintext; that is why the measured
+8497 ms sits just above the 8000 ms the plaintext alone would predict.
 
 ### `--retries N`
 

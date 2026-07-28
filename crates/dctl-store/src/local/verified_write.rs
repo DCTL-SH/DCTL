@@ -41,6 +41,7 @@ use tokio::io::AsyncWriteExt;
 
 use crate::checksum::{ContentHash, HashAlgo, Hasher};
 use crate::error::{Result, StoreError};
+use crate::meter::Meter;
 use crate::model::{ObjectKey, PutOutcome};
 use crate::modified::SourceModified;
 
@@ -196,9 +197,14 @@ pub(super) async fn put_from_path(
     let dest = fs.resolve(key)?;
     let source = source.to_path_buf();
     let expected = expected.clone();
-    tokio::task::spawn_blocking(move || put_from_path_blocking(&dest, &source, &expected, modified))
-        .await
-        .map_err(|e| StoreError::Backend(format!("streaming verified write task failed: {e}")))?
+    // The meter goes with the work, not with the call: the copy loop runs on a
+    // blocking thread, and that is the thread whose windows have to be paced.
+    let meter = fs.meter();
+    tokio::task::spawn_blocking(move || {
+        put_from_path_blocking(&dest, &source, &expected, modified, meter.as_ref())
+    })
+    .await
+    .map_err(|e| StoreError::Backend(format!("streaming verified write task failed: {e}")))?
 }
 
 /// The blocking body of [`put_from_path`]: stream-copy → sync → stream-verify →
@@ -208,6 +214,7 @@ fn put_from_path_blocking(
     source: &Path,
     expected: &ContentHash,
     modified: SourceModified,
+    meter: &dyn Meter,
 ) -> Result<PutOutcome> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent)?;
@@ -218,7 +225,7 @@ fn put_from_path_blocking(
     // `std::fs` is synchronous, so a failed write is returned by the call that
     // made it — there is no deferred error to surface here, unlike the buffered
     // `put` above.
-    let written = match stream_copy_to_temp(source, &tmp) {
+    let written = match stream_copy_to_temp(source, &tmp, meter) {
         Ok(n) => n,
         Err(e) => {
             let _ = std::fs::remove_file(&tmp);
@@ -277,12 +284,34 @@ fn put_from_path_blocking(
 /// Returns the number of bytes handed to the filesystem, so the caller can hold
 /// the file that came back to that number rather than inferring a failure from
 /// its hash.
-fn stream_copy_to_temp(source: &Path, tmp: &Path) -> std::io::Result<u64> {
+///
+/// Written as an explicit loop rather than `std::io::copy` for one reason: every
+/// block is declared to `meter` as it lands, which is what makes `--bwlimit`
+/// apply *within* one enormous object instead of only between files. `io::copy`
+/// has no seam to declare from, and a copy that hands the whole file over in one
+/// opaque call is precisely the shape this crate had to lose.
+fn stream_copy_to_temp(source: &Path, tmp: &Path, meter: &dyn Meter) -> std::io::Result<u64> {
+    use std::io::Read as _;
+    use std::io::Write as _;
+
     let mut reader =
         std::io::BufReader::with_capacity(STREAM_BUF_LEN, std::fs::File::open(source)?);
-    let writer = std::io::BufWriter::with_capacity(STREAM_BUF_LEN, std::fs::File::create(tmp)?);
-    let mut writer = writer;
-    let written = std::io::copy(&mut reader, &mut writer)?;
+    let mut writer = std::io::BufWriter::with_capacity(STREAM_BUF_LEN, std::fs::File::create(tmp)?);
+
+    let mut buf = vec![0u8; STREAM_BUF_LEN];
+    let mut written: u64 = 0;
+    loop {
+        let read = reader.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        writer.write_all(&buf[..read])?;
+        written += read as u64;
+        // After the block is written, never before: the charge is a measurement,
+        // and the pause it produces belongs between this window and the next.
+        crate::meter::charge_blocking(meter, read as u64);
+    }
+
     let file = writer
         .into_inner()
         .map_err(std::io::IntoInnerError::into_error)?;

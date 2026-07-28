@@ -266,6 +266,24 @@ impl RangeHeader {
         &self.head.file_id
     }
 
+    /// Whether this object carries §3's trailing footer.
+    ///
+    /// Read from the authenticated head, so it is the writer's own statement rather than
+    /// an inference from the object's length — which is what a reader folding the footer
+    /// as it streams needs, since it must decide whether to expect one *before* it has
+    /// reached the end.
+    #[must_use]
+    pub const fn has_footer(&self) -> bool {
+        self.head.has_footer()
+    }
+
+    /// Offset of chunk `0`'s ciphertext, which is also the length of the header the
+    /// footer hash covers before it reaches the payload (§3).
+    #[must_use]
+    pub const fn payload_start(&self) -> u64 {
+        self.payload_start
+    }
+
     /// The object's own §4 metadata — including the `content_blake3` of its whole
     /// plaintext, which a ranged read records but cannot itself verify (see the module
     /// documentation). [`None`] only for an unknown `schema_version`, skipped-and-served

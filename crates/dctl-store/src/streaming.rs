@@ -154,6 +154,7 @@ pub(crate) async fn stream_to_file(
     mut resp: reqwest::Response,
     dest: &Path,
     expected_len: Option<u64>,
+    meter: &dyn crate::meter::Meter,
 ) -> Result<()> {
     use tokio::io::AsyncWriteExt as _;
 
@@ -164,7 +165,7 @@ pub(crate) async fn stream_to_file(
     let file = tokio::fs::File::create(&tmp).await?;
     let mut writer = tokio::io::BufWriter::with_capacity(STREAM_BUF_LEN, file);
 
-    let bytes_written = match copy_body(&mut resp, &mut writer).await {
+    let bytes_written = match copy_body(&mut resp, &mut writer, meter).await {
         Ok(n) => n,
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp).await;
@@ -204,6 +205,7 @@ pub(crate) async fn stream_to_file(
 async fn copy_body(
     resp: &mut reqwest::Response,
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
+    meter: &dyn crate::meter::Meter,
 ) -> Result<u64> {
     use tokio::io::AsyncWriteExt as _;
     let mut written = 0u64;
@@ -212,6 +214,11 @@ async fn copy_body(
             Ok(Some(chunk)) => {
                 writer.write_all(&chunk).await?;
                 written += chunk.len() as u64;
+                // Every network chunk, as it lands. Pausing here applies TCP
+                // back-pressure to the sender rather than merely delaying the
+                // next request, which is what makes `--bwlimit` a cap on the
+                // link during one enormous download instead of after it.
+                crate::meter::charge(meter, chunk.len() as u64).await;
             }
             Ok(None) => break,
             Err(e) => return Err(StoreError::Backend(e.to_string())),

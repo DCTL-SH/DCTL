@@ -14,6 +14,7 @@ mod verified_write;
 mod walk;
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -22,6 +23,7 @@ use crate::backend::Backend;
 use crate::checksum::ContentHash;
 use crate::error::Result;
 use crate::links::LinkPolicy;
+use crate::meter::{self, Meter};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
 
@@ -47,6 +49,13 @@ pub struct LocalFs {
     /// is still writing into the same directory; see [`root`] for the run that
     /// reported `Files: 25 / 25, Errors: 0` into a replacement.
     opened_as: Option<root::RootId>,
+    /// Who is told about bytes as they move, window by window.
+    ///
+    /// See [`crate::meter`]. Held on the backend rather than passed per call
+    /// because pacing is a property of the *run* — one `--bwlimit` covers every
+    /// object a command touches — and a per-call argument is one a new call site
+    /// can omit, which is a window that silently escapes the cap.
+    meter: Arc<dyn Meter>,
 }
 
 impl LocalFs {
@@ -58,7 +67,25 @@ impl LocalFs {
             root,
             links: LinkPolicy::default(),
             opened_as,
+            meter: meter::unmetered(),
         }
+    }
+
+    /// The same backend, declaring every window it moves to `meter`.
+    ///
+    /// A builder for the reason [`LocalFs::with_links`] gives: almost every
+    /// construction of a backend in this workspace is an internal bookkeeping
+    /// read that nobody is pacing, and only the CLI — which holds the run's
+    /// `--bwlimit` — has anything to install.
+    #[must_use]
+    pub fn with_meter(mut self, meter: Arc<dyn Meter>) -> Self {
+        self.meter = meter;
+        self
+    }
+
+    /// Who is told about this backend's bytes.
+    pub(crate) fn meter(&self) -> Arc<dyn Meter> {
+        Arc::clone(&self.meter)
     }
 
     /// The same backend, walking symbolic links under `policy`.
@@ -113,7 +140,14 @@ impl Backend for LocalFs {
         expected: &ContentHash,
         modified: SourceModified,
     ) -> Result<PutOutcome> {
-        verified_write::put(self, key, data, expected, modified).await
+        let moved = data.len() as u64;
+        let outcome = verified_write::put(self, key, data, expected, modified).await?;
+        // One window, because the whole object *was* one window: the buffered
+        // put is the path a small object takes, and charging it here is what
+        // keeps a run of ten thousand small files paced now that the pipeline no
+        // longer charges per file.
+        meter::charge(self.meter.as_ref(), moved).await;
+        Ok(outcome)
     }
 
     async fn put_from_path(
@@ -127,7 +161,9 @@ impl Backend for LocalFs {
     }
 
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
-        read::get(self, key).await
+        let bytes = read::get(self, key).await?;
+        meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
+        Ok(bytes)
     }
 
     async fn get_to_path(&self, key: &ObjectKey, dest: &Path) -> Result<()> {
@@ -135,7 +171,13 @@ impl Backend for LocalFs {
     }
 
     async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Bytes> {
-        read::get_range(self, key, range).await
+        let bytes = read::get_range(self, key, range).await?;
+        // The window a caller asked for is the window that moved. This is the
+        // call a streaming read makes once per chunk, so it is the finest grain
+        // the read side has, and pacing it is what stops `--bwlimit` being inert
+        // on a `cat` of one enormous object.
+        meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
+        Ok(bytes)
     }
 
     async fn head(&self, key: &ObjectKey) -> Result<ObjectMeta> {

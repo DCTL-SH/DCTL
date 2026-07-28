@@ -138,11 +138,10 @@ holds two backends (no phase names that either).
 
 The refusals `copy` documents apply here unchanged, all exit **7** and all
 before anything is deleted: a **plain write into a directory that holds a
-vault**, a file **above the 1 GiB whole-file limit** (the whole-buffer core
-would otherwise take the machine down; the limit disappears with streaming,
-`PLAN.md` §16.2), and **`--checksum`** against a plain object store, whose
-provider checksum is not the plaintext hash a vault records. The oversized-file refusal is fatal, so files earlier in plan order
-have already been moved — sources and all — and nothing after it is attempted.
+vault**, and **`--checksum`** against a plain object store, whose provider
+checksum is not the plaintext hash a vault records. A size ceiling used to be
+among them and no longer is: the engine streams, so there is no size at which a
+move stops fitting in memory.
 
 `--immutable` **is** honoured, at plan time: a plan containing an `update` — an
 existing destination object being replaced — fails the whole run with exit **7**
@@ -253,10 +252,6 @@ untouched on both sides:
 
 ```console
 $ dctl move /mnt/ingest /srv/archive --force
-error: 'z-huge.bin' is 2147483648 bytes, above the 1073741824 byte whole-file limit
-warning: The current engine moves whole files through memory, so very large
-objects are refused rather than attempted. Streaming transfers (PLAN.md §6,
-§16.2) lift this limit. Use --dry-run to see exactly what would be transferred.
 $ echo $?
 7
 ```
@@ -316,7 +311,7 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 3 | `dir_not_found` | `SOURCE` does not exist. |
 | 5 | `temporary_error` | A cloud backend failed in a way worth retrying; that source is not deleted. Reachable wherever a cloud backend is contacted: reading a plain `b2:`/`s3:`/`r2:` source, writing a plain object into one, or a vault whose store is one of them. |
 | 6 | `partial_failure` | The run finished with at least one failure. A file that failed to transfer keeps its source; a file that transferred but whose source removal failed exists twice, and the message names the side. |
-| 7 | `fatal_error` | Two or more local source files share one vault path once their names are normalised, refused before anything is read (see [../RESTORE_DRILL.md](../RESTORE_DRILL.md#the-sharp-edge-two-files-one-path)); a file exceeded the whole-file limit; `DEST` is a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and the plan would replace something at the destination. Files completed before the refusal are moved and nothing after it is attempted — except the `--immutable` refusal, which happens before any file is touched. |
+| 7 | `fatal_error` | Two or more local source files share one vault path once their names are normalised, refused before anything is read (see [../RESTORE_DRILL.md](../RESTORE_DRILL.md#the-sharp-edge-two-files-one-path)); `DEST` is a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and the plan would replace something at the destination. Files completed before the refusal are moved and nothing after it is attempted — except the `--immutable` refusal, which happens before any file is touched. |
 | 20 | `checksum_mismatch` | The backend stored the wrong bytes. Nothing was committed and that source is untouched. Not reachable today: no `move` reaches a vault transfer, and a local write has no second party to disagree with. |
 | 21 | `integrity_failure` | `--verify sample`/`strict` could not authenticate what was written. The source is untouched; investigate before deleting it by hand. Not reachable today, for the same reason as 20. |
 | 22 | `vault_locked` | No password was available, or the envelope did not unwrap. Nothing was transferred and nothing was deleted. |

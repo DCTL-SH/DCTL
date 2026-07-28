@@ -134,12 +134,12 @@ pub async fn run(ctx: &Ctx, args: &CatArgs) -> Result<()> {
     if args.discard {
         stream(ctx, args, &sources, &mut Sink::writing(io::sink())).await
     } else {
-        stream(ctx, args, &sources, &mut Sink::writing(io::stdout().lock())).await
+        stream(ctx, args, &sources, &mut Sink::writing(io::stdout())).await
     }
 }
 
 /// Copy every source into `sink`, reporting as the active format requires.
-async fn stream<W: Write>(
+async fn stream<W: Write + Send>(
     ctx: &Ctx,
     args: &CatArgs,
     sources: &[Source],
@@ -158,6 +158,19 @@ async fn stream<W: Write>(
         // opening it here would buy nothing but a syscall.
         let flow = if source.slice().is_empty() {
             Flow::Continue
+        } else if let Some(remote) = source.whole_object_source() {
+            // The whole object, from a remote: streamed window by window
+            // straight into the sink. This is the case that used to materialise
+            // the file — `dctl cat` of an 806 MiB object peaked at 1624 MiB —
+            // and it is the one `dctl cat` exists for.
+            match remote
+                .stream_to(source.spec().path(), &mut sink.as_async())
+                .await
+            {
+                Ok(_) => Flow::Continue,
+                Err(error) if sink::is_closed_pipe(&error) => Flow::Stop,
+                Err(error) => return Err(error),
+            }
         } else {
             let mut reader = source.open().await?;
             sink.drain(&mut reader, &mut buffer)?

@@ -17,6 +17,7 @@ pub mod durable;
 pub mod error;
 pub mod links;
 pub mod local;
+pub mod meter;
 pub mod model;
 pub mod modified;
 pub mod r2;
@@ -33,6 +34,7 @@ pub use links::{
     LINK_POLICY_CHOICES, LinkNote, LinkPolicy, LinkReport, LinkVerdict, UnknownLinkPolicy,
 };
 pub use local::LocalFs;
+pub use meter::{Meter, Unmetered, unmetered};
 pub use model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 pub use modified::SourceModified;
 pub use r2::R2Backend;

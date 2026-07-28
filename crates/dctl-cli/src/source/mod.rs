@@ -200,6 +200,38 @@ pub trait Source: Send + Sync {
     /// **not** returned.
     async fn read(&self, path: &str) -> Result<Zeroizing<Vec<u8>>>;
 
+    /// Write one object's entire contents to `out`, holding none of it.
+    ///
+    /// The constant-memory form of [`Source::read`], and the one every caller
+    /// that is going to *write the bytes somewhere* should use. `read` returns a
+    /// `Vec`, so `dctl cat` of an 806 MiB object peaked at 1624 MiB of resident
+    /// memory and a 10 GB video needed 20 GB of RAM — for a command whose entire
+    /// job is to move bytes from one place to another without keeping them.
+    ///
+    /// **The whole-object statement is preserved, and that is the point.** A
+    /// sealed source streams in bounded windows while folding a BLAKE3 over the
+    /// plaintext and comparing it against the hash the object itself records, so
+    /// this makes exactly the claim `read` makes — unlike
+    /// [`Source::read_range`], which cannot, because it never sees the bytes
+    /// outside its window. Serving a whole-object request through the ranged
+    /// path would have been the easy way to bound the memory and it would have
+    /// quietly traded away the check.
+    ///
+    /// **Bytes reach `out` before that statement completes.** Each has been
+    /// authenticated by its own chunk's tag, but the final comparison cannot
+    /// happen until the last byte has been hashed, so a caller writing to a pipe
+    /// may already have emitted a prefix when this returns an integrity failure.
+    /// That is unavoidable for a stream and it is why the transfer commands
+    /// write through a staging file and a rename instead.
+    ///
+    /// # Errors
+    /// As [`Source::read`], plus any failure to write to `out`.
+    async fn stream_to(
+        &self,
+        path: &str,
+        out: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    ) -> Result<u64>;
+
     /// Read a byte window: `length` of [`None`] means "to the end".
     ///
     /// A window past the end of the object yields fewer bytes than asked for

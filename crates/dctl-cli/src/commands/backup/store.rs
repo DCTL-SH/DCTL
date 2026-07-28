@@ -2,11 +2,15 @@
 //!
 //! ## Why this is not the transfer pipeline
 //!
-//! `copy` moves a file by reading its plaintext into a buffer and handing that
-//! buffer to [`Vault::put_file`](dctl_core::Vault::put_file). That is fine for
-//! documents and it is why the transfer family carries
-//! [`TRANSFER_WHOLE_FILE_LIMIT`](crate::constants::TRANSFER_WHOLE_FILE_LIMIT) —
-//! a ceiling above which it refuses rather than being OOM-killed.
+//! `copy` used to move a file by reading its plaintext into a buffer and handing
+//! that buffer to [`Vault::put_file`](dctl_core::Vault::put_file), which is why
+//! the transfer family carried a one-gibibyte ceiling above which it refused
+//! rather than being OOM-killed. It no longer does either: the transfer engine
+//! streams, and the ceiling is deleted.
+//!
+//! What follows is therefore no longer a *difference* between `backup` and
+//! `copy` — both stream now — but it remains the reason this module reaches for
+//! the streaming API directly rather than through the buffered one.
 //!
 //! `backup` is the verb most likely to meet a fifty-gigabyte video, and a backup
 //! tool that cannot store the largest file on the disk is not a backup tool. So

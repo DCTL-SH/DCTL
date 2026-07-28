@@ -18,8 +18,11 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
+pub mod constants;
 pub mod error;
 pub mod range;
+pub mod spool;
+pub mod streamed;
 mod vault;
 
 /// §12 asymmetric-recipient types (hybrid X25519 + ML-KEM-768), re-exported so callers can
@@ -38,6 +41,7 @@ pub use dctl_index::Record;
 /// creation, because the answer is baked into the envelope from then on.
 pub use dctl_crypto::kdf::Cost as KdfCost;
 pub use error::{CoreError, Result};
+pub use streamed::Streamed;
 pub use vault::{Modified, NewVault, Rebuilt, UnlockKey, Vault};
 
 /// Check a typed recovery phrase against BIP-39 without attempting an unlock.

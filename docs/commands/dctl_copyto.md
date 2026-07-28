@@ -125,9 +125,10 @@ real defect and is fixed. See
 worth reading before trusting any remaining addressing claim on this page.
 
 The family's data-safety refusals apply unchanged, all exit **7**: a **plain
-write into a directory that holds a vault**, a file **above the 1 GiB whole-file
-limit** (the core is whole-buffer; streaming is `PLAN.md` §16.2), and
-**`--checksum`** when no hashes are available. Pattern filters are *not* on that
+write into a directory that holds a vault** and **`--checksum`** when no hashes
+are available. A size ceiling used to be among them and no longer is: the engine
+moves bytes in bounded windows, so there is no size at which a transfer stops
+fitting in memory. Pattern filters are *not* on that
 list any more — they are honoured, as the Synopsis says.
 
 `--immutable` **is** honoured, at plan time: if `DEST` already names an object
@@ -308,7 +309,7 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 3 | `dir_not_found` | `SOURCE` does not exist. |
 | 5 | `temporary_error` | A cloud backend failed in a way worth retrying. Reachable wherever a cloud backend is contacted: reading a plain `b2:`/`s3:`/`r2:` source, writing a plain object into one, or a vault whose store is one of them. |
 | 6 | `partial_failure` | A directory source finished with at least one file failing. |
-| 7 | `fatal_error` | The file exceeded the whole-file limit; `DEST` is inside a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and `DEST` already exists, which is refused before any byte moves. |
+| 7 | `fatal_error` | `DEST` is inside a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and `DEST` already exists, which is refused before any byte moves. |
 | 20 | `checksum_mismatch` | The backend stored bytes other than the ones sent. Nothing was committed. |
 | 21 | `integrity_failure` | `--verify sample`/`strict` could not authenticate what was written. |
 | 22 | `vault_locked` | No password was available, or the envelope did not unwrap. |

@@ -35,6 +35,8 @@ pub mod bandwidth;
 pub mod budget;
 pub mod quantity;
 
+use std::sync::Arc;
+
 use crate::cli::GlobalArgs;
 
 pub use bandwidth::Bandwidth;
@@ -45,12 +47,23 @@ pub use quantity::ByteLimit;
 #[derive(Debug)]
 pub struct Limits {
     /// The pace, from `--bwlimit`.
-    pub bandwidth: Bandwidth,
+    pub bandwidth: Arc<Bandwidth>,
     /// The ceiling, from `--max-transfer`.
     pub budget: Budget,
 }
 
 impl Limits {
+    /// This run's pace, as the storage layer's [`Meter`](dctl_store::Meter).
+    ///
+    /// One limiter shared by every backend a command opens, because "do not use
+    /// more than 1 MB/s of my uplink" is a statement about the uplink and not
+    /// about each destination separately. A command that opens two remotes and
+    /// got two limiters would move at twice the rate the operator asked for.
+    #[must_use]
+    pub fn meter(&self) -> Arc<dyn dctl_store::Meter> {
+        Arc::clone(&self.bandwidth) as Arc<dyn dctl_store::Meter>
+    }
+
     /// Resolve both from the parsed flags.
     ///
     /// Infallible, and that is a property of the types rather than an omission:
@@ -60,7 +73,7 @@ impl Limits {
     #[must_use]
     pub fn resolve(globals: &GlobalArgs) -> Self {
         Self {
-            bandwidth: Bandwidth::new(globals.bwlimit.unwrap_or_default()),
+            bandwidth: Arc::new(Bandwidth::new(globals.bwlimit.unwrap_or_default())),
             budget: Budget::new(globals.max_transfer.unwrap_or_default()),
         }
     }

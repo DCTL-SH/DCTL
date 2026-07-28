@@ -26,6 +26,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 use crate::checksum::{ContentHash, Hasher};
 use crate::error::{Result, StoreError};
+use crate::meter::Meter;
 use crate::model::PutOutcome;
 use crate::modified::SourceModified;
 
@@ -70,21 +71,42 @@ pub(super) async fn put_bytes<F: RemoteFs>(
     })
 }
 
+/// What a streaming write is being asked to store.
+///
+/// The four facts travel together because they are one description of one
+/// object, and because separating them made the call an eight-argument one that
+/// a reader had to count positions in. Grouping them also makes the two that
+/// must not be forgotten — the digest and the source's time — impossible to omit
+/// without saying so.
+///
 /// Store `total` bytes read from `source` at `remote`, verified, atomically,
 /// carrying `modified`.
 ///
 /// Peak memory is `O(chunk)` regardless of object size, which is the whole
 /// reason this exists beside [`put_bytes`]. The hash is folded chunk by chunk
 /// and compared before the flush, so a source that changed under the read is
-/// caught with nothing committed.
+/// caught with nothing committed. Each chunk is declared to `meter` as it lands,
+/// which is what lets `--bwlimit` pace inside one enormous object.
+pub(super) struct Incoming<'a> {
+    /// Exactly how many bytes `source` will yield. Not a hint: the loop reads
+    /// this many and a source that yields fewer fails the read rather than
+    /// publishing a short object.
+    pub total: u64,
+    /// Bytes per write, and therefore the peak working set of the whole
+    /// operation.
+    pub chunk: u64,
+    /// The digest the stored bytes must match, or nothing is published.
+    pub expected: &'a ContentHash,
+    /// When the *content* was last changed — never when this copy was made.
+    pub modified: SourceModified,
+}
+
 pub(super) async fn put_stream<F, R>(
     fs: &F,
     remote: &str,
     source: &mut R,
-    total: u64,
-    chunk: u64,
-    expected: &ContentHash,
-    modified: SourceModified,
+    incoming: Incoming<'_>,
+    meter: &dyn Meter,
 ) -> Result<PutOutcome>
 where
     F: RemoteFs,
@@ -93,6 +115,13 @@ where
     fs.mkdir_p(remote).await;
     let tmp = temp_path(remote);
     let mut file = fs.create(&tmp).await?;
+
+    let Incoming {
+        total,
+        chunk,
+        expected,
+        modified,
+    } = incoming;
 
     let mut hasher = Hasher::new(expected.algo);
     let mut buf = vec![0u8; chunk.max(1) as usize];
@@ -109,6 +138,10 @@ where
             fs.remove_quiet(&tmp).await;
             return Err(e);
         }
+        // Charged per chunk, after it is on the link. The loop was already
+        // windowed; declaring the window is the only thing that was missing for
+        // `--bwlimit` to reach inside one object.
+        crate::meter::charge(meter, n as u64).await;
     }
 
     let computed = hasher.finalize();
@@ -403,10 +436,13 @@ mod tests {
             &fake,
             REMOTE,
             &mut source,
-            data.len() as u64,
-            8,
-            &blake3(data),
-            SourceModified::at(AGED),
+            Incoming {
+                total: data.len() as u64,
+                chunk: 8,
+                expected: &blake3(data),
+                modified: SourceModified::at(AGED),
+            },
+            &crate::meter::Unmetered,
         )
         .await
         .expect("the streamed write succeeds");
@@ -437,10 +473,13 @@ mod tests {
             &fake,
             REMOTE,
             &mut source,
-            data.len() as u64,
-            32,
-            &blake3(&data),
-            SourceModified::unknown(),
+            Incoming {
+                total: data.len() as u64,
+                chunk: 32,
+                expected: &blake3(&data),
+                modified: SourceModified::unknown(),
+            },
+            &crate::meter::Unmetered,
         )
         .await
         .expect("the streamed write succeeds");
@@ -540,10 +579,13 @@ mod tests {
             &fake,
             REMOTE,
             &mut source,
-            data.len() as u64,
-            8,
-            &blake3(b"what the caller declared"),
-            SourceModified::at(AGED),
+            Incoming {
+                total: data.len() as u64,
+                chunk: 8,
+                expected: &blake3(b"what the caller declared"),
+                modified: SourceModified::at(AGED),
+            },
+            &crate::meter::Unmetered,
         )
         .await
         .expect_err("a mismatch must refuse");

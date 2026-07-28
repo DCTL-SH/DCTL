@@ -38,7 +38,7 @@ pub(super) async fn get_to_path(b2: &B2Backend, key: &ObjectKey, dest: &Path) ->
     // Verify the committed length against the object's declared Content-Length so a
     // short-but-clean body is not atomically committed as if whole.
     let expected_len = streaming::content_length(&resp);
-    streaming::stream_to_file(resp, dest, expected_len).await
+    streaming::stream_to_file(resp, dest, expected_len, b2.meter.as_ref()).await
 }
 
 /// Send an authenticated download request (optionally ranged) and return the response

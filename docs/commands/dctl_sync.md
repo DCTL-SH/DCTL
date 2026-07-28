@@ -210,11 +210,10 @@ then sync that up.
 
 The refusals `copy` documents apply here unchanged, all exit **7** and all
 before anything is removed: a **plain write into a directory that holds a
-vault**, a file **above the 1 GiB whole-file limit** (the core is whole-buffer;
-streaming is `PLAN.md` §16.2), and **`--checksum`** against a plain object store,
-whose provider checksum is not the plaintext hash a vault records. The oversized-file refusal is fatal, so under
-`--delete-before` the deletions have already happened when it fires, and under
-`--delete-after` none of them have.
+vault**, and **`--checksum`** against a plain object store, whose provider
+checksum is not the plaintext hash a vault records. A size ceiling used to be
+among them and no longer is: the engine streams, so there is no size at which a
+transfer stops fitting in memory.
 
 `--immutable` **is** honoured, at plan time, and it is strictest here: `sync` is
 the verb that both replaces and removes, so a plan containing **any** `update` or
@@ -434,7 +433,7 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 3 | `dir_not_found` | `SOURCE` does not exist. A missing `DEST` is not an error. |
 | 5 | `temporary_error` | A cloud backend failed in a way worth retrying. `sync` addresses remotes — sealed and plain alike — so this is reachable wherever a cloud backend is actually contacted. A local-to-local sync does not produce it. |
 | 6 | `partial_failure` | The run finished with at least one failure. A failed deletion contributes to this and is **never** counted as a deletion in the summary — the "Deleted" number means files that are actually gone. |
-| 7 | `fatal_error` | Two or more local source files share one vault path once their names are normalised, refused before anything is read (see [../RESTORE_DRILL.md](../RESTORE_DRILL.md#the-sharp-edge-two-files-one-path)); both sides are remotes; a file exceeded the whole-file limit; `DEST` is a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; `--immutable` and the plan would replace or delete anything, which is refused before any file is touched. |
+| 7 | `fatal_error` | Two or more local source files share one vault path once their names are normalised, refused before anything is read (see [../RESTORE_DRILL.md](../RESTORE_DRILL.md#the-sharp-edge-two-files-one-path)); both sides are remotes; `DEST` is a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; `--immutable` and the plan would replace or delete anything, which is refused before any file is touched. |
 | 25 | `cancelled` | The confirmation was declined, or the run was interrupted with Ctrl-C. Nothing further was deleted. |
 
 **20** (`checksum_mismatch`), **21** (`integrity_failure`), **22**

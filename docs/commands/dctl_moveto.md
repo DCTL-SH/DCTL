@@ -148,10 +148,10 @@ and a plain-to-plain path needs an engine holding two backends at once. Neither
 is scheduled by `PLAN.md` §11.
 
 The family's refusals apply unchanged, all exit **7** and all before anything is
-deleted: a **plain write into a directory that holds a vault**, a file **above
-the 1 GiB whole-file limit** (the core is whole-buffer; streaming is `PLAN.md`
-§16.2), and **`--checksum`** against a plain object store, which cannot supply a
-plaintext hash.
+deleted: a **plain write into a directory that holds a vault**, and
+**`--checksum`** against a plain object store, which cannot supply a plaintext
+hash. A size ceiling used to be among them and no longer is: the engine streams,
+so there is no size at which a transfer stops fitting in memory.
 `--no-traverse` still skips the destination lookup, and therefore also skips the
 "`DEST` is an existing directory" refusal.
 
@@ -330,7 +330,7 @@ See [../EXIT_CODES.md](../EXIT_CODES.md) for the full contract.
 | 3 | `dir_not_found` | `SOURCE` does not exist. |
 | 5 | `temporary_error` | A cloud backend failed in a way worth retrying; the source is untouched. Reachable wherever a cloud backend is contacted: reading a plain `b2:`/`s3:`/`r2:` source, writing a plain object into one, or a vault whose store is one of them. |
 | 6 | `partial_failure` | A directory source finished with at least one file failing. A file that failed keeps its source; a file whose source removal failed exists twice, and the message names the side. |
-| 7 | `fatal_error` | The file exceeded the whole-file limit; `DEST` is inside a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and `DEST` already exists. Nothing was transferred and nothing was deleted. |
+| 7 | `fatal_error` | `DEST` is inside a local directory holding a vault; `--checksum` against a plain object store, which cannot supply a plaintext hash; both sides are remotes; `--immutable` and `DEST` already exists. Nothing was transferred and nothing was deleted. |
 | 20 | `checksum_mismatch` | The backend stored the wrong bytes. Nothing was committed and the source is untouched. Not reachable today: no `moveto` reaches a vault transfer, and a local write has no second party to disagree with. |
 | 21 | `integrity_failure` | `--verify sample`/`strict` could not authenticate what was written. The source is untouched; investigate before removing it by hand. Not reachable today, for the same reason as 20. |
 | 22 | `vault_locked` | No password was available, or the envelope did not unwrap. Nothing was transferred or deleted. |

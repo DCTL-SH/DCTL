@@ -122,7 +122,10 @@ impl Medium {
             "removing from the plain view"
         );
         let resolved = crate::remote::resolve::resolve(&spec, &config)?;
-        let backend = crate::remote::registry::build(&resolved, ctx.globals.links)?;
+        // Unmetered: a delete moves no body. Pacing it would charge a rate
+        // limit for bytes that never crossed the link.
+        let backend =
+            crate::remote::registry::build(&resolved, ctx.globals.links, dctl_store::unmetered())?;
         Ok(Self::Plain {
             source: PlainSource::new(Arc::clone(&backend)),
             backend,
@@ -252,7 +255,11 @@ impl Medium {
             Self::Vault { storage, .. } => {
                 let config = load(ctx)?;
                 let resolved = crate::remote::resolve::resolve(storage, &config)?;
-                crate::remote::registry::build(&resolved, ctx.globals.links)
+                crate::remote::registry::build(
+                    &resolved,
+                    ctx.globals.links,
+                    dctl_store::unmetered(),
+                )
             }
         }
     }

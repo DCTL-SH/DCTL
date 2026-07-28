@@ -81,6 +81,11 @@ fn parse_src_modified(value: &str) -> Option<i64> {
 pub(crate) struct S3Client {
     http: reqwest::Client,
     config: S3Config,
+    /// Who is told about bytes as they cross the link, part by part and body
+    /// chunk by body chunk. See [`crate::meter`]. Held here rather than on the
+    /// two backends because S3 and R2 differ in an endpoint and a region and in
+    /// nothing else that moves bytes — one field, one pair of loops, one answer.
+    meter: std::sync::Arc<dyn crate::meter::Meter>,
 }
 
 impl S3Client {
@@ -88,7 +93,14 @@ impl S3Client {
         Ok(Self {
             http: crate::tls::post_quantum_client()?,
             config,
+            meter: crate::meter::unmetered(),
         })
+    }
+
+    /// The same client, declaring every part and body chunk it moves.
+    pub(crate) fn with_meter(mut self, meter: std::sync::Arc<dyn crate::meter::Meter>) -> Self {
+        self.meter = meter;
+        self
     }
 
     // ---- signing + transport -------------------------------------------------
@@ -194,6 +206,10 @@ impl S3Client {
         if !streaming::use_multipart(data.len() as u64, self.config.part_size()) {
             self.put_single(key.as_str(), data.clone(), modified)
                 .await?;
+            // One window, because a single-shot `PUT` *is* one window. The
+            // multipart arm charges per part inside its own loop, so charging
+            // here as well would bill the object twice.
+            crate::meter::charge(self.meter.as_ref(), data.len() as u64).await;
         } else {
             self.put_multipart(key.as_str(), &data, modified).await?;
         }
@@ -308,6 +324,9 @@ impl S3Client {
                 "<Part><PartNumber>{}</PartNumber><ETag>{etag}</ETag></Part>",
                 span.number
             ));
+            // Charged once the part is acknowledged: a retried part used the
+            // link on every attempt and is charged for every attempt.
+            crate::meter::charge(self.meter.as_ref(), span.len).await;
         }
         parts_xml.push_str("</CompleteMultipartUpload>");
 
@@ -455,6 +474,9 @@ impl S3Client {
                 "<Part><PartNumber>{}</PartNumber><ETag>{etag}</ETag></Part>",
                 span.number
             ));
+            // Charged once the part is acknowledged: a retried part used the
+            // link on every attempt and is charged for every attempt.
+            crate::meter::charge(self.meter.as_ref(), want as u64).await;
         }
         parts_xml.push_str("</CompleteMultipartUpload>");
 
@@ -529,7 +551,9 @@ impl S3Client {
     }
 
     pub(crate) async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
-        self.fetch(key, None).await
+        let bytes = self.fetch(key, None).await?;
+        crate::meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
+        Ok(bytes)
     }
 
     pub(crate) async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Bytes> {
@@ -537,7 +561,9 @@ impl S3Client {
             Some(len) => format!("bytes={}-{}", range.offset, range.offset + len - 1),
             None => format!("bytes={}-", range.offset),
         };
-        self.fetch(key, Some(header)).await
+        let bytes = self.fetch(key, Some(header)).await?;
+        crate::meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
+        Ok(bytes)
     }
 
     /// Streaming download (the S3-family override of
@@ -549,7 +575,7 @@ impl S3Client {
         // Verify the committed length against the object's declared Content-Length so a
         // short-but-clean body is not atomically committed as if whole.
         let expected_len = streaming::content_length(&resp);
-        streaming::stream_to_file(resp, dest, expected_len).await
+        streaming::stream_to_file(resp, dest, expected_len, self.meter.as_ref()).await
     }
 
     async fn fetch(&self, key: &ObjectKey, range: Option<String>) -> Result<Bytes> {

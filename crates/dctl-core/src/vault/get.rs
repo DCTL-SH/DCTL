@@ -11,18 +11,15 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use dctl_crypto::constants::{FILE_ID_LEN, KEM_ID_HYBRID, KEM_ID_NONE, KEY_LEN, OBJECT_HEAD_LEN};
-use dctl_crypto::object::{self, Metadata};
+use dctl_crypto::object::{self};
 use dctl_crypto::{kem, path};
-use dctl_store::{ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, StoreError};
+use dctl_store::{ContentHash, ObjectKey, StoreError};
 use zeroize::Zeroizing;
 
 use super::put_stream::io_err;
 use super::{Vault, layout};
 use crate::error::{CoreError, Result};
 use crate::range::{self, RangeReader};
-
-/// Working-buffer size for the streaming decrypt-to-disk copy.
-const STREAM_BUF_LEN: usize = 128 * 1024;
 
 impl Vault {
     /// Resolve a normalized path to its backend object key, **without side effects**.
@@ -155,134 +152,41 @@ impl Vault {
             Arc::clone(&self.backend),
             key,
             header,
+            prefix.slice(..header_len),
             path,
         ))
     }
 
-    /// Fetch and decrypt the file at `logical_path` straight to the local file `dest`, at
-    /// **`O(chunk_size)` memory end-to-end** — the constant-memory read that mirrors
-    /// [`put_file_from_path`](Vault::put_file_from_path). Use this for huge media where
-    /// [`get_file`](Vault::get_file)'s whole-plaintext `Vec` would blow up RAM.
+    /// Verify the file at `path` end to end **without materializing it** — neither its
+    /// plaintext nor its ciphertext.
     ///
-    /// Pipeline: resolve `logical_path` → object key (local index, else the authoritative
-    /// §5 name record, so it works cross-device with only the password) → stream the
-    /// object to a temp file via [`get_to_path`](dctl_store::Backend::get_to_path) → open
-    /// that temp with [`object::open_reader`], streaming plaintext into a temp sibling of
-    /// `dest`, one chunk at a time. Memory is bounded by the chunk buffer plus the bounded
-    /// object header; nothing ever holds the whole file. (On the `LocalFs` backend the
-    /// object download is itself streamed; the remote backends still buffer that one stage
-    /// pending their streaming-download follow-up, but the decrypt/verify/write stage is
-    /// always `O(chunk_size)`.)
+    /// Streams the object through [`stream_file_to`](Vault::stream_file_to) into a sink, so
+    /// every chunk's Poly1305 tag is checked and the assembled plaintext is compared against
+    /// the object's own DEK-authenticated `content_blake3`, at
+    /// `O(STREAM_WINDOW_CHUNKS x chunk_size)` memory whatever the object weighs — then asks
+    /// the backend how long the stored object actually is and holds it to the length its
+    /// authenticated geometry implies.
     ///
-    /// **Integrity.** `open_reader` verifies every chunk's Poly1305 tag (and the footer);
-    /// on top of that this folds a streaming BLAKE3 over the emitted plaintext and compares
-    /// it to the object's own DEK-authenticated `content_blake3`, exactly as `get_file`
-    /// does — a mismatch removes the temp and returns [`CoreError::Integrity`].
+    /// **This used to buffer the whole object.** The plaintext was streamed to a sink, so
+    /// the claim "O(chunk_size) plaintext memory" was true and the *measurement* still
+    /// tracked the file exactly: `Backend::get` pulled the entire ciphertext first, and a
+    /// scrub of a 1 GiB object peaked at 1040 MiB. A verify that cannot run on a 10 GB
+    /// object is not a verify, so both halves are bounded now.
     ///
-    /// **Atomicity.** Plaintext is written to a temp sibling of `dest`, fsynced, and only
-    /// renamed onto `dest` once it fully decrypts and its hash matches — so a tamper,
-    /// truncation, or I/O error leaves **no** `dest` file (and never a partial one).
-    #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
-    pub async fn get_file_to_path(&self, logical_path: &str, dest: &Path) -> Result<()> {
-        let path = path::normalize(logical_path)?;
-        let object_key = self
-            .lookup_object_key(&path)
-            .await?
-            .ok_or_else(|| CoreError::NotFound(path.clone()))?;
-        tracing::debug!(object = %object_key, "resolved object key");
-        let key = ObjectKey::new(object_key);
-
-        // Peek the fixed 68-byte head (bounded range read) to route on `kem_id` without
-        // buffering the whole object.
-        let head_peek = self
-            .backend
-            .get_range(&key, ByteRange::new(0, Some(OBJECT_HEAD_LEN as u64)))
-            .await?;
-        let kem_id = object::parse_head(head_peek.as_ref())?.kem_id;
-
-        let err_task = |e: tokio::task::JoinError| {
-            CoreError::Store(StoreError::Backend(format!(
-                "streaming read task failed: {e}"
-            )))
-        };
-
-        match kem_id {
-            // `kem_id=0`: constant-memory streaming decrypt straight to `dest`.
-            KEM_ID_NONE => {
-                let obj_temp = tempfile::NamedTempFile::new().map_err(io_err)?;
-                self.backend.get_to_path(&key, obj_temp.path()).await?;
-                // A transient owned copy for the blocking task: `LockedSecret` is not
-                // `Clone` (duplicating a pinned secret must be explicit), so the root is
-                // copied into a `Zeroizing<[u8; 32]>` that wipes when the task returns.
-                let root_key = Zeroizing::new(*self.root()?);
-                let dest = dest.to_path_buf();
-                let err_path = path.clone();
-                tokio::task::spawn_blocking(move || -> Result<()> {
-                    let out = decrypt_object_to_dest(&root_key, obj_temp.path(), &dest, &err_path);
-                    drop(obj_temp); // remove the temp only after decrypt finished with it
-                    out
-                })
-                .await
-                .map_err(err_task)??;
-            }
-            // `kem_id=1` (§12): recover `KW` here in async (inline recipient first, then the
-            // §12.6 grant sidecar — the first successful recovery wins), then decode + write
-            // off the runtime. Buffered (whole object in memory); constant-memory streaming
-            // for `kem_id=1` is a follow-up. Only `KW` — a per-object secret — crosses into
-            // the blocking task, never the recipient private key.
-            KEM_ID_HYBRID => {
-                let object = self.backend.get(&key).await?;
-                let kw = self.recover_object_kw(&object).await?;
-                let dest = dest.to_path_buf();
-                let err_path = path.clone();
-                tokio::task::spawn_blocking(move || -> Result<()> {
-                    let opened = object::open_with_kw(&kw, object.as_ref())?;
-                    let expected = opened.metadata.as_ref().map(|m| &m.content_blake3);
-                    write_plaintext_atomic(opened.plaintext.as_slice(), expected, &dest, &err_path)
-                })
-                .await
-                .map_err(err_task)??;
-            }
-            other => return Err(unsupported_kem_id(other)),
-        }
-        tracing::info!(%path, "file decrypted to destination");
-        Ok(())
-    }
-
-    /// Verify the file at `path` end-to-end **without materializing its plaintext**:
-    /// stream-decrypt to a sink so every chunk tag + footer is checked at O(chunk_size)
-    /// plaintext memory (§9.1). A multi-GB object is verified without a multi-GB buffer.
+    /// **What runs, precisely** — every check the buffered opener ran, and one it did not.
+    /// Every chunk tag, over an AAD binding the authenticated head and the chunk index. The
+    /// whole-plaintext BLAKE3 against the value sealed in the §4 metadata. §3's trailing
+    /// footer, folded from the same ciphertext each window was decrypted from rather than
+    /// from a second pass over the object. And, new here, the object's stored length against
+    /// the length its authenticated geometry implies, which is what catches bytes appended
+    /// *past* the last chunk — a region the footer's own hash never reaches either.
     #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
     pub async fn verify_file(&self, path: &str) -> Result<()> {
-        let path = path::normalize(path)?;
-        let object_key = self
-            .lookup_object_key(&path)
-            .await?
-            .ok_or_else(|| CoreError::NotFound(path.clone()))?;
-        let object = self.backend.get(&ObjectKey::new(object_key)).await?;
-        let head = object::parse_head(&object)?;
-        match head.kem_id {
-            // `kem_id=0`: stream-decrypt to a sink at O(chunk_size) — no plaintext buffer.
-            KEM_ID_NONE => {
-                let mut sink = std::io::sink();
-                object::open_stream(self.root()?, &object, &mut sink)?;
-            }
-            // `kem_id=1` (§12): recover `KW` (inline recipient first, then the §12.6 grant
-            // sidecar), then the buffered opener verifies every chunk tag, the footer, and
-            // `meta.size == plaintext_len`; we additionally re-check the object's own
-            // `content_blake3`. Constant-memory streaming verify for `kem_id=1` is a follow-up.
-            KEM_ID_HYBRID => {
-                let kw = self.recover_object_kw(&object).await?;
-                let opened = object::open_with_kw(&kw, &object)?;
-                if let Some(meta) = &opened.metadata {
-                    let got = ContentHash::blake3(opened.plaintext.as_slice());
-                    if got.bytes[..] != meta.content_blake3[..] {
-                        return Err(CoreError::Integrity(path.clone()));
-                    }
-                }
-            }
-            other => return Err(unsupported_kem_id(other)),
-        }
+        let normalized = path::normalize(path)?;
+        let reader = self.open_range_reader(&normalized).await?;
+        reader.confirm_object_length().await?;
+        self.stream_reader_to(&reader, &normalized, &mut tokio::io::sink())
+            .await?;
         Ok(())
     }
 
@@ -493,98 +397,8 @@ fn write_plaintext_atomic(
     Ok(())
 }
 
-/// Decrypt the temp object at `obj_path` under `root_key` straight to `dest`, atomically
-/// and at constant memory. Streams plaintext into a temp sibling of `dest` (so the final
-/// result is published by one rename), folding a BLAKE3 over the output to check it
-/// against the object's own DEK-authenticated `content_blake3`. Any decrypt/integrity/I/O
-/// failure removes the temp and leaves no `dest` file. `nfc_path` names the file only in
-/// the [`CoreError::Integrity`] message.
-fn decrypt_object_to_dest(
-    root_key: &[u8; 32],
-    obj_path: &Path,
-    dest: &Path,
-    nfc_path: &str,
-) -> Result<()> {
-    let mut obj = std::fs::File::open(obj_path).map_err(io_err)?;
-    if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(io_err)?;
-    }
-    let dest_tmp = temp_sibling(dest);
-
-    // Stream-decrypt object → dest_tmp, hashing the plaintext as it is written.
-    let mut hasher = Hasher::new(HashAlgo::Blake3);
-    let metadata = match stream_decrypt_to_tmp(root_key, &mut obj, &dest_tmp, &mut hasher) {
-        Ok(md) => md,
-        Err(e) => {
-            let _ = std::fs::remove_file(&dest_tmp);
-            return Err(e);
-        }
-    };
-
-    // Integrity: the streamed plaintext hash must equal the object's own content hash.
-    if let Some(md) = &metadata {
-        let computed = hasher.finalize();
-        if computed.bytes[..] != md.content_blake3[..] {
-            let _ = std::fs::remove_file(&dest_tmp);
-            tracing::warn!(path = %nfc_path, "plaintext hash mismatch — integrity failure");
-            return Err(CoreError::Integrity(nfc_path.to_string()));
-        }
-    }
-
-    // Publish atomically; nothing ever exposed a partial `dest`.
-    if let Err(e) = std::fs::rename(&dest_tmp, dest) {
-        let _ = std::fs::remove_file(&dest_tmp);
-        return Err(io_err(e));
-    }
-    Ok(())
-}
-
-/// Open `obj` with [`object::open_reader`], writing plaintext to a fresh `dest_tmp` while
-/// folding every emitted byte into `hasher`, then flush + fsync. Returns the object's
-/// metadata. Kept separate from [`decrypt_object_to_dest`] so the `&mut hasher` borrow
-/// ends here, leaving the caller free to `finalize` it.
-fn stream_decrypt_to_tmp(
-    root_key: &[u8; 32],
-    obj: &mut std::fs::File,
-    dest_tmp: &Path,
-    hasher: &mut Hasher,
-) -> Result<Option<Metadata>> {
-    let file = std::fs::File::create(dest_tmp).map_err(io_err)?;
-    let mut writer = HashingWriter {
-        inner: std::io::BufWriter::with_capacity(STREAM_BUF_LEN, file),
-        hasher,
-    };
-    let metadata = object::open_reader(root_key, obj, &mut writer)?;
-    let file = writer
-        .inner
-        .into_inner()
-        .map_err(|e| io_err(e.into_error()))?;
-    file.sync_all().map_err(io_err)?;
-    Ok(metadata)
-}
-
 /// A unique temp sibling of `dest` in the same directory, so the final publish is an
 /// atomic same-filesystem rename.
 fn temp_sibling(dest: &Path) -> PathBuf {
     dctl_store::staging::staging_sibling(dest)
-}
-
-/// A [`Write`] tee that folds every written byte into a [`Hasher`] before passing it to
-/// the inner writer — lets the streaming decrypt compute the plaintext BLAKE3 in the same
-/// pass it writes `dest`, with no extra buffer and no second read.
-struct HashingWriter<'a, W: Write> {
-    inner: W,
-    hasher: &'a mut Hasher,
-}
-
-impl<W: Write> Write for HashingWriter<'_, W> {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.inner.write_all(buf)?;
-        self.hasher.update(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.inner.flush()
-    }
 }

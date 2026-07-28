@@ -26,10 +26,10 @@ offers two ways to store an object: `put_file`, which takes the whole plaintext 
 a buffer, and `put_file_from_path`, which seals straight from disk in
 `O(chunk_size)` memory. A pipe is neither, so one of them has to be manufactured,
 and `rcat` spools the stream to a temporary file and uses the second. The
-alternative — buffering in memory and refusing past the transfer engine's
-whole-file limit — would put a hard ceiling on the one command whose entire
-purpose is a stream nobody measured, and an operator would only discover the
-ceiling *after* the producer had run. Spooling moves the ceiling to free space in
+alternative — buffering the stream in memory and refusing past a fixed ceiling,
+the way the transfer engine did before it learned to stream — would put a hard
+ceiling on the one command whose entire purpose is a stream nobody measured, and
+an operator would only discover the ceiling *after* the producer had run. Spooling moves the ceiling to free space in
 the temporary directory, which is a resource an operator can see, measure and
 change.
 

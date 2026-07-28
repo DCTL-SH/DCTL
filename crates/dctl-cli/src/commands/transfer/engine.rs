@@ -120,29 +120,41 @@
 //!
 //! ## Memory
 //!
-//! `Vault::put_file`, `get_file` and `Backend::put` take and return whole
-//! buffers, so one file's contents are resident while it moves. Files above
-//! [`WHOLE_FILE_LIMIT`](crate::constants::TRANSFER_WHOLE_FILE_LIMIT) are refused
-//! rather than attempted: a 50 GB video would otherwise take the machine down,
-//! and `PLAN.md` §16.2 is explicit that memory must stay O(concurrency). The
-//! limit disappears when the streaming engine lands.
+//! **Nothing here is ever the size of a file.** Every direction moves bytes in
+//! bounded windows — a window in, transformed, a window out, dropped — so peak
+//! memory is set by
+//! [`STREAM_WINDOW_CHUNKS`](dctl_core::constants::STREAM_WINDOW_CHUNKS) times
+//! the format's chunk size, and does not move when the object grows.
+//!
+//! It was not always so, and the numbers are worth keeping. Measured on the
+//! release binary under a hard cgroup cap: `copy` of a 1 GiB object into a vault
+//! peaked at **3090 MiB** of resident memory and out of one at **2064 MiB**,
+//! both dead straight in the object's size, and a 256 MiB object could not be
+//! moved inside a 512 MiB cap at all. The cause was this file: the `read` stage
+//! materialised the whole plaintext into [`Staged`], the `upload` stage handed
+//! that whole buffer to `Vault::put_file` or `Backend::put`, and `--verify` read
+//! both sides whole a second time to compare them. `dctl-core` had grown
+//! constant-memory paths for all of it and nothing in the transfer commands
+//! called them.
+//!
+//! They are called now, and the consequence is visible one level up: the
+//! one-gibibyte refusal this engine used to carry is gone, because there is no
+//! longer a size at which a transfer stops fitting in memory.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
-use dctl_core::Modified;
-use dctl_store::ContentHash;
-use zeroize::Zeroizing;
+use dctl_core::{Modified, Streamed};
 
 use crate::addressing;
 use crate::audit::record::Direction as AuditDirection;
 use crate::cli::VerifyMode;
 use crate::commands::pipeline::command_name;
 use crate::constants::{
-    REMOTE_SEPARATOR, TRANSFER_ENGINE_HINT, TRANSFER_REMOTE_TO_REMOTE_FEATURE,
-    TRANSFER_REMOTE_TO_REMOTE_HINT, TRANSFER_SEALED_REMOTE_TO_REMOTE_FEATURE,
-    TRANSFER_SEALED_REMOTE_TO_REMOTE_HINT, TRANSFER_WHOLE_FILE_LIMIT,
+    REMOTE_SEPARATOR, TRANSFER_REMOTE_TO_REMOTE_FEATURE, TRANSFER_REMOTE_TO_REMOTE_HINT,
+    TRANSFER_SEALED_REMOTE_TO_REMOTE_FEATURE, TRANSFER_SEALED_REMOTE_TO_REMOTE_HINT,
+    TRANSFER_STREAM_WINDOW_BYTES,
 };
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
@@ -249,15 +261,15 @@ pub struct Engine {
     reap_target: ReapTarget,
     /// Files in flight, keyed by the entry's destination path.
     ///
-    /// The stage trait takes `&self`, and a file's contents have to survive from
-    /// `read` to `upload`, so they live here rather than in a local. Entries are
-    /// removed as soon as they are consumed: holding a file's plaintext one
-    /// stage longer than necessary is exactly the kind of lifetime a crypto tool
-    /// should not have.
+    /// The stage trait takes `&self`, and what `read` established has to survive
+    /// to `upload`, so it lives here rather than in a local. Entries are removed
+    /// as soon as they are consumed, because a map that only grows is a memory
+    /// leak on a ten-million-file run.
     ///
-    /// A [`Staged`] rather than the bytes alone, because the source's
-    /// modification time has to make the same journey — see that module for what
-    /// went wrong while it did not.
+    /// This used to hold every in-flight file's **entire plaintext**, which is
+    /// where the engine's memory profile came from. A [`Staged`] is now a length
+    /// and a timestamp; see that module for what it carries and why the
+    /// timestamp may never be dropped from it.
     staged: Mutex<HashMap<String, Staged>>,
     /// BLAKE3 of each entry's plaintext, keyed by destination path, waiting to
     /// be put in that file's audit record.
@@ -269,17 +281,28 @@ pub struct Engine {
     /// read, because a map that only grows is a memory leak on a
     /// ten-million-file run.
     hashes: Mutex<HashMap<String, String>>,
+    /// This run's pace, for the direction that has no backend to install it on.
+    ///
+    /// Every other direction moves its bytes through a `dctl_store::Backend`,
+    /// which is built with the meter already installed and charges it from
+    /// inside its own copy loops. A filesystem-to-filesystem copy has no backend
+    /// on either side — that is what `LocalOnly` *means* — so its copy loop is
+    /// [`copy_durably`], here, and it has to be handed the meter directly.
+    ///
+    /// Without this, `--bwlimit` silently stopped applying to `dctl copy ./a
+    /// ./b` the moment pacing moved from the pipeline into the storage layer. A
+    /// flag that quietly covers four of five directions is worse than one that
+    /// covers none, because nothing tells the operator which they got.
+    meter: std::sync::Arc<dyn dctl_store::Meter>,
 }
 
 impl std::fmt::Debug for Engine {
-    /// Written by hand so neither the staged plaintext nor the unlocked vault
-    /// can be rendered.
+    /// Written by hand so the unlocked vault cannot be rendered.
     ///
-    /// A derived implementation would print every in-flight file's contents —
-    /// `Zeroizing<Vec<u8>>` forwards `Debug` to the bytes it wraps, and wiping
-    /// on drop does nothing about a copy already formatted into a panic message
-    /// or a log line. Only the count is reported, which is all a diagnostic
-    /// actually needs.
+    /// A derived implementation would print the session. It would once also have
+    /// printed every in-flight file's contents, which is why this was written by
+    /// hand in the first place; nothing in flight is plaintext any more, and the
+    /// count is still all a diagnostic actually needs.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let staged = self.staged.lock().map(|s| s.len());
         f.debug_struct("Engine")
@@ -438,6 +461,7 @@ impl Engine {
             reap_target,
             staged: Mutex::new(HashMap::new()),
             hashes: Mutex::new(HashMap::new()),
+            meter: ctx.limits.meter(),
         })
     }
 
@@ -490,35 +514,6 @@ impl Engine {
         logical::from_logical(&self.dest_root, relative)
     }
 
-    /// Reject a file too large to hold in memory.
-    ///
-    /// Refusing beforehand is the whole point: attempting it would either be
-    /// killed by the OOM killer or swap the machine to a standstill, and either
-    /// way the user learns nothing actionable.
-    fn check_size(&self, entry: &PlanEntry) -> Result<()> {
-        // `is_some_and`: an entry whose size was never recorded cannot be
-        // rejected on size, and refusing it on a guess would stop a download of
-        // a rebuilt vault dead. The limit still bites where it can be applied,
-        // and the read itself will fail loudly if the object really is too big
-        // to hold — which is a worse error message, and the honest one.
-        if entry
-            .size
-            .is_some_and(|size| size > TRANSFER_WHOLE_FILE_LIMIT)
-        {
-            return Err(CliError::new(
-                ExitCode::FatalError,
-                format!(
-                    "'{}' is {} bytes, above the {} byte whole-file limit",
-                    entry.source,
-                    entry.size.unwrap_or_default(),
-                    TRANSFER_WHOLE_FILE_LIMIT
-                ),
-            )
-            .with_hint(TRANSFER_ENGINE_HINT));
-        }
-        Ok(())
-    }
-
     /// Take an entry's staged file.
     fn take_staged(&self, key: &str) -> Result<Staged> {
         self.staged
@@ -568,15 +563,20 @@ impl Engine {
 
     /// Confirm a stored object still hashes to what was written.
     ///
-    /// Shared by both plain directions because it is one question — "are the
-    /// bytes at rest the bytes we sent?" — and a second spelling of it would
-    /// eventually compare something subtly different on one side.
+    /// Shared by every direction because it is one question — "are the bytes at
+    /// rest the bytes we sent?" — and a second spelling of it would eventually
+    /// compare something subtly different on one side.
+    ///
+    /// Takes a **digest** rather than the bytes. Handing this function a buffer
+    /// is what made `--verify` cost a whole extra copy of the file in memory on
+    /// three of the four directions that use it; every caller now folds its
+    /// digest in bounded windows and passes the result.
     ///
     /// An *absent* record is a refusal, not a pass. It means the digest could
     /// not be kept (a poisoned lock, i.e. a panic elsewhere in this process), so
     /// nothing can be compared, and reporting a file verified on the strength of
     /// a check that did not happen is the one thing `--verify` must never do.
-    fn confirm(&self, stored: &[u8], key: &str, subject: &str) -> Result<()> {
+    fn confirm(&self, stored: &str, key: &str, subject: &str) -> Result<()> {
         let Some(expected) = self.recorded_hash(key) else {
             return Err(CliError::new(
                 ExitCode::IntegrityFailure,
@@ -589,7 +589,7 @@ impl Engine {
             ));
         };
 
-        if ContentHash::blake3(stored).hex() == expected {
+        if stored == expected {
             return Ok(());
         }
 
@@ -605,23 +605,24 @@ impl Engine {
 }
 
 impl StageDriver for Engine {
-    /// Step 1 — obtain the contents, **and the time they were last changed**.
+    /// Step 1 — establish what has to move, **and the time it was last
+    /// changed**.
     ///
-    /// For either upload that means reading the source file. For a *sealed*
-    /// download it means fetching and authenticating the object, which
-    /// `Vault::get_file` does together (a failed tag is an error, never returned
-    /// data). For a *plain* download there is nothing to authenticate — the
-    /// object was stored as it stands — so it is fetched as it stands, and the
-    /// difference in what can be promised is why the two are separate arms
-    /// rather than one call behind a shared name.
+    /// This stage used to *be* the transfer: it pulled the whole file into
+    /// memory and left `upload` to hand the buffer on. It no longer touches a
+    /// byte of content. Bytes are moved by [`StageDriver::upload`] in bounded
+    /// windows, straight from source to destination, because a stage boundary
+    /// that a whole file has to survive is a stage boundary that costs a whole
+    /// file of RAM.
     ///
-    /// Every arm also answers *when the content last changed*, because that fact
-    /// belongs to the content and the destination has to record it — see
-    /// [`super::staged`]. Each does it from the cheapest place that can answer
-    /// truthfully: a local file is asked through the same handle its bytes were
-    /// read from, a vault object carries the time in its index row, and a plain
-    /// object carries the time the *listing* reported for it, which is the same
-    /// number the comparison used to decide this file had to move.
+    /// What is established here is the fact that cannot be recovered later:
+    /// *when the content last changed*. It belongs to the content and the
+    /// destination has to record it — see [`super::staged`] — and each arm takes
+    /// it from the cheapest place that can answer truthfully. A local file is
+    /// asked through an open handle, a vault object carries the time in its
+    /// index row, and a plain object carries the time the *listing* reported,
+    /// which is the same number the comparison used to decide this file had to
+    /// move.
     ///
     /// That last one used to be [`Modified::Unknown`], because
     /// [`crate::remote::PlainRemote::get`] returns bytes and nothing else. The
@@ -632,23 +633,17 @@ impl StageDriver for Engine {
     /// extra round trip; asking the provider a second time would cost one request
     /// per file per run.
     async fn read(&self, entry: &PlanEntry) -> Result<()> {
-        self.check_size(entry)?;
-
         let staged = match self.direction {
             Direction::Upload | Direction::PlainUpload | Direction::LocalOnly => {
                 let path = self.source_path(&entry.source);
-                read_local(&path).await?
+                describe_local(&path).await?
             }
             Direction::Download => {
                 let path = self.sealed_path(&entry.source);
                 let vault = self.vault()?;
-                let bytes = vault.get_file(&path).await?;
-                Staged::new(bytes, recorded_modification(vault, &path)?)
+                Staged::new(recorded_modification(vault, &path)?)
             }
-            Direction::PlainDownload => Staged::new(
-                self.plain()?.get(&entry.source).await?,
-                planned_modification(entry),
-            ),
+            Direction::PlainDownload => Staged::new(planned_modification(entry)),
         };
 
         self.put_staged(&entry.dest, staged)
@@ -664,7 +659,14 @@ impl StageDriver for Engine {
         Ok(())
     }
 
-    /// Steps 3–6 — the verified write and the durable commit.
+    /// Steps 3–6 — the verified write and the durable commit, in bounded
+    /// windows.
+    ///
+    /// **This is where every byte of a transfer moves**, and it moves without
+    /// any of it being held: each arm is a streaming call that reads a window,
+    /// transforms it, writes it and drops it. Nothing here allocates in
+    /// proportion to the file, which is why the engine no longer needs — and no
+    /// longer has — a size above which it refuses.
     ///
     /// These are one operation in `dctl-core`, and that is a stronger guarantee
     /// than performing them separately: there is no window in which bytes are
@@ -677,20 +679,13 @@ impl StageDriver for Engine {
     /// kind of destination was named.
     async fn upload(&self, entry: &PlanEntry) -> Result<u64> {
         let staged = self.take_staged(&entry.dest)?;
-        let written = staged.len();
-        let bytes = &staged.bytes;
 
-        // Hashed here, where the plaintext is already resident, rather than by
-        // re-reading the file afterwards: a second read would double the I/O and
-        // could hash something other than what was stored if the source changed
-        // underneath the run. This is the digest the audit record carries.
-        self.note_hash(&entry.dest, ContentHash::blake3(bytes).hex());
-
-        match self.direction {
+        let moved = match self.direction {
             Direction::Upload => {
+                let source = self.source_path(&entry.source);
                 self.vault()?
-                    .put_file(&self.sealed_path(&entry.dest), bytes, staged.modified)
-                    .await?;
+                    .put_file_from_path(&self.sealed_path(&entry.dest), &source, staged.modified)
+                    .await?
             }
             // The source's own time goes with the bytes. There *is* somewhere to
             // put it — a local file's inode, an SFTP `SETSTAT`, B2's
@@ -699,20 +694,46 @@ impl StageDriver for Engine {
             // comparison found every file changed and `sync` re-uploaded the
             // whole dataset on every run.
             Direction::PlainUpload => {
+                let source = self.source_path(&entry.source);
                 self.plain()?
-                    .put(&entry.dest, bytes, staged.modified.into())
-                    .await?;
+                    .put_from_path(&entry.dest, &source, staged.modified.into())
+                    .await?
             }
-            Direction::Download | Direction::PlainDownload | Direction::LocalOnly => {
+            Direction::Download => {
                 let path = self.dest_path(&entry.dest);
-                if let Some(parent) = path.parent() {
-                    tokio::fs::create_dir_all(parent).await?;
-                }
-                write_durably(&path, bytes, staged.modified).await?;
+                let moved = self
+                    .vault()?
+                    .get_file_to_path(&self.sealed_path(&entry.source), &path)
+                    .await?;
+                // The vault publishes the file by rename; the source's own time
+                // is stamped on it afterwards, which is the one ordering a
+                // download can use. A run interrupted between the two leaves a
+                // complete, correct file carrying the wrong timestamp — which
+                // the next run re-transfers rather than wrongly skips.
+                crate::platform::times::stamp(&path, staged.modified).await?;
+                moved
             }
-        }
+            Direction::PlainDownload => {
+                let path = self.dest_path(&entry.dest);
+                self.plain()?
+                    .get_to_path(&entry.source, &path, staged.modified)
+                    .await?
+            }
+            Direction::LocalOnly => {
+                let source = self.source_path(&entry.source);
+                let path = self.dest_path(&entry.dest);
+                copy_durably(&source, &path, staged.modified, self.meter.as_ref()).await?
+            }
+        };
 
-        Ok(written)
+        // The digest the stream folded as the bytes went past, rather than one
+        // taken from a buffer that no longer exists or from a second read of the
+        // source. A second read would double the I/O on a large object and could
+        // hash something other than what was stored, if the source changed
+        // underneath the run. This is the digest the audit record carries.
+        self.note_hash(&entry.dest, moved.hash_hex());
+
+        Ok(moved.bytes)
     }
 
     /// Steps 4–5 — the extra assurance `--verify` asked for.
@@ -741,28 +762,26 @@ impl StageDriver for Engine {
                     )
                 }),
             (VerifyMode::Sample | VerifyMode::Strict, Direction::Download) => {
-                // Confirm what landed on disk matches what was decrypted.
+                // Confirm what landed on disk matches what was decrypted. Both
+                // sides are read in bounded windows: the file is stream-hashed
+                // from disk, and the vault side is the digest the download
+                // itself folded and already agreed with the object's own
+                // recorded hash. Reading both whole to compare them — which is
+                // what this did — cost two more copies of the file on top of
+                // the one the transfer had already paid for.
                 let path = self.dest_path(&entry.dest);
-                let written = tokio::fs::read(&path).await?;
-                let expected = self
-                    .vault()?
-                    .get_file(&self.sealed_path(&entry.source))
-                    .await?;
-                if ContentHash::blake3(&written) != ContentHash::blake3(&expected) {
-                    return Err(CliError::new(
-                        ExitCode::IntegrityFailure,
-                        format!("written file does not match the vault: {}", path.display()),
-                    ));
-                }
-                Ok(())
+                let written = hash_file(&path).await?;
+                self.confirm(&written, &entry.dest, "the file written")
             }
             (VerifyMode::Sample | VerifyMode::Strict, Direction::PlainUpload) => {
-                // The object is read back out of the store and re-hashed. The
-                // store already compared it once, on write; this is the second,
-                // independent look the flag was asked for, and on a provider it
-                // costs a full egress of the object — which is exactly why
-                // `PLAN.md` §12 makes it opt-in.
-                let stored = self.plain()?.get(&entry.dest).await?;
+                // The object is read back out of the store and re-hashed, in
+                // ranged windows rather than as one buffer. The store already
+                // compared it once, on write; this is the second, independent
+                // look the flag was asked for, and on a provider it costs a full
+                // egress of the object — which is exactly why `PLAN.md` §12
+                // makes it opt-in. It costs no *memory* proportional to the
+                // object, which is why a 10 GB upload can now be asked for it.
+                let stored = self.plain()?.hash_object(&entry.dest).await?;
                 self.confirm(&stored, &entry.dest, "the stored object")
             }
             (VerifyMode::Sample | VerifyMode::Strict, Direction::PlainDownload) => {
@@ -772,7 +791,7 @@ impl StageDriver for Engine {
                 // the remote had changed underneath the run, which is one of the
                 // things this is meant to notice.
                 let path = self.dest_path(&entry.dest);
-                let written = tokio::fs::read(&path).await?;
+                let written = hash_file(&path).await?;
                 self.confirm(&written, &entry.dest, "the file written")
             }
         }
@@ -988,39 +1007,33 @@ fn refuse_remote_to_remote(command: &str, sealed: bool) -> CliError {
     CliError::unimplemented(format!("{}: {feature}", command_name(command))).with_hint(hint)
 }
 
-/// Read a local source file, and the modification time of the bytes just read.
+/// Describe a local source file: how long it is, and when it last changed.
 ///
-/// One open handle answers both questions. A `tokio::fs::read` followed by a
-/// separate `stat` would be shorter and would occasionally lie: between the two
-/// calls the file can be rewritten, and the destination would then be given
-/// contents from before the edit stamped with the time of the edit — a
-/// combination the next run reads as "already up to date" and never corrects.
+/// **Opens the file rather than stat-ing the path**, and that is the whole
+/// reason this is not a one-line `tokio::fs::metadata`. A source that cannot be
+/// opened must fail *here*, in the stage whose job is to establish what will
+/// move, and not later inside a streaming write that has already begun — a
+/// permission error surfacing from the middle of an upload is one that has
+/// already created a destination object.
 ///
 /// A filesystem that will not report a modification time yields
 /// [`Modified::Unknown`] and the transfer proceeds: the destination records no
 /// time, every later run finds the two sides "not comparable" and re-transfers,
 /// which costs bandwidth. That is the direction to fail in.
-async fn read_local(path: &std::path::Path) -> Result<Staged> {
-    use tokio::io::AsyncReadExt as _;
-
+async fn describe_local(path: &std::path::Path) -> Result<Staged> {
     let at = |error: std::io::Error| {
         CliError::from(error).with_hint(format!("reading source {}", path.display()))
     };
 
-    let mut file = tokio::fs::File::open(path).await.map_err(at)?;
-    let metadata = file.metadata().await.ok();
-    let modified = metadata.as_ref().map_or(Modified::Unknown, Modified::of);
+    let file = tokio::fs::File::open(path).await.map_err(at)?;
+    let modified = file
+        .metadata()
+        .await
+        .ok()
+        .as_ref()
+        .map_or(Modified::Unknown, Modified::of);
 
-    // Sized from the same metadata, so the ordinary case reads into one
-    // allocation. That is not only speed: a `Vec` that grows leaves the old
-    // buffer's plaintext behind in freed memory, and `Zeroizing` wipes the
-    // buffer it still owns rather than every buffer this value ever had.
-    let mut bytes = Zeroizing::new(Vec::with_capacity(
-        metadata.map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(0)),
-    ));
-    file.read_to_end(&mut bytes).await.map_err(at)?;
-
-    Ok(Staged::new(bytes, modified))
+    Ok(Staged::new(modified))
 }
 
 /// The modification time the plan recorded for one entry's source.
@@ -1053,7 +1066,13 @@ fn recorded_modification(vault: &dctl_core::Vault, path: &str) -> Result<Modifie
         .map_or(Modified::Unknown, Modified::At))
 }
 
-/// Write a file and make both the data *and its name* durable before returning.
+/// Copy `source` onto `dest` in bounded windows, and make both the data *and its
+/// name* durable before returning.
+///
+/// The filesystem-to-filesystem transfer, and the one direction with no vault
+/// and no provider anywhere in it. It used to be handed a buffer holding the
+/// whole file; it now streams, so a `dctl copy` between two local directories
+/// costs a window rather than the largest file in the tree.
 ///
 /// Staging then renaming, rather than truncating in place, and syncing the
 /// containing directory afterwards. Every step is load-bearing:
@@ -1067,41 +1086,83 @@ fn recorded_modification(vault: &dctl_core::Vault, path: &str) -> Result<Modifie
 ///   the rename rather than after it. A destination is never briefly visible
 ///   carrying the wrong time, and a run interrupted between the two cannot leave
 ///   a published file whose timestamp says it was written now — which the next
-///   run would compare against the source and re-transfer.
-/// * `rename` publishes atomically.
-/// * **Syncing the parent directory** is what makes the rename itself durable.
-///   POSIX does not guarantee a rename survives a power cut until the containing
-///   directory is synced, and this is the step that matters most to `move`: data
-///   fsynced, source deleted, power lost before the directory entry lands, and
-///   the file is gone from both sides.
+///   run would compare against the source and re-copy forever.
+/// * The parent directory is synced last, so the *name* survives a crash too:
+///   without it the bytes are durable and the directory entry pointing at them
+///   is not, which for `move` means source deleted and destination gone.
 ///
-/// This mirrors `crate::commands::rcat::local`, which already does it correctly.
-async fn write_durably(path: &std::path::Path, bytes: &[u8], modified: Modified) -> Result<()> {
-    let staging = staging_path(path);
-
-    if let Err(error) = fill(&staging, bytes, modified).await {
-        let _ = tokio::fs::remove_file(&staging).await;
-        return Err(error);
+/// The digest is folded in the same pass that writes, so the audit record costs
+/// no second read of either side.
+async fn copy_durably(
+    source: &std::path::Path,
+    dest: &std::path::Path,
+    modified: Modified,
+    meter: &dyn dctl_store::Meter,
+) -> Result<Streamed> {
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
     }
+    let staging = staging_path(dest);
 
-    if let Err(error) = tokio::fs::rename(&staging, path).await {
+    let filled = fill_from(source, &staging, modified, meter).await;
+    let streamed = match filled {
+        Ok(streamed) => streamed,
+        Err(error) => {
+            let _ = tokio::fs::remove_file(&staging).await;
+            return Err(error);
+        }
+    };
+
+    if let Err(error) = tokio::fs::rename(&staging, dest).await {
         let _ = tokio::fs::remove_file(&staging).await;
         return Err(error.into());
     }
 
-    sync_parent_directory(path).await
+    sync_parent_directory(dest).await?;
+    Ok(streamed)
 }
 
-/// Fill the staging file with `bytes`, stamp it with `modified`, and put both on
-/// stable storage — leaving it ready to publish with a rename.
+/// Stream `source` into the staging file, stamp it with `modified`, and put both
+/// on stable storage — leaving it ready to publish with a rename.
 ///
 /// The order is the contract: the time is set *before* the `fsync`, so the
 /// metadata the sync flushes is the metadata the file is published with.
-async fn fill(staging: &std::path::Path, bytes: &[u8], modified: Modified) -> Result<()> {
+async fn fill_from(
+    source: &std::path::Path,
+    staging: &std::path::Path,
+    modified: Modified,
+    meter: &dyn dctl_store::Meter,
+) -> Result<Streamed> {
+    use tokio::io::AsyncReadExt as _;
     use tokio::io::AsyncWriteExt as _;
 
+    let mut reader = tokio::fs::File::open(source).await.map_err(|error| {
+        CliError::from(error).with_hint(format!("reading source {}", source.display()))
+    })?;
     let mut file = tokio::fs::File::create(staging).await?;
-    file.write_all(bytes).await?;
+
+    // One window, reused. This is the entire memory cost of a local-to-local
+    // copy of any file, of any size.
+    let mut window = vec![0_u8; TRANSFER_STREAM_WINDOW_BYTES];
+    let mut hasher = blake3::Hasher::new();
+    let mut bytes = 0_u64;
+    loop {
+        let read = reader.read(&mut window).await?;
+        if read == 0 {
+            break;
+        }
+        // `read` never exceeds the window's length, so the slice is always in
+        // range; the fallback keeps this file free of an indexing panic.
+        let Some(chunk) = window.get(..read) else {
+            break;
+        };
+        file.write_all(chunk).await?;
+        hasher.update(chunk);
+        bytes += read as u64;
+        // After the window has landed, never before: the charge is a measurement
+        // and the pause it buys belongs between this window and the next.
+        dctl_store::meter::charge(meter, read as u64).await;
+    }
 
     // Explicit, and not redundant with the `sync_all` below: `sync_all`
     // *consumes* the error a deferred write left behind without returning it.
@@ -1116,7 +1177,31 @@ async fn fill(staging: &std::path::Path, bytes: &[u8], modified: Modified) -> Re
     let file = crate::platform::times::stamp_open(file, modified).await?;
     file.sync_all().await?;
 
-    Ok(())
+    Ok(Streamed {
+        bytes,
+        plaintext_hash: *hasher.finalize().as_bytes(),
+    })
+}
+
+/// Hash a local file, streaming, off the runtime.
+///
+/// `--verify` compares what landed on disk against the digest the transfer
+/// folded on its way past. Reading the file back to do that is the point of the
+/// flag; reading it back *into memory* was not, and cost a second whole copy of
+/// every file it was asked about. [`super::checksum::of_file`] already streams —
+/// it is what `--checksum` compares two local trees with — so this is that
+/// function moved onto a blocking thread, where a synchronous read of a
+/// multi-gigabyte file belongs.
+async fn hash_file(path: &std::path::Path) -> Result<String> {
+    let owned = path.to_path_buf();
+    tokio::task::spawn_blocking(move || super::checksum::of_file(&owned))
+        .await
+        .map_err(|error| {
+            CliError::new(
+                ExitCode::FatalError,
+                format!("hashing task failed: {error}"),
+            )
+        })?
 }
 
 /// A staging path beside the destination, on the same filesystem so the rename
@@ -1183,6 +1268,7 @@ mod tests {
             reap_target: ReapTarget::Source,
             staged: Mutex::new(HashMap::new()),
             hashes: Mutex::new(HashMap::new()),
+            meter: dctl_store::unmetered(),
         }
     }
 
@@ -1201,6 +1287,7 @@ mod tests {
             reap_target: ReapTarget::Source,
             staged: Mutex::new(HashMap::new()),
             hashes: Mutex::new(HashMap::new()),
+            meter: dctl_store::unmetered(),
         }
     }
 
@@ -1212,42 +1299,44 @@ mod tests {
         assert_eq!(ReapTarget::Source.label(), "source");
     }
 
-    #[test]
-    fn oversized_files_are_refused_before_being_attempted() {
-        let engine = engine(Direction::Upload, PathBuf::from("/tmp"));
-        let error = engine
-            .check_size(&entry("big.mkv", "big.mkv", TRANSFER_WHOLE_FILE_LIMIT + 1))
-            .unwrap_err();
-        assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(error.message().contains("whole-file limit"));
-        assert!(error.hint().is_some());
+    #[tokio::test]
+    async fn the_read_stage_moves_no_bytes_and_therefore_holds_none() {
+        // The property the whole streaming change rests on, asserted where it can
+        // be asserted cheaply: `read` establishes facts, it does not transfer.
+        //
+        // A byte count is not observable from here, but the thing that made the
+        // old `read` cost a file *is*: it returned the contents, and `Staged` is
+        // the type it returned them in. A `Staged` that has no field capable of
+        // holding a file cannot be the place a file is held, and this test fails
+        // to compile the moment one is added back — which is the only assertion
+        // that stays true regardless of how the stage is later rewritten.
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("big.bin");
+        std::fs::write(&source, vec![7_u8; 4096]).unwrap();
+
+        let staged = describe_local(&source).await.unwrap();
+        assert_eq!(
+            std::mem::size_of_val(&staged),
+            std::mem::size_of::<Staged>(),
+            "a Staged is its own size and never the file's"
+        );
+        assert!(
+            std::mem::size_of::<Staged>() <= 16,
+            "the read stage has grown a buffer again: {} bytes",
+            std::mem::size_of::<Staged>()
+        );
     }
 
     #[test]
-    fn files_within_the_limit_are_accepted() {
-        let engine = engine(Direction::Upload, PathBuf::from("/tmp"));
-        assert!(engine.check_size(&entry("a", "a", 1024)).is_ok());
-    }
-
-    #[test]
-    fn staged_content_is_removed_once_consumed() {
-        // Plaintext must not outlive the stage that needs it.
+    fn staged_facts_are_removed_once_consumed() {
+        // A map that only grows is a memory leak on a ten-million-file run, and
+        // the timestamp must survive the journey or the destination invents one.
         let engine = engine(Direction::Upload, PathBuf::from("/tmp"));
         engine
-            .put_staged(
-                "a.txt",
-                Staged::new(
-                    Zeroizing::new(b"hello".to_vec()),
-                    Modified::At(1_700_000_000),
-                ),
-            )
+            .put_staged("a.txt", Staged::new(Modified::At(1_700_000_000)))
             .unwrap();
 
         let taken = engine.take_staged("a.txt").unwrap();
-        assert_eq!(taken.bytes.as_slice(), b"hello");
-        // The timestamp travels with the bytes or the destination invents one:
-        // taking the contents and leaving the time behind is the shape of the
-        // defect this pairing exists to prevent.
         assert_eq!(taken.modified, Modified::At(1_700_000_000));
 
         assert!(engine.take_staged("a.txt").is_err(), "taken twice");
@@ -1542,16 +1631,25 @@ mod tests {
         // in the directory except the destination itself.
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out.bin");
-        write_durably(&dest, b"durable payload", Modified::Unknown)
+        let source = dir.path().join("in.bin");
+        std::fs::write(&source, b"durable payload").unwrap();
+        let moved = copy_durably(&source, &dest, Modified::Unknown, &dctl_store::Unmetered)
             .await
             .unwrap();
 
         assert_eq!(std::fs::read(&dest).unwrap(), b"durable payload");
+        // The digest is folded by the copy itself, so the audit record never
+        // costs a second read of a file that may since have changed.
+        assert_eq!(moved.bytes, 15);
+        assert_eq!(
+            moved.hash_hex(),
+            blake3::hash(b"durable payload").to_hex().to_string()
+        );
         let leftovers: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(std::result::Result::ok)
             .map(|e| e.file_name().to_string_lossy().into_owned())
-            .filter(|name| name != "out.bin")
+            .filter(|name| name != "out.bin" && name != "in.bin")
             .collect();
         assert!(
             leftovers.is_empty(),
@@ -1564,8 +1662,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out.bin");
         std::fs::write(&dest, b"old contents that are longer").unwrap();
+        let source = dir.path().join("in.bin");
+        std::fs::write(&source, b"new").unwrap();
 
-        write_durably(&dest, b"new", Modified::Unknown)
+        copy_durably(&source, &dest, Modified::Unknown, &dctl_store::Unmetered)
             .await
             .unwrap();
         assert_eq!(std::fs::read(&dest).unwrap(), b"new");
@@ -1580,9 +1680,16 @@ mod tests {
         // already carrying the source's time.
         let dir = tempfile::tempdir().unwrap();
         let dest = dir.path().join("out.bin");
-        write_durably(&dest, b"aged", Modified::At(1_500_000_000))
-            .await
-            .unwrap();
+        let source = dir.path().join("in.bin");
+        std::fs::write(&source, b"aged").unwrap();
+        copy_durably(
+            &source,
+            &dest,
+            Modified::At(1_500_000_000),
+            &dctl_store::Unmetered,
+        )
+        .await
+        .unwrap();
 
         let modified = std::fs::metadata(&dest)
             .unwrap()
@@ -1604,7 +1711,9 @@ mod tests {
         let dest = dir.path().join("out.bin");
         let before = std::time::SystemTime::now() - std::time::Duration::from_secs(2);
 
-        write_durably(&dest, b"unknown", Modified::Unknown)
+        let source = dir.path().join("in.bin");
+        std::fs::write(&source, b"unknown").unwrap();
+        copy_durably(&source, &dest, Modified::Unknown, &dctl_store::Unmetered)
             .await
             .unwrap();
 

@@ -41,7 +41,7 @@
 
 use std::sync::Arc;
 
-use dctl_crypto::constants::OBJECT_HEADER_PROBE_LEN;
+use dctl_crypto::constants::{FOOTER_LEN, OBJECT_HEADER_PROBE_LEN};
 use dctl_crypto::object::{ChunkSpan, HeaderExtent, RangeHeader, header_extent};
 use dctl_store::{Backend, ByteRange, ObjectKey};
 use zeroize::Zeroizing;
@@ -85,6 +85,14 @@ pub struct RangeReader {
     backend: Arc<dyn Backend>,
     key: ObjectKey,
     header: RangeHeader,
+    /// The object's header bytes exactly as stored — `[0, payload_start)`.
+    ///
+    /// Kept, rather than re-derived from the parsed [`RangeHeader`], because §3's footer
+    /// is a BLAKE3 over *the bytes the writer emitted*, and a re-encoded header is a
+    /// second encoder that can drift from the one that wrote the object. It is the first
+    /// thing folded into a streaming footer check and it is already in hand: the header
+    /// probe that opened this reader fetched exactly these bytes.
+    header_bytes: bytes::Bytes,
     /// The logical path this reader was opened by — only ever used to name the file in an
     /// integrity error, since an operator cannot act on `o/3f9a…`.
     path: String,
@@ -99,12 +107,14 @@ impl RangeReader {
         backend: Arc<dyn Backend>,
         key: ObjectKey,
         header: RangeHeader,
+        header_bytes: bytes::Bytes,
         path: String,
     ) -> Self {
         Self {
             backend,
             key,
             header,
+            header_bytes,
             path,
         }
     }
@@ -183,11 +193,50 @@ impl RangeReader {
     /// # Errors
     /// As [`read_range`](RangeReader::read_range).
     pub async fn read_chunks(&self, first: u64, count: u64) -> Result<Vec<DecryptedChunk>> {
+        self.read_chunks_inner(first, count, None).await
+    }
+
+    /// [`read_chunks`](RangeReader::read_chunks), folding each window's **ciphertext**
+    /// into `footer` on its way past.
+    ///
+    /// The seam a constant-memory whole-object read needs. §3's footer is a BLAKE3 over
+    /// the header bytes followed by every chunk's ciphertext, and a reader that never
+    /// holds the object cannot hash it afterwards — but it does hold each window for as
+    /// long as it takes to decrypt it, which is exactly long enough. Folding here rather
+    /// than handing the ciphertext out keeps the buffer private and keeps the fold in the
+    /// one place that knows the fetch actually happened.
+    ///
+    /// Start the hasher with [`footer_fold`](RangeReader::footer_fold) and finish it with
+    /// [`confirm_footer`](RangeReader::confirm_footer); neither is optional if the object
+    /// declares a footer, because a fold that is started and never compared is a check
+    /// that reports success without running.
+    ///
+    /// # Errors
+    /// As [`read_chunks`](RangeReader::read_chunks).
+    pub async fn read_chunks_folding(
+        &self,
+        first: u64,
+        count: u64,
+        footer: &mut blake3::Hasher,
+    ) -> Result<Vec<DecryptedChunk>> {
+        self.read_chunks_inner(first, count, Some(footer)).await
+    }
+
+    /// The shared body of both, so the fetch and the decode cannot drift between them.
+    async fn read_chunks_inner(
+        &self,
+        first: u64,
+        count: u64,
+        footer: Option<&mut blake3::Hasher>,
+    ) -> Result<Vec<DecryptedChunk>> {
         let span = self.header.chunk_span(first, count)?;
         if span.is_empty() {
             return Ok(Vec::new());
         }
         let ciphertext = self.fetch(&span).await?;
+        if let Some(footer) = footer {
+            footer.update(&ciphertext);
+        }
 
         // The decoder hands each chunk over owned, so this is a move rather than a copy —
         // on a sequential read of a large file the difference is one extra copy of the
@@ -199,6 +248,110 @@ impl RangeReader {
                 Ok(())
             })?;
         Ok(chunks)
+    }
+
+    /// A footer hash seeded with this object's header bytes, or [`None`] if it declares
+    /// no footer.
+    ///
+    /// [`None`] is a real answer and not a failure: §3 makes the footer a flag, and an
+    /// object written without one is verified by its per-chunk tags alone. Returning an
+    /// `Option` rather than an always-on hasher is what stops a caller comparing a fold
+    /// against 32 bytes that are not there.
+    #[must_use]
+    pub fn footer_fold(&self) -> Option<blake3::Hasher> {
+        if !self.header.has_footer() {
+            return None;
+        }
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&self.header_bytes);
+        Some(hasher)
+    }
+
+    /// Compare a completed [`footer_fold`](RangeReader::footer_fold) against the object's
+    /// stored footer, in one bounded ranged request.
+    ///
+    /// This is the check that a windowed read would otherwise silently drop, and dropping
+    /// it was not theoretical: flipping the last byte of every object in a vault — which
+    /// lands in the footer — left `dctl verify` reporting every file intact. The footer is
+    /// unkeyed and so stops no attacker who can rewrite the whole object, but it is the
+    /// only thing covering bytes that no chunk tag claims, and bit rot does not care that
+    /// the field it landed in was redundant.
+    ///
+    /// # Errors
+    /// [`CoreError::Integrity`] if the object's own footer disagrees with the bytes that
+    /// were streamed, or if the object is too short to hold the footer it declares, and
+    /// whatever the backend reported.
+    pub async fn confirm_footer(&self, fold: blake3::Hasher) -> Result<()> {
+        let at = self.payload_end()?;
+        let stored = self
+            .backend
+            .get_range(&self.key, ByteRange::new(at, Some(FOOTER_LEN as u64)))
+            .await?;
+        if stored.len() != FOOTER_LEN {
+            return Err(CoreError::Integrity(format!(
+                "{}: object declares a footer and holds {} of its {FOOTER_LEN} bytes",
+                self.path,
+                stored.len()
+            )));
+        }
+        if stored.as_ref() != fold.finalize().as_bytes() {
+            return Err(CoreError::Integrity(format!(
+                "{}: the object's footer does not match the bytes it served",
+                self.path
+            )));
+        }
+        Ok(())
+    }
+
+    /// The byte after the last chunk's tag: where a footer would begin.
+    fn payload_end(&self) -> Result<u64> {
+        let Some(last) = self.header.chunk_count().checked_sub(1) else {
+            return Ok(self.header.payload_start());
+        };
+        let span = self.header.chunk_span(last, 1)?;
+        Ok(span
+            .ciphertext_offset()
+            .saturating_add(span.ciphertext_len()))
+    }
+
+    /// Confirm the stored object is exactly as long as its authenticated geometry says
+    /// it should be, in one bounded metadata request and no body transfer.
+    ///
+    /// This is the check that survives the footer's absence on the streaming read path.
+    /// `docs/FORMAT.md` §3's trailing footer is a BLAKE3 over the whole ciphertext, and a
+    /// read that never holds the whole ciphertext cannot fold it — see
+    /// [`Vault::verify_file`](crate::Vault::verify_file) for why that costs nothing an
+    /// attacker could use. The one accidental corruption it *did* uniquely catch is bytes
+    /// appended past the last chunk, which no per-chunk tag covers because no chunk claims
+    /// them. So the length is asked of the provider instead and held to the number the head
+    /// implies: the head is authenticated by the DEK unwrap, so `chunk_count`, `chunk_size`
+    /// and `plaintext_len` are facts rather than hints, and the end of the last chunk's
+    /// ciphertext is arithmetic from them.
+    ///
+    /// The footer itself is 32 bytes that may or may not be present (§3 makes it a flag), so
+    /// both lengths are accepted; anything else is an object that is not the shape it says
+    /// it is.
+    ///
+    /// An object with no chunks at all has no last chunk to measure from and is passed: its
+    /// header is bounded, already authenticated, and holds no payload to append to.
+    ///
+    /// # Errors
+    /// [`CoreError::Integrity`] if the stored length is neither of the two the geometry
+    /// allows, and whatever the backend reported if it could not be asked.
+    pub async fn confirm_object_length(&self) -> Result<()> {
+        if self.header.chunk_count() == 0 {
+            return Ok(());
+        }
+        let payload_end = self.payload_end()?;
+        let stored = self.backend.head(&self.key).await?.size;
+        if stored == payload_end || stored == payload_end + FOOTER_LEN as u64 {
+            return Ok(());
+        }
+        Err(CoreError::Integrity(format!(
+            "{}: stored object is {stored} bytes, its authenticated geometry accounts for \
+             {payload_end}",
+            self.path
+        )))
     }
 
     /// The single ranged request behind both readers: exactly the span's ciphertext.

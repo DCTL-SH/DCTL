@@ -180,7 +180,11 @@ pub async fn open(config: &Config, spec: &str, side: Side, links: LinkPolicy) ->
     }
 
     let resolved = resolve(&parsed, &settings::catalog(config))?;
-    let backend = registry::build(&resolved, links)?;
+    // Unmetered. `replicate` copies ciphertext between stores and refuses every
+    // flag under `Filtering`; `--bwlimit` is not among the flags it honours, and
+    // silently pacing it from a global would be a behaviour its own refusal says
+    // it does not have.
+    let backend = registry::build(&resolved, links, dctl_store::unmetered())?;
     let standing = admit(&parsed, config, &backend, spec, side).await?;
 
     Ok(Store {

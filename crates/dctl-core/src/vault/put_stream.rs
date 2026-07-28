@@ -24,6 +24,7 @@ use zeroize::Zeroizing;
 
 use super::{Modified, Vault, layout};
 use crate::error::{CoreError, Result};
+use crate::streamed::Streamed;
 
 /// Working-buffer size for the vault's constant-memory hashing passes over the temp
 /// object and the source plaintext.
@@ -64,7 +65,7 @@ impl Vault {
         logical_path: &str,
         source: &Path,
         modified: Modified,
-    ) -> Result<()> {
+    ) -> Result<Streamed> {
         let path = path::normalize(logical_path)?;
         // Capture any object this path currently maps to, for post-commit overwrite GC.
         let previous = self.lookup_object_key(&path).await?;
@@ -144,7 +145,15 @@ impl Vault {
 
         // Overwrite GC: the new mapping is durable, so delete the superseded object.
         self.gc_superseded_object(previous, &object_key).await;
-        Ok(())
+        // The digest the index just committed, handed back rather than left to be
+        // recomputed: see [`Streamed`] for why a second pass over the source would
+        // be both slower and less truthful.
+        let mut plaintext_hash = [0u8; 32];
+        plaintext_hash.copy_from_slice(&record.content_hash);
+        Ok(Streamed {
+            bytes: sealed.plaintext_len,
+            plaintext_hash,
+        })
     }
 }
 
@@ -166,7 +175,12 @@ fn seal_source_to_temp(
     let plaintext_len = src.metadata().map_err(io_err)?.len();
 
     // Seal source (Read + Seek) → temp object, constant memory.
-    let mut temp = tempfile::NamedTempFile::new().map_err(io_err)?;
+    // Not `NamedTempFile::new()`. That resolves to `/tmp`, which systemd mounts
+    // as `tmpfs` by default — and a sealed object staged in `tmpfs` is the whole
+    // file in RAM, which would quietly undo everything this streaming path
+    // exists for on the majority of modern Linux hosts. `crate::spool` chooses
+    // the directory deliberately and says so when it is memory.
+    let mut temp = tempfile::NamedTempFile::new_in(crate::spool::spool_dir()).map_err(io_err)?;
     {
         let mut writer = std::io::BufWriter::with_capacity(STREAM_BUF_LEN, temp.as_file_mut());
         object::seal_stream(

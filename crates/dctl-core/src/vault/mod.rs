@@ -15,6 +15,7 @@ mod list;
 mod modified;
 mod put;
 mod put_stream;
+mod read_stream;
 mod rekey;
 mod restore;
 mod share;

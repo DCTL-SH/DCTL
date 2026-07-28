@@ -236,6 +236,17 @@ mod tests {
 
     #[async_trait]
     impl Source for Fixture {
+        async fn stream_to(
+            &self,
+            path: &str,
+            out: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+        ) -> Result<u64> {
+            use tokio::io::AsyncWriteExt as _;
+            let bytes = self.read(path).await?;
+            out.write_all(&bytes).await?;
+            Ok(bytes.len() as u64)
+        }
+
         async fn enumerate(&self, prefix: &str) -> Result<Box<dyn Entries>> {
             Ok(Box::new(Cursor {
                 entries: self
