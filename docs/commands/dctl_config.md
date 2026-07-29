@@ -306,7 +306,19 @@ each provider accepts are exactly the keys the file accepts:
 
 `verify` is the per-remote verification strength — `checksum`, `sample` or
 `strict` — spelled exactly as the `--verify` flag spells it, because the
-cost/assurance trade-off belongs to the destination. On a `vault` remote, `base`
+cost/assurance trade-off belongs to the destination.
+
+`chunk_size` is the multipart part size in **plain bytes** — `8388608`, not
+`8MB`, and a value that is not a positive whole number is refused by name rather
+than quietly replaced with the default. On `b2`, `s3` and `r2` it is the size an
+upload is cut into, the size above which an object stops being one request,
+**and the memory that upload costs**: one part is held at a time, so
+`chunk_size=8388608` is how a remote is made to fit in a container that cannot
+spare the 100 MiB default. Values outside the provider's own envelope are
+clamped into it (B2 and S3 both floor at about 5 MB) rather than refused,
+because the failure that prevents is an upload that runs for an hour and is then
+rejected at its second part. It reaches nothing on `sftp` and `vault` remotes —
+see `HANDOVER.md` §11.3. On a `vault` remote, `base`
 is a bare remote **name**, never a `name:path` spec; the subdirectory inside it
 is `base_path`. Anything else is refused with the offending key named.
 

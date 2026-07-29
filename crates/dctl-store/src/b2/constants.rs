@@ -59,7 +59,73 @@ pub(super) const H_SRC_MODIFIED: &str = "X-Bz-Info-src_last_modified_millis";
 /// Content type instructing B2 to auto-detect (`b2/x-auto`).
 pub(super) const CONTENT_TYPE_AUTO: &str = "b2/x-auto";
 
+// ── The upload's memory contract ────────────────────────────────────────────
+//
+// An upload's peak resident memory is
+//
+//     peak ≈ part_size × UPLOAD_PARTS_IN_FLIGHT
+//
+// and **no term in it is a function of the object's size**. One part is read
+// into one buffer, that buffer is handed to the request as an owned `Bytes`, and
+// every attempt at that part re-sends the same allocation instead of a copy of
+// it; the buffer is released before the next part's is taken. Parts go one at a
+// time, so the multiplier is [`UPLOAD_PARTS_IN_FLIGHT`] = 1.
+//
+// It is written here rather than in `upload.rs` because both numbers it is made
+// of are here, and because the previous shape of this backend — a reusable part
+// buffer plus a fresh `to_vec()` of every attempt — cost *twice* the part size
+// while its own doc comment claimed `O(part_size)`. A contract stated beside the
+// code that implements it is a contract a reader checks.
+//
+// The one term that is not flat is forced by B2 and not chosen here:
+// `b2_upload_part` accepts at most [`MAX_PARTS`](crate::streaming::MAX_PARTS)
+// = 10,000 parts per large file, so an object larger than
+// `part_size × 10,000` must be cut into bigger parts and the peak grows as
+// `object / 10,000`. At the default part size that floor starts at 1 TiB. It is
+// a documented slope rather than a surprise, and `adaptive_part_size` is where
+// it happens.
+
+/// Default multipart part size, and — because they are the same number — the
+/// size above which an object stops being uploaded in one request.
+///
+/// This is a **memory** knob before it is a throughput one: it is the whole of
+/// the peak above, so an operator who must run inside a small container lowers
+/// it and pays in request count. It reaches here from a remote's `chunk_size`
+/// setting through [`B2Backend::with_part_size`](super::B2Backend::with_part_size).
+///
+/// B2's `b2_authorize_account` answers with a `recommendedPartSize` — 100,000,000
+/// bytes on the account this was measured against — and it is deliberately **not**
+/// used as the default. It is advisory, it is per-account, and it arrives from the
+/// network: taking it would make DCTL's peak memory whatever the provider said
+/// that morning, which is not a contract anybody can hold the tool to. `rclone`
+/// makes the same call — it parses `recommendedPartSize` into
+/// `api.AuthorizeAccountResponse` (`backend/b2/api/types.go:150`) and never sizes
+/// an upload with it, using its own `defaultChunkSize = 96 * fs.Mebi`
+/// (`backend/b2/b2.go:67`) instead.
+///
+/// 100 MiB is the same number as the S3 client's own `DEFAULT_PART_SIZE`, so the
+/// two object-store families state one memory figure rather than two, and it is
+/// twenty times B2's five-megabyte floor — few enough requests on a large object
+/// that the per-request cost stays invisible, small enough that a retried part is
+/// not an expensive thing to lose.
+pub(super) const DEFAULT_PART_SIZE: u64 = 100 * 1024 * 1024;
+
+/// How many parts of one object are in flight at once.
+///
+/// One. It is a named constant rather than an unwritten property of a `for` loop
+/// because it is the second factor in the contract above: uploading four parts
+/// concurrently would quadruple the peak, and the change that did it would be a
+/// change to a loop with no obvious connection to a memory figure recorded in
+/// `HANDOVER.md`. The memory test in `tests/b2_upload_memory.rs` computes its
+/// ceiling from this constant, so raising the concurrency without raising this
+/// fails a test that names the reason.
+pub(super) const UPLOAD_PARTS_IN_FLIGHT: u64 = 1;
+
 /// B2's absolute minimum part size (bytes) for large files.
+///
+/// A provider limit, not a preference. A configured part size below it is raised
+/// rather than refused: the alternative is an upload that is accepted, runs, and
+/// is rejected at the second part, long after the operator stopped watching.
 pub(super) const MIN_PART_SIZE: u64 = 5_000_000;
 /// B2's documented maximum part size (bytes) for large files: 5 GB, in B2's decimal
 /// byte convention (matching `MIN_PART_SIZE`'s 5 MB). This is the upper bound when
@@ -67,8 +133,6 @@ pub(super) const MIN_PART_SIZE: u64 = 5_000_000;
 /// combined, a single large file is bounded at 5 GB * 10,000 = 50 TB.
 /// See <https://www.backblaze.com/apidocs/b2-upload-part>.
 pub(super) const B2_MAX_PART_SIZE: u64 = 5_000_000_000;
-/// Objects larger than this use the large-file (multipart) API.
-pub(super) const MULTIPART_THRESHOLD: u64 = 100 * 1024 * 1024;
 /// Objects requested per listing page.
 pub(super) const LIST_PAGE_SIZE: u32 = 1000;
 /// The `action` value marking a real uploaded file (vs a hide marker).

@@ -355,15 +355,36 @@ verifies one chunk at a time into a temp sibling of the destination, folding a
 streaming BLAKE3 over the emitted plaintext.
 
 > **Where the bound holds.** `LocalFs`, S3, R2, and B2 **all stream** the transfer
-> stage at `O(part_size)` — S3/R2 via multipart-from-file through the S3 client and
-> B2 via its large-file API — so the trait's in-memory buffering *default* for
+> stage — S3/R2 via multipart-from-file through the S3 client and B2 via its
+> large-file API — so the trait's in-memory buffering *default* for
 > `put_from_path`/`get_to_path` is **not used** by any shipped cloud backend. The
 > **decrypt / verify / write** stage is likewise always `O(chunk_size)` regardless
-> of backend. The one honest caveat is that these cloud paths are **not yet
-> live-verified end-to-end** — their integration tests are `#[ignore]` + env-gated
-> (see [`PROJECT_STATUS.md`](PROJECT_STATUS.md)). `put_file` and `get_file` (the
-> buffered `Vec` variants) deliberately hold the whole plaintext and are for small
-> objects; large media should use the `*_to_path` / `rcat` paths.
+> of backend. `put_file` and `get_file` (the buffered `Vec` variants) deliberately
+> hold the whole plaintext and are for small objects; large media should use the
+> `*_to_path` / `rcat` paths.
+
+> **What an upload holds, exactly.** On the object stores the transfer stage's
+> peak is **one part**, and on B2 that is a number the program will state:
+> `B2Backend::upload_peak_bytes()` is `part_size × UPLOAD_PARTS_IN_FLIGHT`, parts
+> go one at a time, and a remote's `chunk_size` sets the part size. Nothing in it
+> is a function of the object's size — measured on the release binary inside a
+> cgroup with `memory.max=512M`, peak RSS is flat from a 99 MiB object to a 4 GiB
+> one (`HANDOVER.md` §25).
+>
+> Two caveats, both about the constant rather than the order. The part size is
+> **not free**: at the 100 MiB default an upload's working set is 100 MiB, so a
+> container sized below that has to lower `chunk_size` and pay in request count.
+> And B2 and S3 both cap a multipart upload at **10 000 parts**, so an object
+> larger than `part_size × 10 000` — 1 TiB at the default — must be cut into
+> bigger parts, and past that point the peak rises as `object / 10 000`. That
+> slope is the provider's rule, not a choice made here, and it is the only place
+> the figure stops being flat.
+>
+> S3 and R2 hold one part by the same construction, in the same shape of code,
+> but that is **not** independently measured: this repository has no S3 account,
+> and the S3 mock buffers request bodies, so it cannot host the measurement
+> without being rewritten. B2 is measured live; the other two are argued from the
+> code, which is exactly the standing this section used to claim for all three.
 
 ---
 

@@ -97,7 +97,9 @@ encryption, and **20-year restorability** (data decodable from the format spec a
 | **HTTP (read-only)** | ⬜ | not started |
 
 Library-level streaming (`dctl-store/src/streaming.rs`) already moves multi-TiB objects at
-O(part-size) memory for the cloud backends.
+O(part-size) memory for the cloud backends — **one** part size, on B2 measured rather than
+argued (`B2Backend::upload_peak_bytes()`, HANDOVER §25), and settable per remote with
+`chunk_size`.
 
 ---
 
@@ -138,7 +140,7 @@ separate gap (§7).
 | local → Vault (seal) / Vault → local (open) | 🟢 | verified write + index commit |
 | local ↔ plain remote | 🟢 | `PlainUpload` / `PlainDownload` directions |
 | **remote ↔ remote (general)** | ⬜ | refused loudly at connect; only ciphertext `replicate` works today |
-| Streaming transfers > 1 GiB | 🟢 | constant-memory both directions; peak RSS flat at ~144 MiB from 256 MiB to 4 GiB objects under a 512 MiB cap, on `local:`, `sftp:` and live B2 (HANDOVER §21) |
+| Streaming transfers > 1 GiB | 🟢 | constant-memory both directions under a 512 MiB cgroup cap: peak RSS flat at 139–144 MiB from 256 MiB to 4 GiB on `local:` and `sftp:` (HANDOVER §21), and flat at 147 MiB from 99 MiB to 4 GiB on live B2 (HANDOVER §25, where it was 213–218 MiB before B2 stopped holding two parts per upload) |
 | Server-side copy / move | ⬜ | needs a backend capability model |
 | Parallel transfers / bandwidth limit / retries | 🟡 | `--bwlimit` paces per window inside a file (HANDOVER §21.8); parallelism and request-level retries outside B2 are still open |
 

@@ -1,5 +1,23 @@
 //! B2 uploads: SHA-1-verified single-file and large-file (multipart) paths, both
 //! from an in-memory `Bytes` (`put`) and streamed from a file (`put_from_path`).
+//!
+//! ## Every body here is an owned `Bytes`, and that is the memory contract
+//!
+//! [`constants`] states it: peak ≈ `part_size × UPLOAD_PARTS_IN_FLIGHT`, with no
+//! term in the object's size. What makes it true is that a part is materialised
+//! **once** — read into one buffer, handed to the request as an owned `Bytes`,
+//! and re-sent by cloning that handle on every attempt. Nothing here calls
+//! `to_vec` or `copy_from_slice` on a body, and nothing should: those were the
+//! two lines that made this backend cost twice its part size while the doc
+//! comment above the buffer said `O(part_size)`. Measured on the release binary
+//! under a 512 MiB cap, that was 213 MiB of RSS for every object from 128 MiB to
+//! 4 GiB; the same runs afterwards are in `HANDOVER.md` §25.
+//!
+//! `rclone` reaches the same place from the other direction: it hands the part
+//! upload an `io.ReadSeeker` over one pooled buffer and **rewinds** it for a
+//! retry rather than buffering a second copy (`backend/b2/upload.go:251-259`),
+//! and returns the buffer to a pool afterwards (`lib/multipart/multipart.go:74`,
+//! `:80-83`). A `Bytes` clone is the same idea with the refcount doing the work.
 
 use std::path::Path;
 
@@ -106,16 +124,17 @@ pub(super) async fn put(
     // B2 verifies uploads by SHA-1; compute it once for the request headers.
     let sha1 = ContentHash::sha1(&data);
     let auth = b2.auth().await?;
-    if data.len() as u64 <= constants::MULTIPART_THRESHOLD {
-        upload_single(b2, &auth, key, &data, &sha1, modified).await?;
-    } else {
+    let size = data.len() as u64;
+    if streaming::use_multipart(size, b2.part_size()) {
         upload_large(b2, &auth, key, &data, modified).await?;
+    } else {
+        upload_single(b2, &auth, key, data, &sha1, modified).await?;
     }
 
     // B2 confirmed the SHA-1 of the exact bytes we sent, and those bytes matched
     // `expected` (guard above) — so the stored object matches `expected`.
     Ok(PutOutcome {
-        size: data.len() as u64,
+        size,
         verified: caller,
     })
 }
@@ -139,7 +158,7 @@ async fn upload_single(
     b2: &B2Backend,
     auth: &AuthState,
     key: &ObjectKey,
-    data: &[u8],
+    data: Bytes,
     sha1: &ContentHash,
     modified: SourceModified,
 ) -> Result<()> {
@@ -167,8 +186,11 @@ async fn upload_single(
         for (name, value) in &headers {
             request = request.header(*name, value);
         }
+        // The object's one buffer, re-sent rather than re-copied: `Bytes::clone`
+        // moves a refcount, so a retried upload costs no memory beyond the
+        // allocation the first attempt already had.
         let resp = request
-            .body(data.to_vec())
+            .body(data.clone())
             .send()
             .await
             .map_err(transport_attempt)?;
@@ -190,7 +212,7 @@ async fn upload_large(
     b2: &B2Backend,
     auth: &AuthState,
     key: &ObjectKey,
-    data: &[u8],
+    data: &Bytes,
     modified: SourceModified,
 ) -> Result<()> {
     let start: StartLargeFileResponse = b2
@@ -211,19 +233,19 @@ async fn upload_large(
     }
 }
 
-/// Upload every part of the in-memory `data` slice, then finish the large file. Any
+/// Upload every part of the in-memory `data`, then finish the large file. Any
 /// error propagates to [`upload_large`], which cancels the large file.
 async fn upload_parts_and_finish(
     b2: &B2Backend,
     auth: &AuthState,
     file_id: &str,
-    data: &[u8],
+    data: &Bytes,
 ) -> Result<()> {
     // Grow the part size for very large objects so the part count stays within B2's
-    // 10,000-part cap; normal objects keep the recommended part size.
+    // 10,000-part cap; normal objects keep the configured part size.
     let part_size = streaming::adaptive_part_size(
         data.len() as u64,
-        auth.recommended_part_size,
+        b2.part_size(),
         constants::MIN_PART_SIZE,
         constants::B2_MAX_PART_SIZE,
         streaming::MAX_PARTS,
@@ -235,12 +257,15 @@ async fn upload_parts_and_finish(
     for span in &plan {
         let start = span.offset as usize;
         let end = start + span.len as usize;
+        // A view of the caller's buffer, not a copy of a piece of it: this arm is
+        // already holding the whole object, and copying each part out of it would
+        // add a part's worth of memory on top of an object's worth.
         upload_one_part(
             b2,
             auth,
             file_id,
             span.number,
-            &data[start..end],
+            data.slice(start..end),
             &mut part_sha1s,
         )
         .await?;
@@ -270,11 +295,16 @@ fn verify_sha1(sent: &str, got: &str) -> Result<()> {
 /// Streaming counterpart of [`put`]: store the file at `source` under `key`, verified,
 /// without ever holding the whole file in memory.
 ///
-/// Below B2's large-file threshold the (bounded) file is read and handed to the verified
+/// At or below the part size the (bounded) file is read and handed to the verified
 /// single-shot [`put`], exactly matching the buffered path. Above it, the file is streamed
 /// part-by-part through the native large-file API at `O(part_size)` memory. This mirrors
-/// the live-verified buffered [`upload_large`] — same threshold, same part size, same
+/// the live-verified buffered [`upload_large`] — same cutoff, same part size, same
 /// per-part SHA-1 verification — only fed from a file instead of an in-RAM slice.
+///
+/// The two arms share one number, which is what keeps the memory contract to a
+/// single figure: whichever arm runs, the most this holds is one part size. When
+/// the cutoff was its own larger constant the *small* arm was the expensive one —
+/// a 99 MiB object cost 203 MiB of anonymous memory and a 4 GiB object cost 197.
 pub(super) async fn put_from_path(
     b2: &B2Backend,
     key: &ObjectKey,
@@ -284,9 +314,9 @@ pub(super) async fn put_from_path(
 ) -> Result<PutOutcome> {
     let size = tokio::fs::metadata(source).await?.len();
 
-    // Below the large-file threshold: read the bounded file and use the verified
-    // single-shot path, exactly like `put` (same in-memory guard + SHA-1 upload).
-    if !streaming::use_multipart(size, constants::MULTIPART_THRESHOLD) {
+    // At or below one part: read the bounded file and use the verified single-shot
+    // path, exactly like `put` (same in-memory guard + SHA-1 upload).
+    if !streaming::use_multipart(size, b2.part_size()) {
         let data = tokio::fs::read(source).await?;
         return put(b2, key, Bytes::from(data), expected, modified).await;
     }
@@ -334,11 +364,15 @@ async fn upload_and_finish(
 ) -> Result<PutOutcome> {
     let size = tokio::fs::metadata(source).await?.len();
     // Grow the part size for very large objects so the part count stays within B2's
-    // 10,000-part cap; normal objects keep the recommended part size. Computed once from
+    // 10,000-part cap; normal objects keep the configured part size. Computed once from
     // the total and used for the whole upload.
+    //
+    // This is the one place the peak stops being flat, and it is B2's rule rather
+    // than a choice made here: past `part_size × MAX_PARTS` there is no way to
+    // send the object without larger parts. See `constants`.
     let part_size = streaming::adaptive_part_size(
         size,
-        auth.recommended_part_size,
+        b2.part_size(),
         constants::MIN_PART_SIZE,
         constants::B2_MAX_PART_SIZE,
         streaming::MAX_PARTS,
@@ -352,8 +386,6 @@ async fn upload_and_finish(
     );
 
     let mut file = tokio::fs::File::open(source).await?;
-    // One reusable part buffer keeps peak memory at O(part_size).
-    let mut buf = vec![0u8; part_size as usize];
     // Whole-file hash under the caller's algorithm, folded part-by-part, so the
     // verified-write contract holds without ever buffering the whole file.
     let mut whole = Hasher::new(expected.algo);
@@ -361,15 +393,29 @@ async fn upload_and_finish(
 
     for span in &plan {
         let want = span.len as usize;
-        let n = streaming::fill_buf(&mut file, &mut buf[..want]).await?;
+        // One allocation per part, given away to the request as an owned `Bytes`
+        // so that the bytes on the wire are *this* buffer and not a copy of it.
+        // The previous part's buffer is dropped when its upload returns, before
+        // this one is taken, which is what makes the peak one part and not two —
+        // the reusable buffer this replaces was live at the same time as the copy
+        // the request needed, and cost exactly double.
+        let mut part = vec![0u8; want];
+        let n = streaming::fill_buf(&mut file, &mut part).await?;
         if n != want {
             return Err(StoreError::Backend(
                 "b2 stream: source file shorter than expected (changed under read)".into(),
             ));
         }
-        let chunk = &buf[..want];
-        whole.update(chunk);
-        upload_one_part(b2, auth, file_id, span.number, chunk, &mut part_sha1s).await?;
+        whole.update(&part);
+        upload_one_part(
+            b2,
+            auth,
+            file_id,
+            span.number,
+            Bytes::from(part),
+            &mut part_sha1s,
+        )
+        .await?;
         // Charged once the part is acknowledged, so a retried part is charged
         // for every attempt — each one really did use the link.
         crate::meter::charge(b2.meter.as_ref(), want as u64).await;
@@ -402,15 +448,20 @@ async fn upload_and_finish(
 /// individually addressed by its number, so re-sending it is idempotent — B2
 /// keeps the last body received for that number and the finish call names the
 /// SHA-1 this function verified.
+///
+/// `chunk` is taken **by value** and cloned per attempt. `Bytes::clone` moves a
+/// refcount, so however many times a busy pod makes this try again, the part
+/// exists in memory exactly once. Taking a slice instead would force every caller
+/// to own a second buffer for the body, which is what it used to do.
 async fn upload_one_part(
     b2: &B2Backend,
     auth: &AuthState,
     file_id: &str,
     part_number: u32,
-    chunk: &[u8],
+    chunk: Bytes,
     part_sha1s: &mut Vec<String>,
 ) -> Result<()> {
-    let sha1_hex = ContentHash::sha1(chunk).hex();
+    let sha1_hex = ContentHash::sha1(&chunk).hex();
     retry::run(constants::OP_UPLOAD_PART, |_| async {
         let part_url: GetUploadPartUrlResponse = b2
             .post_json_once(
@@ -427,7 +478,7 @@ async fn upload_one_part(
             .header(constants::H_PART_NUMBER, part_number.to_string())
             .header(constants::H_CONTENT_SHA1, &sha1_hex)
             .header(constants::H_CONTENT_LENGTH, chunk.len().to_string())
-            .body(chunk.to_vec())
+            .body(chunk.clone())
             .send()
             .await
             .map_err(transport_attempt)?;

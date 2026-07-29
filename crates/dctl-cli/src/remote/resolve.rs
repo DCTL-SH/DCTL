@@ -266,6 +266,7 @@ fn target_from_entry(name: &str, entry: &RemoteEntry) -> Result<Target> {
 
         PROVIDER_B2 => Ok(Target::B2 {
             bucket: required(name, entry, CONFIG_KEY_BUCKET)?.to_string(),
+            chunk_size: chunk_size(name, entry)?,
         }),
 
         PROVIDER_S3 => Ok(Target::S3 {
@@ -369,6 +370,7 @@ fn shorthand(name: &str, path: &str) -> Result<Resolved> {
     let target = match name {
         PROVIDER_B2 => Target::B2 {
             bucket: bucket(name, container)?,
+            chunk_size: None,
         },
         PROVIDER_S3 => Target::S3 {
             bucket: bucket(name, container)?,
@@ -501,15 +503,18 @@ mod tests {
     /// carries the setting without carrying it through fails
     /// [`chunk_size_is_either_carried_to_the_backend_or_listed_as_inert`], which
     /// says which list to add it to and what that costs.
-    const CHUNK_SIZE_HONOURED: &[&str] = &[PROVIDER_S3, PROVIDER_R2];
+    const CHUNK_SIZE_HONOURED: &[&str] = &[PROVIDER_S3, PROVIDER_R2, PROVIDER_B2];
 
     /// `chunk_size` on these providers is accepted by the parser and reaches
-    /// nothing. B2's part size is `dctl_store::b2`'s own constant and the vault's
-    /// is `dctl_core::constants::DEFAULT_CHUNK_SIZE`, neither of which has a
-    /// setter — so wiring them is a change to those crates' construction, not to
-    /// this one, and is on the pre-production list in `HANDOVER.md` §11.3 rather
-    /// than half-done here.
-    const CHUNK_SIZE_INERT: &[&str] = &[PROVIDER_B2, crate::constants::PROVIDER_VAULT];
+    /// nothing. The vault's chunk size is `dctl_core::constants::DEFAULT_CHUNK_SIZE`
+    /// and has no setter — so wiring it is a change to that crate's construction,
+    /// not to this one, and is on the pre-production list in `HANDOVER.md` §11.3
+    /// rather than half-done here.
+    ///
+    /// B2 left this list in §25. It had to: on B2 the part size *is* an upload's
+    /// peak memory, so leaving the setting inert meant an operator who had to run
+    /// inside a small container had no way to say so.
+    const CHUNK_SIZE_INERT: &[&str] = &[crate::constants::PROVIDER_VAULT];
 
     #[test]
     fn chunk_size_is_either_carried_to_the_backend_or_listed_as_inert() {
@@ -520,7 +525,9 @@ mod tests {
                 .with_setting(CONFIG_KEY_CHUNK_SIZE, "8388608");
             let target = target_from_entry("r", &entry).expect("the remote resolves");
             let carried = match target {
-                Target::S3 { chunk_size, .. } | Target::R2 { chunk_size, .. } => chunk_size,
+                Target::S3 { chunk_size, .. }
+                | Target::R2 { chunk_size, .. }
+                | Target::B2 { chunk_size, .. } => chunk_size,
                 other => panic!("'{provider}' resolved to {other:?}"),
             };
             assert_eq!(
@@ -667,7 +674,8 @@ mod tests {
         assert_eq!(
             resolved.target(),
             &Target::B2 {
-                bucket: "cold-storage".into()
+                bucket: "cold-storage".into(),
+                chunk_size: None,
             }
         );
         assert_eq!(resolved.path(), "photos/2024");
@@ -726,7 +734,8 @@ mod tests {
         assert_eq!(
             resolved.target(),
             &Target::B2 {
-                bucket: "actually-b2".into()
+                bucket: "actually-b2".into(),
+                chunk_size: None,
             }
         );
         assert_eq!(resolved.path(), "anything");
@@ -739,7 +748,8 @@ mod tests {
         assert_eq!(
             resolved.target(),
             &Target::B2 {
-                bucket: "my-bucket".into()
+                bucket: "my-bucket".into(),
+                chunk_size: None,
             }
         );
         assert!(resolved.path().is_empty());

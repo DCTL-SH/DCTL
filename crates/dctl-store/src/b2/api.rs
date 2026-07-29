@@ -16,7 +16,6 @@ pub(crate) struct AuthState {
     pub download_url: String,
     pub auth_token: String,
     pub bucket_id: String,
-    pub recommended_part_size: u64,
 }
 
 #[derive(Deserialize)]

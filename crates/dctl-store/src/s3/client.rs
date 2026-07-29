@@ -305,7 +305,7 @@ impl S3Client {
     /// In-memory multipart upload (the buffered `>100 MiB` path reachable via
     /// [`put`](Self::put)). Aborts the upload on any error so no orphaned parts linger and
     /// get billed — mirroring the streaming sibling [`put_multipart_from_path`].
-    async fn put_multipart(&self, key: &str, data: &[u8], modified: SourceModified) -> Result<()> {
+    async fn put_multipart(&self, key: &str, data: &Bytes, modified: SourceModified) -> Result<()> {
         let create = self
             .send(
                 Method::POST,
@@ -342,7 +342,7 @@ impl S3Client {
         &self,
         key: &str,
         upload_id: &str,
-        data: &[u8],
+        data: &Bytes,
     ) -> Result<()> {
         // Grow the part size for very large objects so the part count stays within S3's
         // 10,000-part cap; normal objects keep PART_SIZE.
@@ -365,13 +365,11 @@ impl S3Client {
         for span in &plan {
             let start = span.offset as usize;
             let end = start + span.len as usize;
+            // A view of the caller's buffer, not a copy of a piece of it: this arm
+            // already holds the whole object, and copying each part out of it would
+            // add a part's worth of memory on top of an object's worth.
             let etag = self
-                .upload_part(
-                    key,
-                    upload_id,
-                    span.number,
-                    Bytes::copy_from_slice(&data[start..end]),
-                )
+                .upload_part(key, upload_id, span.number, data.slice(start..end))
                 .await?;
             parts_xml.push_str(&format!(
                 "<Part><PartNumber>{}</PartNumber><ETag>{etag}</ETag></Part>",
@@ -499,8 +497,6 @@ impl S3Client {
         );
 
         let mut file = tokio::fs::File::open(source).await?;
-        // One reusable part buffer keeps peak memory at O(part_size).
-        let mut buf = vec![0u8; part_size as usize];
         // Whole-file hash under the caller's algorithm, folded part-by-part, so the
         // verified-write contract holds without ever buffering the whole file.
         let mut whole = Hasher::new(expected.algo);
@@ -508,20 +504,21 @@ impl S3Client {
 
         for span in &plan {
             let want = span.len as usize;
-            let n = streaming::fill_buf(&mut file, &mut buf[..want]).await?;
+            // One allocation per part, given away to the request as an owned
+            // `Bytes`. The reusable buffer this replaces was live at the same time
+            // as the copy the request needed and cost exactly double the part size
+            // — the defect measured on B2 in `HANDOVER.md` §25, in the sibling that
+            // shares this shape.
+            let mut part = vec![0u8; want];
+            let n = streaming::fill_buf(&mut file, &mut part).await?;
             if n != want {
                 return Err(StoreError::Backend(
                     "s3 stream: source file shorter than expected (changed under read)".into(),
                 ));
             }
-            whole.update(&buf[..want]);
+            whole.update(&part);
             let etag = self
-                .upload_part(
-                    key,
-                    upload_id,
-                    span.number,
-                    Bytes::copy_from_slice(&buf[..want]),
-                )
+                .upload_part(key, upload_id, span.number, Bytes::from(part))
                 .await?;
             parts_xml.push_str(&format!(
                 "<Part><PartNumber>{}</PartNumber><ETag>{etag}</ETag></Part>",

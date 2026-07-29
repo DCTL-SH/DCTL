@@ -45,6 +45,12 @@ pub struct B2Backend {
     /// Who is told about bytes as they cross the link, part by part and body
     /// chunk by body chunk. See [`crate::meter`].
     pub(crate) meter: std::sync::Arc<dyn crate::meter::Meter>,
+    /// How large a part is, and therefore how much memory an upload costs. See
+    /// [`part_size`](Self::part_size) and the contract in [`constants`].
+    part_size: u64,
+    /// Where `b2_authorize_account` is asked. See
+    /// [`with_authorize_url`](Self::with_authorize_url).
+    authorize_url: String,
 }
 
 impl B2Backend {
@@ -59,7 +65,30 @@ impl B2Backend {
             bucket_name: bucket_name.into(),
             auth: Mutex::new(None),
             meter: crate::meter::unmetered(),
+            part_size: constants::DEFAULT_PART_SIZE,
+            authorize_url: constants::AUTHORIZE_URL.to_string(),
         })
+    }
+
+    /// The same backend, asking `b2_authorize_account` at `url`.
+    ///
+    /// **The only address in the whole conversation that is not discovered.**
+    /// B2's authorization reply carries the `apiUrl` every later call is built
+    /// on, the `downloadUrl` reads go to, and — indirectly, through
+    /// `b2_get_upload_url` — the pod each upload lands on. So one override here
+    /// is enough to point the entire client at a server a test controls, which
+    /// is what `tests/support/mock_b2.rs` does.
+    ///
+    /// It exists for the reason `mock_s3` exists: B2 is the one cloud provider
+    /// this repository has credentials for, its part-buffering behaviour is a
+    /// memory contract stated in `HANDOVER.md`, and a contract that can only be
+    /// checked by spending money on a live bucket is a contract that stops being
+    /// checked. Nothing in `dctl-cli` calls this; production always talks to
+    /// Backblaze.
+    #[must_use]
+    pub fn with_authorize_url(mut self, url: impl Into<String>) -> Self {
+        self.authorize_url = url.into();
+        self
     }
 
     /// The same backend, declaring every part and body chunk it moves to
@@ -68,6 +97,59 @@ impl B2Backend {
     pub fn with_meter(mut self, meter: std::sync::Arc<dyn crate::meter::Meter>) -> Self {
         self.meter = meter;
         self
+    }
+
+    /// The same backend, cutting large files into `part_size`-byte parts.
+    ///
+    /// `None` keeps the module's default part size; anything outside the
+    /// envelope B2 publishes is clamped into it rather than refused, for the
+    /// reason `config::clamp_part_size` gives.
+    ///
+    /// This is the operator's handle on how much memory an upload costs — one
+    /// part, once, is the whole of it — which is why it is a builder on the
+    /// backend and not a constant. A remote's `chunk_size` setting arrives here.
+    #[must_use]
+    pub fn with_part_size(mut self, part_size: Option<u64>) -> Self {
+        if let Some(size) = part_size {
+            self.part_size = config::clamp_part_size(size);
+        }
+        self
+    }
+
+    /// The part size in force, in bytes.
+    ///
+    /// Also the single-shot cutoff: an object of exactly this many bytes is one
+    /// `b2_upload_file`, and one byte more is a large file. They are the same
+    /// number on purpose — it is the size of the one buffer an upload holds, so
+    /// splitting it into two settings would make the peak the *larger* of two
+    /// numbers while looking like a single knob. The S3 client states it the same
+    /// way for the same reason.
+    #[must_use]
+    pub(crate) const fn part_size(&self) -> u64 {
+        self.part_size
+    }
+
+    /// The most memory one upload will hold, whatever the object's size.
+    ///
+    /// The contract in [`constants`], as a number this backend states rather than
+    /// a paragraph somebody has to find: one part, times the number of parts in
+    /// flight. A 10 GiB object and a 200 MiB object cost the same, and the cost
+    /// is this.
+    ///
+    /// It is public because it is the honest answer to the question a buyer sizing
+    /// a container asks, and because a figure the program will not say out loud is
+    /// a figure that drifts from the code. `tests/b2_upload_memory.rs` measures the
+    /// process against exactly this value, so raising the concurrency without
+    /// raising the constant fails a test rather than a customer's `docker run -m`.
+    ///
+    /// It does **not** include the process's own baseline — an unlocked vault's
+    /// Argon2id working set dominates that — and it is not the whole of a
+    /// `dctl copy`, which also stages the sealed object on disk. `HANDOVER.md` §25
+    /// carries the measured totals.
+    #[must_use]
+    pub const fn upload_peak_bytes(&self) -> u64 {
+        self.part_size
+            .saturating_mul(constants::UPLOAD_PARTS_IN_FLIGHT)
     }
 
     /// Current authorization, authorizing on first call.
@@ -98,7 +180,7 @@ impl B2Backend {
         let parsed: AuthorizeResponse = retry::run(constants::EP_AUTHORIZE, |_| async {
             let resp = self
                 .client
-                .get(constants::AUTHORIZE_URL)
+                .get(&self.authorize_url)
                 .basic_auth(&self.creds.key_id, Some(&self.creds.app_key))
                 .send()
                 .await
@@ -106,7 +188,17 @@ impl B2Backend {
             read_json(resp).await
         })
         .await?;
-        tracing::debug!(api_url = %parsed.api_url, "b2 authorized");
+        // `recommendedPartSize` is read and reported and is deliberately not what
+        // parts are cut at — `constants::DEFAULT_PART_SIZE` says why a figure that
+        // *is* the process's peak memory must not arrive from the network. Both
+        // numbers are logged so an operator comparing throughput against
+        // Backblaze's own advice can see the divergence instead of deducing it.
+        tracing::debug!(
+            api_url = %parsed.api_url,
+            b2_recommended_part_size = parsed.recommended_part_size,
+            part_size = self.part_size,
+            "b2 authorized"
+        );
 
         let bucket_id = match parsed.allowed.bucket_id.clone() {
             Some(id) => id,
@@ -126,7 +218,6 @@ impl B2Backend {
             download_url: parsed.download_url,
             auth_token: parsed.authorization_token,
             bucket_id,
-            recommended_part_size: parsed.recommended_part_size.max(constants::MIN_PART_SIZE),
         })
     }
 

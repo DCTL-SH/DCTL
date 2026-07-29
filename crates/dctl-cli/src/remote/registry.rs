@@ -72,6 +72,15 @@ pub enum Target {
     B2 {
         /// Bucket name.
         bucket: String,
+        /// Large-file part size in bytes, from the remote's `chunk_size`.
+        ///
+        /// `None` takes the client's default. Also the size above which an
+        /// upload stops being one request, and — because a part is the one
+        /// buffer an upload holds — the whole of what that upload costs in
+        /// memory. No environment fall-back, for the reason the S3 variant's
+        /// own `chunk_size` gives: it is a tuning choice rather than a piece of
+        /// addressing.
+        chunk_size: Option<u64>,
     },
 
     /// Amazon S3, or any S3-compatible endpoint.
@@ -131,7 +140,7 @@ impl Target {
     pub fn container(&self) -> String {
         match self {
             Self::Local { root } => root.display().to_string(),
-            Self::B2 { bucket } => format!("{PROVIDER_B2}:{bucket}"),
+            Self::B2 { bucket, .. } => format!("{PROVIDER_B2}:{bucket}"),
             Self::S3 { bucket, .. } => format!("{PROVIDER_S3}:{bucket}"),
             Self::R2 { bucket, .. } => format!("{PROVIDER_R2}:{bucket}"),
             Self::Sftp { host, base } => format!("{PROVIDER_SFTP}:{host}:{base}"),
@@ -184,13 +193,10 @@ pub fn build(
     let built = match target {
         Target::Local { root } => Built::Local(LocalFs::new(root.clone()).with_links(links)),
 
-        Target::B2 { bucket } => {
+        Target::B2 { bucket, chunk_size } => {
             let key_id = env_required(ENV_B2_KEY_ID)?;
             let app_key = env_required(ENV_B2_APP_KEY)?;
-            Built::B2(B2Backend::new(
-                B2Credentials::new(key_id, app_key),
-                bucket.clone(),
-            )?)
+            Built::B2(b2_backend(key_id, app_key, bucket, *chunk_size)?)
         }
 
         Target::S3 {
@@ -385,6 +391,28 @@ fn classify(variable: &str, value: std::result::Result<String, VarError>) -> Res
     }
 }
 
+/// Assemble the B2 backend from a resolved target's parts.
+///
+/// Split out from [`build`] so the journey a `chunk_size` makes — configuration
+/// file, resolver, `Target`, backend — can be tested at its last step without
+/// exporting a credential into the test process. The resolver's half is covered
+/// in [`super::resolve`]; this is the half where a setting that was carried all
+/// the way here can still be dropped on the floor, which is `HANDOVER.md` §21.7's
+/// defect exactly: the meter was installed in one arm of this very match and
+/// silently omitted from four.
+///
+/// On B2 the part size is the whole of an upload's peak memory, so dropping it
+/// would not be a lost tuning hint — it would be an operator's container limit
+/// silently ignored.
+fn b2_backend(
+    key_id: String,
+    app_key: String,
+    bucket: &str,
+    chunk_size: Option<u64>,
+) -> Result<B2Backend> {
+    Ok(B2Backend::new(B2Credentials::new(key_id, app_key), bucket)?.with_part_size(chunk_size))
+}
+
 /// Build the failure for an unusable credential variable.
 ///
 /// One constructor so every provider words it identically, and so the value can
@@ -417,12 +445,39 @@ mod tests {
     }
 
     #[test]
+    fn a_b2_remotes_chunk_size_reaches_the_backend_that_cuts_the_parts() {
+        // The setting's last step. `resolve` proves it survives the config file;
+        // this proves the arm of `build` that receives it does not drop it — and
+        // the number it must not drop is the upload's peak memory, which is what
+        // `upload_peak_bytes` reports.
+        let asked = 8 * 1024 * 1024;
+        let backend = b2_backend("k".into(), "a".into(), "bucket", Some(asked))
+            .expect("a b2 backend builds from a key pair");
+        assert_eq!(
+            backend.upload_peak_bytes(),
+            asked,
+            "a configured chunk_size must reach the backend, or an operator's \
+             memory ceiling is a setting that parses and does nothing"
+        );
+
+        // And with nothing configured, the compiled default — not zero, and not
+        // whatever B2 advertises when the run authorizes.
+        let default = b2_backend("k".into(), "a".into(), "bucket", None)
+            .expect("a b2 backend builds without a chunk_size");
+        assert_eq!(default.upload_peak_bytes(), 100 * 1024 * 1024);
+    }
+
+    #[test]
     fn every_target_reports_the_provider_type_the_config_spells() {
         // The registry, the config file and the log field must agree on the
         // word, or an operator greps for `provider=s3` and finds nothing.
         assert_eq!(local_target().provider_type(), PROVIDER_LOCAL);
         assert_eq!(
-            Target::B2 { bucket: "b".into() }.provider_type(),
+            Target::B2 {
+                bucket: "b".into(),
+                chunk_size: None,
+            }
+            .provider_type(),
             PROVIDER_B2
         );
         assert_eq!(

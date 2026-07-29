@@ -51,9 +51,11 @@ use bytes::Bytes;
 use dctl_store::b2::{B2Backend, B2Credentials};
 use dctl_store::{Backend, ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, SourceModified};
 
-/// Bytes for the streaming test source. Exceeds B2's 100 MiB large-file threshold so
-/// `put_from_path` takes the multipart branch (≥ 2 parts for the usual ~100 MB part
-/// size), rather than falling back to the single-shot path.
+/// Bytes for the streaming test source. Exceeds the default 100 MiB part size, so
+/// `put_from_path` takes the large-file branch (two parts) rather than falling back
+/// to the single-shot path. The part size and the single-shot cutoff are the same
+/// number — see `b2::constants::DEFAULT_PART_SIZE` — so one figure decides both,
+/// and it is also what this upload costs in memory.
 const STREAM_SOURCE_LEN: u64 = 100 * 1024 * 1024 + 6 * 1024 * 1024;
 
 /// Every variable a live B2 round trip needs.
