@@ -40,6 +40,7 @@
 //! | `408`, `429` | retry, honouring `Retry-After` | the server named a time; arguing with it is how a cap becomes a ban |
 //! | `5xx` | retry | includes the `503 no tomes available` above |
 //! | anything else (`400`, `404`, `416`, …) | **never** | the request is wrong, and it will be equally wrong next time |
+//! | a `200` whose body contradicts the request | **never** | see [`Observed::settled`] |
 //!
 //! The `401` split is the one worth stating twice. Classifying every `401` as
 //! temporary is what made a permanently wrong `DCTL_B2_APP_KEY` report an exit
@@ -84,6 +85,17 @@ pub(super) struct Observed {
     pub code: Option<String>,
     /// The server's `Retry-After`, already parsed, when it sent one.
     pub retry_after: Option<Duration>,
+    /// The request succeeded and its answer is what is wrong.
+    ///
+    /// The row the status table cannot express, because there is no failing
+    /// status to key it on. B2 verifies an upload's body against the
+    /// `X-Bz-Content-Sha1` header it was sent and rejects a mismatch with `400`;
+    /// so a `200` whose `contentSha1` is a *different* digest is B2 saying it
+    /// accepted the bytes and holds something else. That is a settled fact about
+    /// the object, not a pod that was busy, and re-sending the part cannot
+    /// change it — it only spends the whole upload again, six times, before
+    /// reporting the same thing.
+    pub settled: bool,
 }
 
 impl Observed {
@@ -93,6 +105,21 @@ impl Observed {
             status: None,
             code: None,
             retry_after: None,
+            settled: false,
+        }
+    }
+
+    /// A request that was answered, and whose answer is the problem.
+    ///
+    /// Distinct from a `4xx` — nothing was refused — and from a transport
+    /// failure, where the absence of a status is precisely what makes another
+    /// attempt worth making. See [`Observed::settled`].
+    pub(super) const fn settled() -> Self {
+        Self {
+            status: None,
+            code: None,
+            retry_after: None,
+            settled: true,
         }
     }
 
@@ -116,6 +143,15 @@ impl Attempt {
     pub(super) const fn transport(error: StoreError) -> Self {
         Self {
             observed: Observed::transport(),
+            error,
+        }
+    }
+
+    /// A failure the answer itself established, which no further attempt can
+    /// change. See [`Observed::settled`].
+    pub(super) const fn settled(error: StoreError) -> Self {
+        Self {
+            observed: Observed::settled(),
             error,
         }
     }
@@ -146,6 +182,11 @@ const HTTP_SERVER_ERROR: u16 = 500;
 /// table this implements and the argument for each row.
 pub(super) fn verdict(observed: &Observed, attempt: u32) -> Verdict {
     if attempt >= RETRY_MAX_ATTEMPTS {
+        return Verdict::Never;
+    }
+    // Before the status is consulted, because there is no failing status to
+    // consult: the request was answered, and the answer is the finding.
+    if observed.settled {
         return Verdict::Never;
     }
     let Some(status) = observed.status else {
@@ -289,6 +330,7 @@ mod tests {
             status: Some(503),
             code: Some("service_unavailable".to_string()),
             retry_after: None,
+            settled: false,
         };
         assert!(matches!(verdict(&observed, 1), Verdict::After(_)));
     }
@@ -315,6 +357,7 @@ mod tests {
             status: Some(401),
             code: Some("bad_auth_token".to_string()),
             retry_after: None,
+            settled: false,
         };
         assert_eq!(verdict(&bad_key, 1), Verdict::Never);
         assert!(!bad_key.is_expired_token());
@@ -323,6 +366,7 @@ mod tests {
             status: Some(401),
             code: Some(CODE_EXPIRED_AUTH_TOKEN.to_string()),
             retry_after: None,
+            settled: false,
         };
         assert!(matches!(verdict(&expired, 1), Verdict::After(_)));
         assert!(expired.is_expired_token());
@@ -331,6 +375,28 @@ mod tests {
         // observed says otherwise, and guessing "temporary" is the guess that
         // loops forever.
         assert_eq!(verdict(&status(401), 1), Verdict::Never);
+    }
+
+    #[test]
+    fn an_answer_that_contradicts_the_request_is_never_retried() {
+        // The row with no status to key it on. B2 checks an upload body against
+        // the `X-Bz-Content-Sha1` header it was sent and refuses a mismatch with
+        // `400`; a `200` naming a *different* digest is therefore B2 saying it
+        // took the bytes and holds something else, which is a fact about the
+        // object rather than a pod that was busy.
+        //
+        // This used to be `Attempt::transport`, whose `Observed` carries no
+        // status — and no status is the one case that means "nothing answered",
+        // so the whole part was re-sent five more times before reporting the
+        // same mismatch. The comment at the call site already said it should be
+        // reported on the first attempt; only the code disagreed.
+        assert_eq!(verdict(&Observed::settled(), 1), Verdict::Never);
+        // And it stays never however early the attempt is, which is what
+        // separates it from the transport case immediately above.
+        assert!(matches!(
+            verdict(&Observed::transport(), 1),
+            Verdict::After(_)
+        ));
     }
 
     #[test]
@@ -344,6 +410,7 @@ mod tests {
             status: Some(429),
             code: None,
             retry_after: Some(Duration::from_secs(7)),
+            settled: false,
         };
         assert_eq!(verdict(&asked, 1), Verdict::After(Duration::from_secs(7)));
 
@@ -351,6 +418,7 @@ mod tests {
             status: Some(503),
             code: None,
             retry_after: Some(Duration::from_secs(86_400)),
+            settled: false,
         };
         assert_eq!(verdict(&absurd, 1), Verdict::After(RETRY_AFTER_CAP));
     }
@@ -397,6 +465,7 @@ mod tests {
                             // Zero, so the test does not spend the real schedule
                             // sleeping; the schedule itself is asserted above.
                             retry_after: Some(Duration::ZERO),
+                            settled: false,
                         },
                         error: StoreError::Backend("busy".into()),
                     })
@@ -425,6 +494,7 @@ mod tests {
                         status: Some(401),
                         code: Some("bad_auth_token".to_string()),
                         retry_after: None,
+                        settled: false,
                     },
                     error: StoreError::Backend("b2 api error 401: bad_auth_token".into()),
                 })
@@ -457,6 +527,7 @@ mod tests {
                     status: Some(503),
                     code: None,
                     retry_after: Some(Duration::ZERO),
+                    settled: false,
                 },
                 error: StoreError::Backend("busy".into()),
             })

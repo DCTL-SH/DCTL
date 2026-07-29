@@ -196,10 +196,11 @@ async fn upload_single(
             .map_err(transport_attempt)?;
 
         let info: UploadFileResponse = b2.observe_expiry(read_json(resp).await).await?;
-        // A SHA-1 B2 echoes back wrong is not a busy pod: the bytes that arrived
-        // are not the bytes that were sent, and sending them again would be
-        // guessing. Reported as the mismatch it is, on the first attempt.
-        verify_sha1(&sha1_hex, &info.content_sha1).map_err(Attempt::transport)
+        // A SHA-1 B2 echoes back wrong is not a busy pod: B2 already checked the
+        // body against the header it was sent, so a different digest in the
+        // answer is what it holds. Settled, so it is reported as the mismatch it
+        // is on the first attempt rather than after five more whole uploads.
+        verify_sha1(&sha1_hex, &info.content_sha1).map_err(Attempt::settled)
     })
     .await
 }
@@ -484,7 +485,9 @@ async fn upload_one_part(
             .map_err(transport_attempt)?;
 
         let part: UploadPartResponse = b2.observe_expiry(read_json(resp).await).await?;
-        verify_sha1(&sha1_hex, &part.content_sha1).map_err(Attempt::transport)
+        // Settled, exactly as on the single-shot path above — and it matters
+        // more here, because the thing that would be re-sent is a whole part.
+        verify_sha1(&sha1_hex, &part.content_sha1).map_err(Attempt::settled)
     })
     .await?;
     part_sha1s.push(sha1_hex);

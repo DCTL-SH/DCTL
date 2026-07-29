@@ -351,6 +351,7 @@ async fn read_json<T: DeserializeOwned>(resp: reqwest::Response) -> Attempted<T>
                 status: Some(status.as_u16()),
                 code: b2_error_code(&bytes),
                 retry_after,
+                settled: false,
             },
             error: StoreError::Backend(format!(
                 "b2 api error {}: {}",

@@ -151,6 +151,23 @@ pub struct State {
     next_id: u64,
     /// The `recommendedPartSize` authorization reports.
     recommended_part_size: u64,
+    /// The id `b2_list_buckets` reports for [`BUCKET`], or [`None`] when the
+    /// bucket is not there at all.
+    ///
+    /// Separate from the id authorization hands out in its `allowed` block,
+    /// because those two answers coming apart is the whole subject of the
+    /// store-identity guard: a run authorizes once and caches what it was told,
+    /// and the bucket can be deleted and re-created underneath it afterwards.
+    bucket_id: Option<String>,
+    /// What every upload response reports as `contentSha1`, when it is not to be
+    /// the hash of the bytes that actually arrived.
+    ///
+    /// The one thing a provider can do that no amount of care on this side
+    /// prevents: accept the bytes, answer `200`, and describe something else.
+    /// DCTL's whole claim about a stored object rests on comparing the receipt
+    /// against the digest it sent, so a mock that always echoes honestly can
+    /// never show that the comparison happens.
+    echoed_sha1: Option<String>,
 }
 
 impl State {
@@ -196,6 +213,7 @@ impl MockB2 {
             .port();
         let state = Arc::new(Mutex::new(State {
             recommended_part_size,
+            bucket_id: Some(BUCKET_ID.to_string()),
             ..State::default()
         }));
         let base = format!("http://127.0.0.1:{port}");
@@ -235,6 +253,43 @@ impl MockB2 {
             .lock()
             .expect("the mock state is not poisoned")
             .clone()
+    }
+
+    /// The bucket is gone: `b2_list_buckets` stops reporting it.
+    ///
+    /// What a customer does with `b2 delete-bucket` while a long run is in
+    /// flight, and what a store-identity probe has to be able to see. The
+    /// authorization this run already cached still names the old id, which is
+    /// exactly why a guard that read the cached value would answer "carry on".
+    pub fn delete_bucket(&self) {
+        self.state
+            .lock()
+            .expect("the mock state is not poisoned")
+            .bucket_id = None;
+    }
+
+    /// Every subsequent upload response reports `sha1` rather than the hash of
+    /// what arrived.
+    ///
+    /// A `200` with a wrong receipt, which is the shape of the failure that
+    /// matters: an error would be caught by any code path at all, and a rejected
+    /// upload is a retry. This is the provider saying it stored something other
+    /// than what was sent, in the one field that could say so.
+    pub fn echo_sha1(&self, sha1: &str) {
+        self.state
+            .lock()
+            .expect("the mock state is not poisoned")
+            .echoed_sha1 = Some(sha1.to_string());
+    }
+
+    /// The bucket is back under the same name and a **new** id — B2 mints one per
+    /// creation, and that is what makes a bucket identity distinguishing rather
+    /// than merely present.
+    pub fn recreate_bucket(&self, bucket_id: &str) {
+        self.state
+            .lock()
+            .expect("the mock state is not poisoned")
+            .bucket_id = Some(bucket_id.to_string());
     }
 
     /// Answer the next request whose path ends with `path_suffix` with `status`
@@ -370,6 +425,9 @@ fn handle(seen: &Seen, state: &mut State, base: &str) -> (u16, String) {
     if path.ends_with("/b2_authorize_account") {
         return authorize(seen, state, base);
     }
+    if path.ends_with("/b2_list_buckets") {
+        return list_buckets(seen, state);
+    }
     if path.ends_with("/b2_get_upload_url") {
         state.next_id += 1;
         let token = format!("upload-token-{}", state.next_id);
@@ -434,6 +492,27 @@ fn authorize(seen: &Seen, state: &State, base: &str) -> (u16, String) {
     )
 }
 
+/// `b2_list_buckets`, filtered by the `bucketName` the caller asked about.
+///
+/// B2 answers a name that matches nothing with `200` and an **empty** array, not
+/// with a `404`, and the distinction is the one the store guard turns on: an
+/// empty list is "the bucket is not there", which is an absence a caller may act
+/// on, while a non-2xx is "I could not look", which is not. Answering the miss
+/// with an error here would let a backend that confused the two pass.
+fn list_buckets(seen: &Seen, state: &State) -> (u16, String) {
+    let asked = seen
+        .json()
+        .and_then(|body| string_field(&body, "bucketName"))
+        .unwrap_or_default();
+    let matched = match (&state.bucket_id, asked == BUCKET) {
+        (Some(id), true) => format!(
+            r#"{{"bucketId":"{id}","accountId":"{ACCOUNT_ID}","bucketName":"{BUCKET}","bucketType":"allPrivate"}}"#
+        ),
+        _ => String::new(),
+    };
+    (200, format!(r#"{{"buckets":[{matched}]}}"#))
+}
+
 fn upload_file(seen: &Seen, state: &mut State) -> (u16, String) {
     let Some(name) = seen.header("x-bz-file-name").map(str::to_string) else {
         return (400, error_body(400, "bad_request", "no X-Bz-File-Name"));
@@ -449,12 +528,15 @@ fn upload_file(seen: &Seen, state: &mut State) -> (u16, String) {
         len: seen.body_len,
         sha1: seen.body_sha1.clone(),
     });
+    let echoed = state
+        .echoed_sha1
+        .clone()
+        .unwrap_or_else(|| seen.body_sha1.clone());
     (
         200,
         format!(
-            r#"{{"fileId":"single-{}","contentSha1":"{}"}}"#,
+            r#"{{"fileId":"single-{}","contentSha1":"{echoed}"}}"#,
             state.singles.len(),
-            seen.body_sha1
         ),
     )
 }
@@ -503,7 +585,11 @@ fn upload_part(seen: &Seen, state: &mut State) -> (u16, String) {
         Some(index) => file.parts[index] = receipt,
         None => file.parts.push(receipt),
     }
-    (200, format!(r#"{{"contentSha1":"{}"}}"#, seen.body_sha1))
+    let echoed = state
+        .echoed_sha1
+        .clone()
+        .unwrap_or_else(|| seen.body_sha1.clone());
+    (200, format!(r#"{{"contentSha1":"{echoed}"}}"#))
 }
 
 fn finish_large_file(seen: &Seen, state: &mut State) -> (u16, String) {

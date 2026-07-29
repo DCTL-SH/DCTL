@@ -1093,6 +1093,83 @@ mod tests {
         assert_eq!(paths(&listing), ["a.txt", "sub/b.txt", "sub/deep/c.txt"]);
     }
 
+    /// The transfer walk under a policy that follows, which is the only way to
+    /// reach [`resolve_link`]'s cycle arm at all.
+    fn following() -> ListOptions {
+        ListOptions {
+            links: LinkPolicy::Follow,
+            ..ListOptions::default()
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_transfer_walk_stops_at_a_link_that_re_enters_its_own_ancestor() {
+        // The transfer walk's own cycle guard, and it is separate code from the
+        // backup scan's — `commands::backup::scan` has one, `dctl_store::links`
+        // has the chain both are built on, and both of those are asserted
+        // elsewhere. This one could be deleted outright and the workspace suite
+        // stayed green, which is what makes it worth a test of its own: `dctl
+        // copy` and `dctl sync` are the verbs that walk it.
+        //
+        // `inner/loop -> the root` is the oldest way to make a backup tool run
+        // until the disk fills. Without the guard the walk descends
+        // `inner/loop/inner/loop/…` and stores the same payload once per level
+        // under a longer name each time, until the kernel's own forty-link
+        // ceiling ends the run with an unreadable directory — a transfer that
+        // either never finishes or fails somewhere nobody can act on.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("inner")).unwrap();
+        fs::write(root.join("inner/a.txt"), "a").unwrap();
+        std::os::unix::fs::symlink(root, root.join("inner/loop")).unwrap();
+
+        let listing = source(
+            &ctx(&[]),
+            &RemoteSpec::Local(root.to_path_buf()),
+            &following(),
+        )
+        .await
+        .expect("a tree whose only oddity is a loop still lists");
+
+        // The payload is through, exactly once, under the name it really has.
+        assert_eq!(paths(&listing), ["inner/a.txt"]);
+        // And the loop is *named*, not merely absent: the count and the reason
+        // are what tell an operator why one directory is not in the transfer.
+        assert_eq!(listing.links.skipped(), 1);
+        assert_eq!(listing.links.followed(), 0);
+        assert_eq!(listing.links.notes()[0].path, "inner/loop");
+        assert_eq!(listing.links.notes()[0].verdict, LinkVerdict::Cycle);
+        assert!(listing.has_omissions(), "the run must not stay quiet");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn two_links_to_one_directory_are_both_transferred() {
+        // The other half of the rule, and the reason the guard tracks ancestors
+        // rather than every directory the walk has entered. `current` and
+        // `latest` are two legitimate names for one release directory; a
+        // visited-set implementation terminates just as well and silently drops
+        // everything under the second of them — the same loss the link work
+        // exists to remove, arrived at from the other side.
+        let dir = tempfile::tempdir().unwrap();
+        let shared = dir.path().join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::write(shared.join("x.txt"), "x").unwrap();
+        let root = dir.path().join("root");
+        fs::create_dir(&root).unwrap();
+        std::os::unix::fs::symlink(&shared, root.join("current")).unwrap();
+        std::os::unix::fs::symlink(&shared, root.join("latest")).unwrap();
+
+        let listing = source(&ctx(&[]), &RemoteSpec::Local(root), &following())
+            .await
+            .unwrap();
+
+        assert_eq!(paths(&listing), ["current/x.txt", "latest/x.txt"]);
+        assert_eq!(listing.links.followed(), 2);
+        assert_eq!(listing.links.skipped(), 0);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_root_reached_through_a_symlink_is_walked_rather_than_skipped() {

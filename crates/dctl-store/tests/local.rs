@@ -389,6 +389,84 @@ async fn rejects_path_traversal_keys() {
     assert!(matches!(err, StoreError::InvalidKey(_)));
 }
 
+/// Every key shape that would put a byte outside the store, on every operation
+/// that resolves one.
+///
+/// `../escape` above is one of four refusals in `local::key_path` and was the
+/// only one with a test: an **absolute** key writes wherever it names and never
+/// touches the store root at all, an **empty** key resolves to the root itself,
+/// and a key carrying a **NUL** byte is truncated by the C string every syscall
+/// underneath eventually builds — so `o/abc\0/../../etc/passwd` is one path to
+/// this layer and a different one to the kernel. Deleting any of the three left
+/// `cargo test --workspace` green.
+///
+/// Asserted on the read side as well as the write side, because containment that
+/// only holds for `put` is not containment: `get` and `head` resolve the same
+/// key, and a store asked for `/etc/shadow` must refuse rather than answer.
+#[tokio::test]
+async fn no_key_shape_reaches_outside_the_store_root() {
+    let dir = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+
+    for key in ["", "/etc/passwd", "o/ab\0cd", "a/../../b", "./x"] {
+        let key = ObjectKey::new(key);
+        let refused = |what: &str, error: StoreError| {
+            assert!(
+                matches!(error, StoreError::InvalidKey(_)),
+                "{what} accepted {:?} with {error}",
+                key.as_str()
+            );
+        };
+        refused(
+            "put",
+            fs.put(
+                &key,
+                Bytes::from_static(b"x"),
+                &blake3(b"x"),
+                SourceModified::unknown(),
+            )
+            .await
+            .expect_err("a key that escapes the root must never be written"),
+        );
+        refused(
+            "get",
+            fs.get(&key)
+                .await
+                .expect_err("nor read from outside the root"),
+        );
+        refused("head", fs.head(&key).await.expect_err("nor described"));
+        refused("delete", fs.delete(&key).await.expect_err("nor deleted"));
+    }
+
+    // Nothing was created on the way to any of those refusals — including the
+    // root itself, which the empty key names.
+    assert_eq!(
+        std::fs::read_dir(dir.path())
+            .expect("the root is readable")
+            .count(),
+        0
+    );
+
+    // The absolute-key refusal is asserted on its *wording*, and that is not
+    // fussiness. Containment against `/etc/passwd` is held twice over: the
+    // component walk below the check rejects `Component::RootDir` (and, on
+    // Windows, `Component::Prefix`) before anything is joined, so deleting
+    // `is_absolute` moves no byte outside the root and the loop above stays
+    // green either way. What it changes is the sentence the operator is handed
+    // — "disallowed path component" for a key whose whole problem is that it
+    // names an absolute path — and a diagnosis that does not say what is wrong
+    // is how §16.1's `checksum mismatch: expected … got …` sent somebody
+    // hunting a corrupt provider when their disk was full.
+    let absolute = fs
+        .head(&ObjectKey::new("/etc/passwd"))
+        .await
+        .expect_err("an absolute key is refused");
+    assert!(
+        absolute.to_string().contains("absolute key not allowed"),
+        "the refusal must name the reason it refused: {absolute}"
+    );
+}
+
 /// Real filenames that the old substring rule (`name.contains(".tmp.")`) treated
 /// as DCTL's own half-written objects and hid from every listing.
 ///

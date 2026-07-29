@@ -410,6 +410,114 @@ mod tests {
     use std::path::Path;
     use tempfile::TempDir;
 
+    /// A provider whose `head` claims more bytes than it will serve.
+    ///
+    /// The one condition every guard in this module exists for, and the one no
+    /// real backend in the workspace can be made to produce: `LocalFs` reads a
+    /// real file, so its `head` and its `get_range` can never disagree. A store
+    /// that answers a range past what it holds with *nothing* — an object
+    /// truncated under it, a proxy that stopped mid-stream, a bucket restored
+    /// from a partial copy — is what turns a `--checksum`, a `verify` and a `cat`
+    /// into confident wrong answers, so it is driven from here.
+    ///
+    /// Deliberately not an error: an error would be caught by any code path at
+    /// all. Serving a short read and then an empty one is the *plausible*
+    /// failure, because every byte it does hand over is genuinely that object's.
+    struct ShortServing {
+        /// What `head` and every listing report.
+        declared: u64,
+        /// How many bytes actually exist. Ranges beyond this are empty.
+        served: u64,
+    }
+
+    impl ShortServing {
+        /// The object's real bytes: a repeating pattern, so a hash over a prefix
+        /// differs from a hash over the whole thing.
+        fn body(&self) -> Vec<u8> {
+            (0..self.served).map(|n| (n % 251) as u8).collect()
+        }
+    }
+
+    #[async_trait]
+    impl Backend for ShortServing {
+        fn name(&self) -> &'static str {
+            "short-serving"
+        }
+
+        async fn store_identity(&self) -> dctl_store::Result<Option<dctl_store::StoreIdentity>> {
+            Ok(Some(dctl_store::StoreIdentity::distinguishing("short")))
+        }
+
+        async fn put(
+            &self,
+            _key: &ObjectKey,
+            _data: bytes::Bytes,
+            _expected: &dctl_store::ContentHash,
+            _modified: dctl_store::SourceModified,
+        ) -> dctl_store::Result<dctl_store::PutOutcome> {
+            Err(StoreError::Backend("this fake is read-only".into()))
+        }
+
+        async fn get(&self, _key: &ObjectKey) -> dctl_store::Result<bytes::Bytes> {
+            Ok(bytes::Bytes::from(self.body()))
+        }
+
+        async fn get_range(
+            &self,
+            _key: &ObjectKey,
+            range: ByteRange,
+        ) -> dctl_store::Result<bytes::Bytes> {
+            let body = self.body();
+            let start = usize::try_from(range.offset)
+                .unwrap_or(usize::MAX)
+                .min(body.len());
+            let end = match range.length {
+                Some(length) => start
+                    .saturating_add(usize::try_from(length).unwrap_or(usize::MAX))
+                    .min(body.len()),
+                None => body.len(),
+            };
+            Ok(bytes::Bytes::copy_from_slice(&body[start..end]))
+        }
+
+        async fn head(&self, key: &ObjectKey) -> dctl_store::Result<ObjectMeta> {
+            Ok(ObjectMeta {
+                key: key.clone(),
+                size: self.declared,
+                modified_unix: None,
+            })
+        }
+
+        async fn exists(&self, _key: &ObjectKey) -> dctl_store::Result<bool> {
+            Ok(true)
+        }
+
+        async fn delete(&self, _key: &ObjectKey) -> dctl_store::Result<()> {
+            Ok(())
+        }
+
+        async fn list_page(
+            &self,
+            _prefix: &str,
+            _cursor: Option<String>,
+        ) -> dctl_store::Result<dctl_store::Page> {
+            Ok(dctl_store::Page::default())
+        }
+
+        async fn list_staging(
+            &self,
+            _prefix: &str,
+            _cursor: Option<String>,
+        ) -> dctl_store::Result<dctl_store::StagingListing> {
+            Ok(dctl_store::StagingListing::NotStaged("a fake"))
+        }
+    }
+
+    /// A source over a store that declares `declared` bytes and holds `served`.
+    fn short_serving(declared: u64, served: u64) -> PlainSource {
+        PlainSource::new(Arc::new(ShortServing { declared, served }))
+    }
+
     /// A real directory tree behind a real `LocalFs`, with `files` written into
     /// it. The same backend a `local:` remote builds.
     struct Fixture {
@@ -661,6 +769,119 @@ mod tests {
             .verify("big.bin")
             .await
             .expect("a multi-window object reads back");
+    }
+
+    #[tokio::test]
+    async fn a_store_that_serves_a_prefix_is_not_hashed_as_the_file() {
+        // The guard this product is sold on. A truncated object hashed to its
+        // prefix produces a digest that is internally consistent and wrong:
+        // `--checksum` compares it against the vault's recorded hash, finds a
+        // difference, and re-transfers — or, worse, the *destination* is the
+        // truncated side and a `check` blesses whatever the two happen to agree
+        // on. Either way the number came from bytes nobody has all of.
+        //
+        // Ten bytes declared, four served. The first window is a legitimate
+        // short read; the second is empty, and empty while `head` still claims
+        // six bytes to go is the store contradicting itself.
+        let source = short_serving(10, 4);
+
+        let error = source
+            .content_hash("truncated.bin")
+            .await
+            .expect_err("a prefix must never be reported as the object's hash");
+
+        assert_eq!(error.code(), ExitCode::IntegrityFailure);
+        assert!(
+            error.message().contains("truncated") && error.message().contains("4"),
+            "the refusal must say where it stopped and what was claimed: {}",
+            error.message()
+        );
+        assert!(
+            error.hint().is_some(),
+            "a refusal must say what to do next: restore from another copy"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_prefix_hash_is_a_real_digest_which_is_exactly_why_it_is_refused() {
+        // The other half, and the reason the test above cannot be satisfied by
+        // any old failure: the hash of the four bytes that *were* served is a
+        // perfectly good BLAKE3. Nothing downstream could tell it from the
+        // right answer — it is not short, not zero, not malformed. The only
+        // thing wrong with it is that the object is ten bytes long.
+        //
+        // So the same fake, serving everything it declares, must produce that
+        // full-length digest and no error at all. Without this row a guard that
+        // simply refused every object would pass the truncation test.
+        let whole = short_serving(10, 10);
+        let hash = whole
+            .content_hash("intact.bin")
+            .await
+            .expect("an object served in full hashes")
+            .expect("and yields a digest");
+
+        let ten: Vec<u8> = (0..10u8).map(|n| n % 251).collect();
+        assert_eq!(hash, blake3::hash(&ten).as_bytes().to_vec());
+        // …and it is not the prefix's, which is what a dropped guard returns.
+        assert_ne!(hash, blake3::hash(&ten[..4]).as_bytes().to_vec());
+    }
+
+    #[tokio::test]
+    async fn verify_refuses_a_short_object_rather_than_reporting_it_healthy() {
+        // `dctl verify` and `dctl check` are the commands an operator runs to be
+        // told the archive is intact. A read-back that stopped at the first
+        // empty window and returned `Ok` would report exactly this object —
+        // present, addressable, and missing six of its ten bytes — as healthy.
+        let source = short_serving(10, 4);
+
+        let error = source
+            .verify("truncated.bin")
+            .await
+            .expect_err("a short object cannot pass a read-back");
+
+        assert_eq!(error.code(), ExitCode::IntegrityFailure);
+        assert!(error.message().contains("truncated"), "{}", error.message());
+        // And the same object served in full passes, so the refusal is about the
+        // shortfall and not about the fake.
+        short_serving(10, 10)
+            .verify("intact.bin")
+            .await
+            .expect("an object served in full verifies");
+    }
+
+    #[tokio::test]
+    async fn cat_fails_on_a_short_object_rather_than_writing_a_partial_file() {
+        // The third copy of the same guard, on the path that hands bytes to a
+        // user: `dctl cat archive:big.iso > big.iso`. Writing four bytes and
+        // exiting 0 would put a truncated file on the operator's disk under the
+        // name of the whole one — a restore that reports success and loses the
+        // file, which is `PLAN.md` §6's forbidden outcome.
+        let source = short_serving(10, 4);
+        let mut sink: Vec<u8> = Vec::new();
+
+        let error = source
+            .stream_to("truncated.bin", &mut sink)
+            .await
+            .expect_err("a short object must fail the stream");
+
+        assert_eq!(error.code(), ExitCode::IntegrityFailure);
+        assert!(
+            error.message().contains("stopped serving bytes at 4"),
+            "the refusal must name the byte it stopped at: {}",
+            error.message()
+        );
+        // The bytes that did arrive are the object's own — which is why the
+        // failure has to be reported rather than inferred from the output.
+        assert_eq!(sink.len(), 4);
+
+        let mut whole: Vec<u8> = Vec::new();
+        assert_eq!(
+            short_serving(10, 10)
+                .stream_to("intact.bin", &mut whole)
+                .await
+                .expect("an object served in full streams"),
+            10
+        );
     }
 
     #[test]

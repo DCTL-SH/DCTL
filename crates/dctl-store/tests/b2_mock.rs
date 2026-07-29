@@ -20,6 +20,7 @@ mod support;
 
 use bytes::Bytes;
 use dctl_store::b2::{B2Backend, B2Credentials};
+use dctl_store::guard::Strength;
 use dctl_store::{Backend, ContentHash, HashAlgo, ObjectKey, SourceModified};
 use support::mock_b2::{APP_KEY, BUCKET, KEY_ID, MockB2};
 use tempfile::TempDir;
@@ -39,6 +40,21 @@ async fn backend(mock: &MockB2, part_size: Option<u64>) -> B2Backend {
         .expect("the backend builds")
         .with_authorize_url(mock.authorize_url())
         .with_part_size(part_size)
+}
+
+/// How many requests arrived whose path *starts* with `prefix`.
+///
+/// [`support::mock_b2::State::count`] matches on a suffix, which is right for
+/// the endpoints B2 addresses by name and silently wrong for the two it
+/// addresses by id: `/b2_upload_file/<bucket>` and `/b2_upload_part/<file>` end
+/// with the id, so a suffix of `"/b2_upload_file/"` matches nothing and an
+/// assertion built on it reads zero however many uploads were sent.
+fn sent(mock: &MockB2, prefix: &str) -> usize {
+    mock.state()
+        .requests
+        .iter()
+        .filter(|seen| seen.path.starts_with(prefix))
+        .count()
 }
 
 fn blake3(data: &[u8]) -> ContentHash {
@@ -319,5 +335,229 @@ async fn the_buffered_put_cuts_the_same_object_the_same_way() {
     assert_eq!(
         large.parts[0].sha1,
         ContentHash::sha1(&data[..PART as usize]).hex()
+    );
+}
+
+// ── the bucket this run has been writing into ────────────────────────────────
+
+#[tokio::test]
+async fn the_bucket_identity_is_re_resolved_and_not_read_back_from_the_session() {
+    // The whole point of B2's `store_identity`, and until this test it could be
+    // replaced by `Ok(None)` — which disables the guard outright — with the
+    // workspace suite staying green.
+    //
+    // The trap it exists to avoid is small and quiet: `AuthState` already holds
+    // a `bucket_id`, resolved when this run authorized, and answering with that
+    // would compile, read naturally and compare a cached value against itself
+    // forever. A bucket deleted and re-created mid-run keeps its *name* and gets
+    // a **new id**, so the fresh lookup is the only thing that can see it.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = backend(&mock, None).await;
+
+    let before = b2
+        .store_identity()
+        .await
+        .expect("the bucket resolves")
+        .expect("and is there");
+    assert_eq!(before.strength(), Strength::Distinguishing);
+
+    // Deleted and re-created under the same name: the session's cached id is
+    // untouched and the provider's answer has changed.
+    mock.recreate_bucket("b2b1c0ffee00000000000002");
+    let after = b2
+        .store_identity()
+        .await
+        .expect("the replacement resolves")
+        .expect("and is there");
+
+    assert_ne!(
+        before, after,
+        "a re-created bucket must not compare equal to the one it replaced"
+    );
+    // Stated as the guard states it, because that is the decision this value is
+    // for: writes into the replacement are refused, not logged and continued.
+    assert_eq!(
+        dctl_store::guard::identity::verdict(Some(&before), Some(&after)),
+        dctl_store::guard::identity::Verdict::Replaced
+    );
+    // And the lookup really went to the provider each time, rather than being
+    // answered from anything this process was already holding.
+    assert_eq!(mock.state().count("/b2_list_buckets"), 2);
+}
+
+#[tokio::test]
+async fn a_deleted_bucket_is_an_absence_and_a_failed_lookup_is_an_error() {
+    // Two answers that must not be folded into one. B2 reports a name that
+    // matches nothing with `200` and an empty array, and that absence is a fact
+    // the guard acts on — `Gone`, and the run stops rather than writing into a
+    // bucket somebody deleted underneath it. A request that *failed* is not that
+    // fact: "I could not look" carried back as `Ok(None)` would read as "the
+    // bucket is gone" and refuse a run over a network hiccup, and carried back
+    // as `Ok(Some(..))` would bless one.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = backend(&mock, None).await;
+
+    let before = b2
+        .store_identity()
+        .await
+        .expect("the bucket resolves")
+        .expect("and is there");
+
+    mock.delete_bucket();
+    assert_eq!(
+        b2.store_identity()
+            .await
+            .expect("the lookup still succeeds"),
+        None,
+        "a bucket that is not listed is an absence, not a failure"
+    );
+    assert_eq!(
+        dctl_store::guard::identity::verdict(Some(&before), None),
+        dctl_store::guard::identity::Verdict::Gone
+    );
+
+    // `403` is B2's storage/transaction cap and this module classifies it as
+    // terminal, so it arrives as one error rather than as a retry storm.
+    mock.fail_next("/b2_list_buckets", 403, "storage_cap_exceeded");
+    let error = b2
+        .store_identity()
+        .await
+        .expect_err("a refused lookup is not an answer about the bucket");
+    assert!(
+        format!("{error}").contains("403"),
+        "the failure must carry what the provider said: {error}"
+    );
+}
+
+// ── the receipt a provider hands back ────────────────────────────────────────
+
+#[tokio::test]
+async fn a_receipt_that_names_a_different_sha1_is_refused_rather_than_believed() {
+    // The only check DCTL has against a provider that accepts an upload and
+    // stores something else. B2 answers every upload with the `contentSha1` it
+    // computed over what it received; comparing it against the digest that was
+    // sent is what turns "the request succeeded" into "the object is the object".
+    //
+    // Deleting the comparison leaves a `put` that returns `Ok` for bytes the
+    // provider says are not the bytes that were sent — a transfer reported as
+    // complete for an object that is not there, which is `PLAN.md` §6's
+    // forbidden outcome arriving through the one field designed to prevent it.
+    //
+    // Both upload shapes are asserted, because they are separate call sites over
+    // one helper and the single-shot path is the one almost every object takes.
+    let mock = MockB2::start(ADVERTISED).await;
+    mock.echo_sha1("0000000000000000000000000000000000000000");
+
+    let b2 = backend(&mock, None).await;
+    let data = Bytes::from_static(b"the bytes that were sent");
+    let error = b2
+        .put(
+            &ObjectKey::new("o/single.bin"),
+            data.clone(),
+            &blake3(&data),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("a receipt that does not describe what was sent is not a success");
+    assert!(
+        matches!(error, dctl_store::StoreError::ChecksumMismatch { .. }),
+        "the failure must name the disagreement rather than the transport: {error}"
+    );
+    // And exactly once. B2 checked the body against the header it was sent and
+    // accepted it, so a different digest in the answer is what B2 holds — a
+    // fact five more uploads of the same bytes cannot change. Asserted by
+    // count, because the wrapped `Retried` error above is the only other trace
+    // a re-upload would leave and an operator would read it as a flaky link.
+    assert_eq!(
+        sent(&mock, "/b2_upload_file/"),
+        1,
+        "a settled disagreement must not be re-uploaded"
+    );
+
+    // The multipart path, over the same helper and a separate call site.
+    let mock = MockB2::start(ADVERTISED).await;
+    mock.echo_sha1("1111111111111111111111111111111111111111");
+    let b2 = backend(&mock, Some(PART)).await;
+    let big = Bytes::from(vec![7u8; (PART * 2) as usize + 5]);
+    let error = b2
+        .put(
+            &ObjectKey::new("o/large.bin"),
+            big.clone(),
+            &blake3(&big),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("a part whose receipt disagrees is not a stored part");
+    assert!(
+        matches!(error, dctl_store::StoreError::ChecksumMismatch { .. }),
+        "the failure must name the disagreement: {error}"
+    );
+    // One part sent, not six. The multipart path is where a retry costs the
+    // most — it re-reads and re-sends a whole part — and it is the path a large
+    // object always takes.
+    assert_eq!(
+        sent(&mock, "/b2_upload_part/"),
+        1,
+        "a settled disagreement must not re-send the part"
+    );
+
+    // The control: the same objects against a mock that answers honestly, so the
+    // refusal is about the receipt and not about the sizes or the mock.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = backend(&mock, Some(PART)).await;
+    b2.put(
+        &ObjectKey::new("o/single.bin"),
+        data.clone(),
+        &blake3(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("an honest receipt stores");
+    b2.put(
+        &ObjectKey::new("o/large.bin"),
+        big.clone(),
+        &blake3(&big),
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("and so does a multipart one");
+}
+
+#[tokio::test]
+async fn a_put_whose_declared_hash_is_not_its_bytes_never_reaches_the_network() {
+    // The guard at the other end of the same claim, and the cheaper one: the
+    // caller states what it believes it is storing, and this backend checks that
+    // belief against the buffer in its hand before a byte leaves the process.
+    //
+    // Without it a caller whose hash and bytes had come apart — a read that was
+    // retried, a buffer reused, an index entry copied from the wrong row — would
+    // upload the bytes, receive an honest receipt for them, and record the wrong
+    // digest against the object. Every later `verify` would then compare the
+    // object against a hash nothing ever had, and report a corrupt archive.
+    //
+    // Asserted by request count as well as by error, because "refused" and
+    // "refused before it was sent" are different guarantees and only the second
+    // one is free.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = backend(&mock, None).await;
+    let data = Bytes::from_static(b"these are the bytes");
+
+    let error = b2
+        .put(
+            &ObjectKey::new("o/mislabelled.bin"),
+            data,
+            &blake3(b"but this is some other file's hash"),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("bytes that are not what the caller says they are must not be stored");
+    assert!(
+        matches!(error, dctl_store::StoreError::ChecksumMismatch { .. }),
+        "{error}"
+    );
+    assert_eq!(
+        sent(&mock, "/b2_upload_file/"),
+        0,
+        "the refusal must come before the upload, not after it"
     );
 }

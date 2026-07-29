@@ -98,6 +98,7 @@ async fn classify_download(
                 status: Some(HTTP_NOT_FOUND),
                 code: None,
                 retry_after: None,
+                settled: false,
             },
             error: StoreError::NotFound(key.to_string()),
         });
@@ -112,6 +113,7 @@ async fn classify_download(
             status: Some(status.as_u16()),
             code: super::b2_error_code(&bytes),
             retry_after,
+            settled: false,
         },
         error: StoreError::Backend(format!(
             "b2 download error {}: {}",

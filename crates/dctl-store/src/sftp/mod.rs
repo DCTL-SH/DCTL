@@ -46,6 +46,20 @@
 //! The rule and the order that carries it are in [`ops`] and [`write`], stated
 //! against a trait so both are provable without an ssh host — which they were
 //! not, and the cost of that is `HANDOVER.md` §15.4.
+//!
+//! # What is below the trait, and how it is reached
+//!
+//! The trait ends where the client library begins, and three guarantees live on
+//! the far side of it: the `SETSTAT` above, the `mkdir -p` that must never
+//! re-create the configured base ([`path::ancestor_dirs_below`]), and the base
+//! probe [`Backend::store_identity`] answers from. Deleting any of the three
+//! left `cargo test --workspace` green, because their only witness was
+//! `tests/sftp_live.rs` and that needs `DCTL_SFTP_HOST`.
+//!
+//! [`SftpBackend::over_stream`] is the answer: this backend will speak its
+//! protocol down any pair of byte streams, so `tests/sftp_mock.rs` runs it
+//! against an SFTP version-3 server in the same process. Real client, real
+//! packets, real files at the other end, and no host.
 
 pub mod base;
 mod ops;
@@ -132,8 +146,13 @@ pub struct SftpBackend {
     /// Kept alive alongside the SFTP channel so the `ControlMaster` mux session
     /// persists for this backend's lifetime (and is available for future
     /// shell-command operations over the same connection if ever needed).
+    ///
+    /// [`None`] for a backend built by [`SftpBackend::over_stream`], where the
+    /// SFTP conversation runs over a byte stream that has no ssh session behind
+    /// it at all. Nothing reads this field; it exists to own the session's
+    /// lifetime, and "there is no session to own" is a legitimate answer.
     #[allow(dead_code)]
-    session: Arc<Session>,
+    session: Option<Arc<Session>>,
     sftp: Sftp,
     /// Normalized remote base (see [`path::normalize_base`]).
     base: String,
@@ -187,7 +206,57 @@ impl SftpBackend {
             .map_err(|e| {
                 StoreError::Backend(format!("open sftp subsystem on {}: {e}", cfg.host))
             })?;
-        let base = normalize_base(&cfg.base);
+        Self::over_sftp(Some(session), sftp, &cfg.base, cfg.links).await
+    }
+
+    /// The same backend, speaking SFTP over an arbitrary byte-stream pair.
+    ///
+    /// **The only way into this backend that does not dial an ssh host**, and it
+    /// exists for the reason [`crate::b2::B2Backend::with_authorize_url`] exists.
+    /// Three of this backend's guarantees — the `SETSTAT` that carries the
+    /// source's modification time, the `mkdir -p` that must never re-create the
+    /// configured base, and the base probe the store guard rests on — live
+    /// *below* the [`ops::RemoteFs`] seam, in the code that talks to the client
+    /// library. Their only witness was `tests/sftp_live.rs`, which is
+    /// `#[ignore]`d and needs `DCTL_SFTP_HOST`, so deleting any of the three left
+    /// `cargo test --workspace` entirely green (`HANDOVER.md` §23.0).
+    ///
+    /// `stdin` is where requests are written and `stdout` is where responses are
+    /// read — the shape a subprocess's pipes have, and the shape
+    /// `tests/support/mock_sftp.rs` hands over. Nothing in `dctl-cli` calls this;
+    /// production always goes through [`connect`](Self::connect).
+    ///
+    /// # Errors
+    /// Whatever opening the SFTP conversation reported.
+    pub async fn over_stream<W, R>(
+        stdin: W,
+        stdout: R,
+        base: &str,
+        links: LinkPolicy,
+    ) -> Result<Self>
+    where
+        W: tokio::io::AsyncWrite + Send + Unpin + 'static,
+        R: tokio::io::AsyncRead + Send + Unpin + 'static,
+    {
+        let sftp = Sftp::new(stdin, stdout, SftpOptions::default())
+            .await
+            .map_err(|e| StoreError::Backend(format!("open sftp subsystem on a stream: {e}")))?;
+        Self::over_sftp(None, sftp, base, links).await
+    }
+
+    /// The shared tail of both constructors: normalize the base, and decide once
+    /// whether a write may create it.
+    ///
+    /// One function rather than two copies, because the probe is the *decision*
+    /// half of the vanished-base guard and a second spelling of it is a second
+    /// place for it to be got wrong.
+    async fn over_sftp(
+        session: Option<Arc<Session>>,
+        sftp: Sftp,
+        base: &str,
+        links: LinkPolicy,
+    ) -> Result<Self> {
+        let base = normalize_base(base);
         // One `stat` at connect. A base that is absent now may be created by the
         // first write; one that is present may never be re-created by any write
         // in this run. See [`SftpBackend::may_create_base`].
@@ -199,7 +268,7 @@ impl SftpBackend {
             session,
             sftp,
             base,
-            links: cfg.links,
+            links,
             meter: meter::unmetered(),
             may_create_base,
         })
