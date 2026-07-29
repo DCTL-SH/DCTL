@@ -45,7 +45,7 @@ use serde::Serialize;
 use crate::commands::listing::emit::Emitter;
 use crate::constants::{
     REMOVAL_KIND_OBJECT, REMOVAL_SIZE_ABSENT, REMOVAL_SIZE_WIDTH, REMOVAL_STATUS_ABSENT,
-    REMOVAL_STATUS_FAILED, REMOVAL_STATUS_NOT_STAGED, REMOVAL_STATUS_REMOVED,
+    REMOVAL_STATUS_FAILED, REMOVAL_STATUS_HELD, REMOVAL_STATUS_NOT_STAGED, REMOVAL_STATUS_REMOVED,
     REMOVAL_STATUS_SUMMARY, REMOVAL_STATUS_UNSUPPORTED, REMOVAL_STATUS_WIDTH,
     REMOVAL_STATUS_WOULD_REMOVE,
 };
@@ -94,6 +94,17 @@ pub struct Totals {
     /// Debris classes this backend does not have. Never an error: the question
     /// was answered, and the answer was "there is no such thing here".
     pub not_staged: u64,
+    /// Debris the sweep found, judged too young to be abandoned — or whose age
+    /// it could not establish — and left in place on purpose.
+    ///
+    /// Never an error, and never folded into `removed`: the storage is still
+    /// being paid for, and an operator deciding whether to lower `--min-age`
+    /// needs the number that says how much. Its absence is what let
+    /// `removed: 0` read as "the store is clean" over a full-size staging file.
+    pub held: u64,
+    /// Bytes accounted for by `held`, as a lower bound: debris with no recorded
+    /// size contributes nothing to it rather than being guessed at.
+    pub held_bytes: u64,
     /// Bytes accounted for by `removed` (or by `would_remove` on a dry run), or
     /// `null` when any of those objects had no recorded size.
     ///
@@ -122,6 +133,8 @@ impl Default for Totals {
             failed: 0,
             unsupported: 0,
             not_staged: 0,
+            held: 0,
+            held_bytes: 0,
             bytes: Some(0),
             measured_bytes: 0,
             unmeasured: 0,
@@ -295,6 +308,26 @@ impl<'a> Report<'a> {
         })
     }
 
+    /// Record one piece of debris the sweep looked at and left where it was.
+    ///
+    /// The reason travels with the record rather than being implied by the
+    /// status, because the two ways of arriving here send an operator to
+    /// different places: "younger than 1d00h" is answered by `--min-age`, and
+    /// "its age cannot be established" is answered by the provider or not at
+    /// all. Counted separately from `removed` in both directions — a held object
+    /// is still being billed for, and a run that held everything freed nothing.
+    ///
+    /// # Errors
+    /// A stdout write failure other than a broken pipe.
+    pub fn held(&mut self, item: &Item, reason: impl Into<String>) -> Result<()> {
+        self.totals.held += 1;
+        self.totals.held_bytes = self
+            .totals
+            .held_bytes
+            .saturating_add(item.size.unwrap_or_default());
+        self.item(REMOVAL_STATUS_HELD, item, Some(reason.into()))
+    }
+
     /// The totals so far, for a caller that has to decide what to say next.
     #[must_use]
     pub const fn totals(&self) -> Totals {
@@ -360,6 +393,19 @@ fn human_totals(ctx: &Ctx, totals: &Totals) {
         size::count(acted),
         size::bytes_or_unknown(totals.bytes, ctx.out.units())
     );
+
+    // Debris that was found and left belongs on the closing line, because the
+    // closing line is what a nightly job's output gets grepped for and
+    // `removed: 0` on its own reads as "the store is clean".
+    let line = if totals.held > 0 {
+        format!(
+            "{line}; {} held, {}",
+            size::count(totals.held),
+            size::bytes(totals.held_bytes, ctx.out.units())
+        )
+    } else {
+        line
+    };
 
     if totals.failed > 0 {
         // A run with survivors is not a success, and the closing line is the

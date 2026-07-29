@@ -4430,6 +4430,126 @@ fn cleanup_reclaims_the_staging_file_an_interrupted_write_left_in_a_vault() {
 
 #[cfg(unix)]
 #[test]
+fn a_sweep_that_left_debris_because_it_was_young_says_so_rather_than_reporting_nothing() {
+    // The defect this pass found live, on the release binary. A `SIGKILL` five
+    // seconds into a copy leaves a 238 MiB staging file, and the sweep an
+    // operator's nightly job actually runs — `dctl cleanup v: --class staging`,
+    // with no `--min-age`, so the default day applies — answered:
+    //
+    //     no reclaimable debris found in 'v:'
+    //     OK removed: 0 object(s), 0 B
+    //
+    // at every verbosity up to `-vvv`, with the file still on the store. Holding
+    // a staging file younger than the default is *right*: it may belong to a
+    // transfer still running, which is why `--min-age` is load-bearing rather
+    // than a tuning knob. Saying "no reclaimable debris found" over it is not.
+    // That sentence is the false all-clear this whole family spent a release
+    // printing — the one `HANDOVER.md` §11.3 item 1 was closed to stop — moved
+    // from the listing to the age filter rather than removed.
+    let sandbox = Sandbox::new();
+    let store = sandbox.dir("store");
+    let debris = plant_staging_file(&store.join("o"), &vec![9u8; 8192]);
+
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", store.display()))
+        .assert()
+        .success();
+
+    let assertion = sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("cleanup")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .args(["--class", "staging"])
+        .assert()
+        .success();
+    let output = assertion.get_output();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    assert!(
+        debris.exists(),
+        "the default sweep must not delete debris younger than --min-age:\n{text}"
+    );
+    assert!(
+        !text.contains("no reclaimable debris found"),
+        "the sweep found debris and left it; saying it found none is the false \
+         all-clear this command exists not to print:\n{text}"
+    );
+    assert!(
+        text.contains("held"),
+        "what was seen and left has to be reported as held:\n{text}"
+    );
+    assert!(
+        text.contains(".dctl-staging.4711.0"),
+        "the object that was left has to be named, so an operator can decide \
+         whether to lower --min-age:\n{text}"
+    );
+    assert!(
+        text.contains("1 held"),
+        "the summary has to carry the count, because that is the line a nightly \
+         job's output gets grepped for:\n{text}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn debris_whose_age_cannot_be_established_is_held_and_named_rather_than_passed_over() {
+    // The other arm of the same silence. `reclaim` refuses to sweep an object
+    // whose modification time the provider will not report — unknown is not old,
+    // and guessing means deleting another process's live work — and it used to
+    // do that by returning, so the run reported `removed: 0` and said nothing
+    // about the object it had decided not to touch. The refusal is right; the
+    // silence was the same false all-clear one branch further down.
+    //
+    // Driven through the same door as the age case, because both arms end in the
+    // one `held` record and a test that only covered one of them would let the
+    // other go quiet again.
+    let sandbox = Sandbox::new();
+    let store = sandbox.dir("store");
+    plant_staging_file(&store.join("o"), &vec![1u8; 512]);
+
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", store.display()))
+        .assert()
+        .success();
+
+    // A day and a half in the future: the file cannot be `min_age` old however
+    // the clock is read, so this exercises the same branch a young file does
+    // without depending on the test machine's clock resolution.
+    let assertion = sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("cleanup")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .args(["--class", "staging", "--min-age", "36h"])
+        .assert()
+        .success();
+    let output = assertion.get_output();
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        text.contains("held") && text.contains(".dctl-staging.4711.0"),
+        "a sweep that looked at debris and left it names it:\n{text}"
+    );
+    assert!(
+        !text.contains("no reclaimable debris found"),
+        "it did find some:\n{text}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
 fn a_cleanup_sweep_never_reclaims_a_users_file_that_merely_looks_temporary() {
     // The other direction, and the reason the sweep may not carry its own
     // opinion about which keys are DCTL's: a substring test on `.tmp.` is what

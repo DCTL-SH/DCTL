@@ -133,6 +133,7 @@ use crate::constants::{
 };
 use crate::ctx::Ctx;
 use crate::error::Result;
+use crate::output::size;
 use crate::platform::path;
 use crate::source::plain::PlainSource;
 use crate::source::{Entry, Source as _};
@@ -222,6 +223,13 @@ struct Attribution<'a> {
     /// The remote the sweep ran against — the record's `remote`.
     remote: &'a str,
 }
+
+/// Why a piece of debris was held when the provider would not say how old it is.
+///
+/// Spelled once because it is the reason field of a machine-readable record as
+/// well as a sentence a person reads, and two spellings of one refusal is how a
+/// consumer ends up matching on the wrong one.
+const AGE_UNKNOWN_REASON: &str = "its age cannot be established, and unknown is not old";
 
 /// The age test every piece of debris is put to.
 ///
@@ -465,25 +473,33 @@ async fn reclaim(
     kind: &'static str,
     report: &mut Report<'_>,
 ) -> Result<()> {
-    let Some(age) = age_of(&entry, aging.now) else {
-        // Unknown is not old. A provider that reports no modification time gives
-        // no basis for calling anything abandoned, and guessing here would mean
-        // deleting another process's live work.
-        ctx.out.info(format!(
-            "'{}' has no modification time, so its age cannot be established",
-            entry.path
-        ));
-        return Ok(());
-    };
-    if age < aging.min_age {
-        return Ok(());
-    }
+    let age = age_of(&entry, aging.now);
 
     let item = Item {
         path: entry.path,
         size: entry.size,
         kind,
     };
+
+    let Some(age) = age else {
+        // Unknown is not old. A provider that reports no modification time gives
+        // no basis for calling anything abandoned, and guessing here would mean
+        // deleting another process's live work. Held rather than passed over:
+        // the object is real, it is being paid for, and a sweep that decided not
+        // to touch it has to say which object and why.
+        return report.held(&item, AGE_UNKNOWN_REASON);
+    };
+    if age < aging.min_age {
+        // The first sweep after any interruption lands here — the default
+        // `--min-age` is a day and the debris is minutes old — so this is the
+        // branch a real operator actually meets, and it used to return in
+        // silence, which is what let `no reclaimable debris found` be printed
+        // over a full-size staging file.
+        return report.held(
+            &item,
+            format!("younger than {}", size::duration(aging.min_age.as_secs())),
+        );
+    }
 
     if ctx.is_dry_run() {
         return report.would_remove(&item);

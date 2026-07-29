@@ -162,6 +162,13 @@ fn note_empty<O: PlanOptions>(
     if totals.removed + totals.would_remove + totals.absent + totals.failed > 0 {
         return;
     }
+    // Debris that was found and deliberately held is not nothing found. Saying
+    // "no reclaimable debris found" over a staging file the sweep had just
+    // decided was too young is the false all-clear this family exists not to
+    // print, one branch below the listing that used to produce it.
+    if totals.held > 0 {
+        return;
+    }
 
     let target = &removal.target;
     if removal.operation.is_cleanup() {

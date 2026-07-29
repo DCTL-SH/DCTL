@@ -4179,6 +4179,24 @@ pub const REMOVAL_STATUS_UNSUPPORTED: &str = "unsupported";
 /// on the backends where the debris actually accumulates.
 pub const REMOVAL_STATUS_NOT_STAGED: &str = "not-staged";
 
+/// Status of a piece of debris a sweep saw, judged and deliberately left.
+///
+/// The third answer a sweep can give about one object, and the one that was
+/// missing. `removed` says the storage stopped being billed for; `failed` says
+/// it should have and did not; this says the sweep found debris, decided it was
+/// too young to be abandoned — or that its age could not be established at all —
+/// and left it where it was on purpose.
+///
+/// It exists because the alternative was silence. `--min-age` defaults to
+/// [`CLEANUP_DEFAULT_MIN_AGE`] for a reason that is load-bearing rather than
+/// cosmetic (a staging file minutes old may belong to a transfer still running),
+/// so the *first* sweep after an interruption is always the one that has to hold
+/// something back — and it reported `no reclaimable debris found` with a
+/// full-size staging file on the store. A nightly job reads that line and stops
+/// looking, which is precisely the failure this command spent a release fixing
+/// one layer further up.
+pub const REMOVAL_STATUS_HELD: &str = "held";
+
 /// Status of the single closing record that carries the run's totals.
 pub const REMOVAL_STATUS_SUMMARY: &str = "summary";
 
@@ -6057,6 +6075,7 @@ mod tests {
             REMOVAL_STATUS_ABSENT,
             REMOVAL_STATUS_FAILED,
             REMOVAL_STATUS_UNSUPPORTED,
+            REMOVAL_STATUS_HELD,
             REMOVAL_STATUS_SUMMARY,
         ];
         for (index, status) in statuses.iter().enumerate() {
