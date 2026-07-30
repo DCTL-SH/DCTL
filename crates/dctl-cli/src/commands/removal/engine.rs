@@ -92,8 +92,35 @@ pub async fn run<O: PlanOptions>(ctx: &Ctx, removal: &Removal<O>, filter: &Filte
     // something.
     require_readable_tree(ctx, &removal.target)?;
 
+    // The path the *store* is scoped by, which is not always the path the
+    // operator typed. A provider shorthand carries two things in one string:
+    // `b2:DCTL001/photos` names the bucket `DCTL001` and the prefix `photos`
+    // inside it, and every verb in this family used the whole of it as a key
+    // prefix — so a `purge b2:DCTL001/2019` looked under `DCTL001/2019/` inside
+    // the bucket `DCTL001`, found nothing, and reported `0 object(s)` at exit 0.
+    // On a retention job that is the worst possible answer: nothing is deleted
+    // and the run says it succeeded.
+    //
+    // Converted once, here, rather than at each of the eight places downstream
+    // that read `target.path` — the same shape `crate::source::open` uses for
+    // the read family, and for the same reason: a caller that has to remember
+    // which of the two paths to use is a caller that will use the wrong one.
+    let scoped = removal.target.scoped_to(ctx)?;
+
+    // Two targets, and which one each call takes is the whole of the fix.
+    //
+    // `Medium::open` takes the **typed** one, because opening the store is what
+    // *consumes* the bucket: `b2:DCTL001/2019` has to reach the resolver whole,
+    // or there is nothing for it to split. Handing it the scoped path instead
+    // makes the resolver read `2019` as the bucket name — which is the same
+    // defect one turn further round, and it is what a first attempt at this fix
+    // produced against live B2: `deletefile b2:DCTL001/a.txt` answered
+    // `object not found: bucket a.txt`.
+    //
+    // `selection::select` takes the **scoped** one, because selecting is what
+    // addresses *inside* the store the bucket already named.
     let medium = Medium::open(ctx, &removal.target).await?;
-    let selection = selection::select(&medium, &removal.target, &removal.operation, filter).await?;
+    let selection = selection::select(&medium, &scoped, &removal.operation, filter).await?;
 
     let mut report = Report::new(ctx);
     // The request opens the document, in every format, so a report can always be
@@ -130,7 +157,7 @@ pub async fn run<O: PlanOptions>(ctx: &Ctx, removal: &Removal<O>, filter: &Filte
             ctx,
             removal.command,
             &medium,
-            &removal.target,
+            &scoped,
             &reclaim::Request {
                 classes,
                 min_age: *min_age,

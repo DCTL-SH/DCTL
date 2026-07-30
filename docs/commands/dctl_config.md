@@ -302,7 +302,7 @@ each provider accepts are exactly the keys the file accepts:
 | `s3` | `bucket` (required), `endpoint`, `region`, `chunk_size`, `verify`, `require_vault` |
 | `r2` | `bucket` (required), `account`, `endpoint`, `chunk_size`, `verify`, `require_vault` |
 | `sftp` | `host` (required), `base` (required), `chunk_size`, `verify`, `require_vault` |
-| `vault` | `base` (required), `base_path`, `chunk_size`, `verify` |
+| `vault` | `base` (required), `chunk_size`, `verify` |
 
 `verify` is the per-remote verification strength — `checksum`, `sample` or
 `strict` — spelled exactly as the `--verify` flag spells it, because the
@@ -317,10 +317,25 @@ upload is cut into, the size above which an object stops being one request,
 spare the 100 MiB default. Values outside the provider's own envelope are
 clamped into it (B2 and S3 both floor at about 5 MB) rather than refused,
 because the failure that prevents is an upload that runs for an hour and is then
-rejected at its second part. It reaches nothing on `sftp` and `vault` remotes —
-see `HANDOVER.md` §11.3. On a `vault` remote, `base`
-is a bare remote **name**, never a `name:path` spec; the subdirectory inside it
-is `base_path`. Anything else is refused with the offending key named.
+rejected at its second part.
+
+On an `sftp` remote it is the **transfer window** rather than a part size —
+SFTP has no multipart API, so the window is the whole of what a streaming read
+or write costs in memory — and it is clamped into 32 KiB–64 MiB. On a `vault`
+remote it is the AEAD chunk size, which is the format's seek granularity: a
+larger value trades seek latency for fewer round trips. It reaches every
+provider that declares it; `crate::config::reach` is the guard that keeps it
+that way.
+
+On a `vault` remote, `base` is a bare remote **name**, never a `name:path` spec.
+A vault occupies the **root** of the store it wraps — the envelope, the index
+and every object are addressed from it, and no layer applies a key prefix — so
+there is no subdirectory setting. Give each vault its own container instead: a
+second bucket, or a second directory named as its own `local` remote, which is
+what `dctl init` creates. A configuration carrying a `base_path` from an older
+build is refused on load, and nothing has to move to fix it: the setting was
+never applied, so the objects are already where deleting the line says they are.
+Anything else is refused with the offending key named.
 
 On an `sftp` remote, `base` is a **directory on the server**, and it has to say
 where: `base=/srv/dctl-store` is absolute, and `base=~/dctl-store` is under the
@@ -393,7 +408,7 @@ $ dctl config touch
 $ dctl config create b2prod b2 bucket=media-archive chunk_size=8388608
 ✓ created remote 'b2prod'
 b2prod  b2
-$ dctl config create vault vault base=b2prod base_path=photos
+$ dctl config create vault vault base=b2prod
 ✓ created remote 'vault'
 vault  vault
 $ dctl config list

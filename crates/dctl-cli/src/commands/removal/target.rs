@@ -97,6 +97,49 @@ impl Target {
     pub fn is_root(&self) -> bool {
         self.path.is_empty()
     }
+
+    /// The same target, with its path replaced by the prefix that addresses
+    /// **inside the store this removal will actually enumerate**.
+    ///
+    /// For a named remote and for a vault the two are identical, and this is a
+    /// clone. For a **provider shorthand** they are not: `b2:DCTL001/photos`
+    /// names the bucket `DCTL001` and the prefix `photos` inside it, and the
+    /// removal family used the whole string as a key prefix — so every verb in
+    /// it looked under `DCTL001/photos/` *inside* `DCTL001` and found nothing.
+    ///
+    /// That is `HANDOVER.md` §11.3 item 6 on the write side. It was fixed for
+    /// the read family at `2e6d180` and these six verbs were missed, which is
+    /// the worse half: a listing that finds nothing is visibly empty, while
+    /// `dctl purge b2:DCTL001/2019 --force` reports `OK removed: 0 object(s)` at
+    /// exit **0** and a retention job records 2019 as reclaimed.
+    ///
+    /// Applied once, in [`super::engine::run`], rather than at the eight places
+    /// downstream that read [`Target::path`] — the same shape
+    /// [`crate::source::open`] uses, and for the same reason: a caller that has
+    /// to remember which of two paths to use will eventually use the wrong one.
+    /// The *typed* target stays the one the report and every message quote, so
+    /// an operator still reads their own argument back.
+    ///
+    /// # Errors
+    /// Whatever [`crate::remote::resolve`] reported — an unknown remote, a
+    /// missing required setting, a malformed `chunk_size`. A removal that cannot
+    /// say where it would look must not guess: guessing produces an empty
+    /// selection, and an empty selection is reported as `0 object(s)` at exit 0.
+    pub fn scoped_to(&self, ctx: &crate::ctx::Ctx) -> Result<Self> {
+        let path = crate::config::resolve_path(ctx.globals.config.as_deref());
+        let configured = crate::config::load_or_default(&path)?;
+        let spec = crate::remote::RemoteSpec::Named {
+            remote: self.remote.clone(),
+            path: self.path.clone(),
+        };
+        Ok(Self {
+            remote: self.remote.clone(),
+            path: crate::remote::resolve::logical_prefix(
+                &spec,
+                &crate::commands::config::settings::catalog(&configured),
+            )?,
+        })
+    }
 }
 
 impl fmt::Display for Target {
@@ -122,6 +165,66 @@ mod tests {
         assert_eq!(target.remote, "vault");
         assert_eq!(target.path, "photos/2024");
         assert!(!target.is_root());
+    }
+
+    /// A context pointing at a config file that does not exist, so resolution
+    /// sees the empty catalog — which is the headless case, and the one in which
+    /// a provider shorthand is the *only* way to name a bucket.
+    fn headless_ctx() -> crate::ctx::Ctx {
+        use clap::Parser as _;
+        #[derive(clap::Parser, Debug)]
+        struct Harness {
+            #[command(flatten)]
+            globals: crate::cli::GlobalArgs,
+        }
+        let dir = std::env::temp_dir().join("dctl-removal-scope-no-such-config");
+        crate::ctx::Ctx::new(
+            Harness::parse_from(["dctl", "--config", &dir.to_string_lossy()]).globals,
+        )
+    }
+
+    #[test]
+    fn a_shorthands_bucket_is_not_part_of_the_prefix_a_removal_deletes_under() {
+        // `HANDOVER.md` §11.3 item 6, on the side that destroys rather than the
+        // side that merely reports nothing. `b2:DCTL001/2019` names the *bucket*
+        // `DCTL001` and the prefix `2019` inside it; using the whole string as a
+        // key prefix looks under `DCTL001/2019/` inside `DCTL001`, matches
+        // nothing, and `dctl purge … --force` then reports `OK removed:
+        // 0 object(s)` at exit 0 — so a retention job marks the year reclaimed
+        // and the data is untouched.
+        let ctx = headless_ctx();
+        for (written, expected) in [
+            ("b2:DCTL001", ""),
+            ("b2:DCTL001/2019", "2019"),
+            ("b2:DCTL001/2019/q4", "2019/q4"),
+            ("s3:media/raw", "raw"),
+            ("r2:cold", ""),
+        ] {
+            let scoped = parse(written)
+                .expect("a well-formed target")
+                .scoped_to(&ctx)
+                .expect("a shorthand resolves with no config file");
+            assert_eq!(
+                scoped.path, expected,
+                "'{written}' would delete under the wrong prefix"
+            );
+            // The remote half is untouched: only the path is re-scoped.
+            assert_eq!(scoped.remote, parse(written).expect("parses").remote);
+        }
+    }
+
+    #[test]
+    fn a_target_that_cannot_be_resolved_yields_no_prefix_at_all() {
+        // Never `Ok("")`. An empty prefix on an unresolvable remote is a
+        // selection of the whole store, or of nothing — and both are answers a
+        // removal acts on.
+        let ctx = headless_ctx();
+        let error = parse("nosuchremote:2019")
+            .expect("a well-formed target")
+            .scoped_to(&ctx)
+            .expect_err("an unknown remote has no prefix");
+        assert_eq!(error.code(), ExitCode::FatalError);
+        assert!(error.message().contains("nosuchremote"));
     }
 
     #[test]

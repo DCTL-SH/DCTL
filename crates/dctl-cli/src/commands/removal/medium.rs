@@ -100,9 +100,17 @@ impl Medium {
         // that re-parses one turns `archive:` into the *directory* `archive`.
         // That is S6, and in this family it would mean deleting from a folder
         // nobody named while reporting success.
+        //
+        // And the whole spec means **with its path**. Blanking it here was the
+        // §11.3 item 6 defect on the removal side: for a provider shorthand the
+        // first path component is the *bucket*, so `deletefile b2:DCTL001/a.txt`
+        // resolved `b2:` with nothing after it and answered "'b2' needs a bucket
+        // name" about a command line that had given one. The read family was
+        // fixed at `2e6d180`; these six verbs were not, and `purge`, `cleanup`
+        // and `deletefile` all failed the same way.
         let spec = RemoteSpec::Named {
             remote: target.remote.clone(),
-            path: String::new(),
+            path: target.path.clone(),
         };
 
         if is_sealed(&config, &target.remote) {
@@ -309,6 +317,13 @@ fn is_sealed(config: &Config, remote: &str) -> bool {
 /// Walking the chain is also what detects a cycle or a dangling base, which is
 /// why a broken configuration is diagnosed here rather than producing a
 /// confident wrong backend.
+///
+/// The path is empty here and that is correct rather than the defect above: this
+/// spec exists to *build a backend* for a sweep that works below the logical
+/// path set, and a vault's own path is a plaintext path in its namespace which
+/// says nothing about where the ciphertext objects sit. The store at the end of
+/// the chain is always a configured remote, so its container is a setting rather
+/// than the first component of a path, and there is nothing to consume.
 fn storage_spec(config: &Config, remote: &str) -> Result<RemoteSpec> {
     let chain = config::vault_chain(config, remote)?;
     Ok(RemoteSpec::Named {
