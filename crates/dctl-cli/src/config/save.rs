@@ -297,9 +297,13 @@ mod tests {
             "vault",
             RemoteDef::Vault(VaultDef {
                 base: "b2prod".into(),
-                base_path: Some("vault".into()),
+                // Deliberately unset: `config::validate` refuses a vault
+                // subdirectory, because no layer applies one. A fixture carrying
+                // it asserted that an inert setting survives a save, which is
+                // what it used to do.
+                base_path: None,
                 chunk_size: Some(4 * 1024 * 1024),
-                verify: None,
+                verify: Some(crate::cli::VerifyMode::Strict),
             }),
         );
         config

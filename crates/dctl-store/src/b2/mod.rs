@@ -107,12 +107,28 @@ impl B2Backend {
     /// this repository has credentials for, its part-buffering behaviour is a
     /// memory contract stated in `HANDOVER.md`, and a contract that can only be
     /// checked by spending money on a live bucket is a contract that stops being
-    /// checked. Nothing in `dctl-cli` calls this; production always talks to
-    /// Backblaze.
+    /// checked.
+    ///
+    /// It is **also** a `b2` remote's `endpoint` setting arriving. That setting
+    /// was declared on `B2Def`, accepted by `dctl config create`, printed by
+    /// `dctl config show` — and dropped by the resolver, so an operator pointing
+    /// a remote at their own gateway talked to Backblaze anyway. See
+    /// `dctl_cli::config::reach`.
     #[must_use]
     pub fn with_authorize_url(mut self, url: impl Into<String>) -> Self {
         self.authorize_url = url.into();
         self
+    }
+
+    /// The endpoint this backend authorizes against.
+    ///
+    /// The far end of the `endpoint` setting's journey, and public for the
+    /// reason `SftpBackend::chunk_size` is: §21.7's lesson is that the *middle*
+    /// of a setting's path is where this project loses one, so both ends are
+    /// pinned and the resolver's end alone is not enough.
+    #[must_use]
+    pub fn authorize_url(&self) -> &str {
+        &self.authorize_url
     }
 
     /// The same backend, declaring every part and body chunk it moves to

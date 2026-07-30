@@ -204,6 +204,34 @@ pub enum ConfigError {
         location: String,
     },
 
+    /// A remote carries a setting this build cannot apply.
+    ///
+    /// The one today is a vault's `base_path`: a vault occupies the **root** of
+    /// the store it wraps, and the setting was accepted by `dctl config create`,
+    /// written to the file, printed back by `dctl config show`, and reached
+    /// nothing. A file written by an older build may still carry one, and the
+    /// objects are at the root regardless of what it says.
+    ///
+    /// Diagnosed on load for the reason
+    /// [`ConfigError::PlainRemoteAtVaultLocation`] is: a rule enforced by one
+    /// command is a rule the file can be hand-edited around. The classification
+    /// itself is `crate::config::reach`'s, so this variant carries the reason
+    /// rather than restating it.
+    ///
+    /// Nothing has to move to fix it, and the hint says so — this is the one
+    /// diagnosis in this enum whose remedy is deleting a line.
+    #[error("remote '{remote}' has a {key} of '{written}', which nothing honours")]
+    SettingNotHonoured {
+        /// The remote carrying it.
+        remote: String,
+        /// The setting's key, as the file spells it.
+        key: String,
+        /// The value as written, so the operator can find the line.
+        written: String,
+        /// Why it cannot be honoured, from `crate::config::reach::refusal`.
+        reason: &'static str,
+    },
+
     /// A name a caller asked to create is already in use.
     ///
     /// Distinct from [`ConfigError::DuplicateNameCase`], which is about a file
@@ -241,6 +269,7 @@ impl ConfigError {
             | Self::NameTaken { .. } => ExitCode::Usage,
 
             Self::PlainRemoteAtVaultLocation { .. }
+            | Self::SettingNotHonoured { .. }
             | Self::Missing(_)
             | Self::Read { .. }
             | Self::Write { .. }
@@ -335,6 +364,18 @@ impl ConfigError {
                  the vault remote that wraps '{guard}' instead — everything \
                  through it is sealed. To replicate the stored objects as they \
                  are, without a password, address '{guard}' itself."
+            )),
+
+            Self::SettingNotHonoured {
+                remote,
+                key,
+                reason,
+                ..
+            } => Some(format!(
+                "Nothing has to move: the setting has never been applied, so \
+                 this remote already addresses what it addressed before. Delete \
+                 the line, or run `dctl config update {remote} {key}=` to clear \
+                 it. {reason}"
             )),
 
             Self::NameTaken { name } => Some(format!(

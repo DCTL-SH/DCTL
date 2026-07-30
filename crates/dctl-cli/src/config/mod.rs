@@ -60,6 +60,7 @@ mod location;
 mod model;
 mod namespace;
 mod pair;
+pub mod reach;
 mod save;
 mod validate;
 
@@ -90,7 +91,7 @@ pub use validate::{
 #[cfg(test)]
 pub use load::{absent_path, parse};
 #[cfg(test)]
-pub use model::{B2Def, LocalDef, R2Def, S3Def, SftpDef, VaultDef};
+pub use model::{B2Def, LocalDef, R2Def, S3Def, SftpDef, VaultDef, model_test_support};
 #[cfg(test)]
 pub use save::render;
 

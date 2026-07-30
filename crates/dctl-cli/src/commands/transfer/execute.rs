@@ -292,6 +292,11 @@ mod tests {
     }
 
     impl StageDriver for Driver {
+        /// The default strength: these drivers exercise the walk, not the
+        /// policy, and `crate::remote::resolve::verify_policy` owns that.
+        fn verify_mode(&self) -> VerifyMode {
+            crate::constants::DEFAULT_VERIFY_MODE
+        }
         async fn read(&self, entry: &PlanEntry) -> Result<()> {
             self.check(entry)
         }

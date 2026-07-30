@@ -27,6 +27,32 @@ pub fn slug(mode: VerifyMode) -> String {
     )
 }
 
+/// The mode a slug names, or [`None`] for a word that is not one.
+///
+/// The inverse of [`slug`], and taken from the same clap table, so the config
+/// file's `verify = "strict"` and the command line's `--verify strict` are the
+/// same three words by construction. Written here rather than beside the config
+/// model for that reason: a second parser would be a second dialect, and this
+/// setting is read at exactly one seam ([`crate::remote::resolve::verify_policy`]).
+#[must_use]
+pub fn from_slug(word: &str) -> Option<VerifyMode> {
+    VerifyMode::value_variants()
+        .iter()
+        .copied()
+        .find(|mode| slug(*mode) == word)
+}
+
+/// Every slug, in the order the flag lists them, for a refusal that says what
+/// would have worked.
+#[must_use]
+pub fn slugs() -> Vec<String> {
+    VerifyMode::value_variants()
+        .iter()
+        .copied()
+        .map(slug)
+        .collect()
+}
+
 /// Whether this mode reads object bytes back from the provider.
 ///
 /// The expensive question, and the one that decides whether a `verify` over a

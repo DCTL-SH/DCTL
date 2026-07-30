@@ -162,7 +162,10 @@ pub async fn run(ctx: &Ctx, args: &ReplicateArgs) -> Result<()> {
     .await?;
     target::refuse_same_place(&source, &destination)?;
 
-    let verify = ctx.verify_mode();
+    // The destination's policy, then the flag. `replicate` copies opaque
+    // objects between two stores, and the strength belongs to the one being
+    // written — which is the same rule every other verb now follows.
+    let verify = ctx.verify_mode_for(&crate::remote::RemoteSpec::parse(&destination.spec)?)?;
     let strength = mode::slug(verify);
     ctx.out.info(format!(
         "{command}: {} -> {} at --verify={strength} — {}",
@@ -218,7 +221,7 @@ pub async fn run(ctx: &Ctx, args: &ReplicateArgs) -> Result<()> {
         .emit(&ctx.out);
     }
 
-    let outcome = execute::run(ctx, &plan, &source, &destination).await?;
+    let outcome = execute::run(ctx, &plan, &source, &destination, verify).await?;
 
     tracing::info!(
         { fields::OP } = VERB,

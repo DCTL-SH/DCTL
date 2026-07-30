@@ -121,10 +121,35 @@ impl Ctx {
         self.globals.dry_run
     }
 
-    /// The configured verification strength.
-    #[must_use]
-    pub const fn verify_mode(&self) -> VerifyMode {
-        self.globals.verify
+    /// The verification strength a run addressed to `spec` applies.
+    ///
+    /// It used to be `verify_mode(&self)` — a function of the flag and nothing
+    /// else — and that signature *was* the defect. `verify` is declared on all
+    /// six providers, accepted by `dctl config create` and printed by
+    /// `dctl config show`, and no caller could have honoured it because no
+    /// caller was given a remote to ask about. Taking the destination is what
+    /// makes forgetting it a compile error rather than a silent `checksum`.
+    ///
+    /// The rule and the precedence live in
+    /// [`crate::remote::resolve::verify_policy`]; this is the seam that supplies
+    /// it the configuration, on the same pattern as [`crate::remote::place::Place::of`].
+    ///
+    /// Not called per file. The transfer pipeline asks its driver
+    /// ([`crate::commands::transfer::pipeline::StageDriver::verify_mode`]),
+    /// which resolved this once when it connected — a million-file run must not
+    /// re-read the configuration a million times.
+    ///
+    /// # Errors
+    /// [`ExitCode::FatalError`] for an unreadable configuration or a `verify`
+    /// value that is not one of the modes, naming the remote and the value.
+    pub fn verify_mode_for(&self, spec: &crate::remote::RemoteSpec) -> Result<VerifyMode> {
+        let path = crate::config::resolve_path(self.globals.config.as_deref());
+        let configured = crate::config::load_or_default(&path)?;
+        crate::remote::resolve::verify_policy(
+            self.globals.verify,
+            spec,
+            &crate::commands::config::settings::catalog(&configured),
+        )
     }
 
     /// Announce an action that a dry run is skipping.
@@ -294,10 +319,19 @@ mod tests {
     }
 
     #[test]
-    fn verify_mode_defaults_to_checksum() {
-        assert_eq!(ctx(&[]).verify_mode(), VerifyMode::Checksum);
+    fn verify_mode_defaults_to_checksum_and_the_flag_still_wins() {
+        // A bare path names no remote, so there is no policy to state and the
+        // compiled default applies. The flag overrides it, which is the half
+        // that has always worked.
+        let bare = crate::remote::RemoteSpec::Local(std::path::PathBuf::from("/srv/x"));
         assert_eq!(
-            ctx(&["--verify", "strict"]).verify_mode(),
+            ctx(&[]).verify_mode_for(&bare).expect("resolves"),
+            VerifyMode::Checksum
+        );
+        assert_eq!(
+            ctx(&["--verify", "strict"])
+                .verify_mode_for(&bare)
+                .expect("resolves"),
             VerifyMode::Strict
         );
     }

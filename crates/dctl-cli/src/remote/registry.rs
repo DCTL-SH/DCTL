@@ -73,6 +73,20 @@ pub enum Target {
     B2 {
         /// Bucket name.
         bucket: String,
+        /// Override for B2's authorization endpoint.
+        ///
+        /// `None` takes B2's published one, which is what every real
+        /// installation wants. It exists for a private deployment and for a
+        /// test double, and it was declared on `B2Def` and read by nothing —
+        /// an operator could point a `b2` remote at their own gateway, see the
+        /// setting in `dctl config show`, and have every request go to
+        /// Backblaze regardless.
+        ///
+        /// Unlike the S3 endpoint there is no environment fall-back, and the
+        /// asymmetry is deliberate: an S3 remote is *unusable* without one, so
+        /// a headless job needs a way to supply it with no config file, while a
+        /// B2 remote works perfectly with none.
+        endpoint: Option<String>,
         /// Large-file part size in bytes, from the remote's `chunk_size`.
         ///
         /// `None` takes the client's default. Also the size above which an
@@ -110,6 +124,18 @@ pub enum Target {
         /// Cloudflare account id, from which R2's endpoint is derived; falls
         /// back to the environment when unset.
         account: Option<String>,
+        /// Explicit endpoint URL, overriding the one derived from
+        /// [`account`](Target::R2::account).
+        ///
+        /// Declared on `R2Def` and read by nothing until this pass: a remote
+        /// naming a jurisdiction-specific endpoint went to the derived
+        /// `https://<account>.r2.cloudflarestorage.com` anyway.
+        ///
+        /// When it is set the account id is no longer needed — it exists only to
+        /// build the hostname — so a remote may carry either, which is what
+        /// [`super::resolve::target_from_entry`] enforces rather than demanding
+        /// an account nobody's endpoint uses.
+        endpoint: Option<String>,
         /// Multipart part size in bytes, from the remote's `chunk_size`.
         chunk_size: Option<u64>,
     },
@@ -126,6 +152,17 @@ pub enum Target {
         host: String,
         /// Remote base directory objects live under.
         base: String,
+        /// Transfer window in bytes, from the remote's `chunk_size`.
+        ///
+        /// `None` takes the backend's compiled-in window. Unlike the object
+        /// stores this is not a *part* size — SFTP has no multipart API and
+        /// declares no content length — it is the size of the one buffer a
+        /// streaming read or write holds, so it is what an sftp transfer costs
+        /// in memory and the knob a small container needs.
+        ///
+        /// The last provider on §11.3 item 8's inert list. It was declared on
+        /// `SftpDef`, printed by `dctl config show`, and reached nothing.
+        chunk_size: Option<u64>,
     },
 }
 
@@ -144,7 +181,7 @@ impl Target {
             Self::B2 { bucket, .. } => format!("{PROVIDER_B2}:{bucket}"),
             Self::S3 { bucket, .. } => format!("{PROVIDER_S3}:{bucket}"),
             Self::R2 { bucket, .. } => format!("{PROVIDER_R2}:{bucket}"),
-            Self::Sftp { host, base } => format!("{PROVIDER_SFTP}:{host}:{base}"),
+            Self::Sftp { host, base, .. } => format!("{PROVIDER_SFTP}:{host}:{base}"),
         }
     }
 
@@ -204,10 +241,21 @@ pub fn build(
     let built = match target {
         Target::Local { root } => Built::Local(LocalFs::new(root.clone()).with_links(links)),
 
-        Target::B2 { bucket, chunk_size } => {
+        Target::B2 {
+            bucket,
+            endpoint,
+            chunk_size,
+        } => {
             let key_id = env_required(ENV_B2_KEY_ID)?;
             let app_key = env_required(ENV_B2_APP_KEY)?;
-            Built::B2(b2_backend(key_id, app_key, bucket, *chunk_size, deadlines)?)
+            Built::B2(b2_backend(
+                key_id,
+                app_key,
+                bucket,
+                endpoint.as_deref(),
+                *chunk_size,
+                deadlines,
+            )?)
         }
 
         Target::S3 {
@@ -228,13 +276,26 @@ pub fn build(
         Target::R2 {
             bucket,
             account,
+            endpoint,
             chunk_size,
         } => {
-            let account = setting_or_env(account.as_deref(), ENV_R2_ACCOUNT_ID)?;
             let access_key = env_required(ENV_R2_ACCESS_KEY)?;
             let secret_key = env_required(ENV_R2_SECRET_KEY)?;
-            let config = R2Backend::config(&account, bucket.clone(), access_key, secret_key)
-                .with_part_size(*chunk_size);
+            // An explicit endpoint replaces the derived one, and with it the
+            // reason the account id is needed at all — so it is only demanded
+            // when it is the thing that builds the hostname. Asking for both
+            // would make a jurisdiction-specific endpoint impossible to
+            // configure without inventing an account id nobody uses.
+            let config = match endpoint {
+                Some(endpoint) => {
+                    R2Backend::config_at(endpoint.clone(), bucket.clone(), access_key, secret_key)
+                }
+                None => {
+                    let account = setting_or_env(account.as_deref(), ENV_R2_ACCOUNT_ID)?;
+                    R2Backend::config(&account, bucket.clone(), access_key, secret_key)
+                }
+            }
+            .with_part_size(*chunk_size);
             Built::R2(R2Backend::from_config(config, deadlines)?)
         }
 
@@ -242,7 +303,11 @@ pub fn build(
         // user's own config, which is the whole reason a cloudflared-proxied host
         // works. This is also the one arm that opens a connection to build, so it
         // is the one that bridges to the async `connect` — see [`connect_sftp`].
-        Target::Sftp { host, base } => Built::Sftp(connect_sftp(host, base, links, deadlines)?),
+        Target::Sftp {
+            host,
+            base,
+            chunk_size,
+        } => Built::Sftp(connect_sftp(host, base, *chunk_size, links, deadlines)?),
     };
     // Metered, then made to try again. The order matters and is not arbitrary: a
     // retried request really did cross the link on every attempt, so the meter
@@ -324,6 +389,7 @@ impl Built {
 fn connect_sftp(
     host: &str,
     base: &str,
+    chunk_size: Option<u64>,
     links: LinkPolicy,
     deadlines: Deadlines,
 ) -> Result<SftpBackend> {
@@ -331,7 +397,9 @@ fn connect_sftp(
         CliError::fatal("the sftp backend must be built inside the async runtime")
             .with_hint("This is an internal error. Please report the command that produced it.")
     })?;
-    let config = SftpConfig::new(host, base).with_links(links);
+    let config = SftpConfig::new(host, base)
+        .with_links(links)
+        .with_chunk_size(chunk_size);
     Ok(tokio::task::block_in_place(|| {
         handle.block_on(SftpBackend::connect(config, deadlines))
     })?)
@@ -428,13 +496,19 @@ fn b2_backend(
     key_id: String,
     app_key: String,
     bucket: &str,
+    endpoint: Option<&str>,
     chunk_size: Option<u64>,
     deadlines: Deadlines,
 ) -> Result<B2Backend> {
-    Ok(
-        B2Backend::new(B2Credentials::new(key_id, app_key), bucket, deadlines)?
-            .with_part_size(chunk_size),
-    )
+    let backend = B2Backend::new(B2Credentials::new(key_id, app_key), bucket, deadlines)?
+        .with_part_size(chunk_size);
+    // Applied only when the remote names one, so the published endpoint stays
+    // the single source of B2's address for every installation that has not
+    // deliberately moved it.
+    Ok(match endpoint {
+        Some(endpoint) => backend.with_authorize_url(endpoint),
+        None => backend,
+    })
 }
 
 /// Build the failure for an unusable credential variable.
@@ -485,6 +559,7 @@ mod tests {
             "k".into(),
             "a".into(),
             "bucket",
+            None,
             Some(asked),
             Deadlines::default(),
         )
@@ -498,9 +573,74 @@ mod tests {
 
         // And with nothing configured, the compiled default — not zero, and not
         // whatever B2 advertises when the run authorizes.
-        let default = b2_backend("k".into(), "a".into(), "bucket", None, Deadlines::default())
-            .expect("a b2 backend builds without a chunk_size");
+        let default = b2_backend(
+            "k".into(),
+            "a".into(),
+            "bucket",
+            None,
+            None,
+            Deadlines::default(),
+        )
+        .expect("a b2 backend builds without a chunk_size");
         assert_eq!(default.upload_peak_bytes(), 100 * 1024 * 1024);
+    }
+
+    #[test]
+    fn a_b2_remotes_endpoint_reaches_the_client_that_authorizes() {
+        // The far end of `endpoint` on b2. `config::reach` proves the value
+        // survives the resolver; this proves the arm of `build` that receives it
+        // does not drop it — which is the half §21.7 says this project loses.
+        //
+        // The consequence of dropping it is not cosmetic: an operator running a
+        // private B2 gateway, or a test pointing at a double, silently talks to
+        // Backblaze with their real credentials.
+        let backend = b2_backend(
+            "k".into(),
+            "a".into(),
+            "bucket",
+            Some("https://b2.internal/b2api/v2/b2_authorize_account"),
+            None,
+            Deadlines::default(),
+        )
+        .expect("a b2 backend builds with an endpoint");
+        assert_eq!(
+            backend.authorize_url(),
+            "https://b2.internal/b2api/v2/b2_authorize_account"
+        );
+
+        // And with nothing configured, B2's published endpoint — never the empty
+        // string, which would fail as a URL parse error three layers down.
+        let default = b2_backend(
+            "k".into(),
+            "a".into(),
+            "bucket",
+            None,
+            None,
+            Deadlines::default(),
+        )
+        .expect("a b2 backend builds without an endpoint");
+        assert!(
+            default.authorize_url().contains("backblazeb2.com"),
+            "an unset endpoint must leave B2's own: {}",
+            default.authorize_url()
+        );
+    }
+
+    #[test]
+    fn an_r2_remotes_endpoint_replaces_the_one_derived_from_its_account() {
+        // The far end of `endpoint` on r2, and the rule that comes with it: an
+        // explicit endpoint makes the account id unnecessary, because deriving
+        // the hostname is the only thing R2 uses it for. Demanding both would
+        // make a jurisdiction-specific endpoint unconfigurable without inventing
+        // an account nobody's URL contains.
+        let named = R2Backend::config_at("https://eu.r2.example", "bucket", "ak", "sk");
+        assert_eq!(named.endpoint, "https://eu.r2.example");
+        // R2's fixed signing region survives, which is the reason `config_at`
+        // exists rather than callers reaching for `S3Config::new`: signing for
+        // anything else fails with `SignatureDoesNotMatch`.
+        let derived = R2Backend::config("acct", "bucket", "ak", "sk");
+        assert_eq!(named.region, derived.region);
+        assert_ne!(named.endpoint, derived.endpoint);
     }
 
     #[test]
@@ -511,6 +651,7 @@ mod tests {
         assert_eq!(
             Target::B2 {
                 bucket: "b".into(),
+                endpoint: None,
                 chunk_size: None,
             }
             .provider_type(),
@@ -530,6 +671,7 @@ mod tests {
             Target::R2 {
                 bucket: "b".into(),
                 account: None,
+                endpoint: None,
                 chunk_size: None,
             }
             .provider_type(),
@@ -539,6 +681,7 @@ mod tests {
             Target::Sftp {
                 host: "lsx-001".into(),
                 base: "store".into(),
+                chunk_size: None,
             }
             .provider_type(),
             PROVIDER_SFTP

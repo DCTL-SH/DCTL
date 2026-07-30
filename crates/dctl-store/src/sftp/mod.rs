@@ -96,9 +96,54 @@ use path::{chunk_spans, join, normalize_base, prefix_dir, remote_path, temp_path
 /// a stalled request is attributed.
 pub(crate) const SFTP_BACKEND_NAME: &str = "sftp";
 
-/// Fixed transfer-chunk size for the streaming upload/download paths. Peak memory
-/// on those paths is `O(CHUNK_LEN)`, independent of object size.
+/// Default transfer-chunk size for the streaming upload/download paths. Peak
+/// memory on those paths is `O(chunk)`, independent of object size.
+///
+/// No longer *fixed*: a remote's `chunk_size` setting overrides it
+/// ([`SftpConfig::with_chunk_size`]). It stays the default because 4 MiB is a
+/// window a slow uplink fills often enough to keep the deadline's heartbeat
+/// beating and large enough that a 4 GiB restore is not a million round trips.
 const CHUNK_LEN: u64 = 4 * 1024 * 1024;
+
+/// Smallest transfer window a remote may pin.
+///
+/// Below this the request overhead dominates the payload — an SFTP write is a
+/// header, a handle and an offset per packet — so a smaller window buys no
+/// memory worth the round trips it costs. It is a *clamp* rather than a
+/// refusal for the reason `crate::b2` clamps its part size: the operator asked
+/// for the smallest footprint they could get, and answering with an error
+/// instead of the smallest footprint available serves nobody.
+const MIN_CHUNK_LEN: u64 = 32 * 1024;
+
+/// Largest transfer window a remote may pin.
+///
+/// The window *is* the peak of a streaming transfer, so the ceiling is what
+/// stops a mistyped `chunk_size = 8589934592` from turning a memory setting into
+/// an out-of-memory kill. 64 MiB is well past the point where a bigger window
+/// buys throughput on any link this backend is used over.
+const MAX_CHUNK_LEN: u64 = 64 * 1024 * 1024;
+
+/// The default has to sit inside the range a remote may pin, or an operator
+/// could not ask for the value they already have — and a zero window would spin
+/// forever. Checked at compile time rather than by a test, because these are
+/// constants and a test of a constant is a test that can only fail once.
+const _: () = assert!(0 < MIN_CHUNK_LEN && MIN_CHUNK_LEN < CHUNK_LEN && CHUNK_LEN < MAX_CHUNK_LEN);
+
+/// The transfer window a remote's `chunk_size` asks for, brought into the range
+/// this backend can actually work in.
+///
+/// Clamped rather than refused, and [`None`] rather than a substituted default,
+/// so the two states an operator can be in stay distinguishable: pinning
+/// nothing takes [`CHUNK_LEN`], and pinning something unreachable takes the
+/// nearest reachable value instead of failing a backup at 02:00.
+const fn clamp_chunk_len(requested: Option<u64>) -> u64 {
+    match requested {
+        None => CHUNK_LEN,
+        Some(size) if size < MIN_CHUNK_LEN => MIN_CHUNK_LEN,
+        Some(size) if size > MAX_CHUNK_LEN => MAX_CHUNK_LEN,
+        Some(size) => size,
+    }
+}
 
 /// Objects returned per [`Backend::list_page`] call.
 const PAGE_SIZE: usize = 1000;
@@ -123,6 +168,14 @@ pub struct SftpConfig {
     /// kind of host this backend reaches, and the walk used to drop it without a
     /// word. See [`crate::links`].
     pub links: LinkPolicy,
+    /// Transfer window for the streaming paths, in bytes.
+    ///
+    /// [`None`] takes [`CHUNK_LEN`]. This is the remote's `chunk_size` setting
+    /// arriving, and it is a *window* rather than a part: SFTP has no multipart
+    /// API, so peak memory on a streaming read or write is one of these and
+    /// nothing else. An operator with a container smaller than the compiled-in
+    /// default has no other way to say so.
+    pub chunk_size: Option<u64>,
 }
 
 impl SftpConfig {
@@ -134,6 +187,7 @@ impl SftpConfig {
             host: host.into(),
             base: base.into(),
             links: LinkPolicy::default(),
+            chunk_size: None,
         }
     }
 
@@ -141,6 +195,18 @@ impl SftpConfig {
     #[must_use]
     pub fn with_links(mut self, policy: LinkPolicy) -> Self {
         self.links = policy;
+        self
+    }
+
+    /// The same config, transferring in windows of `chunk_size` bytes.
+    ///
+    /// Takes an [`Option`] rather than a `u64` so "the operator pinned nothing"
+    /// stays distinguishable from "the operator pinned the default", which is
+    /// the distinction that lets [`clamp_chunk_len`] refuse a useless value
+    /// without refusing an absent one.
+    #[must_use]
+    pub fn with_chunk_size(mut self, chunk_size: Option<u64>) -> Self {
+        self.chunk_size = chunk_size;
         self
     }
 }
@@ -209,6 +275,14 @@ pub struct SftpBackend {
     /// The connect half of the pair is not here: it belongs to the dialer, which
     /// is the only thing that connects.
     deadlines: Deadlines,
+    /// The window every streaming read and write moves bytes in, already
+    /// clamped. See [`clamp_chunk_len`].
+    ///
+    /// Held resolved rather than as the `Option` the operator wrote, so no call
+    /// site can forget the clamp and no two call sites can disagree about the
+    /// default — which is how `chunk_size` came to mean one thing in the resolver
+    /// and nothing at all here.
+    chunk: u64,
 }
 
 impl SftpBackend {
@@ -224,7 +298,9 @@ impl SftpBackend {
     /// dropped eventually is, and this crate has already paid for that once.
     pub async fn connect(cfg: SftpConfig, deadlines: Deadlines) -> Result<Self> {
         let dialer = Arc::new(SshDialer::new(cfg.host.clone(), deadlines.connect));
-        Self::over_dialer(dialer, &cfg.base, cfg.links, deadlines).await
+        Ok(Self::over_dialer(dialer, &cfg.base, cfg.links, deadlines)
+            .await?
+            .with_chunk_size(cfg.chunk_size))
     }
 
     /// The same backend, speaking SFTP over an arbitrary byte-stream pair.
@@ -297,7 +373,36 @@ impl SftpBackend {
             meter: meter::unmetered(),
             may_create_base,
             deadlines,
+            chunk: clamp_chunk_len(None),
         })
+    }
+
+    /// The same backend, moving bytes in windows of `chunk_size`.
+    ///
+    /// A builder for the reason [`SftpBackend::with_meter`] is one: the window is
+    /// a property of the *invocation* — an operator's answer to how much memory
+    /// this run may have — rather than of the destination, and threading it
+    /// through [`over_dialer`](Self::over_dialer) would put it in the two
+    /// constructors that exist for tests as well as the one that exists for
+    /// production.
+    ///
+    /// [`None`] restores the default, so the setter is total rather than
+    /// one-way.
+    #[must_use]
+    pub fn with_chunk_size(mut self, chunk_size: Option<u64>) -> Self {
+        self.chunk = clamp_chunk_len(chunk_size);
+        self
+    }
+
+    /// The window this backend moves bytes in, after clamping.
+    ///
+    /// The far end of the `chunk_size` journey, and public so a test can assert
+    /// it without a server: §21.7's lesson is that the middle of a setting's
+    /// path is where this project loses one, so both ends are pinned and the
+    /// resolver's end alone is not enough.
+    #[must_use]
+    pub const fn chunk_size(&self) -> u64 {
+        self.chunk
     }
 
     /// The live conversation, opening one if the last ended.
@@ -489,7 +594,7 @@ impl Backend for SftpBackend {
         Ok(outcome)
     }
 
-    /// The same write, fed from a file instead of memory, at `O(CHUNK_LEN)`
+    /// The same write, fed from a file instead of memory, at `O(self.chunk)`
     /// peak regardless of object size.
     async fn put_from_path(
         &self,
@@ -507,7 +612,7 @@ impl Backend for SftpBackend {
             &mut src,
             write::Incoming {
                 total,
-                chunk: CHUNK_LEN,
+                chunk: self.chunk,
                 expected,
                 modified,
             },
@@ -560,6 +665,11 @@ impl Backend for SftpBackend {
         // request in flight, and the two have to end together. The deadline
         // therefore spans the transfer and is reset by every chunk that lands,
         // which is what makes an hours-long restore never approach it.
+        //
+        // Bound outside the closure: `self` is not in scope inside it, and the
+        // loop below binds `chunk` to the *bytes* it read, so the window keeps a
+        // name of its own rather than being shadowed by its own payload.
+        let window = self.chunk;
         self.watched(|link, watch| async move {
             let mut file = link
                 .sftp
@@ -580,9 +690,9 @@ impl Backend for SftpBackend {
             }
             let tmp = local_temp(dest);
             let out = tokio::fs::File::create(&tmp).await?;
-            let mut writer = tokio::io::BufWriter::with_capacity(CHUNK_LEN as usize, out);
+            let mut writer = tokio::io::BufWriter::with_capacity(window as usize, out);
 
-            for span in chunk_spans(total, CHUNK_LEN) {
+            for span in chunk_spans(total, window) {
                 let chunk = match file.read_all(span.len as usize, BytesMut::new()).await {
                     Ok(c) => c,
                     Err(e) => {
@@ -593,7 +703,7 @@ impl Backend for SftpBackend {
                 // The deadline own heartbeat, and the reason this loop uses
                 // `watched` rather than `on_link`: a chunk that arrived is proof
                 // the link is alive, so an hours-long restore over a slow uplink
-                // resets its patience every 4 MiB instead of running out of it.
+                // resets its patience every window instead of running out of it.
                 watch.touch();
                 if let Err(e) = writer.write_all(&chunk).await {
                     let _ = tokio::fs::remove_file(&tmp).await;
@@ -912,4 +1022,62 @@ fn is_session_lost(error: &StoreError) -> bool {
 /// filesystem), so the final rename onto `dest` is atomic.
 fn local_temp(dest: &Path) -> std::path::PathBuf {
     std::path::PathBuf::from(temp_path(&dest.to_string_lossy()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The transfer window is the operator's memory ceiling on this backend, and
+    /// the clamp is what stops a typo turning it into an OOM kill.
+    ///
+    /// Pure — no server, no session — because this is the *policy* half. The
+    /// other half is `SftpConfig::with_chunk_size` reaching this field, which
+    /// `SftpBackend::chunk_size` exposes and `dctl_cli::config::reach` asserts
+    /// from the configuration file's end.
+    #[test]
+    fn a_pinned_transfer_window_is_taken_and_an_absurd_one_is_clamped() {
+        // Pinning nothing is not the same as pinning the default: it is what
+        // lets a later release improve the default without rewriting configs.
+        assert_eq!(clamp_chunk_len(None), CHUNK_LEN);
+
+        // A value inside the range is taken exactly. 9 MiB is neither a bound
+        // nor the default, so a clamp that ignored its argument would fail here.
+        assert_eq!(clamp_chunk_len(Some(9 * 1024 * 1024)), 9 * 1024 * 1024);
+
+        // Below the floor: an operator asking for the smallest footprint gets
+        // the smallest one available, rather than a failed backup at 02:00.
+        assert_eq!(clamp_chunk_len(Some(1)), MIN_CHUNK_LEN);
+        assert_eq!(clamp_chunk_len(Some(0)), MIN_CHUNK_LEN);
+
+        // Above the ceiling. `chunk_size = 8589934592` is a plausible typo for
+        // 8 MiB written in bytes-of-GiB, and honouring it would turn a memory
+        // setting into an out-of-memory kill.
+        assert_eq!(clamp_chunk_len(Some(8 * 1024 * 1024 * 1024)), MAX_CHUNK_LEN);
+        assert_eq!(clamp_chunk_len(Some(u64::MAX)), MAX_CHUNK_LEN);
+
+        // The bounds themselves are reachable, or the range is narrower than it
+        // claims to be.
+        assert_eq!(clamp_chunk_len(Some(MIN_CHUNK_LEN)), MIN_CHUNK_LEN);
+        assert_eq!(clamp_chunk_len(Some(MAX_CHUNK_LEN)), MAX_CHUNK_LEN);
+    }
+
+    /// A config carries the window to the backend, and back off it again.
+    ///
+    /// The setter and the getter are the two ends `dctl_cli::config::reach`
+    /// cannot see between: it proves the resolver produces the number, and this
+    /// proves the number a `SftpConfig` was built with is the number the
+    /// backend's streaming paths will use.
+    #[test]
+    fn a_config_carries_its_window_and_the_default_is_not_zero() {
+        let pinned = SftpConfig::new("h", "/srv/x").with_chunk_size(Some(9 * 1024 * 1024));
+        assert_eq!(pinned.chunk_size, Some(9 * 1024 * 1024));
+        assert_eq!(clamp_chunk_len(pinned.chunk_size), 9 * 1024 * 1024);
+
+        // Unset stays unset through the builder chain, so the backend can tell
+        // "pinned the default" from "pinned nothing".
+        let plain = SftpConfig::new("h", "/srv/x").with_links(LinkPolicy::Skip);
+        assert_eq!(plain.chunk_size, None);
+        assert_eq!(clamp_chunk_len(plain.chunk_size), CHUNK_LEN);
+    }
 }

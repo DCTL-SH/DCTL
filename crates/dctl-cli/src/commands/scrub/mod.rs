@@ -200,7 +200,10 @@ pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
         mode::describe(performed)
     ));
 
-    let requested = ctx.verify_mode();
+    // The target's own policy, not the flag alone: `verify = "strict"` on the
+    // remote being scrubbed is the operator saying how hard this destination is
+    // checked, and it was read by nothing until §29.
+    let requested = ctx.verify_mode_for(&target.spec())?;
     if !mode::proves_whole_plaintext(requested) {
         ctx.out.warn(format!(
             "--verify={} asks for a cheaper check than a scrub can perform in this \

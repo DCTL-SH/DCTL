@@ -972,6 +972,24 @@ pub const DEFAULT_TIMEOUT_SECS: u64 = dctl_store::deadline::constants::DEFAULT_I
 /// seconds. See [`DEFAULT_TIMEOUT_SECS`] for why it is derived and not restated.
 pub const DEFAULT_CONTIMEOUT_SECS: u64 = dctl_store::deadline::constants::DEFAULT_CONNECT.as_secs();
 
+/// The verification strength applied when neither `--verify` nor the
+/// destination remote's `verify` setting names one.
+///
+/// [`VerifyMode::Checksum`](crate::cli::globals::VerifyMode::Checksum) — the
+/// provider-checksum comparison `PLAN.md` §6 step 5 mandates after every write.
+/// It costs no extra egress, which is what makes it the right thing to do
+/// without being asked.
+///
+/// A named constant rather than clap's `default_value_t`, and that is the
+/// change that let a per-remote policy exist at all: with a default baked into
+/// the parser there is no way to distinguish *"the operator asked for
+/// `checksum`"* from *"the operator asked for nothing"*, so a configured
+/// `strict` would be silently overridden by a value nobody typed. The same
+/// argument `VERIFY_SAMPLES_UNSUPPORTED_REASON`'s flag makes for being an
+/// `Option`. `dctl --help` states this default in prose instead.
+pub const DEFAULT_VERIFY_MODE: crate::cli::globals::VerifyMode =
+    crate::cli::globals::VerifyMode::Checksum;
+
 /// Why `--verify-samples` is refused.
 ///
 /// Worth stating plainly rather than as "not wired": on the vault path
@@ -988,6 +1006,27 @@ pub const DUMP_UNSUPPORTED_REASON: &str = "The protocol tracing layer this selec
      nothing in dctl_store or crate::logging captures headers, bodies, requests \
      or retry decisions, so every target would produce silence. Raise -vvv for \
      the tracing this build does emit.";
+
+/// Why a vault remote's `base_path` is refused.
+///
+/// The capability is genuinely absent — a vault occupies the **root** of the
+/// container it wraps, and `HANDOVER.md` §11.2 has said so since the first
+/// verdict — but the refusal only existed at one of the two doors.
+/// `dctl init --base local:/srv/v/sub` said no in a sentence; `dctl config
+/// create v vault base=store base_path=sub` said yes, wrote the key, printed it
+/// back from `dctl config show`, and addressed `/srv/v` anyway. An operator who
+/// configured a vault the second way had a setting they could see, could not
+/// remove by observation, and that moved no data.
+///
+/// Stated as what the tool does instead, not as "unimplemented": the answer to
+/// "I want two vaults on one bucket" is two containers, and the sentence says so.
+pub const VAULT_BASE_PATH_UNSUPPORTED_REASON: &str = "A vault occupies the root of the store it wraps: \
+     the envelope, the index and every object are addressed from it, and no \
+     layer between dctl_core::Vault and the backend applies a key prefix. \
+     Give each vault its own container instead — a second bucket, or a second \
+     directory named as its own local remote — which is what `dctl init` \
+     creates and what `dctl init --base` refuses the subdirectory form in \
+     favour of.";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Cost controls (`--max-transfer`, `--bwlimit`)

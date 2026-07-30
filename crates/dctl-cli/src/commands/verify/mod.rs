@@ -137,7 +137,9 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
         mode::describe(performed)
     ));
 
-    let requested = ctx.verify_mode();
+    // The target's own policy, not the flag alone. See
+    // `crate::remote::resolve::verify_policy`.
+    let requested = ctx.verify_mode_for(&target.spec())?;
     if !mode::proves_whole_plaintext(requested) {
         ctx.out.warn(format!(
             "--verify={} asks for a cheaper check than `{command}` can perform in this \
@@ -252,9 +254,14 @@ mod tests {
     #[tokio::test]
     async fn the_global_verify_mode_is_reachable_without_a_local_flag() {
         // Strength is a global dial; a per-command copy would be a second
-        // spelling of one setting.
+        // spelling of one setting. Asked about the target, because the remote
+        // states a policy the flag overrides.
         let (ctx, _) = parse(&["verify", "vault:x", "--verify", "strict"]);
-        assert_eq!(ctx.verify_mode(), crate::cli::VerifyMode::Strict);
+        let spec = crate::remote::RemoteSpec::parse("vault:x").expect("a well-formed spec");
+        assert_eq!(
+            ctx.verify_mode_for(&spec).expect("the mode resolves"),
+            crate::cli::VerifyMode::Strict
+        );
     }
 
     #[tokio::test]

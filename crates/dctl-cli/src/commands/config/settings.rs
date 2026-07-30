@@ -199,23 +199,72 @@ fn deserialize(table: toml::Table) -> Result<RemoteDef> {
     canonicalise(remote)
 }
 
-/// Put a remote's settings into the spelling the file should carry.
+/// Put a remote's settings into the spelling the file should carry, and refuse
+/// the ones this build cannot honour.
 ///
-/// One provider needs it. An sftp `base` written as a bare relative path meant
-/// `$HOME/…` here and `/…` through `dctl init --base sftp:HOST/…`
-/// (`docs/HANDOVER.md` §16.3), so the one rule
-/// ([`crate::remote::sftp_base`]) is applied at the moment the value is written
-/// rather than at the moment it is used. Two things follow: the file always says
-/// which of the two it means, and a remote that cannot say is refused *before*
-/// it exists instead of after somebody has pointed a backup at it.
+/// Two providers need something here, for two different reasons.
+///
+/// **sftp `base`.** Written as a bare relative path it meant `$HOME/…` here and
+/// `/…` through `dctl init --base sftp:HOST/…` (`docs/HANDOVER.md` §16.3), so
+/// the one rule ([`crate::remote::sftp_base`]) is applied at the moment the
+/// value is written rather than at the moment it is used. Two things follow: the
+/// file always says which of the two it means, and a remote that cannot say is
+/// refused *before* it exists instead of after somebody has pointed a backup at
+/// it.
+///
+/// **vault `base_path`.** A vault occupies the root of the store it wraps, and
+/// `dctl init --base local:/srv/v/sub` has always said so. This door did not:
+/// it accepted the key, wrote it to the file, printed it back from
+/// `dctl config show`, and addressed the root anyway — the exact shape
+/// `crate::config::reach` exists to make impossible. Refused here rather than at
+/// resolve time so the value never reaches the file, because a setting that
+/// fails only when a transfer runs is a setting that fails at 02:00.
 fn canonicalise(remote: RemoteDef) -> Result<RemoteDef> {
     match remote {
         RemoteDef::Sftp(mut def) => {
             def.base = crate::remote::sftp_base::from_setting(&def.base)?;
             Ok(RemoteDef::Sftp(def))
         }
-        other => Ok(other),
+        other => {
+            refuse_unhonourable(&other)?;
+            Ok(other)
+        }
     }
+}
+
+/// Refuse any setting [`crate::config::reach`] says this provider cannot honour.
+///
+/// Table-driven rather than a match per provider, and that is the point: the one
+/// refusal in the table today is a vault's `base_path`, and the next one must not
+/// need a second place to be remembered. A setting whose row says `Refused` is
+/// refused here, at the door that writes the file, and again by
+/// [`crate::config::validate`] for a file that already carries one.
+///
+/// Asked of the *serialised* form so the question is (provider, key) — the same
+/// pair the table is keyed on — rather than a field access that would have to be
+/// written out per variant.
+fn refuse_unhonourable(remote: &RemoteDef) -> Result<()> {
+    let Ok(Value::Table(table)) = Value::try_from(remote) else {
+        return Ok(());
+    };
+    for (key, value) in &table {
+        // An empty value is unset, the rule every other setting follows, and the
+        // way an update assigning nothing clears one an older build wrote.
+        if value.as_str() == Some("") {
+            continue;
+        }
+        if let Some(reason) = crate::config::reach::refusal(remote.type_name(), key) {
+            return Err(CliError::new(
+                ExitCode::Usage,
+                format!(
+                    "'{key}' is not a setting a {} remote can honour",
+                    remote.type_name()
+                ),
+            )
+            .with_hint(reason));
+        }
+    }
+    Ok(())
 }
 
 /// Interpret a command-line value as the TOML scalar a user meant.
@@ -247,6 +296,16 @@ fn coerce(value: &str) -> Value {
 /// Strings lose their quotes — someone reading `bucket photos` does not want
 /// `bucket "photos"` — while every other type keeps the spelling that would have
 /// to be typed back into the file.
+///
+/// Re-exported as [`scalar_text`] because `crate::config::validate` quotes a
+/// refused setting's value back at the operator, and it has to be the *same*
+/// spelling `dctl config show` used or they will be hunting for a line that
+/// reads differently from the message.
+pub fn scalar_text(value: &Value) -> String {
+    scalar_to_string(value)
+}
+
+/// See [`scalar_text`].
 fn scalar_to_string(value: &Value) -> String {
     match value {
         Value::String(text) => text.clone(),
@@ -608,11 +667,15 @@ mod tests {
 
     #[test]
     fn a_vault_chain_setting_round_trips_through_the_flat_vocabulary() {
+        // `base_path` is deliberately absent. It used to be in this fixture, and
+        // the fixture passing was the whole problem: the round trip was faithful
+        // and the value reached nothing, which is exactly what `config::reach`
+        // now forbids. The settings that remain are the ones a vault honours.
         let remote = RemoteDef::Vault(VaultDef {
             base: "b2prod".into(),
-            base_path: Some("vault".into()),
+            base_path: None,
             chunk_size: Some(4 * 1024 * 1024),
-            verify: None,
+            verify: Some(crate::cli::VerifyMode::Strict),
         });
         let settings = flatten(&remote);
         let rebuilt = build(
@@ -624,5 +687,51 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rebuilt, remote);
+    }
+
+    #[test]
+    fn a_vault_subdirectory_is_refused_at_the_door_that_used_to_accept_it() {
+        // `HANDOVER.md` §11.2 has always said a vault occupies the root of the
+        // store it wraps, and `dctl init --base local:/srv/v/sub` has always said
+        // so out loud. This door did not: it took the key, wrote it to the file,
+        // showed it back through `dctl config show`, and addressed the root — a
+        // setting the operator could see, could not remove by observing anything,
+        // and that moved no data.
+        let error = build(
+            constants::PROVIDER_VAULT,
+            &assignments(&[("base", "b2prod"), ("base_path", "vaults/a")]),
+        )
+        .expect_err("a subdirectory must be refused rather than ignored");
+        assert_eq!(error.code(), ExitCode::Usage);
+        assert!(
+            error.message().contains(constants::CONFIG_KEY_BASE_PATH),
+            "the refusal must name the setting: {}",
+            error.message()
+        );
+        // And say what to do instead, which is the whole difference between a
+        // refusal and a wall.
+        let hint = error.hint().unwrap_or_default();
+        assert!(hint.contains("own container"), "{hint}");
+
+        // The same remote without it is still perfectly creatable, or the
+        // refusal is refusing vaults rather than subdirectories.
+        assert!(
+            build(
+                constants::PROVIDER_VAULT,
+                &assignments(&[("base", "b2prod")])
+            )
+            .is_ok()
+        );
+
+        // An *empty* value is unset, not a subdirectory — the same rule every
+        // other setting follows, and the way `dctl config update v base_path=`
+        // clears one written by an older build.
+        assert!(
+            build(
+                constants::PROVIDER_VAULT,
+                &assignments(&[("base", "b2prod"), ("base_path", "")])
+            )
+            .is_ok()
+        );
     }
 }

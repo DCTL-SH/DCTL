@@ -471,22 +471,27 @@ pub struct VaultDef {
     pub verify: Option<VerifyMode>,
 }
 
+/// The schema walk both this module's tests and [`super::reach`] are built on.
+///
+/// A separate module rather than a function inside `mod tests` because two
+/// guards need it and they check different things about the same set: the audit
+/// below proves no field is named like a credential, and
+/// [`super::reach::SETTINGS`] proves every field reaches an implementation.
+/// Sharing the one definition is what stops a provider being added to one walk
+/// and forgotten by the other.
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::constants::{
-        CONFIG_KEY_BASE, CONFIG_KEY_BUCKET, CONFIG_KEY_REMOTES, CONFIG_KEY_REQUIRE_VAULT,
-        CONFIG_REMOTE_TYPE_KEY,
-    };
-    use crate::logging::redact::is_sensitive_key;
+pub mod model_test_support {
+    use super::{B2Def, LocalDef, PathBuf, R2Def, RemoteDef, S3Def, SftpDef, VaultDef, VerifyMode};
 
     /// One fully-populated value of every variant.
     ///
     /// Every optional field is `Some` on purpose: a field that is `None` does
     /// not appear in the serialised form, so a sample built from defaults would
-    /// let a secret-shaped field slip past the audit below unnoticed. The same
-    /// reasoning sets every flag, which is skipped when it is `false`.
-    fn every_variant() -> Vec<RemoteDef> {
+    /// let a secret-shaped field slip past the audit unnoticed, and would let a
+    /// setting stay out of the reach table without failing its exhaustiveness
+    /// check. The same reasoning sets every flag, which is skipped when `false`.
+    #[must_use]
+    pub fn every_variant() -> Vec<RemoteDef> {
         vec![
             RemoteDef::Local(LocalDef {
                 path: PathBuf::from("/srv/data"),
@@ -511,7 +516,7 @@ mod tests {
             RemoteDef::R2(R2Def {
                 bucket: "cold".into(),
                 account: Some("0123456789abcdef".into()),
-                endpoint: None,
+                endpoint: Some("https://acct.r2.cloudflarestorage.com".into()),
                 chunk_size: Some(8 * 1024 * 1024),
                 verify: Some(VerifyMode::Checksum),
                 require_vault: true,
@@ -531,6 +536,17 @@ mod tests {
             }),
         ]
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::{
+        CONFIG_KEY_BASE, CONFIG_KEY_BUCKET, CONFIG_KEY_REMOTES, CONFIG_KEY_REQUIRE_VAULT,
+        CONFIG_REMOTE_TYPE_KEY,
+    };
+    use crate::logging::redact::is_sensitive_key;
+    use model_test_support::every_variant;
 
     fn sample_config() -> Config {
         let mut config = Config::default();

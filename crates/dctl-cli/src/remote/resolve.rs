@@ -39,11 +39,12 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
+use crate::cli::globals::VerifyMode;
 use crate::constants::{
     CONFIG_KEY_ACCOUNT, CONFIG_KEY_BASE, CONFIG_KEY_BUCKET, CONFIG_KEY_CHUNK_SIZE,
-    CONFIG_KEY_ENDPOINT, CONFIG_KEY_HOST, CONFIG_KEY_PATH, CONFIG_KEY_REGION,
-    CONFIG_REMOTE_TYPE_KEY, PATH_SEPARATOR, PROVIDER_B2, PROVIDER_LOCAL, PROVIDER_R2, PROVIDER_S3,
-    PROVIDER_SFTP, PROVIDER_VAULT, REMOTE_PROVIDER_TYPES,
+    CONFIG_KEY_ENDPOINT, CONFIG_KEY_HOST, CONFIG_KEY_PATH, CONFIG_KEY_REGION, CONFIG_KEY_VERIFY,
+    CONFIG_REMOTE_TYPE_KEY, DEFAULT_VERIFY_MODE, PATH_SEPARATOR, PROVIDER_B2, PROVIDER_LOCAL,
+    PROVIDER_R2, PROVIDER_S3, PROVIDER_SFTP, PROVIDER_VAULT, REMOTE_PROVIDER_TYPES,
 };
 use crate::error::{CliError, Result};
 
@@ -266,6 +267,7 @@ fn target_from_entry(name: &str, entry: &RemoteEntry) -> Result<Target> {
 
         PROVIDER_B2 => Ok(Target::B2 {
             bucket: required(name, entry, CONFIG_KEY_BUCKET)?.to_string(),
+            endpoint: entry.setting(CONFIG_KEY_ENDPOINT).map(str::to_string),
             chunk_size: chunk_size(name, entry)?,
         }),
 
@@ -279,6 +281,7 @@ fn target_from_entry(name: &str, entry: &RemoteEntry) -> Result<Target> {
         PROVIDER_R2 => Ok(Target::R2 {
             bucket: required(name, entry, CONFIG_KEY_BUCKET)?.to_string(),
             account: entry.setting(CONFIG_KEY_ACCOUNT).map(str::to_string),
+            endpoint: entry.setting(CONFIG_KEY_ENDPOINT).map(str::to_string),
             chunk_size: chunk_size(name, entry)?,
         }),
 
@@ -294,6 +297,7 @@ fn target_from_entry(name: &str, entry: &RemoteEntry) -> Result<Target> {
         PROVIDER_SFTP => Ok(Target::Sftp {
             host: required(name, entry, CONFIG_KEY_HOST)?.to_string(),
             base: crate::remote::sftp_base::from_setting(required(name, entry, CONFIG_KEY_BASE)?)?,
+            chunk_size: chunk_size(name, entry)?,
         }),
 
         // A legal `type` that is deliberately not a provider. Diagnosed on its
@@ -360,7 +364,11 @@ fn shorthand(name: &str, path: &str) -> Result<Resolved> {
         let (host, base) = crate::remote::sftp_base::from_spec(&format!("{name}:{path}"), path)?;
         return Ok(Resolved::new(
             name,
-            Target::Sftp { host, base },
+            Target::Sftp {
+                host,
+                base,
+                chunk_size: None,
+            },
             String::new(),
         ));
     }
@@ -370,6 +378,7 @@ fn shorthand(name: &str, path: &str) -> Result<Resolved> {
     let target = match name {
         PROVIDER_B2 => Target::B2 {
             bucket: bucket(name, container)?,
+            endpoint: None,
             chunk_size: None,
         },
         PROVIDER_S3 => Target::S3 {
@@ -381,6 +390,7 @@ fn shorthand(name: &str, path: &str) -> Result<Resolved> {
         PROVIDER_R2 => Target::R2 {
             bucket: bucket(name, container)?,
             account: None,
+            endpoint: None,
             chunk_size: None,
         },
         other => {
@@ -575,6 +585,87 @@ pub fn vault_chunk_size<C: RemoteCatalog + ?Sized>(
         return Ok(None);
     }
     chunk_size(remote, &entry)
+}
+
+/// The verification strength a run addressed to `spec` applies.
+///
+/// ## The defect this closes
+///
+/// `verify` is declared on **all six** provider definitions, accepted by
+/// `dctl config create`, printed by `dctl config show`, documented on
+/// [`CONFIG_KEY_VERIFY`](crate::constants::CONFIG_KEY_VERIFY) — and
+/// [`RemoteDef::verify`](crate::config::RemoteDef::verify) had no caller
+/// anywhere in the crate. Every run verified at whatever the flag said, so an
+/// operator who wrote `verify = "strict"` on the one destination they cared
+/// about got `checksum`, and nothing anywhere said so. `HANDOVER.md` §11.3
+/// item 9 names it first for that reason.
+///
+/// ## The rule, in one sentence
+///
+/// **The remote named on the command line states the policy; `--verify` states
+/// the intent for this run and wins.** Not the store beneath a vault and not
+/// some merge of the two: `dctl copy x archive:` reads `archive`'s setting even
+/// when the bytes land in `archive-store`, because `archive` is what the
+/// operator addressed and what `dctl config show archive` reports back.
+///
+/// A bare path, a provider shorthand and an unconfigured name have no policy to
+/// state, so they take the compiled-in default — which is
+/// [`VerifyMode::Checksum`], the comparison `PLAN.md` §6 step 5 mandates.
+///
+/// ## Why the flag is an `Option`
+///
+/// It has to be, or this function cannot exist. With a `default_value_t` there
+/// is no way to tell "the operator asked for `checksum`" from "the operator
+/// asked for nothing", so a configured `strict` would either be overridden by a
+/// default nobody typed or would override an explicit `--verify checksum`. The
+/// in-house precedent is `--verify-samples`, whose own doc comment makes exactly
+/// this argument. `dctl --help` states the default in prose instead.
+///
+/// # Errors
+/// [`crate::exit::ExitCode::FatalError`] for a `verify` value that is not one of
+/// the modes, naming the remote and the value — the same treatment
+/// [`chunk_size`] gets, and for the same reason: a newly-wired setting must not
+/// accept a value it cannot use and fall back to the default, because that is
+/// indistinguishable from the inert behaviour it replaced.
+pub fn verify_policy<C: RemoteCatalog + ?Sized>(
+    flag: Option<VerifyMode>,
+    spec: &RemoteSpec,
+    catalog: &C,
+) -> Result<VerifyMode> {
+    if let Some(asked) = flag {
+        return Ok(asked);
+    }
+    let RemoteSpec::Named { remote, .. } = spec else {
+        return Ok(DEFAULT_VERIFY_MODE);
+    };
+    let Some(entry) = catalog.lookup(remote) else {
+        return Ok(DEFAULT_VERIFY_MODE);
+    };
+    let Some(written) = entry.setting(CONFIG_KEY_VERIFY) else {
+        return Ok(DEFAULT_VERIFY_MODE);
+    };
+    parse_verify_mode(remote, written)
+}
+
+/// One `verify` word, or a refusal naming the remote and the value.
+///
+/// Parsed from the same spelling `--verify` takes, through
+/// [`VerifyMode::from_slug`], so the file and the flag cannot acquire two
+/// dialects of the same three words.
+fn parse_verify_mode(name: &str, written: &str) -> Result<VerifyMode> {
+    crate::commands::integrity::mode::from_slug(written.trim()).ok_or_else(|| {
+        CliError::fatal(format!(
+            "remote '{name}' has {CONFIG_KEY_VERIFY} = '{written}', which is not a \
+             verification mode"
+        ))
+        .with_hint(format!(
+            "Write one of {}, for example \
+             `dctl config update {name} {CONFIG_KEY_VERIFY}=strict`. It is the \
+             default for writes to this remote; --verify on the command line \
+             still overrides it.",
+            crate::commands::integrity::mode::slugs().join(", ")
+        ))
+    })
 }
 
 /// The advertised provider types, for a hint. Derived from the table rather than
@@ -806,6 +897,139 @@ mod tests {
     }
 
     #[test]
+    fn a_remotes_verify_setting_is_the_default_and_the_flag_overrides_it() {
+        // `HANDOVER.md` §11.3 item 9's first named setting. `verify` was declared
+        // on all six providers, accepted by `config create`, printed by
+        // `config show`, and `RemoteDef::verify` had no caller anywhere — so an
+        // operator who wrote `verify = "strict"` on the one destination they
+        // cared about got `checksum`, silently, on every run.
+        let configured = catalog(&[
+            (
+                "strictly",
+                RemoteEntry::new(PROVIDER_B2)
+                    .with_setting(CONFIG_KEY_BUCKET, "b")
+                    .with_setting(CONFIG_KEY_VERIFY, "strict"),
+            ),
+            (
+                "unpinned",
+                RemoteEntry::new(PROVIDER_B2).with_setting(CONFIG_KEY_BUCKET, "b"),
+            ),
+        ]);
+
+        let strict = RemoteSpec::parse("strictly:").expect("a well-formed spec");
+        assert_eq!(
+            verify_policy(None, &strict, &configured).expect("the policy resolves"),
+            VerifyMode::Strict,
+            "a remote's own setting must decide when the flag says nothing"
+        );
+
+        // The flag wins — including when it asks for something *weaker*, which
+        // is the case a `.unwrap_or()` over the setting would get wrong: the
+        // file states a policy, the command line states an intent for this run.
+        assert_eq!(
+            verify_policy(Some(VerifyMode::Checksum), &strict, &configured).expect("resolves"),
+            VerifyMode::Checksum
+        );
+        assert_eq!(
+            verify_policy(Some(VerifyMode::Sample), &strict, &configured).expect("resolves"),
+            VerifyMode::Sample
+        );
+
+        // A remote that pins nothing takes the compiled default, and so does a
+        // bare path, an unknown name and a provider shorthand — none of them has
+        // a policy to state.
+        for spec in ["unpinned:", "b2:some-bucket", "/srv/data"] {
+            let parsed = RemoteSpec::parse(spec).expect("a well-formed spec");
+            assert_eq!(
+                verify_policy(None, &parsed, &configured).expect("resolves"),
+                DEFAULT_VERIFY_MODE,
+                "'{spec}'"
+            );
+        }
+        assert_eq!(DEFAULT_VERIFY_MODE, VerifyMode::Checksum);
+    }
+
+    #[test]
+    fn a_vault_states_its_own_policy_rather_than_its_stores() {
+        // The remote the operator *addressed* is the one whose setting applies.
+        // `archive:` is what `dctl config show archive` reports and what they
+        // typed; the store underneath is an implementation detail of where the
+        // ciphertext lands, and reading its `verify` instead would mean the
+        // setting they can see is not the setting that runs.
+        let configured = catalog(&[
+            (
+                "archive",
+                RemoteEntry::new(PROVIDER_VAULT)
+                    .with_setting(CONFIG_KEY_BASE, "archive-store")
+                    .with_setting(CONFIG_KEY_VERIFY, "strict"),
+            ),
+            (
+                "archive-store",
+                RemoteEntry::new(PROVIDER_B2)
+                    .with_setting(CONFIG_KEY_BUCKET, "b")
+                    .with_setting(CONFIG_KEY_VERIFY, "sample"),
+            ),
+        ]);
+        let vault = RemoteSpec::parse("archive:photos").expect("a well-formed spec");
+        assert_eq!(
+            verify_policy(None, &vault, &configured).expect("resolves"),
+            VerifyMode::Strict
+        );
+        // And addressing the store directly gets the store's, which is the same
+        // rule and not an exception to it.
+        let store = RemoteSpec::parse("archive-store:").expect("a well-formed spec");
+        assert_eq!(
+            verify_policy(None, &store, &configured).expect("resolves"),
+            VerifyMode::Sample
+        );
+    }
+
+    #[test]
+    fn a_mistyped_verify_is_refused_rather_than_quietly_defaulted() {
+        // The one thing a newly-wired setting must not do is accept a value it
+        // cannot use and fall back to the default, which is indistinguishable
+        // from the inert behaviour it replaced. `chunk_size` follows the same
+        // rule and for the same reason.
+        for written in ["Strict", "full", "yes", "checksums"] {
+            let configured = catalog(&[(
+                "r",
+                RemoteEntry::new(PROVIDER_LOCAL)
+                    .with_setting(CONFIG_KEY_PATH, "/srv")
+                    .with_setting(CONFIG_KEY_VERIFY, written),
+            )]);
+            let spec = RemoteSpec::parse("r:").expect("a well-formed spec");
+            let error = verify_policy(None, &spec, &configured)
+                .expect_err(&format!("'{written}' must be refused, not defaulted"));
+            assert_eq!(error.code(), ExitCode::FatalError);
+            assert!(
+                error.message().contains(CONFIG_KEY_VERIFY),
+                "the message must name the key: {}",
+                error.message()
+            );
+            assert!(error.message().contains(written), "{}", error.message());
+            // …and list the words that would have worked.
+            assert!(
+                error.hint().is_some_and(|h| h.contains("strict")),
+                "'{written}' failed without advice"
+            );
+        }
+
+        // An empty value is *unset*, the same rule `endpoint = ""` follows, so a
+        // half-typed key keeps the default rather than failing every command.
+        let blank = catalog(&[(
+            "r",
+            RemoteEntry::new(PROVIDER_LOCAL)
+                .with_setting(CONFIG_KEY_PATH, "/srv")
+                .with_setting(CONFIG_KEY_VERIFY, ""),
+        )]);
+        let spec = RemoteSpec::parse("r:").expect("a well-formed spec");
+        assert_eq!(
+            verify_policy(None, &spec, &blank).expect("an empty setting is unset"),
+            DEFAULT_VERIFY_MODE
+        );
+    }
+
+    #[test]
     fn a_read_is_scoped_by_the_resolvers_prefix_and_never_by_the_specs_path() {
         // `HANDOVER.md` §11.3 item 6. The shorthand's first component is the
         // *bucket*; a read that used the spec's path as its prefix looked for
@@ -999,6 +1223,7 @@ mod tests {
             resolved.target(),
             &Target::B2 {
                 bucket: "cold-storage".into(),
+                endpoint: None,
                 chunk_size: None,
             }
         );
@@ -1059,6 +1284,7 @@ mod tests {
             resolved.target(),
             &Target::B2 {
                 bucket: "actually-b2".into(),
+                endpoint: None,
                 chunk_size: None,
             }
         );
@@ -1073,6 +1299,7 @@ mod tests {
             resolved.target(),
             &Target::B2 {
                 bucket: "my-bucket".into(),
+                endpoint: None,
                 chunk_size: None,
             }
         );

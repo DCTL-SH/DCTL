@@ -55,6 +55,27 @@ impl R2Backend {
         S3Config::new(endpoint, R2_REGION, bucket, access_key, secret_key)
     }
 
+    /// The same settings for an endpoint the operator names outright.
+    ///
+    /// The region is still R2's fixed `auto`, and that is the whole reason this
+    /// is here rather than being left to [`S3Config::new`]: an operator pointing
+    /// an `r2` remote at a jurisdiction-specific endpoint is still talking to R2,
+    /// and signing for anything else fails with `SignatureDoesNotMatch`. A
+    /// caller who reached for the S3 constructor to supply an endpoint would have
+    /// to know that, and would get it wrong exactly once.
+    ///
+    /// The account id is not taken, because it has no other purpose: R2 derives
+    /// nothing else from it, so a remote that names its endpoint needs no account.
+    #[must_use]
+    pub fn config_at(
+        endpoint: impl Into<String>,
+        bucket: impl Into<String>,
+        access_key: impl Into<String>,
+        secret_key: impl Into<String>,
+    ) -> S3Config {
+        S3Config::new(endpoint, R2_REGION, bucket, access_key, secret_key)
+    }
+
     /// Create an R2 backend. The endpoint is `https://<account_id>.r2.cloudflarestorage.com`.
     ///
     /// # Errors

@@ -188,7 +188,57 @@ pub fn validate(config: &Config) -> Result<()> {
     }
 
     vault_only_locations(config)?;
+    settings_nothing_honours(config)?;
 
+    Ok(())
+}
+
+/// Refuse a remote carrying a setting [`crate::config::reach`] says this build
+/// cannot apply.
+///
+/// `dctl config create` refuses one before it is written, but a file created by
+/// an earlier build still carries it — and carried it *silently*, because the
+/// value round-tripped through the file faithfully and reached nothing. So the
+/// setting is diagnosed on the way in as well, which is the same conclusion
+/// §16.3 reached about the sftp base and for the same reason: a rule enforced by
+/// one command is a rule the file can be hand-edited around.
+///
+/// Table-driven, and asked of the serialised form, so the next refused setting
+/// needs no edit here. One refusal exists today — a vault's `base_path` — and
+/// its remedy costs nothing, which the hint says: because the setting was never
+/// applied, the vault's objects are already at the root of the store it wraps,
+/// so deleting the line changes where nothing is addressed. That is what makes
+/// refusing an existing file safe rather than hostile, and it is the opposite of
+/// the sftp base, where the same shape of fault meant two different directories.
+///
+/// # Errors
+/// [`ConfigError::SettingNotHonoured`], naming the remote, the key and the value
+/// as written, so the operator can find the line.
+fn settings_nothing_honours(config: &Config) -> Result<()> {
+    for name in config.names() {
+        let Some(remote) = config.get(name) else {
+            continue;
+        };
+        let Ok(toml::Value::Table(table)) = toml::Value::try_from(remote) else {
+            continue;
+        };
+        for (key, value) in &table {
+            // An empty value is unset, the same rule every other setting
+            // follows, and what an update assigning nothing writes on its way
+            // to removing one.
+            if value.as_str() == Some("") {
+                continue;
+            }
+            if let Some(reason) = crate::config::reach::refusal(remote.type_name(), key) {
+                return Err(ConfigError::SettingNotHonoured {
+                    remote: name.to_string(),
+                    key: key.clone(),
+                    written: crate::commands::config::settings::scalar_text(value),
+                    reason,
+                });
+            }
+        }
+    }
     Ok(())
 }
 
@@ -840,5 +890,58 @@ mod tests {
         )
         .expect("must parse as TOML");
         assert!(reject_secret_keys(&document).is_ok());
+    }
+
+    #[test]
+    fn a_vault_base_path_written_by_an_older_build_is_diagnosed_on_the_way_in() {
+        // `dctl config create` refuses it now, but a file that already carries
+        // one is the case that matters: the setting round-tripped faithfully and
+        // reached nothing, so an operator has a subdirectory in their config and
+        // their objects at the root.
+        let mut config = Config::default();
+        config.insert(
+            "archive-store",
+            RemoteDef::Local(LocalDef {
+                path: PathBuf::from("/srv/v"),
+                verify: None,
+                require_vault: true,
+            }),
+        );
+        config.insert(
+            "archive",
+            RemoteDef::Vault(VaultDef {
+                base: "archive-store".into(),
+                base_path: Some("vaults/a".into()),
+                chunk_size: None,
+                verify: None,
+            }),
+        );
+        let error = validate(&config).expect_err("a subdirectory must be diagnosed");
+        assert_eq!(
+            error.exit_code(),
+            crate::exit::ExitCode::FatalError,
+            "a configuration that cannot be honoured is a configuration error"
+        );
+        assert!(error.to_string().contains("archive"), "{error}");
+        assert!(error.to_string().contains("vaults/a"), "{error}");
+        // The remedy is deleting a line and nothing moves, which is the whole
+        // reason refusing an existing file is safe here.
+        let hint = error.hint().unwrap_or_default();
+        assert!(hint.contains("Nothing has to move"), "{hint}");
+        assert!(hint.contains("base_path="), "{hint}");
+
+        // Cleared, the same configuration is fine — so the rule refuses the
+        // setting rather than the vault.
+        if let Some(RemoteDef::Vault(def)) = config.remotes.get_mut("archive") {
+            def.base_path = None;
+        }
+        assert!(validate(&config).is_ok());
+
+        // And an empty value is unset, which is what `config update v
+        // base_path=` writes on the way to removing it.
+        if let Some(RemoteDef::Vault(def)) = config.remotes.get_mut("archive") {
+            def.base_path = Some(String::new());
+        }
+        assert!(validate(&config).is_ok());
     }
 }

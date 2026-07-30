@@ -193,16 +193,31 @@ pub struct GlobalArgs {
     pub no_ask_password: bool,
 
     // ── Durability ───────────────────────────────────────────────────────
-    /// Verification strength applied after every write.
+    /// Verification strength applied after every write. Overrides the
+    /// destination remote's `verify` setting. [default: checksum]
+    ///
+    /// `Option` rather than a defaulted value, and the difference is the whole
+    /// reason a per-remote `verify` can exist: with `default_value_t` there is
+    /// no way to tell "the operator asked for checksum" from "the operator
+    /// asked for nothing", so a remote configured `strict` would be overridden
+    /// by a value nobody typed — and the setting would stay exactly as inert as
+    /// it was before it was wired. See
+    /// [`crate::remote::resolve::verify_policy`], and
+    /// [`GlobalArgs::verify_samples`] for the same argument made first.
+    ///
+    /// The default is stated in the help text rather than published by clap
+    /// for the same reason `--timeout`'s was: what a run actually applies is
+    /// this, then the remote's, then [`DEFAULT_VERIFY_MODE`], and printing only
+    /// the last of the three as `[default: …]` would be a claim about the
+    /// destination that this flag cannot make.
     #[arg(
         long,
         global = true,
         value_enum,
-        default_value_t = VerifyMode::Checksum,
         value_name = "MODE",
         help_heading = "Durability"
     )]
-    pub verify: VerifyMode,
+    pub verify: Option<VerifyMode>,
 
     /// Chunks to sample when --verify=sample. REFUSED in this build — sample
     /// mode reads every chunk, so a depth would describe nothing.
@@ -727,7 +742,12 @@ mod tests {
         assert_eq!(g.checkers, constants::CHECKERS_PERFORMED);
         assert_eq!(g.retries, constants::DEFAULT_RETRIES);
         assert_eq!(g.max_depth, constants::MAX_DEPTH_UNLIMITED);
-        assert_eq!(g.verify, VerifyMode::Checksum);
+        // `--verify` carries no clap default, deliberately: the run's strength
+        // is the flag, then the destination remote's `verify` setting, then
+        // `DEFAULT_VERIFY_MODE`, and a default here would silently win over the
+        // middle one. See `crate::remote::resolve::verify_policy`.
+        assert_eq!(g.verify, None);
+        assert_eq!(constants::DEFAULT_VERIFY_MODE, VerifyMode::Checksum);
     }
 
     #[test]
@@ -857,8 +877,14 @@ mod tests {
 
     #[test]
     fn verify_modes_parse_from_their_lowercase_names() {
-        assert_eq!(parse(&["--verify", "strict"]).verify, VerifyMode::Strict);
-        assert_eq!(parse(&["--verify", "sample"]).verify, VerifyMode::Sample);
+        assert_eq!(
+            parse(&["--verify", "strict"]).verify,
+            Some(VerifyMode::Strict)
+        );
+        assert_eq!(
+            parse(&["--verify", "sample"]).verify,
+            Some(VerifyMode::Sample)
+        );
         assert!(Harness::try_parse_from(["dctl", "--verify", "nonsense"]).is_err());
     }
 }

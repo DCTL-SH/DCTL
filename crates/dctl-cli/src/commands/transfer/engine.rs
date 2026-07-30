@@ -294,6 +294,18 @@ pub struct Engine {
     /// flag that quietly covers four of five directions is worse than one that
     /// covers none, because nothing tells the operator which they got.
     meter: std::sync::Arc<dyn dctl_store::Meter>,
+    /// How hard this run checks what it wrote, resolved once when the engine
+    /// connected.
+    ///
+    /// `--verify` if the operator gave one, otherwise the **destination**
+    /// remote's own `verify` setting, otherwise `DEFAULT_VERIFY_MODE`. See
+    /// [`crate::remote::resolve::verify_policy`] for why that order, and why the
+    /// flag had to become an `Option` before this field could mean anything.
+    ///
+    /// Resolved here rather than per file because its inputs — a flag and a
+    /// configuration file — cannot change during a run, and
+    /// [`StageDriver::verify`] is called once per object.
+    verify_mode: VerifyMode,
 }
 
 impl std::fmt::Debug for Engine {
@@ -451,6 +463,14 @@ impl Engine {
             None => None,
         };
 
+        // The *destination*'s policy, and only a destination has one: `verify`
+        // is the strength applied to what was written, so a download asks the
+        // remote it read from and gets the same answer the flag alone used to
+        // give. Resolved from the spec the operator typed rather than from the
+        // store a vault wraps — `archive:` is what `dctl config show archive`
+        // reports, so it is what states the policy.
+        let verify_mode = ctx.verify_mode_for(dest)?;
+
         Ok(Self {
             direction,
             session,
@@ -462,6 +482,7 @@ impl Engine {
             staged: Mutex::new(HashMap::new()),
             hashes: Mutex::new(HashMap::new()),
             meter: ctx.limits.meter(),
+            verify_mode,
         })
     }
 
@@ -850,6 +871,12 @@ impl StageDriver for Engine {
             (None, Some(plain)) => plain.name(),
             (None, None) => "",
         }
+    }
+
+    /// See [`StageDriver::verify_mode`]. Resolved at construction; this hands it
+    /// back rather than re-reading the configuration once per file.
+    fn verify_mode(&self) -> VerifyMode {
+        self.verify_mode
     }
 
     /// Which way this engine moves bytes across the boundary of the remote it
@@ -1269,6 +1296,7 @@ mod tests {
             staged: Mutex::new(HashMap::new()),
             hashes: Mutex::new(HashMap::new()),
             meter: dctl_store::unmetered(),
+            verify_mode: crate::constants::DEFAULT_VERIFY_MODE,
         }
     }
 
@@ -1288,6 +1316,7 @@ mod tests {
             staged: Mutex::new(HashMap::new()),
             hashes: Mutex::new(HashMap::new()),
             meter: dctl_store::unmetered(),
+            verify_mode: crate::constants::DEFAULT_VERIFY_MODE,
         }
     }
 

@@ -132,6 +132,25 @@ pub trait StageDriver {
     /// touched.
     async fn verify(&self, entry: &PlanEntry, mode: VerifyMode) -> Result<()>;
 
+    /// The verification strength this driver's **destination** asks for.
+    ///
+    /// Asked of the driver for the same reason [`StageDriver::remote`] is: the
+    /// driver is what connected, so it is the only thing that knows which remote
+    /// the bytes are landing in — and the strength is that remote's policy
+    /// unless `--verify` overrode it
+    /// ([`crate::remote::resolve::verify_policy`]).
+    ///
+    /// Resolved **once**, when the driver was built, and returned rather than
+    /// recomputed: this is called per file, and re-reading `config.toml` a
+    /// million times to answer a question whose inputs cannot change during a
+    /// run would be a per-file syscall storm for no information.
+    ///
+    /// No default implementation, deliberately. A default would be a strength
+    /// this trait invented, applied silently by whichever driver forgot to
+    /// answer — which is exactly how `verify` came to be declared on six
+    /// providers and read by nothing.
+    fn verify_mode(&self) -> VerifyMode;
+
     /// Step 6 — the durable index commit. Returning `Ok` from this method is the
     /// only thing that makes a file count as stored.
     async fn commit(&self, entry: &PlanEntry) -> Result<()>;
@@ -426,7 +445,7 @@ async fn run_stages<D: StageDriver>(
             // Step 4 is mandatory. Everything before this line moved bytes;
             // nothing before it proved they arrived intact.
             Stage::Verifying => {
-                driver.verify(entry, ctx.verify_mode()).await?;
+                driver.verify(entry, driver.verify_mode()).await?;
                 ctx.stats.add_verified_bytes(entry.size.unwrap_or_default());
             }
 
@@ -564,6 +583,11 @@ mod tests {
         calls: RefCell<Vec<Stage>>,
         /// Stage at which every call starts failing.
         fail_at: Option<Stage>,
+        /// The strength `verify` was actually handed, so the wiring between
+        /// `StageDriver::verify_mode` and `StageDriver::verify` can be asserted
+        /// rather than assumed. It used to come from `ctx`, which meant a
+        /// destination's `verify` setting could not reach it at all.
+        verified_at: RefCell<Option<VerifyMode>>,
     }
 
     impl Recording {
@@ -571,6 +595,7 @@ mod tests {
             Self {
                 calls: RefCell::new(Vec::new()),
                 fail_at: Some(stage),
+                verified_at: RefCell::new(None),
             }
         }
 
@@ -598,7 +623,8 @@ mod tests {
             self.note(Stage::Uploading)?;
             Ok(entry.size.unwrap_or_default())
         }
-        async fn verify(&self, _entry: &PlanEntry, _mode: VerifyMode) -> Result<()> {
+        async fn verify(&self, _entry: &PlanEntry, mode: VerifyMode) -> Result<()> {
+            *self.verified_at.borrow_mut() = Some(mode);
             self.note(Stage::Verifying)
         }
         async fn commit(&self, _entry: &PlanEntry) -> Result<()> {
@@ -609,6 +635,11 @@ mod tests {
         }
         fn remote(&self) -> &str {
             TEST_REMOTE
+        }
+        /// Deliberately **not** the default. A driver answering `checksum` here
+        /// would pass whether the pipeline asked it or asked the flag.
+        fn verify_mode(&self) -> VerifyMode {
+            VerifyMode::Strict
         }
         fn direction(&self) -> AuditDirection {
             AuditDirection::In
@@ -664,6 +695,11 @@ mod tests {
     }
 
     impl StageDriver for Flaky {
+        /// The default strength: these drivers exercise the walk, not the
+        /// policy, and `crate::remote::resolve::verify_policy` owns that.
+        fn verify_mode(&self) -> VerifyMode {
+            crate::constants::DEFAULT_VERIFY_MODE
+        }
         async fn read(&self, _entry: &PlanEntry) -> Result<()> {
             *self.attempts.borrow_mut() += 1;
             let mut remaining = self.remaining.borrow_mut();
@@ -764,6 +800,37 @@ mod tests {
         );
         assert_eq!(driver.attempts(), 1);
         assert_eq!(ctx.stats.snapshot().retries, 0);
+    }
+
+    #[tokio::test]
+    async fn the_verify_stage_is_given_the_strength_the_driver_reports() {
+        // The wiring `HANDOVER.md` §11.3 item 9 was about, at the one seam where
+        // it decides what actually happens to a file. The strength used to come
+        // from `ctx.verify_mode()` — a function of the flag and nothing else — so
+        // a destination's `verify = "strict"` could not reach this call no matter
+        // what the resolver made of it.
+        //
+        // `Recording` answers `Strict` and the context asks for nothing, so a
+        // pipeline that still consulted the flag would hand `checksum` here.
+        let ctx = ctx(&[]);
+        let driver = Recording::default();
+        transfer_file(&ctx, TEST_OP, &driver, &entry("a.txt", 10))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *driver.verified_at.borrow(),
+            Some(VerifyMode::Strict),
+            "the stage must be driven at the destination's strength, not the flag's"
+        );
+        assert_eq!(
+            driver.verify_mode(),
+            VerifyMode::Strict,
+            "and it must be the same answer the driver gives when asked"
+        );
+        // The control: the strength the flag alone would have produced is a
+        // different value, or this test would pass either way.
+        assert_ne!(crate::constants::DEFAULT_VERIFY_MODE, VerifyMode::Strict);
     }
 
     #[tokio::test]
@@ -930,6 +997,11 @@ mod tests {
         // The specific §6 step-4 case: the provider stored the wrong bytes.
         struct Mismatching;
         impl StageDriver for Mismatching {
+            /// The default strength: these drivers exercise the walk, not the
+            /// policy, and `crate::remote::resolve::verify_policy` owns that.
+            fn verify_mode(&self) -> VerifyMode {
+                crate::constants::DEFAULT_VERIFY_MODE
+            }
             async fn read(&self, _: &PlanEntry) -> Result<()> {
                 Ok(())
             }
@@ -1148,6 +1220,11 @@ mod tests {
         // of false statement as reporting a file stored that was not.
         struct Short;
         impl StageDriver for Short {
+            /// The default strength: these drivers exercise the walk, not the
+            /// policy, and `crate::remote::resolve::verify_policy` owns that.
+            fn verify_mode(&self) -> VerifyMode {
+                crate::constants::DEFAULT_VERIFY_MODE
+            }
             async fn read(&self, _: &PlanEntry) -> Result<()> {
                 Ok(())
             }
@@ -1195,6 +1272,11 @@ mod tests {
         // driver is what knows which end is the remote.
         struct Egress;
         impl StageDriver for Egress {
+            /// The default strength: these drivers exercise the walk, not the
+            /// policy, and `crate::remote::resolve::verify_policy` owns that.
+            fn verify_mode(&self) -> VerifyMode {
+                crate::constants::DEFAULT_VERIFY_MODE
+            }
             async fn read(&self, _: &PlanEntry) -> Result<()> {
                 Ok(())
             }

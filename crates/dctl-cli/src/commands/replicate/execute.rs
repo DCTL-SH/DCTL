@@ -90,8 +90,18 @@ pub struct Outcome {
 /// Only for a failure that makes the *run* impossible. A failure that belongs to
 /// one object is recorded on that object and counted, so the walk reaches every
 /// other object and the exit code still reports the shortfall.
-pub async fn run(ctx: &Ctx, plan: &Plan, source: &Store, destination: &Store) -> Result<Outcome> {
-    let verify = ctx.verify_mode();
+///
+/// `verify` is passed in rather than asked of `ctx` here, because the strength
+/// is the *destination's* policy and this function is not the thing that decided
+/// which store that is. Resolving it a second way is how two answers to one
+/// question start to disagree — and the plan above was already built with it.
+pub async fn run(
+    ctx: &Ctx,
+    plan: &Plan,
+    source: &Store,
+    destination: &Store,
+    verify: VerifyMode,
+) -> Result<Outcome> {
     let planned = plan.summary();
 
     // Sized against what will be *read*, not against what will be written: a
@@ -573,7 +583,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let outcome = run(&context, &plan, &source, &destination).await.unwrap();
+        let outcome = run(&context, &plan, &source, &destination, VerifyMode::Checksum)
+            .await
+            .unwrap();
 
         assert_eq!(outcome.summary.replicated, 2);
         assert_eq!(outcome.summary.failed, 0);
@@ -603,7 +615,15 @@ mod tests {
         )
         .await
         .unwrap();
-        run(&context, &first, &source, &destination).await.unwrap();
+        run(
+            &context,
+            &first,
+            &source,
+            &destination,
+            VerifyMode::Checksum,
+        )
+        .await
+        .unwrap();
 
         let second = Plan::build(
             source.backend(),
@@ -612,7 +632,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let outcome = run(&context, &second, &source, &destination).await.unwrap();
+        let outcome = run(
+            &context,
+            &second,
+            &source,
+            &destination,
+            VerifyMode::Checksum,
+        )
+        .await
+        .unwrap();
         assert_eq!(outcome.summary.replicated, 0);
         assert_eq!(outcome.summary.skipped, 1);
     }
@@ -629,7 +657,15 @@ mod tests {
         let first = Plan::build(source.backend(), destination.backend(), VerifyMode::Strict)
             .await
             .unwrap();
-        run(&context, &first, &source, &destination).await.unwrap();
+        run(
+            &context,
+            &first,
+            &source,
+            &destination,
+            VerifyMode::Checksum,
+        )
+        .await
+        .unwrap();
 
         std::fs::write(dest_dir.join("data").join("aa"), b"evil bytes").unwrap();
 
@@ -638,7 +674,15 @@ mod tests {
             .unwrap();
         assert_eq!(second.items()[0].action, Action::Reverify);
 
-        let outcome = run(&context, &second, &source, &destination).await.unwrap();
+        let outcome = run(
+            &context,
+            &second,
+            &source,
+            &destination,
+            VerifyMode::Checksum,
+        )
+        .await
+        .unwrap();
         assert_eq!(outcome.summary.replicated, 1, "it must be replaced");
         assert_eq!(outcome.items[0].reason, PLAN_REASON_CHECKSUM);
         assert_eq!(
@@ -657,12 +701,28 @@ mod tests {
         let first = Plan::build(source.backend(), destination.backend(), VerifyMode::Strict)
             .await
             .unwrap();
-        run(&context, &first, &source, &destination).await.unwrap();
+        run(
+            &context,
+            &first,
+            &source,
+            &destination,
+            VerifyMode::Checksum,
+        )
+        .await
+        .unwrap();
 
         let second = Plan::build(source.backend(), destination.backend(), VerifyMode::Strict)
             .await
             .unwrap();
-        let outcome = run(&context, &second, &source, &destination).await.unwrap();
+        let outcome = run(
+            &context,
+            &second,
+            &source,
+            &destination,
+            VerifyMode::Checksum,
+        )
+        .await
+        .unwrap();
         assert_eq!(outcome.summary.replicated, 0);
         // Proved, not assumed — and counted as such, so a report cannot pass a
         // size comparison off as a read-back.
@@ -682,7 +742,9 @@ mod tests {
         let plan = Plan::build(source.backend(), destination.backend(), VerifyMode::Sample)
             .await
             .unwrap();
-        let outcome = run(&context, &plan, &source, &destination).await.unwrap();
+        let outcome = run(&context, &plan, &source, &destination, VerifyMode::Checksum)
+            .await
+            .unwrap();
         assert_eq!(outcome.summary.replicated, 1);
         assert_eq!(outcome.summary.failed, 0);
     }
@@ -708,7 +770,9 @@ mod tests {
         .unwrap();
         std::fs::remove_file(source_dir.join("data").join("gone")).unwrap();
 
-        let outcome = run(&context, &plan, &source, &destination).await.unwrap();
+        let outcome = run(&context, &plan, &source, &destination, VerifyMode::Checksum)
+            .await
+            .unwrap();
         assert_eq!(outcome.summary.replicated, 1, "the reachable object moved");
         assert_eq!(outcome.summary.failed, 1);
         assert!(
