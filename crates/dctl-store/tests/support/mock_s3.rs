@@ -105,6 +105,54 @@ pub struct Scripted {
     pub headers: Vec<(String, String)>,
 }
 
+/// Which requests a [`Rule`] answers, expressed as the *shape* of the operation
+/// rather than as its position in a sequence.
+///
+/// Shape and not position, and the difference decides whether these tests keep
+/// their meaning. `script` queues a response for the **next** request, which is
+/// right for a retry test and useless for a multipart one: a
+/// `CompleteMultipartUpload` arrives after a create and however many part
+/// uploads the part size happens to imply, so "fail the fourth request" silently
+/// becomes "fail a part upload" the day a default changes, and the test goes on
+/// passing while testing something else.
+///
+/// S3 distinguishes its operations by query parameter — `?uploads`,
+/// `?uploadId=`, `?partNumber=` — so that is what a rule matches on.
+#[derive(Clone, Debug)]
+pub enum When {
+    /// Every request with this method.
+    Any,
+    /// Requests whose query carries this parameter, whatever its value.
+    Carrying(String),
+    /// Requests whose query does **not** carry it — which is how a single-shot
+    /// `PUT` is told apart from a `PUT ?partNumber=`, the two having the same
+    /// method and the same path.
+    Without(String),
+}
+
+impl When {
+    fn matches(&self, params: &[(String, String)]) -> bool {
+        let has = |name: &String| params.iter().any(|(key, _)| key == name);
+        match self {
+            Self::Any => true,
+            Self::Carrying(name) => has(name),
+            Self::Without(name) => !has(name),
+        }
+    }
+}
+
+/// A standing answer for one shape of request. See [`MockS3::fail`].
+#[derive(Clone, Debug)]
+pub struct Rule {
+    method: String,
+    when: When,
+    status: u16,
+    body: String,
+    /// How many more times this rule fires before it is spent. `usize::MAX` is
+    /// "for the rest of the test", which is what a provider outage looks like.
+    remaining: usize,
+}
+
 /// One response: status, body **bytes**, and any extra headers.
 ///
 /// Bytes rather than a `String` because an object body is arbitrary data. A
@@ -145,6 +193,11 @@ pub struct State {
     pub requests: Vec<Seen>,
     /// Responses to give instead of the real answer, consumed in order.
     scripted: Vec<Scripted>,
+    /// Standing answers matched on the request's shape. Checked **after**
+    /// `scripted`, so a test that arms both gets the queue first — which is the
+    /// order that lets a rule stand for a whole operation while a scripted
+    /// response covers one retry inside it.
+    rules: Vec<Rule>,
     /// Whether `AbortMultipartUpload` is refused rather than honoured.
     ///
     /// The only way to reach the state this whole capability exists to test. DCTL
@@ -286,6 +339,58 @@ impl MockS3 {
             .lock()
             .expect("the mock state is not poisoned")
             .stall += 1;
+    }
+
+    /// Answer **every** request of this shape with `status` and `body`, for the
+    /// rest of the test.
+    ///
+    /// The knob the multipart error paths need. A create, a part upload and a
+    /// complete are three different operations that DCTL issues in one call, so
+    /// choosing which of them fails is choosing between three different
+    /// consequences — an upload that never started, one that started and left
+    /// parts billing, and one whose parts are all there and which never became
+    /// an object. `script` cannot express any of them, because it answers
+    /// whichever request happens to arrive next.
+    ///
+    /// Standing rather than one-shot because a provider that is refusing
+    /// `CompleteMultipartUpload` refuses the retry too: a one-shot rule would
+    /// have the retry layer succeed on the second attempt and would test the
+    /// happy path with extra steps.
+    pub fn fail(&self, method: &str, when: When, status: u16, body: &str) {
+        self.push_rule(method, when, status, body, usize::MAX);
+    }
+
+    /// The same, spent after one match, so the operation succeeds on the retry.
+    ///
+    /// The other half of the pair: this is a transient provider failure, and
+    /// what it proves is that the retry layer reaches *this* operation rather
+    /// than only the ones an earlier test happened to cover.
+    pub fn fail_once(&self, method: &str, when: When, status: u16, body: &str) {
+        self.push_rule(method, when, status, body, 1);
+    }
+
+    fn push_rule(&self, method: &str, when: When, status: u16, body: &str, remaining: usize) {
+        self.state
+            .lock()
+            .expect("the mock state is not poisoned")
+            .rules
+            .push(Rule {
+                method: method.to_string(),
+                when,
+                status,
+                body: body.to_string(),
+                remaining,
+            });
+    }
+
+    /// Stop answering from rules. A provider outage that ends is a real event,
+    /// and it is what lets one test show both the failure and the recovery.
+    pub fn clear_rules(&self) {
+        self.state
+            .lock()
+            .expect("the mock state is not poisoned")
+            .rules
+            .clear();
     }
 
     /// The same, carrying headers — `Retry-After` above all.
@@ -432,6 +537,34 @@ async fn serve(mut stream: TcpStream, state: Arc<Mutex<State>>) -> std::io::Resu
             &scripted.headers,
         )
         .await;
+    }
+
+    // A standing rule for this shape of request, if one is armed. Matched on the
+    // parsed query rather than on the raw string so `?uploadId=abc` and
+    // `?uploads` cannot be confused by a substring — the first *contains* the
+    // second.
+    //
+    // Matching, spending and retiring all happen under **one** lock. Two
+    // connections are served concurrently here, so a `fail_once` rule found
+    // under one lock and retired under another can be spent twice — both
+    // requests see `remaining == 1` before either decrements it, and a test
+    // whose subject is "the retry succeeds" watches it fail instead.
+    let ruled = {
+        let mut guard = state.lock().expect("the mock state is not poisoned");
+        let params = parse_query(&query);
+        let answer = guard
+            .rules
+            .iter_mut()
+            .find(|rule| rule.method == method && rule.when.matches(&params))
+            .map(|rule| {
+                rule.remaining = rule.remaining.saturating_sub(1);
+                (rule.status, rule.body.clone())
+            });
+        guard.rules.retain(|rule| rule.remaining > 0);
+        answer
+    };
+    if let Some((status, body)) = ruled {
+        return respond(&mut stream, status, body.as_bytes(), &[]).await;
     }
 
     // The silent treatment. Holding the stream rather than dropping it is the

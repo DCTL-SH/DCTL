@@ -162,6 +162,14 @@ zero bytes, `L = 32`. The exact same construction is reused by the §12 KEM comb
 `index-key-v1`, `name-hash-key-v1`, `name-value-key-v1`, `audit-key-v1`, `cache-key-v1`,
 and `object-keying-v1` (reserved).
 
+`audit-key-v1` is **reserved and used by nothing** — the audit log's chain is *unkeyed*
+BLAKE3, so a verified chain proves integrity, order and (with an anchor) length, and never
+authorship. The label's presence in this list is not evidence that the log is
+authenticated; [`AUDIT_LOG.md §11`](./AUDIT_LOG.md) states the limit normatively, gives the
+argument for why a key this process can read would not close it, and the operating
+procedure that bounds how much history a compromise can rewrite — which is weaker than
+authorship and is what is actually on offer.
+
 The **per-object DEK is random**, not HKDF-derived, and is wrapped by the root
 (`kem_id=0`) or by a per-object recipient key `KW` (`kem_id=1`). Chunks and metadata are
 both sealed under the DEK in **disjoint nonce spaces** — the 24-byte nonce's `byte[23]` is a

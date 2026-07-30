@@ -31,6 +31,24 @@
 //! by an anchor that is merely older than the log — which is one of the four
 //! shapes [`crate::audit::anchor::Mismatch`] separates, and the one that keeps
 //! the flag usable on a vault still in service.
+//!
+//! ## `proves`: one word, three claims, and the one that is never made
+//!
+//! `intact` has to be a single shell-comparable token, and a single token cannot
+//! say which of several separate things it established. It establishes that no
+//! record was **edited** and that none was **removed, reordered or inserted**;
+//! with a matching `--expect-head` it also establishes that none was removed
+//! from the **end**; and it never establishes **who wrote any of them**.
+//!
+//! The `--json` document therefore carries `proves` — the claims as separate
+//! tokens, so a consumer branches on a list rather than on a word's reputation.
+//! `authorship` is not in that vocabulary and there is no arm of this function
+//! that can put it there. The chain is unkeyed BLAKE3 over public values, so any
+//! process that can append a line to the log can append a correctly linked one;
+//! `docs/AUDIT_LOG.md` §11 is the argument for why DCTL cannot close that with a
+//! key it must itself be able to use unattended, and what the operator does
+//! instead. [`AUDIT_PROVES_AUTHORSHIP_NOTE`] says the same on the human stream,
+//! unconditionally, because unlike length there is no flag that closes it.
 
 use std::path::PathBuf;
 
@@ -39,6 +57,7 @@ use serde::Serialize;
 
 use crate::audit::anchor::{self, Anchor, Mismatch};
 use crate::constants::{
+    AUDIT_PROVES_AUTHORSHIP_NOTE, AUDIT_PROVES_INTEGRITY, AUDIT_PROVES_LENGTH, AUDIT_PROVES_ORDER,
     AUDIT_VERDICT_BROKEN, AUDIT_VERDICT_HEAD_MISMATCH, AUDIT_VERDICT_INTACT,
     AUDIT_WITHOUT_ANCHOR_NOTE,
 };
@@ -72,6 +91,19 @@ struct Verdict<'a> {
     /// [`AUDIT_VERDICT_INTACT`], [`AUDIT_VERDICT_BROKEN`] or
     /// [`AUDIT_VERDICT_HEAD_MISMATCH`].
     verdict: &'static str,
+    /// Exactly which claims this verdict establishes, as separate tokens.
+    ///
+    /// `intact` is one word doing three jobs, and the three are not always all
+    /// true: content and order always are, length only with a matching anchor,
+    /// and **authorship never** — so the vocabulary
+    /// ([`AUDIT_PROVES_INTEGRITY`], [`AUDIT_PROVES_ORDER`],
+    /// [`AUDIT_PROVES_LENGTH`]) has no token for it and cannot acquire one by
+    /// accident. A consumer that treats `verdict == "intact"` as "authentic" is
+    /// making a claim this document declines to make, and now has a field to
+    /// read instead of a manual to have read.
+    ///
+    /// Empty on a break: a chain that failed proves nothing.
+    proves: &'static [&'static str],
     /// The file that was walked.
     log: String,
     /// How many records were read.
@@ -91,6 +123,23 @@ struct Verdict<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     head_mismatch: Option<&'a Mismatch>,
 }
+
+/// What a chain that verified proves when nothing anchored its length.
+///
+/// Authorship is absent from all three of these lists, and there is no fourth
+/// list that has it — see [`AUDIT_PROVES_AUTHORSHIP_NOTE`].
+const PROVES_UNANCHORED: &[&str] = &[AUDIT_PROVES_INTEGRITY, AUDIT_PROVES_ORDER];
+
+/// The same, and the length the matching anchor closed.
+const PROVES_ANCHORED: &[&str] = &[
+    AUDIT_PROVES_INTEGRITY,
+    AUDIT_PROVES_ORDER,
+    AUDIT_PROVES_LENGTH,
+];
+
+/// A chain that failed proves nothing at all — not even about the records
+/// before the break, because a walk that stopped never reached the rest.
+const PROVES_NOTHING: &[&str] = &[];
 
 pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     let log = source::load(&ctx.globals, args.audit_log.as_deref())?;
@@ -115,6 +164,7 @@ fn report(
                 ctx,
                 &Verdict {
                     verdict: AUDIT_VERDICT_BROKEN,
+                    proves: PROVES_NOTHING,
                     log: log.path.display().to_string(),
                     records: log.records.len(),
                     head: None,
@@ -141,6 +191,14 @@ fn report(
             ctx,
             &Verdict {
                 verdict: AUDIT_VERDICT_INTACT,
+                // The anchor is what adds `length`, so the list is chosen by
+                // whether one was given — and, because this arm is only reached
+                // when `compare` found no mismatch, by whether it *held*.
+                proves: if expected.is_some() {
+                    PROVES_ANCHORED
+                } else {
+                    PROVES_UNANCHORED
+                },
                 log: log.path.display().to_string(),
                 records: verified.records,
                 head: Some(verified.head.as_str()),
@@ -160,6 +218,10 @@ fn report(
             // create.
             ctx.out.info(AUDIT_WITHOUT_ANCHOR_NOTE);
         }
+        // Unconditional, where the note above is conditional: an anchor closes
+        // length and nothing closes authorship, so there is no flag whose
+        // presence would make this one stop being true.
+        ctx.out.info(AUDIT_PROVES_AUTHORSHIP_NOTE);
         return Ok(());
     };
 
@@ -167,6 +229,11 @@ fn report(
         ctx,
         &Verdict {
             verdict: AUDIT_VERDICT_HEAD_MISMATCH,
+            // The links held, so content and order stand; the anchor did not, so
+            // `length` must not be in the list. This is the arm where a
+            // consumer reading only `verdict` would most easily go wrong, and
+            // the one where the field earns its place.
+            proves: PROVES_UNANCHORED,
             log: log.path.display().to_string(),
             records: verified.records,
             head: Some(verified.head.as_str()),
@@ -392,6 +459,7 @@ mod tests {
 
         let verdict = Verdict {
             verdict: AUDIT_VERDICT_HEAD_MISMATCH,
+            proves: PROVES_UNANCHORED,
             log: "/tmp/a.jsonl".into(),
             records: 7,
             head: Some(&verified.head),
@@ -409,6 +477,93 @@ mod tests {
         // to see what the chain ends at before deciding anything.
         assert!(json.contains("\"head\""), "{json}");
         assert!(json.contains("\"expected_head\":\"9:"), "{json}");
+    }
+
+    #[test]
+    fn no_verdict_this_command_can_produce_claims_authorship() {
+        // `HANDOVER.md` §11.2's entry, pinned as a property of the code rather
+        // than as a sentence in a document nobody diffs. The chain is unkeyed —
+        // its hash is BLAKE3 over values anyone can read — so a correctly linked
+        // *append* is available to anybody who can write the file, and there is
+        // no state of this command in which that stops being so.
+        //
+        // Two properties, and together they are what makes the claim structural
+        // rather than a spot check. **The vocabulary has no authorship token**,
+        // and **every list is drawn from the vocabulary** — so no list can spell
+        // a claim the vocabulary does not have.
+        const VOCABULARY: &[&str] = &[
+            AUDIT_PROVES_INTEGRITY,
+            AUDIT_PROVES_ORDER,
+            AUDIT_PROVES_LENGTH,
+        ];
+        for token in VOCABULARY {
+            assert_ne!(*token, "authorship", "the vocabulary grew the claim");
+        }
+        for list in [PROVES_NOTHING, PROVES_UNANCHORED, PROVES_ANCHORED] {
+            for token in list {
+                assert!(
+                    VOCABULARY.contains(token),
+                    "a verdict list holds a token the vocabulary does not: {token}"
+                );
+            }
+        }
+
+        // What this cannot enforce, said rather than implied: nothing makes the
+        // compiler notice a **fourth** list added for a future keyed mode and
+        // left out of the loop above. Rust has no reflection over consts and
+        // there is no enum to be exhaustive about. The guard against that is
+        // this test's name and `docs/AUDIT_LOG.md` §11's normative statement,
+        // not the type system — so a pass that adds one has to come here on
+        // purpose.
+    }
+
+    #[test]
+    fn length_is_claimed_only_when_an_anchor_was_given_and_held() {
+        // The three states of the same chain, and the field that separates
+        // them. `intact` is one word for the first two, which is exactly why a
+        // machine consumer needs the list instead.
+        let records = sealed_chain(9);
+        let head = records[8].hash.clone();
+
+        // No anchor: content and order, and deliberately not length.
+        assert_eq!(
+            PROVES_UNANCHORED,
+            [AUDIT_PROVES_INTEGRITY, AUDIT_PROVES_ORDER]
+        );
+        assert!(!PROVES_UNANCHORED.contains(&AUDIT_PROVES_LENGTH));
+        check(records.clone(), None).expect("the chain holds");
+
+        // A matching anchor: length as well.
+        assert!(PROVES_ANCHORED.contains(&AUDIT_PROVES_LENGTH));
+        check(records.clone(), Some(&format!("9:{head}"))).expect("and it ends where it was left");
+
+        // An anchor that does not hold reaches the mismatch arm, whose list is
+        // the *unanchored* one — the links held, the length did not. A verdict
+        // that kept `length` here would be the §14 defect wearing a new field.
+        let error = check(records, Some(&format!("11:{}", "ab".repeat(32)))).unwrap_err();
+        assert_eq!(error.code(), ExitCode::AuditHeadMismatch);
+    }
+
+    #[test]
+    fn the_authorship_note_never_reaches_the_word_a_script_compares() {
+        // The note is a claim about scope, so it belongs on stderr beside the
+        // record count — not in the one token
+        // `[ "$(dctl audit verify)" = intact ]` reads. Pinned because moving it
+        // to `line` would break every operator's cron and would look like a
+        // documentation improvement while doing it.
+        assert!(
+            !AUDIT_PROVES_AUTHORSHIP_NOTE.contains(AUDIT_VERDICT_INTACT),
+            "the note must not contain the verdict word: {AUDIT_PROVES_AUTHORSHIP_NOTE}"
+        );
+        assert!(
+            AUDIT_PROVES_AUTHORSHIP_NOTE.contains("unkeyed"),
+            "the note has to say *why*, or it is a disclaimer rather than a fact: \
+             {AUDIT_PROVES_AUTHORSHIP_NOTE}"
+        );
+        assert!(
+            AUDIT_PROVES_AUTHORSHIP_NOTE.contains("AUDIT_LOG.md"),
+            "and where the argument is: {AUDIT_PROVES_AUTHORSHIP_NOTE}"
+        );
     }
 
     #[test]
@@ -437,6 +592,7 @@ mod tests {
     fn the_verdict_document_carries_the_head_or_the_break_but_never_both() {
         let intact = Verdict {
             verdict: AUDIT_VERDICT_INTACT,
+            proves: PROVES_UNANCHORED,
             log: "/tmp/a.jsonl".into(),
             records: 2,
             head: Some("ab"),
@@ -456,6 +612,7 @@ mod tests {
         let broken = chain::verify(&records).unwrap_err();
         let failed = Verdict {
             verdict: AUDIT_VERDICT_BROKEN,
+            proves: PROVES_NOTHING,
             log: "/tmp/a.jsonl".into(),
             records: 3,
             head: None,

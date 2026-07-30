@@ -46,9 +46,19 @@ procedure for it: `dctl audit head` prints one, `dctl audit verify --expect-head
 checks one, and a mismatch is exit **26** with the number of missing records when
 it is knowable. **Length is proved by §4 and §10 together, never by §4 alone.**
 
-This is stated at the top rather than buried, because an evidence tool that
-overstates what it proves is worse than one that proves less — and an unanchored
-`dctl audit verify` that reports `intact` is making the narrower claim.
+**The chain does not prove authorship at all, and no flag closes that one.** The
+hash is unkeyed (§3), so every input to it is a value already in the file: anyone
+who can append a line can append a *correctly linked* line. `intact` means the
+records that are there were not tampered with. It has never meant that DCTL wrote
+them, and this build ships no mechanism that would — §11 is the argument for that
+decision, and the operating procedure that bounds what a compromise can rewrite,
+which is the strongest thing available and is not the same as authorship.
+
+Both limits are stated at the top rather than buried, because an evidence tool
+that overstates what it proves is worse than one that proves less — and an
+unanchored `dctl audit verify` that reports `intact` is making the narrowest of
+the three claims. `dctl audit verify --json` carries a `proves` field that names
+which of them hold, so a consumer never has to infer it from a single word.
 
 ### File layout
 
@@ -964,8 +974,8 @@ mirrored or offline copy.
 **What this still does not prove: authorship.** The chain is unkeyed, so anybody
 who can write the file can *append* correctly linked records to it. An anchor
 proves that nothing before it was removed or rewritten; it says nothing about who
-wrote what came after. Detecting forged appends needs a signature over the head,
-which is a different mechanism and is not claimed here.
+wrote what came after. §11 is the whole of that question — why this build does not
+close it, and what an operator does instead.
 
 ### 10.5 Why there is no in-log anchor record
 
@@ -998,6 +1008,141 @@ written into the log. The one variant worth naming as future work is a head hash
 pushed into the *encrypted remote* — a different trust domain, a different
 credential, and therefore genuinely external — which is a replication feature
 rather than a log format change, and is not in this build.
+
+---
+
+## 11. Authorship (normative: out of scope in this build)
+
+**A DCTL audit log does not prove who wrote it, and this build ships no mechanism
+that would.** That is a decision with an argument behind it, not an omission, and
+this section is the argument. It is stated with the same weight as §1's statement
+about length, because a buyer's security review that finds this limit in a
+footnote rather than in the specification has found an overclaim.
+
+### 11.1 What is and is not established (normative)
+
+For a chain that verifies under §4:
+
+| claim | established? | by what |
+|---|---|---|
+| no record was **edited** after it was written | yes | §4, the per-record hash |
+| no record was **removed, reordered or inserted** in the interior | yes | §4, the links and the dense index |
+| no record was removed from the **end** | only with §10 | an anchor kept out of reach |
+| DCTL, rather than some other writer, **produced** these records | **no** | nothing |
+
+`dctl audit verify --json` carries this as a `proves` field — an explicit list of
+which of the first three hold for the answer just given — precisely so that a
+machine consumer branches on the claims rather than on the reputation of the word
+`intact`. **The vocabulary of that field has no token for authorship**, and no
+state of the command can put one there. `proves` is on stdout and is not
+verbosity-gated, so it is the form of this statement a consumer cannot miss;
+`dctl audit verify -v` says the same in prose on stderr, whether or not an anchor
+was given.
+
+The reason is in §3: the hash is **unkeyed** BLAKE3 over a canonical string built
+from values that are all present in the file. Anyone who can read the log can
+compute the next record's `prev`, and anyone who can append a line can append a
+correctly linked one. Verification is a public function of public inputs — which
+is what makes §8's twenty-line standalone verifiers possible, and is the same
+property that makes forgery-by-append available to any writer.
+
+### 11.2 Why a key DCTL can use does not close it
+
+The obvious remedy is to key the chain: a MAC or a signature over each record, or
+over the head. It is rejected for this build, and the argument is the one §10.5
+already made about anchors, applied to secrets instead of to values.
+
+DCTL appends a record on **every** operation, unattended, in a cron job at 03:00
+with nobody present. So whatever key it signs with, it must be able to read
+without a human. On the deployment DCTL actually has — a CLI writing
+`audit.jsonl` under the operator's own uid — the key file sits on the same host,
+under the same uid, as the log. **Every attacker who can write the log can read
+the key**, because writing the log already required being that uid on that
+machine. A signature under those conditions is not evidence; it is the same
+forgery with a certificate attached.
+
+And it is worse than doing nothing, which is the decisive part. An unkeyed chain
+makes no claim about authorship, so no auditor is misled by one. A chain signed
+with a co-located key makes a claim that is false exactly when it matters, and
+converts *"we cannot tell who wrote this"* into *"this is cryptographically
+attributed to DCTL"* in the one scenario — host compromise — where the attribution
+is wrong. `PLAN.md` §6's rule against reporting work that did not happen applies
+to cryptographic claims at least as strongly as to test results.
+
+The same argument disposes of deriving the key from the vault passphrase. It
+would also make `dctl audit verify` require the passphrase, turning a cheap
+scriptable check into an interactive one, and it would leave every record written
+without a vault — plain-storage operations, `config`, `audit` itself (§9.1) —
+outside whatever it protected.
+
+### 11.3 What would close it, and its status
+
+Two mechanisms genuinely close authorship. Neither is a log-format change, which
+is why the format is not waiting on this.
+
+* **A key the DCTL process can *use* but never *read*** — an `ssh-agent`, a
+  PKCS#11 token, a TPM, or a touch-to-sign hardware key. This is the real answer
+  to §11.2: the key is out of reach in exactly the sense §10.5 requires, so an
+  attacker who takes the host afterwards cannot forge a past record, and with
+  touch-to-sign cannot forge a present one either. It is **not in this build**.
+  What it needs is a key-management story DCTL does not have today — provisioning,
+  rotation, and an answer to *"the token is gone and five years of logs are now
+  unverifiable"* — and shipping the signature without that answer would be
+  shipping the failure mode rather than the feature.
+* **An external append-only witness** — the log, or just its head, delivered as it
+  is written to somewhere this machine cannot rewrite. This one **is** available
+  now, needs nothing new from DCTL, and is §10.4's procedure: a host that accepts
+  appends and not edits, a SIEM, or a third-party timestamp.
+
+  It does **not** close authorship, and it is worth being exact about that
+  because it is the easy thing to get wrong here. A witness cannot tell a forged
+  append from a genuine one: an attacker who is on the host writes a record into
+  `audit.jsonl`, the shipper forwards it like any other, and the collector stores
+  it faithfully. What a witness closes is *retroactive* tampering — nothing that
+  reached it can afterwards be altered or removed — so it bounds the damage to
+  **the window after the compromise** and makes everything before that window
+  fixed. That is a great deal less than authorship and a great deal more than
+  nothing, and it is the strongest property available today.
+
+### 11.4 What the operator must do instead (operating procedure)
+
+**Nothing here proves authorship either**, and the list is honest about that
+rather than presented as a workaround: no arrangement of storage can tell you who
+wrote a line. What an operator can do is two different things — make the set of
+possible writers small and accountable by other means, and make everything
+already written impossible to revise — and between them they turn "somebody could
+have forged anything" into "somebody with *this* access could have forged records
+after *this* time". In descending order of what they buy:
+
+1. **Ship the log off the host as it is written.** `audit.jsonl` is JSON Lines
+   with a stable canonical form, so an ordinary log shipper handles it. A record
+   that reached an append-only collector before the host was compromised is a
+   record the compromise cannot alter or unsay — so the shorter the shipping
+   interval, the smaller the window in which history is still rewritable. It
+   subsumes §10.4's anchor procedure and it is the single highest-value control
+   on this page. It still does not tell you who wrote a record that arrives
+   *after* a compromise; see §11.3.
+2. **Keep the log where the DCTL host cannot rewrite history.** A
+   remote-append-only mount, an object store with object-lock or versioning, or a
+   syslog collector. §10.4's rule that an anchor beside the log is truncated by
+   the same command as the log is the same rule applied to the log itself.
+3. **Restrict who can be the uid that writes it.** The log is created `0600` and
+   re-hardened on every open (§1), so the exposure is exactly the set of
+   principals who can become that user, plus root. That set is the honest answer
+   to "who could have written this", and it is worth writing down in the runbook
+   because it is what an auditor will ask.
+4. **Take and store anchors** (§10.4) regardless. They do not prove authorship,
+   but they bound how much history a compromise could have removed, which is the
+   first question after one.
+
+The threat this leaves open, stated exactly: **an attacker who is already the uid
+that writes the log, on the host that writes it, can append records DCTL never
+produced, and nothing — not an anchor, not a witness, not any examination of the
+file — will show it.** What they cannot do is alter or remove anything already
+witnessed elsewhere (§11.4 item 1) or covered by an anchor already taken (§10);
+those fix the past, and the exposure is the window since the last one. That is
+the boundary, and it is where it will stay until the first mechanism in §11.3
+ships.
 
 ## See also
 

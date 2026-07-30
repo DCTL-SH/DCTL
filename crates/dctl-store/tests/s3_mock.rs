@@ -16,6 +16,18 @@
 //!
 //! Every test that could be satisfied by a client that did nothing asserts the
 //! request the server actually saw, not merely that the call returned `Ok`.
+//!
+//! ## The provider answering *no*
+//!
+//! The last group in this file is about the requests S3 refuses, and it needed a
+//! fault aimed at an **operation** rather than at the next request to arrive —
+//! [`support::mock_s3::When`] says why a positional `script` cannot express one.
+//! DCTL issues a multipart upload as a single call, and the provider can refuse
+//! it at three moments with three different consequences: nothing opened,
+//! parts left billing, or — the expensive one — every byte uploaded and the
+//! object still not existing. Four of those arms could be deleted with
+//! `cargo test --workspace` staying green before this group existed
+//! (`handover-scripts/protocol-2026-07-30/reinstate-before.txt`).
 
 mod support;
 
@@ -1403,5 +1415,413 @@ async fn a_run_that_asked_for_no_deadline_waits_for_a_silent_provider() {
         outcome.is_err(),
         "with no deadline the request must still be waiting, not reporting a \
          timeout DCTL invented: {outcome:?}"
+    );
+}
+
+// ── the three ways a multipart upload fails, told apart ──────────────────────
+//
+// `HANDOVER.md` §11.3 item 10. DCTL issues a multipart upload as one call, and
+// the provider can refuse it at three different moments with three different
+// consequences:
+//
+//   * the **create** is refused — nothing was ever opened, so there is nothing to
+//     abort and nothing to bill, and the only wrong answer is reporting success;
+//   * a **part** is refused — parts are stored and charged for, so an upload
+//     abandoned here costs money until somebody notices (covered above by
+//     `a_multipart_upload_that_fails_partway_is_aborted_rather_than_left_billing`);
+//   * the **complete** is refused — every byte arrived, and the object still does
+//     not exist. This is the expensive one to get wrong: a client that read the
+//     completion's status loosely has uploaded a 4 GiB object, been told no, and
+//     reported yes.
+//
+// Reaching the first and third needs a fault aimed at *an operation* rather than
+// at the next request to arrive, which is what `MockS3::fail` and `When` are
+// for — `support::mock_s3::When` documents why a positional `script` cannot
+// express it. Before them, six `return Err` arms across these paths were
+// unreachable in the plain gate.
+
+use support::mock_s3::When;
+
+/// The five hundred a provider gives when its own storage is unhappy.
+const INTERNAL_ERROR: &str =
+    "<Error><Code>InternalError</Code><Message>we are sorry</Message></Error>";
+
+#[tokio::test]
+async fn a_refused_create_never_reports_an_object_that_was_never_started() {
+    // Three separate copies of this arm — the buffered `put`, the streaming
+    // `put_from_path`, and the producer-fed `put_stream` — because each opens
+    // its own upload. All three were unreachable. A backend that reported
+    // success here would have `sync` record the object as transferred and never
+    // look at it again.
+    let mock = MockS3::start().await;
+    let s3 = multipart_backend(&mock);
+    let data = vec![b'c'; PART as usize + 32];
+
+    mock.fail(
+        "POST",
+        When::Carrying("uploads".into()),
+        503,
+        INTERNAL_ERROR,
+    );
+
+    // Buffered.
+    let error = s3
+        .put(
+            &key("buffered"),
+            Bytes::from(data.clone()),
+            &hash(&data),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("an upload that was never opened is not a stored object");
+    assert!(error.to_string().contains("503"), "{error}");
+
+    // Streamed from a file.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("big.bin");
+    std::fs::write(&path, &data).expect("written");
+    let error = s3
+        .put_from_path(
+            &key("from-path"),
+            &path,
+            &hash(&data),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("nor is one whose create was refused");
+    assert!(error.to_string().contains("503"), "{error}");
+
+    // Fed by a producer. Not `streamed_put`: that helper insists the producer
+    // hands over every byte, and here it must not — a create the provider
+    // refused means nothing downstream is reading, so the write side is
+    // *supposed* to be cut off part-way. A helper that asserted otherwise would
+    // report this arm as a producer fault.
+    let (mut writer, stream) = dctl_store::object_stream(data.len() as u64, HashAlgo::Blake3);
+    let owned = data.clone();
+    let producing = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let _ = writer.write_all(&owned);
+        drop(writer);
+    });
+    let error = s3
+        .put_stream(&key("streamed"), stream, SourceModified::unknown())
+        .await
+        .expect_err("nor is one fed by a producer");
+    producing.await.expect("the producer ran");
+    assert!(error.to_string().contains("503"), "{error}");
+
+    let state = mock.state();
+    assert!(state.objects.is_empty(), "{:?}", state.objects.keys());
+    assert!(state.completed.is_empty(), "{:?}", state.completed);
+    // Nothing to abort: an upload that was never created has no id, and a client
+    // that sent an abort here would be guessing at one.
+    assert!(
+        state.aborted.is_empty(),
+        "an upload that never opened must not be aborted: {:?}",
+        state.aborted
+    );
+}
+
+#[tokio::test]
+async fn a_refused_completion_is_a_failure_even_though_every_byte_arrived() {
+    // The one that matters most and the one a loose client gets wrong. Every
+    // part is on the provider and acknowledged; only the call that turns them
+    // into an object is refused. There is no local signal — the bytes went out,
+    // the hashes matched, the parts were accepted — so the *only* thing standing
+    // between this and a false success is reading the completion's status.
+    let mock = MockS3::start().await;
+    let s3 = multipart_backend(&mock);
+    let data = vec![b'd'; PART as usize * 2];
+
+    mock.fail(
+        "POST",
+        When::Carrying("uploadId".into()),
+        500,
+        INTERNAL_ERROR,
+    );
+
+    let error = s3
+        .put(
+            &key("never-committed"),
+            Bytes::from(data.clone()),
+            &hash(&data),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("an upload the provider refused to complete is not stored");
+    assert!(error.to_string().contains("500"), "{error}");
+
+    // And the producer-fed writer, which is the one a vault actually uses and
+    // which carries its **own** copy of this check — three writers, three
+    // copies, and a test that covered two of them would leave the third
+    // deletable with the gate staying green.
+    let error = streamed_put(&s3, "streamed-never-committed", &data)
+        .await
+        .expect_err("nor may the producer-fed writer commit an upload S3 refused");
+    assert!(error.to_string().contains("500"), "{error}");
+
+    let state = mock.state();
+    // The parts really did arrive, or this proves nothing about the completion.
+    assert!(
+        state.count("PUT") >= 2,
+        "the parts were never uploaded, so the completion is not what failed: {}",
+        state.count("PUT")
+    );
+    assert!(
+        !state.objects.contains_key("never-committed"),
+        "the object exists, which means the client's own view is what committed it"
+    );
+    assert!(state.completed.is_empty(), "{:?}", state.completed);
+    assert!(
+        !state.objects.contains_key("streamed-never-committed"),
+        "the streamed writer committed an object the provider refused"
+    );
+}
+
+#[tokio::test]
+async fn a_producer_that_declares_more_than_it_supplies_commits_nothing() {
+    // The other half of `HANDOVER.md` §26.1's worst outcome, on S3's two
+    // streaming arms: a producer that ends **cleanly** having handed over fewer
+    // bytes than it declared. Nothing errors — the stream closes properly, every
+    // part that was sent was accepted — so the only thing between this and a
+    // short object stored under the right name is the client comparing what it
+    // filled against what it was promised.
+    //
+    // Both arms carry their own copy of that comparison, because the object goes
+    // through a different one either side of the multipart threshold, and the
+    // sub-threshold arm is the one a small file takes.
+    let mock = MockS3::start().await;
+    let s3 = multipart_backend(&mock);
+
+    // Above the threshold: the multipart loop's per-part check.
+    let declared = PART * 3;
+    let (mut writer, stream) = dctl_store::object_stream(declared, HashAlgo::Blake3);
+    let producing = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let part = vec![b'h'; PART as usize + 4096];
+        writer
+            .write_all(&part)
+            .expect("the pipe takes what there is");
+        writer.finish().expect("and the producer says it is done");
+    });
+    let error = s3
+        .put_stream(&key("short-multipart"), stream, SourceModified::unknown())
+        .await
+        .expect_err("an object shorter than its declaration must not be committed");
+    producing.await.expect("the producer ran");
+    assert!(
+        matches!(error, StoreError::ShortWrite { .. }),
+        "a short object is a write that stopped, not a checksum failure: {error:?}"
+    );
+
+    // Below the threshold: the single-shot arm's whole-object check.
+    let (mut writer, stream) = dctl_store::object_stream(4096, HashAlgo::Blake3);
+    let producing = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        writer
+            .write_all(&[b'i'; 512])
+            .expect("the pipe takes what there is");
+        writer.finish().expect("and the producer says it is done");
+    });
+    let error = s3
+        .put_stream(&key("short-single"), stream, SourceModified::unknown())
+        .await
+        .expect_err("nor may the one-request arm commit a short object");
+    producing.await.expect("the producer ran");
+    assert!(matches!(error, StoreError::ShortWrite { .. }), "{error:?}");
+
+    let state = mock.state();
+    assert!(
+        !state.objects.contains_key("short-multipart")
+            && !state.objects.contains_key("short-single"),
+        "a short object was stored: {:?}",
+        state.objects.keys().collect::<Vec<_>>()
+    );
+    assert!(state.completed.is_empty(), "{:?}", state.completed);
+    // The multipart attempt opened an upload, so it has to have been closed
+    // again — a short producer that left parts billing would be §24.1's defect
+    // with a different cause.
+    assert_eq!(state.aborted.len(), 1, "{:?}", state.aborted);
+
+    // **Where the multipart arm's own length check earns its place**, and the
+    // only observable it has. Refusing the object is not it: `sealed()` after
+    // the loop refuses it anyway, with the same error. What the per-part check
+    // buys is refusing it *before* the padding goes on the wire.
+    //
+    // Without it, `fill` returns 1 MiB into a 5 MiB buffer and the other 4 MiB
+    // are the zeroes the buffer was allocated with — so all three planned parts
+    // are uploaded, in full, to a provider that charges for them, and only then
+    // is the object refused. Three parts instead of one, and 15 MiB of mostly
+    // zeroes across somebody's uplink, for an object that was never going to
+    // exist. The plan was three parts; the count is what says so.
+    let parts = state
+        .requests
+        .iter()
+        .filter(|seen| seen.method == "PUT" && seen.param("partNumber").is_some())
+        .count();
+    assert_eq!(
+        parts, 1,
+        "a short producer must be noticed at the first part, not after every          planned part has been uploaded and paid for: {parts} part uploads"
+    );
+}
+
+#[test]
+fn the_single_shot_arms_own_length_check_cannot_fire_and_the_line_above_it_is_why() {
+    // An **arithmetic argument** rather than a test, in the shape
+    // `HANDOVER.md` §26.5 names for exactly this case — a guard whose
+    // precondition the code above it already disposes of. It is here so that
+    // the claim is checked by the compiler and by a reader, rather than being a
+    // comment somebody deletes.
+    //
+    // `put_object_stream`'s sub-multipart arm reads:
+    //
+    //     let filled = source.fill(&mut whole).await?;
+    //     let expected = source.sealed().await?;      // <-- returns ShortWrite
+    //     if filled as u64 != size { return Err(ShortWrite { .. }) }
+    //
+    // `sealed` is `window()` followed by `agreed()`, and `agreed` refuses with
+    // `StoreError::ShortWrite { expected: len, actual: consumed }` whenever the
+    // producer handed over fewer bytes than it declared
+    // (`incoming/stream.rs`). `filled` **is** `consumed` for this arm — one
+    // `fill` over one buffer of exactly `size` — so `filled != size` implies
+    // `consumed != len`, which means the `?` one line earlier has already
+    // returned. The third line is unreachable, and its error would be identical
+    // if it were not.
+    //
+    // The `?` ordering is the whole of it, and it is not accidental: `sealed`
+    // has to run before anything is committed, and running it before the length
+    // check is what makes the *stricter* refusal the one that fires. A future
+    // edit that moved `sealed` below the check would make the check reachable
+    // and this test's name a lie — which is the failure mode worth a test.
+    //
+    // Asserted rather than asserted-about: the same short-producer input, driven
+    // through the real backend, must come back with the error `agreed` produces.
+    // The assertion is on the *numbers*, because that is what tells the two
+    // apart — `agreed` reports the whole object's declaration and what arrived,
+    // while the dead check would report the same two values by construction.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("a runtime");
+    runtime.block_on(async {
+        let mock = MockS3::start().await;
+        let s3 = multipart_backend(&mock);
+        let (mut writer, stream) = dctl_store::object_stream(4096, HashAlgo::Blake3);
+        let producing = tokio::task::spawn_blocking(move || {
+            use std::io::Write as _;
+            writer.write_all(&[b'j'; 700]).expect("the pipe takes it");
+            writer.finish().expect("and the producer closes");
+        });
+        let error = s3
+            .put_stream(&key("dead-check"), stream, SourceModified::unknown())
+            .await
+            .expect_err("a short object is refused either way");
+        producing.await.expect("the producer ran");
+
+        match error {
+            StoreError::ShortWrite { expected, actual } => {
+                assert_eq!(expected, 4096, "the declaration");
+                assert_eq!(actual, 700, "and what really arrived");
+            }
+            other => panic!("the refusal changed shape: {other:?}"),
+        }
+        assert!(
+            mock.state().objects.is_empty(),
+            "and nothing may be stored either way"
+        );
+    });
+}
+
+#[tokio::test]
+async fn a_refused_single_shot_put_is_not_a_stored_object() {
+    // The other half of the same rule, on the path every small object takes.
+    // `When::Without` is what separates it from a part upload: same method, same
+    // path, and only the absence of `?partNumber` tells them apart.
+    let mock = MockS3::start().await;
+    let s3 = backend(&mock);
+    let data = b"small enough for one request";
+
+    mock.fail(
+        "PUT",
+        When::Without("partNumber".into()),
+        403,
+        "<Error><Code>AccessDenied</Code></Error>",
+    );
+
+    let error = s3
+        .put(
+            &key("refused"),
+            Bytes::from_static(data),
+            &hash(data),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("a refused write is not a write");
+    assert!(error.to_string().contains("403"), "{error}");
+    assert!(error.to_string().contains("AccessDenied"), "{error}");
+    assert!(mock.state().objects.is_empty());
+
+    // And the same backend stores once the provider stops refusing — so the
+    // failure above was the rule and not a broken fixture.
+    mock.clear_rules();
+    s3.put(
+        &key("refused"),
+        Bytes::from_static(data),
+        &hash(data),
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("the write succeeds once the refusal is lifted");
+    assert_eq!(
+        s3.get(&key("refused"))
+            .await
+            .expect("it reads back")
+            .as_ref(),
+        data
+    );
+}
+
+#[tokio::test]
+async fn a_completion_refused_once_succeeds_on_the_retry_and_commits_exactly_one_object() {
+    // The recovery half, and the reason `fail_once` exists beside `fail`. A
+    // provider hiccup on the completion is transient, so the retry layer should
+    // carry it — but a retry that re-ran the *whole* upload would double the
+    // bytes on the wire and leave the first upload's parts billing, and a retry
+    // that completed twice would be a client the provider has to de-duplicate
+    // for.
+    let mock = MockS3::start().await;
+    let s3 = Retrying::with_policy(
+        Arc::new(multipart_backend(&mock)) as Arc<dyn Backend>,
+        impatient(),
+    );
+    let data = vec![b'g'; PART as usize * 2];
+
+    mock.fail_once(
+        "POST",
+        When::Carrying("uploadId".into()),
+        503,
+        INTERNAL_ERROR,
+    );
+
+    s3.put(
+        &key("eventually"),
+        Bytes::from(data.clone()),
+        &hash(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("a transient completion failure is retried through");
+
+    let state = mock.state();
+    assert_eq!(
+        state.completed.len(),
+        1,
+        "exactly one upload may be completed: {:?}",
+        state.completed
+    );
+    assert_eq!(
+        state.objects.get("eventually").map(|o| o.body.len()),
+        Some(data.len()),
+        "and the object has to be whole"
     );
 }

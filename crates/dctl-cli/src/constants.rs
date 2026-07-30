@@ -2931,6 +2931,53 @@ pub const AUDIT_WITHOUT_ANCHOR_NOTE: &str = "no --expect-head was given, so this
      its length: records removed from the end leave a shorter chain that still \
      verifies. `dctl audit head` prints the anchor that closes that.";
 
+/// What a verified chain establishes about the **order** of its records: that
+/// none was removed, reordered or inserted.
+///
+/// The three `AUDIT_PROVES_*` values are the vocabulary of the `proves` field on
+/// `dctl audit verify --json`, and they exist because one word — `intact` — has
+/// to serve a cron job while a *machine* consumer needs to know which of three
+/// separate claims it just received. See [`AUDIT_PROVES_AUTHORSHIP_NOTE`] for
+/// the claim that is deliberately absent from that vocabulary.
+pub const AUDIT_PROVES_ORDER: &str = "order";
+
+/// What a verified chain establishes about the **content** of its records: that
+/// no field of any record was edited after it was written.
+pub const AUDIT_PROVES_INTEGRITY: &str = "integrity";
+
+/// What a chain establishes about its **length**, and only when an anchor was
+/// given and matched: that nothing was removed from the end.
+///
+/// Never present without `--expect-head`, because without one it is not true —
+/// which is the whole of [`AUDIT_WITHOUT_ANCHOR_NOTE`], carried in a form a
+/// script can branch on rather than a sentence it has to parse.
+pub const AUDIT_PROVES_LENGTH: &str = "length";
+
+/// Note shown after a successful `dctl audit verify`, anchored or not.
+///
+/// Authorship is the one claim the log does not make, and unlike length it is not
+/// closed by any flag — so this is unconditional **in the anchor**, where
+/// [`AUDIT_WITHOUT_ANCHOR_NOTE`] fires only without one. It is still an
+/// [`crate::output::Out::info`] and therefore still shown at `-v` and above, like
+/// its sibling: a caveat printed on every successful run at default verbosity
+/// would be read once and filtered forever, which is §14.2's argument about exit
+/// 26 in a different place. The claim a consumer must not be able to miss is
+/// carried by `--json`'s `proves` list, which no verbosity setting removes. The chain is unkeyed: its hash
+/// is plain BLAKE3 over the canonical string, computed from values anyone can
+/// read, so any process that can append a line to the file can append a
+/// *correctly linked* one. `intact` means the records that are there were not
+/// tampered with; it has never meant that DCTL wrote them.
+///
+/// Stated at the point the verdict is given for the same reason the length
+/// caveat is: an operator who reads one word as three claims has the belief this
+/// command must not create, and a buyer's security review that finds the limit
+/// in the manual but not in the tool has found an overclaim. `docs/AUDIT_LOG.md`
+/// §11 is the argument for why DCTL cannot close this locally and what the
+/// operator does instead.
+pub const AUDIT_PROVES_AUTHORSHIP_NOTE: &str = "this attests to what the records say and to their order, never to who wrote \
+     them: the chain is unkeyed, so any process that can write this file can \
+     append correctly linked records. See docs/AUDIT_LOG.md §11.";
+
 /// Separator between the record count and the head hash in an audit anchor.
 ///
 /// A colon, so the whole anchor is one word a shell will not split, one token a

@@ -189,6 +189,37 @@ dctl audit verify --expect-head 9:37b656508f9217e841bf0963e2fa72225506687d1f1ecb
 intact
 ```
 
+### What `intact` covers, and the one thing it never does
+
+`intact` is a single token because a cron job's whole test is
+`[ "$(dctl audit verify)" = intact ]`, and a single token cannot say which of
+three separate claims it just made. `--json` carries a `proves` list that does:
+
+```
+dctl audit verify --json --expect-head "$(cat last-anchor)" | jq -c .proves
+["integrity","order","length"]
+```
+
+Without `--expect-head` the same log answers `["integrity","order"]` — the links
+held and nothing attests to the length. **`authorship` is not in that vocabulary
+and never will be for this record version.** The chain is unkeyed, so any process
+that can append a line to the log can append a correctly linked one; a verified
+chain says the records that are there were not tampered with, not that DCTL wrote
+them. `dctl audit verify` says so on stderr on every successful run, and
+[`AUDIT_LOG.md` §11](../AUDIT_LOG.md) is the argument for why a key DCTL can
+itself read would not close it, plus the operating procedure that limits the
+damage — ship the log to an append-only collector as it is written, which fixes
+everything that has already arrived without making a forged append detectable.
+
+A consumer should branch on `proves`, not on the reputation of the word
+`intact`:
+
+```
+dctl audit verify --json --expect-head "$a" \
+  | jq -e '.proves | index("length")' >/dev/null \
+  || echo "this run did not establish the log's length"
+```
+
 Somebody trimmed the log. The chain still verifies — every remaining link holds,
 which is exactly why this needed an anchor — and the anchor says how much is
 gone:

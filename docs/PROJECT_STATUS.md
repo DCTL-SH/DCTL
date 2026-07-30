@@ -69,7 +69,7 @@ encryption, and **20-year restorability** (data decodable from the format spec a
 | Name records + UCD-15.1-pinned NFC path validation | ✅ | cross-platform-stable keys; Zip-Slip defense |
 | Standalone **C99 reference decoder** + byte-exact KATs | ✅ | `dctl-decode/reference/dctl-decode.c`; the 20-year guarantee (symmetric `kem_id=0` path) |
 | Verified-write contract (hash-before-commit; index commit = "it exists") | ✅ | library; CLI wiring 🟢 |
-| Anti-rollback / tamper-evident audit log | ✅ | `dctl audit` |
+| Anti-rollback / tamper-evident audit log | ✅ | `dctl audit`; tamper-**evident**, not authenticated — integrity and order always, length with an anchor, **authorship never** ([`AUDIT_LOG.md` §11](AUDIT_LOG.md)) |
 
 ---
 
@@ -118,7 +118,7 @@ separate gap (§7).
 | `delete` `deletefile` `rm` `purge` `rmdir` `rmdirs` | 🟢 | plain + Vault |
 | `verify` `check` `scrub` `hashsum` | 🟢 | `check` gained read-only remote↔remote; `hashsum` downloads-and-hashes (no remote-native hash yet) |
 | `about` | 🟢 | usage / quota / capability |
-| `audit`, `index` | ✅ | tamper-evident log; index rebuild |
+| `audit`, `index` | ✅ | tamper-evident log (unkeyed — see `AUDIT_LOG.md` §11); index rebuild |
 | `rcat` | 🟡 | plain **filesystem** + Vault (spooled); plain object-store streaming write pending |
 | `copy` `put` `get` | 🟡 | **local ↔ plain-FS and local ↔ Vault only**; no remote↔remote; >1 GiB refused |
 | `sync` | 🟡 | = copy + destination reap; same limits as `copy` |

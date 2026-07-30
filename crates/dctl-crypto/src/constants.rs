@@ -38,6 +38,19 @@ pub const FLAG_FOOTER: u8 = 0x01;
 /// HKDF-SHA512 root sub-key domain-separation tags (§1). Frozen; brand-neutral.
 pub const INFO_INDEX: &[u8] = b"index-key-v1";
 pub const INFO_CACHE: &[u8] = b"cache-key-v1";
+/// **Reserved, and consumed by nothing in this build.** The label is frozen in
+/// `docs/FORMAT.md` §1 so a future keyed audit profile has a name already
+/// allocated to it, but the shipped audit log is *unkeyed*: `docs/AUDIT_LOG.md`
+/// §3's chain hash is plain BLAKE3 over public values, which is what lets §8's
+/// standalone verifiers be twenty lines and no key.
+///
+/// Deriving it and keying the chain with it would **not** buy authorship, and
+/// `docs/AUDIT_LOG.md` §11.2 is the argument: DCTL appends a record on every
+/// operation unattended, so it must be able to reach whatever it signs with —
+/// and on the deployment it has, every attacker who can write the log can reach
+/// the root key's derivation path too. Wiring this up would turn "no claim"
+/// into a false one. It is here so that the label stays allocated, not because
+/// it is nearly used.
 pub const INFO_AUDIT: &[u8] = b"audit-key-v1";
 /// Name-layer sub-key labels (§1). `name-hash-key` keys the public path hash;
 /// `name-value-key` encrypts the record value — split so publishing `n/*` keys never
