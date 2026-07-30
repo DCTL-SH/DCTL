@@ -2070,41 +2070,78 @@ mod tests {
     #[tokio::test]
     async fn an_object_store_destination_asks_for_a_credential_and_not_for_a_feature() {
         // The reachability proof for the b2/s3/r2 arms of `registry::build`,
-        // which is as far as a machine with no cloud credentials can go — and it
-        // is a real check, because every wrong answer is distinguishable:
+        // which is as far as a machine with no cloud credentials can go. What it
+        // proves is that the plain write path is **open**: a refusal naming a
+        // missing feature would mean it is still closed, and a *success* under
+        // `--no-ask-password` with no credentials exported would mean nothing
+        // tried to connect at all. What is left is the honest failure — the
+        // credential the provider needs is not on the environment, named by
+        // variable.
         //
-        //  * a refusal naming a missing feature would mean the write path is
-        //    still closed;
-        //  * `VaultLocked` would mean the bucket was misclassified as sealed and
-        //    a password was demanded for a remote that has no key (defect S6/D4);
-        //  * a *success* under `--no-ask-password` with no credentials exported
-        //    would mean nothing tried to connect at all.
-        //
-        // What is left is the honest failure: the credential the provider needs
-        // is not on the environment, named by variable.
+        // **What it does not prove, contrary to what this comment used to say.**
+        // It claimed that `VaultLocked` here would catch a bucket misclassified
+        // as sealed (defect S6/D4). It cannot, and the claim was checked rather
+        // than repeated: forcing `Place::Sealed` for this destination and running
+        // the test produces `FatalError: DCTL_B2_KEY_ID is not set` — byte for
+        // byte the *correct* classification's failure — because
+        // `session::open` builds the storage backend, and the credential check
+        // fires before any password is acquired. With a credential exported it
+        // produces `TemporaryError` from a 401, which is not `VaultLocked`
+        // either. So the misclassification is invisible from here in both
+        // environments, and D4 is guarded by `remote::place`'s own tests
+        // instead. The `assert_ne!` below is kept because it costs nothing and
+        // is true; it is not the reason this test exists.
         let src = tempfile::tempdir().unwrap();
         let ctx = crate::commands::transfer::testing::ctx(&["--no-ask-password"]);
         let source = RemoteSpec::parse(src.path().to_str().unwrap()).unwrap();
         let dest = RemoteSpec::parse("b2:mybucket/photos").unwrap();
 
-        let error = Engine::connect(&ctx, "copy", &source, &dest)
-            .await
-            .expect_err("no B2 credentials are exported in a test run");
-        // Not `VaultLocked`, which is what a bucket misclassified as sealed
-        // would produce under `--no-ask-password`.
-        assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(
-            error
-                .message()
-                .contains(&dctl_meta::env_var(crate::constants::ENV_B2_KEY_ID)),
-            "the failure must name the missing credential variable: {}",
-            error.message()
-        );
-        assert!(
-            !error.message().contains("not implemented"),
-            "writing a plain object is implemented: {}",
-            error.message()
-        );
+        // Whether a credential is on the environment is a property of the
+        // machine, not of this test, and it used to be assumed: the
+        // `expect_err` message said "no B2 credentials are exported in a test
+        // run", which stops being true the moment somebody follows this
+        // repository's own instructions and exports them for a live pass. The
+        // test then failed for a reason that had nothing to do with the defect
+        // it guards. A test whose result depends on the developer's shell
+        // measures the shell.
+        //
+        // The crate forbids `unsafe`, so the variables cannot be cleared for the
+        // duration (`std::env::remove_var` is unsafe from edition 2024). The
+        // answer is to assert what is true either way, and to keep the sharper
+        // assertion where it is meaningful.
+        let key_id = dctl_meta::env_var(crate::constants::ENV_B2_KEY_ID);
+        let credentialled = std::env::var(&key_id).is_ok_and(|v| !v.is_empty());
+
+        let outcome = Engine::connect(&ctx, "copy", &source, &dest).await;
+
+        // True on every machine: whatever the environment holds, a plain object
+        // write must not be refused as unimplemented, and nothing here may
+        // demand a password for a remote that has no key.
+        if let Err(error) = &outcome {
+            assert_ne!(
+                error.code(),
+                ExitCode::VaultLocked,
+                "a bucket was misclassified as a sealed vault: {}",
+                error.message()
+            );
+            assert!(
+                !error.message().contains("not implemented"),
+                "writing a plain object is implemented: {}",
+                error.message()
+            );
+        }
+
+        // With no credential, the failure is knowable exactly, and this is the
+        // arm that runs in the plain gate.
+        if !credentialled {
+            let error = outcome.expect_err("a b2 destination cannot connect without a key");
+            assert_eq!(error.code(), ExitCode::FatalError);
+            assert!(
+                error.message().contains(&key_id),
+                "the failure must name the missing credential variable: {}",
+                error.message()
+            );
+        }
     }
 
     #[tokio::test]
