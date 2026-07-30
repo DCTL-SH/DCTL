@@ -733,6 +733,7 @@ dependencies = [
  "bytes",
  "hex",
  "hmac",
+ "http-body",
  "libc",
  "openssh",
  "openssh-sftp-client",

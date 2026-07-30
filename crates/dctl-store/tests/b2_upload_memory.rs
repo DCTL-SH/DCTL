@@ -47,6 +47,7 @@
 
 mod support;
 
+use dctl_store::Deadlines;
 use std::io::Write as _;
 use std::path::Path;
 
@@ -100,10 +101,14 @@ async fn an_upload_holds_one_part_however_large_the_object_and_however_often_it_
     // sends one, DCTL reads it, reports it and sizes nothing from it, because a
     // figure that is the process's peak memory must not arrive from the network.
     let mock = MockB2::start(7_000_000).await;
-    let b2 = B2Backend::new(B2Credentials::new(KEY_ID, APP_KEY), BUCKET)
-        .expect("the backend builds")
-        .with_authorize_url(mock.authorize_url())
-        .with_part_size(Some(PART));
+    let b2 = B2Backend::new(
+        B2Credentials::new(KEY_ID, APP_KEY),
+        BUCKET,
+        Deadlines::default(),
+    )
+    .expect("the backend builds")
+    .with_authorize_url(mock.authorize_url())
+    .with_part_size(Some(PART));
 
     // Warm up: authorize, open a connection, let the runtime and the HTTP client
     // reach their steady state. Everything they allocate for their own sake

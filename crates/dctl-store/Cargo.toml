@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 bytes = { workspace = true }
 hex = { workspace = true }
+http-body = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }
 rustls-post-quantum = { workspace = true }

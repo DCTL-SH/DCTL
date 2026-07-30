@@ -10,6 +10,7 @@ use bytes::Bytes;
 
 use crate::backend::{Backend, UploadTicket};
 use crate::checksum::ContentHash;
+use crate::deadline::Deadlines;
 use crate::error::Result;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
@@ -63,17 +64,21 @@ impl R2Backend {
         bucket: impl Into<String>,
         access_key: impl Into<String>,
         secret_key: impl Into<String>,
+        deadlines: Deadlines,
     ) -> Result<Self> {
-        Self::from_config(Self::config(account_id, bucket, access_key, secret_key))
+        Self::from_config(
+            Self::config(account_id, bucket, access_key, secret_key),
+            deadlines,
+        )
     }
 
     /// Create an R2 backend from settings [`R2Backend::config`] produced.
     ///
     /// # Errors
     /// Whatever building the TLS client reported.
-    pub fn from_config(config: S3Config) -> Result<Self> {
+    pub fn from_config(config: S3Config, deadlines: Deadlines) -> Result<Self> {
         Ok(Self {
-            client: S3Client::new(config)?,
+            client: S3Client::new(config, deadlines)?,
         })
     }
 

@@ -132,6 +132,9 @@ struct Upload {
 /// Everything the server remembers.
 #[derive(Clone, Debug, Default)]
 pub struct State {
+    /// How many more requests to accept and never answer. See
+    /// [`MockS3::stall_next`].
+    stall: usize,
     pub objects: BTreeMap<String, StoredObject>,
     /// In-flight multipart uploads, by upload id.
     uploads: BTreeMap<String, Upload>,
@@ -263,6 +266,26 @@ impl MockS3 {
     /// Queue a response to give instead of the real answer, once.
     pub fn script(&self, status: u16, body: &str) {
         self.script_with_headers(status, body, &[]);
+    }
+
+    /// Read the next request whole, and then answer nothing, ever.
+    ///
+    /// The provider failure that no status code can express and that the retry
+    /// layer alone cannot survive: a server that **accepts** the connection and
+    /// the request and then goes silent. TCP is established, the bytes are gone,
+    /// and the client is waiting for a reply that is not coming — which is the
+    /// shape a black-holed route, a hung load balancer and a stalled pod all
+    /// present, and which without a deadline is a hang rather than a failure.
+    ///
+    /// Deliberately after the request is fully read, so the stall is on the
+    /// *response* and not on the upload: a connection that stopped accepting
+    /// data would be a different test, and this one has to be sure the request
+    /// really arrived.
+    pub fn stall_next(&self) {
+        self.state
+            .lock()
+            .expect("the mock state is not poisoned")
+            .stall += 1;
     }
 
     /// The same, carrying headers — `Retry-After` above all.
@@ -409,6 +432,23 @@ async fn serve(mut stream: TcpStream, state: Arc<Mutex<State>>) -> std::io::Resu
             &scripted.headers,
         )
         .await;
+    }
+
+    // The silent treatment. Holding the stream rather than dropping it is the
+    // whole point: a closed socket is an error the client reports at once, and
+    // what is being tested is the case where nothing happens at all.
+    let stalling = {
+        let mut guard = state.lock().expect("the mock state is not poisoned");
+        if guard.stall > 0 {
+            guard.stall -= 1;
+            true
+        } else {
+            false
+        }
+    };
+    if stalling {
+        std::future::pending::<()>().await;
+        unreachable!("a stalled connection is never answered");
     }
 
     let (status, response, extra) = handle(&state, &method, &path, &query, &headers, body);

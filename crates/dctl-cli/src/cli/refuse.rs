@@ -72,8 +72,9 @@ pub fn refuse_if_present(globals: &GlobalArgs, operation: &str, consequence: &st
             // not implemented in this build" to whatever it is handed, which is
             // right for `--key-file` — the subject there is a *feature* — and
             // produced "--timeout is not honoured in this build is not
-            // implemented in this build" here, caught on the release binary
-            // rather than by any test. Two claims in one sentence, one of them
+            // implemented in this build" — quoted as it was, from when that
+            // flag was refused — caught on the release binary rather than by
+            // any test. Two claims in one sentence, one of them
             // ungrammatical and the other false: the flag is implemented as far
             // as parsing goes, and what it is not is *honoured*.
             return Err(CliError::new(
@@ -91,7 +92,7 @@ pub fn refuse_if_present(globals: &GlobalArgs, operation: &str, consequence: &st
 mod tests {
     use super::*;
     use crate::cli::reach::FLAGS;
-    use crate::constants::{KEY_FILE_UNSUPPORTED_REASON, TIMEOUT_UNSUPPORTED_REASON};
+    use crate::constants::{KEY_FILE_UNSUPPORTED_REASON, LOW_LEVEL_RETRIES_UNSUPPORTED_REASON};
     use clap::Parser;
 
     #[derive(Parser, Debug)]
@@ -111,15 +112,22 @@ mod tests {
 
     #[test]
     fn the_refusal_names_the_flag_the_operation_and_what_did_not_happen() {
+        // `--low-level-retries` rather than `--timeout`, which used to stand
+        // here: the exemplar of a refused flag has to be a flag this build still
+        // refuses, and `--timeout` is honoured now.
         let error = refuse_if_present(
-            &globals(&["--timeout", "30"]),
+            &globals(&["--low-level-retries", "4"]),
             "dctl sync",
             "Nothing was transferred.",
         )
         .unwrap_err();
 
         assert_eq!(error.code(), ExitCode::FatalError);
-        assert!(error.message().contains("--timeout"), "{}", error.message());
+        assert!(
+            error.message().contains("--low-level-retries"),
+            "{}",
+            error.message()
+        );
         assert!(error.message().contains("dctl sync"), "{}", error.message());
         assert!(
             !error.message().starts_with("dctl sync is not"),
@@ -128,7 +136,10 @@ mod tests {
         );
 
         let hint = error.hint().expect("a refusal must explain itself");
-        assert!(hint.contains(TIMEOUT_UNSUPPORTED_REASON), "{hint}");
+        assert!(
+            hint.contains(LOW_LEVEL_RETRIES_UNSUPPORTED_REASON),
+            "{hint}"
+        );
         assert!(hint.contains("Nothing was transferred."), "{hint}");
     }
 
@@ -151,7 +162,6 @@ mod tests {
             let argv: Vec<&str> = match flag.long {
                 "--transfers" | "--checkers" => vec![flag.long, "2"],
                 "--verify-samples" | "--low-level-retries" => vec![flag.long, "4"],
-                "--timeout" | "--contimeout" => vec![flag.long, "30"],
                 "--dump" => vec![flag.long, "headers"],
                 "--key-file" => vec![flag.long, "/dev/null"],
                 other => vec![other],
@@ -192,7 +202,7 @@ mod tests {
         // protected the way the operator thinks it is, so that is the one the
         // message must be about when a run asks for both.
         let error = refuse_if_present(
-            &globals(&["--timeout", "30", "--key-file", "/dev/null"]),
+            &globals(&["--low-level-retries", "4", "--key-file", "/dev/null"]),
             "dctl copy",
             "Nothing was copied.",
         )

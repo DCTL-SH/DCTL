@@ -14,6 +14,7 @@
 //! opens a socket — the three object stores answer this question without a
 //! request, which is itself part of what is asserted.
 
+use dctl_store::Deadlines;
 use std::sync::Arc;
 
 use dctl_store::b2::{B2Backend, B2Credentials};
@@ -118,21 +119,22 @@ async fn the_three_object_stores_say_they_never_stage_rather_than_reporting_zero
     // the backend returns the reason instead, and no request is made to learn
     // it — these constructions carry credentials that would be refused.
     let b2: Arc<dyn Backend> = Arc::new(
-        B2Backend::new(B2Credentials::new("nobody", "nothing"), "no-such-bucket")
-            .expect("a client is built without contacting anything"),
+        B2Backend::new(
+            B2Credentials::new("nobody", "nothing"),
+            "no-such-bucket",
+            Deadlines::default(),
+        )
+        .expect("a client is built without contacting anything"),
     );
     let s3: Arc<dyn Backend> = Arc::new(
-        S3Backend::new(S3Config::new(
-            "https://s3.invalid",
-            "us-east-1",
-            "bucket",
-            "key",
-            "secret",
-        ))
+        S3Backend::new(
+            S3Config::new("https://s3.invalid", "us-east-1", "bucket", "key", "secret"),
+            Deadlines::default(),
+        )
         .expect("a client is built without contacting anything"),
     );
     let r2: Arc<dyn Backend> = Arc::new(
-        R2Backend::new("account", "bucket", "key", "secret")
+        R2Backend::new("account", "bucket", "key", "secret", Deadlines::default())
             .expect("a client is built without contacting anything"),
     );
 

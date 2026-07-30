@@ -45,6 +45,7 @@ use super::config::S3Config;
 use super::constants::{
     H_SRC_MODIFIED, LIST_PAGE_SIZE, MAX_PART_SIZE, MIN_PART_SIZE, PRESIGN_TTL_SECS, S3_SERVICE,
 };
+use crate::deadline::{Answered, Deadlines};
 
 /// The name every failure from this client is attributed to.
 ///
@@ -114,6 +115,15 @@ fn parse_src_modified(value: &str) -> Option<i64> {
 pub(crate) struct S3Client {
     http: reqwest::Client,
     config: S3Config,
+    /// How long this run waits for a link that has gone quiet, and for one that
+    /// will not answer at all. See [`crate::deadline`].
+    ///
+    /// Held rather than taken per call because half of it is already spent by
+    /// the time a call is made: `connect` is built into
+    /// [`S3Client::http`](Self::http) and cannot be changed afterwards, so the
+    /// two halves would drift if the other were passed in. One field, set once,
+    /// for both.
+    deadlines: Deadlines,
     /// Who is told about bytes as they cross the link, part by part and body
     /// chunk by body chunk. See [`crate::meter`]. Held here rather than on the
     /// two backends because S3 and R2 differ in an endpoint and a region and in
@@ -122,11 +132,12 @@ pub(crate) struct S3Client {
 }
 
 impl S3Client {
-    pub(crate) fn new(config: S3Config) -> Result<Self> {
+    pub(crate) fn new(config: S3Config, deadlines: Deadlines) -> Result<Self> {
         Ok(Self {
-            http: crate::tls::post_quantum_client()?,
+            http: crate::tls::post_quantum_client(deadlines)?,
             config,
             meter: crate::meter::unmetered(),
+            deadlines,
         })
     }
 
@@ -140,6 +151,11 @@ impl S3Client {
 
     /// Sign and send a request. `key` is the object key (None = bucket-level).
     /// `query_params` are canonicalized; `body` (if any) is hashed and signed.
+    ///
+    /// The [`Answered`] that comes back carries the request's own inactivity
+    /// watch, still running, because the deadline has to cover the body as well
+    /// as the headers — an object that stops arriving halfway is the failure
+    /// `--timeout` is for, and it happens long after this function returns.
     async fn send(
         &self,
         method: Method,
@@ -147,7 +163,7 @@ impl S3Client {
         query_params: &[(&str, String)],
         extra_headers: &[(&str, String)],
         body: Option<Bytes>,
-    ) -> Result<reqwest::Response> {
+    ) -> Result<Answered> {
         let cfg = &self.config;
         let uri_path = match key {
             Some(k) => format!("/{}/{}", cfg.bucket, uri_encode(k, false)),
@@ -203,18 +219,29 @@ impl S3Client {
         for (k, v) in extra_headers {
             req = req.header(*k, v);
         }
+        let watch = self.deadlines.watch();
         if let Some(b) = body {
-            req = req.body(b);
+            // Framed rather than handed over whole, so the connection taking it
+            // is what feeds the deadline. `crate::deadline::http` says why the
+            // socket itself is out of reach and what the framing costs — which
+            // is nothing: the frames are views of this same buffer.
+            req = req.body(watch.body(b));
         }
         // `Transport`, not `Backend`: nothing answered, so the request may never
         // have reached the provider — which is the case `crate::retry` exists
         // for, and which a formatted string could only have expressed by being
         // searched for later. See `crate::error` for why the classification
-        // lives in the type.
-        req.send().await.map_err(|e| StoreError::Transport {
-            backend: S3_BACKEND_NAME,
-            detail: e.to_string(),
-        })
+        // lives in the type. A stall is reported the same way and for the same
+        // reason: the provider may never have seen it either.
+        let response = watch
+            .guard(req.send())
+            .await
+            .map_err(|expired| expired.into_store_error(S3_BACKEND_NAME))?
+            .map_err(|e| StoreError::Transport {
+                backend: S3_BACKEND_NAME,
+                detail: e.to_string(),
+            })?;
+        Ok(Answered { watch, response })
     }
 
     /// Turn a refused response into the error an operator reads and the retry
@@ -225,14 +252,24 @@ impl S3Client {
     /// status, the code and any `Retry-After` survive as *fields*, so a `503
     /// SlowDown` is retried because it is a 503 and not because somebody matched
     /// on the message.
-    async fn error(resp: reqwest::Response) -> StoreError {
+    async fn error(resp: Answered) -> StoreError {
         let status = resp.status().as_u16();
         let retry_after_secs = resp
             .headers()
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.trim().parse::<u64>().ok());
-        let body = resp.bytes().await.unwrap_or_default();
+        // The status is the diagnosis and the body is a nicety, so a body that
+        // stalls must not cost the operator the status code. A timeout here
+        // degrades to the same `?` that a response with no `<Code>` gives —
+        // reporting `s3 error 503: ?` is strictly better than reporting a
+        // timeout and losing the fact that the provider said 503.
+        let body = resp
+            .bytes()
+            .await
+            .ok()
+            .and_then(std::result::Result::ok)
+            .unwrap_or_default();
         let text = String::from_utf8_lossy(&body);
         let code = xml::extract_tag(&text, "Code").unwrap_or_else(|| "?".to_string());
         StoreError::Provider {
@@ -344,6 +381,7 @@ impl S3Client {
         let body = create
             .text()
             .await
+            .map_err(|expired| expired.into_store_error(S3_BACKEND_NAME))?
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let upload_id = xml::extract_tag(&body, "UploadId")
             .ok_or_else(|| StoreError::Backend("s3: no UploadId in response".into()))?;
@@ -474,6 +512,7 @@ impl S3Client {
         let body = create
             .text()
             .await
+            .map_err(|expired| expired.into_store_error(S3_BACKEND_NAME))?
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let upload_id = xml::extract_tag(&body, "UploadId")
             .ok_or_else(|| StoreError::Backend("s3: no UploadId in response".into()))?;
@@ -631,6 +670,7 @@ impl S3Client {
         let body = create
             .text()
             .await
+            .map_err(|expired| expired.into_store_error(S3_BACKEND_NAME))?
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let upload_id = xml::extract_tag(&body, "UploadId")
             .ok_or_else(|| StoreError::Backend("s3: no UploadId in response".into()))?;
@@ -750,6 +790,7 @@ impl S3Client {
         let body = resp
             .text()
             .await
+            .map_err(|expired| expired.into_store_error(S3_BACKEND_NAME))?
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let page = xml::parse_uploads(&body)?;
 
@@ -852,27 +893,27 @@ impl S3Client {
     /// body straight to `dest` at constant memory (temp → fsync → atomic rename) without
     /// ever holding the whole object in RAM. A missing object maps to `NotFound`.
     pub(crate) async fn get_to_path(&self, key: &ObjectKey, dest: &Path) -> Result<()> {
-        let resp = self.fetch_response(key, None).await?;
+        let (watch, resp) = self.fetch_response(key, None).await?.into_parts();
         // Verify the committed length against the object's declared Content-Length so a
         // short-but-clean body is not atomically committed as if whole.
         let expected_len = streaming::content_length(&resp);
-        streaming::stream_to_file(resp, dest, expected_len, self.meter.as_ref()).await
+        // The watch travels with the body: a 4 GiB restore is hours of body and
+        // milliseconds of headers, so a deadline that ended when the headers
+        // arrived would be watching the wrong thing entirely.
+        streaming::stream_to_file(resp, dest, expected_len, self.meter.as_ref(), &watch).await
     }
 
     async fn fetch(&self, key: &ObjectKey, range: Option<String>) -> Result<Bytes> {
         let resp = self.fetch_response(key, range).await?;
         resp.bytes()
             .await
+            .map_err(|expired| expired.into_store_error(S3_BACKEND_NAME))?
             .map_err(|e| StoreError::Backend(e.to_string()))
     }
 
     /// Send a GET (optionally ranged) and return the response once its status is
     /// confirmed successful. Maps 404 to `NotFound`; other non-2xx to a backend error.
-    async fn fetch_response(
-        &self,
-        key: &ObjectKey,
-        range: Option<String>,
-    ) -> Result<reqwest::Response> {
+    async fn fetch_response(&self, key: &ObjectKey, range: Option<String>) -> Result<Answered> {
         let extra: Vec<(&str, String)> = match range {
             Some(r) => vec![("range", r)],
             None => vec![],
@@ -956,6 +997,7 @@ impl S3Client {
         let body = resp
             .text()
             .await
+            .map_err(|expired| expired.into_store_error(S3_BACKEND_NAME))?
             .map_err(|e| StoreError::Backend(e.to_string()))?;
         let listing = xml::parse_list(&body)?;
         let items = listing

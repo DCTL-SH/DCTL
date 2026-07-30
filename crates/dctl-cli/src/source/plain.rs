@@ -38,6 +38,7 @@ use std::collections::VecDeque;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use dctl_store::Deadlines;
 use dctl_store::{
     Backend, ByteRange, LinkPolicy, LinkReport, ObjectKey, ObjectMeta, SpecialReport, StoreError,
 };
@@ -70,7 +71,12 @@ impl PlainSource {
     /// [`ExitCode::FatalError`](crate::exit::ExitCode::FatalError) for a remote
     /// the configuration and the provider shorthands both fail to explain, or
     /// for one whose settings are incomplete.
-    pub fn open(config: &Config, spec: &RemoteSpec, links: LinkPolicy) -> Result<Self> {
+    pub fn open(
+        config: &Config,
+        spec: &RemoteSpec,
+        links: LinkPolicy,
+        deadlines: Deadlines,
+    ) -> Result<Self> {
         let resolved = crate::remote::resolve::resolve(spec, config)?;
         // Unmetered: this is the *listing and reading* view, reached by `ls`,
         // `size`, `tree` and `cat`. `cat` is the only one of those that moves a
@@ -82,6 +88,7 @@ impl PlainSource {
             &resolved,
             links,
             dctl_store::unmetered(),
+            deadlines,
         )?))
     }
 
@@ -914,7 +921,15 @@ mod tests {
         // source with no config file anywhere in sight.
         let root = TempDir::new().unwrap();
         let spec = RemoteSpec::Local(root.path().to_path_buf());
-        assert!(PlainSource::open(&Config::default(), &spec, LinkPolicy::default()).is_ok());
+        assert!(
+            PlainSource::open(
+                &Config::default(),
+                &spec,
+                LinkPolicy::default(),
+                Deadlines::default()
+            )
+            .is_ok()
+        );
         let _: &Path = root.path();
     }
 
@@ -924,9 +939,14 @@ mod tests {
             remote: "nosuchremote".into(),
             path: String::new(),
         };
-        let error = PlainSource::open(&Config::default(), &spec, LinkPolicy::default())
-            .err()
-            .expect("an unconfigured remote cannot be built");
+        let error = PlainSource::open(
+            &Config::default(),
+            &spec,
+            LinkPolicy::default(),
+            Deadlines::default(),
+        )
+        .err()
+        .expect("an unconfigured remote cannot be built");
         assert_eq!(error.code(), crate::exit::ExitCode::FatalError);
         assert!(
             error.message().contains("nosuchremote"),

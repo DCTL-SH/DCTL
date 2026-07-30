@@ -200,6 +200,7 @@ mod tests {
             "primary-store:",
             Side::Source,
             dctl_store::LinkPolicy::default(),
+            dctl_store::Deadlines::default(),
         )
         .await
         .unwrap();
@@ -208,6 +209,7 @@ mod tests {
             "offsite-store:",
             Side::Destination,
             dctl_store::LinkPolicy::default(),
+            dctl_store::Deadlines::default(),
         )
         .await
         .unwrap();

@@ -616,14 +616,19 @@ which layer owes the capability. If you meet one, the message tells you what DCT
 does instead.
 
 Refused today: `--key-file`, `--verify-samples`, `--low-level-retries`,
-`--timeout`, `--contimeout`, `--dump`, and `--transfers`/`--checkers` for any
-value above `1`. See
+`--dump`, and `--transfers`/`--checkers` for any value above `1`. See
 [Global flags → Flags that are refused](GLOBAL_FLAGS.md#flags-that-are-refused).
 
-Two flags that used to be on that list now work and are worth knowing about,
-because they are the ones that bound what a run can cost: `--bwlimit RATE` paces
-a run to an average byte rate, and `--max-transfer SIZE` stops it at a ceiling
-with exit **8** without ever exceeding it.
+Four flags that used to be on that list now work and are worth knowing about,
+because they are the ones that bound what a run can cost — in money, and in time.
+`--bwlimit RATE` paces a run to an average byte rate, and `--max-transfer SIZE`
+stops it at a ceiling with exit **8** without ever exceeding it. `--timeout
+SECONDS` gives up on a transfer that has moved nothing for that long — an
+*inactivity* deadline, so a slow transfer that is still moving is never touched —
+and `--contimeout SECONDS` gives up on reaching a host at all. Together those two
+are how long a run will sit on a network that has died: it used to be whatever
+the operating system decided, which on a black-holed route was 200 seconds and
+was nobody's choice.
 
 ### Exit codes
 

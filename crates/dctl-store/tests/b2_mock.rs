@@ -19,6 +19,7 @@
 mod support;
 
 use bytes::Bytes;
+use dctl_store::Deadlines;
 use dctl_store::b2::{B2Backend, B2Credentials};
 use dctl_store::guard::Strength;
 use dctl_store::{Backend, ContentHash, HashAlgo, ObjectKey, SourceModified};
@@ -36,10 +37,14 @@ const PART: u64 = 5_000_000;
 const ADVERTISED: u64 = 7_000_000;
 
 async fn backend(mock: &MockB2, part_size: Option<u64>) -> B2Backend {
-    B2Backend::new(B2Credentials::new(KEY_ID, APP_KEY), BUCKET)
-        .expect("the backend builds")
-        .with_authorize_url(mock.authorize_url())
-        .with_part_size(part_size)
+    B2Backend::new(
+        B2Credentials::new(KEY_ID, APP_KEY),
+        BUCKET,
+        Deadlines::default(),
+    )
+    .expect("the backend builds")
+    .with_authorize_url(mock.authorize_url())
+    .with_part_size(part_size)
 }
 
 /// How many requests arrived whose path *starts* with `prefix`.

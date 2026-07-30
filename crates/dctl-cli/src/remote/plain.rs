@@ -125,7 +125,12 @@ impl PlainRemote {
         // Metered: this is the *write* view, and it is what a transfer moves
         // bytes through. The run's `--bwlimit` is installed here so the storage
         // layer's copy loops can charge it window by window.
-        let backend = registry::build(&resolved, ctx.globals.links, ctx.limits.meter())?;
+        let backend = registry::build(
+            &resolved,
+            ctx.globals.links,
+            ctx.limits.meter(),
+            ctx.deadlines,
+        )?;
         Ok(Self { resolved, backend })
     }
 

@@ -25,6 +25,7 @@ use tokio::sync::Mutex;
 
 use crate::backend::{Backend, UploadTicket};
 use crate::checksum::ContentHash;
+use crate::deadline::{Answered, Deadlines, Expired};
 use crate::error::{Result, StoreError};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
@@ -51,14 +52,36 @@ pub struct B2Backend {
     /// Where `b2_authorize_account` is asked. See
     /// [`with_authorize_url`](Self::with_authorize_url).
     authorize_url: String,
+    /// How long this run waits for a link that has gone quiet, and for one that
+    /// will not answer at all. See [`crate::deadline`].
+    ///
+    /// Held rather than passed per call because half of it — the connect
+    /// deadline — is built into [`client`](Self::client) and cannot be changed
+    /// afterwards. One field, set once, so the two halves cannot drift apart.
+    pub(crate) deadlines: Deadlines,
 }
+
+/// This backend's name, as [`Backend::name`] spells it and as a stalled request
+/// is attributed.
+pub(crate) const B2_BACKEND_NAME: &str = "b2";
 
 impl B2Backend {
     /// Create a backend for `bucket_name` using `creds`. Authorization happens
     /// lazily on first use.
-    pub fn new(creds: B2Credentials, bucket_name: impl Into<String>) -> Result<Self> {
+    /// `deadlines` is a required argument rather than a builder, and the
+    /// difference is the point. A builder can be forgotten, and this crate has
+    /// already paid for that once: `crate::meter` was written into each arm of
+    /// the CLI's construction match and four of the five arms dropped it, so
+    /// `--bwlimit` was inert on every cloud provider with nothing to indicate
+    /// it. A positional argument cannot be dropped — the compiler will not
+    /// accept the call without it.
+    pub fn new(
+        creds: B2Credentials,
+        bucket_name: impl Into<String>,
+        deadlines: Deadlines,
+    ) -> Result<Self> {
         // Hybrid post-quantum TLS (falls back to classical if the server lacks it).
-        let client = crate::tls::post_quantum_client()?;
+        let client = crate::tls::post_quantum_client(deadlines)?;
         Ok(Self {
             client,
             creds,
@@ -67,6 +90,7 @@ impl B2Backend {
             meter: crate::meter::unmetered(),
             part_size: constants::DEFAULT_PART_SIZE,
             authorize_url: constants::AUTHORIZE_URL.to_string(),
+            deadlines,
         })
     }
 
@@ -178,14 +202,18 @@ impl B2Backend {
 
     async fn authorize(&self) -> Result<AuthState> {
         let parsed: AuthorizeResponse = retry::run(constants::EP_AUTHORIZE, |_| async {
-            let resp = self
-                .client
-                .get(&self.authorize_url)
-                .basic_auth(&self.creds.key_id, Some(&self.creds.app_key))
-                .send()
+            let watch = self.deadlines.watch();
+            let response = watch
+                .guard(
+                    self.client
+                        .get(&self.authorize_url)
+                        .basic_auth(&self.creds.key_id, Some(&self.creds.app_key))
+                        .send(),
+                )
                 .await
+                .map_err(stalled_attempt)?
                 .map_err(transport_attempt)?;
-            read_json(resp).await
+            read_json(Answered { watch, response }).await
         })
         .await?;
         // `recommendedPartSize` is read and reported and is deliberately not what
@@ -233,17 +261,22 @@ impl B2Backend {
             constants::EP_LIST_BUCKETS
         );
         let listed: ListBucketsResponse = retry::run(constants::EP_LIST_BUCKETS, |_| async {
-            let resp = self
-                .client
-                .post(&url)
-                .header(constants::H_AUTHORIZATION, token)
-                .json(
-                    &serde_json::json!({ "accountId": account_id, "bucketName": self.bucket_name }),
+            let watch = self.deadlines.watch();
+            let response = watch
+                .guard(
+                    self.client
+                        .post(&url)
+                        .header(constants::H_AUTHORIZATION, token)
+                        .json(&serde_json::json!({
+                            "accountId": account_id,
+                            "bucketName": self.bucket_name,
+                        }))
+                        .send(),
                 )
-                .send()
                 .await
+                .map_err(stalled_attempt)?
                 .map_err(transport_attempt)?;
-            read_json(resp).await
+            read_json(Answered { watch, response }).await
         })
         .await?;
         listed
@@ -295,15 +328,20 @@ impl B2Backend {
     ) -> Attempted<T> {
         tracing::debug!(endpoint, "b2 api request");
         let url = format!("{}/{}/{}", auth.api_url, constants::API_PREFIX, endpoint);
-        let resp = self
-            .client
-            .post(&url)
-            .header(constants::H_AUTHORIZATION, &auth.auth_token)
-            .json(&body)
-            .send()
+        let watch = self.deadlines.watch();
+        let response = watch
+            .guard(
+                self.client
+                    .post(&url)
+                    .header(constants::H_AUTHORIZATION, &auth.auth_token)
+                    .json(&body)
+                    .send(),
+            )
             .await
+            .map_err(stalled_attempt)?
             .map_err(transport_attempt)?;
-        self.observe_expiry(read_json(resp).await).await
+        self.observe_expiry(read_json(Answered { watch, response }).await)
+            .await
     }
 
     /// Clear the cached authorization when `attempted` failed because the token
@@ -335,16 +373,35 @@ fn transport_attempt(e: reqwest::Error) -> Attempt {
     Attempt::transport(reqwest_err(e))
 }
 
+/// A request that stopped moving bytes for as long as the operator was willing
+/// to wait.
+///
+/// Classified exactly like the line above and for the same reason: nothing
+/// answered, so another attempt — on another connection — is the thing worth
+/// doing. `StoreError::Transport` rather than `Backend` so the *outer* retry
+/// layer agrees, since `crate::retry::observed` reads that variant as transient
+/// and reads `Backend` as permanent.
+fn stalled_attempt(expired: Expired) -> Attempt {
+    Attempt::transport(expired.into_store_error(B2_BACKEND_NAME))
+}
+
 /// Read a response, erroring on non-2xx status, then deserialize the body as `T`.
 ///
 /// Carries the status, B2's own error `code` and any `Retry-After` alongside the
 /// error, because those three facts are what decide whether another attempt can
 /// possibly differ — and reading them back out of a formatted message later is a
 /// rule that breaks the first time somebody rewords it.
-async fn read_json<T: DeserializeOwned>(resp: reqwest::Response) -> Attempted<T> {
+async fn read_json<T: DeserializeOwned>(resp: Answered) -> Attempted<T> {
     let status = resp.status();
     let retry_after = retry_after_of(resp.headers());
-    let bytes = resp.bytes().await.map_err(transport_attempt)?;
+    // Under the same watch the request was made under, so a body that stops
+    // arriving is the stall it is rather than a request that looked instant
+    // because its headers were.
+    let bytes = resp
+        .bytes()
+        .await
+        .map_err(stalled_attempt)?
+        .map_err(transport_attempt)?;
     if !status.is_success() {
         return Err(Attempt {
             observed: Observed {

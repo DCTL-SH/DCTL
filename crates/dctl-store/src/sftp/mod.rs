@@ -62,6 +62,7 @@
 //! packets, real files at the other end, and no host.
 
 pub mod base;
+pub mod dial;
 mod ops;
 mod path;
 mod tree;
@@ -72,13 +73,14 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
-use openssh::{KnownHosts, Session};
+use openssh_sftp_client::Error as SftpError;
 use openssh_sftp_client::error::SftpErrorKind;
-use openssh_sftp_client::{Error as SftpError, Sftp, SftpOptions};
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
+use tokio::sync::RwLock;
 
 use crate::backend::Backend;
 use crate::checksum::ContentHash;
+use crate::deadline::{Deadlines, IdleWatch};
 use crate::error::{Result, StoreError};
 use crate::links::{LinkPolicy, LinkReport};
 use crate::meter::{self, Meter};
@@ -87,7 +89,12 @@ use crate::modified::SourceModified;
 use crate::specials::SpecialReport;
 use crate::staging::{StagingListing, Want};
 
+use dial::{Link, SftpDial, SshDialer, StreamDialer};
 use path::{chunk_spans, join, normalize_base, prefix_dir, remote_path, temp_path};
+
+/// This backend's name, as [`Backend::name`] spells it and as a lost session or
+/// a stalled request is attributed.
+pub(crate) const SFTP_BACKEND_NAME: &str = "sftp";
 
 /// Fixed transfer-chunk size for the streaming upload/download paths. Peak memory
 /// on those paths is `O(CHUNK_LEN)`, independent of object size.
@@ -143,17 +150,21 @@ impl SftpConfig {
 /// Construct one with [`SftpBackend::connect`]. The session and SFTP channel stay
 /// open for the lifetime of the value and are torn down on drop.
 pub struct SftpBackend {
-    /// Kept alive alongside the SFTP channel so the `ControlMaster` mux session
-    /// persists for this backend's lifetime (and is available for future
-    /// shell-command operations over the same connection if ever needed).
+    /// How a conversation with this destination is opened — the first one, and
+    /// every one after a session dies. See [`dial`].
+    dialer: Arc<dyn SftpDial>,
+    /// The live conversation, or [`None`] when the last one ended and the next
+    /// operation must open another.
     ///
-    /// [`None`] for a backend built by [`SftpBackend::over_stream`], where the
-    /// SFTP conversation runs over a byte stream that has no ssh session behind
-    /// it at all. Nothing reads this field; it exists to own the session's
-    /// lifetime, and "there is no session to own" is a legitimate answer.
-    #[allow(dead_code)]
-    session: Option<Arc<Session>>,
-    sftp: Sftp,
+    /// A cell rather than a field, because "the session is gone" has to be
+    /// expressible. It is the one-connection form of rclone's pool
+    /// (`backend/sftp/sftp.go:804-833`), which discards a closed connection on
+    /// the way out and dials when it finds nothing to hand over.
+    ///
+    /// An `RwLock` and not a `Mutex`: every ordinary operation only *reads* it,
+    /// so concurrent requests on one healthy session do not queue behind each
+    /// other, and only a dial or a discard takes the write side.
+    link: RwLock<Option<Arc<Link>>>,
     /// Normalized remote base (see [`path::normalize_base`]).
     base: String,
     /// What this backend's listing does with symbolic links. Fixed for the
@@ -185,7 +196,19 @@ pub struct SftpBackend {
     /// base that disappears while the run is using it must stay disappeared, and
     /// re-asking would answer "not there, so make it" — which is the defect
     /// exactly.
+    ///
+    /// Decided on the **first** dial and carried across every re-dial, which is
+    /// the same rule stated against a new fact. A re-dial that re-probed would
+    /// answer the question again on a session opened *after* the base was
+    /// renamed away, get "not there, so make it", and re-create underneath the
+    /// run precisely the directory this field exists to protect.
     may_create_base: bool,
+    /// How long this run waits for a request that has stopped moving. See
+    /// [`crate::deadline`].
+    ///
+    /// The connect half of the pair is not here: it belongs to the dialer, which
+    /// is the only thing that connects.
+    deadlines: Deadlines,
 }
 
 impl SftpBackend {
@@ -196,17 +219,12 @@ impl SftpBackend {
     /// first-time connection to a proxied host succeeds without an interactive
     /// prompt; transport authentication is still provided by ssh (and, for
     /// cloudflared hosts, the access tunnel).
-    pub async fn connect(cfg: SftpConfig) -> Result<Self> {
-        let session = Session::connect_mux(&cfg.host, KnownHosts::Accept)
-            .await
-            .map_err(|e| StoreError::Backend(format!("ssh connect to {}: {e}", cfg.host)))?;
-        let session = Arc::new(session);
-        let sftp = Sftp::from_clonable_session(Arc::clone(&session), SftpOptions::default())
-            .await
-            .map_err(|e| {
-                StoreError::Backend(format!("open sftp subsystem on {}: {e}", cfg.host))
-            })?;
-        Self::over_sftp(Some(session), sftp, &cfg.base, cfg.links).await
+    /// `deadlines` is a required argument rather than a builder, for the reason
+    /// [`crate::b2::B2Backend::new`] gives: a run-scoped setting that *can* be
+    /// dropped eventually is, and this crate has already paid for that once.
+    pub async fn connect(cfg: SftpConfig, deadlines: Deadlines) -> Result<Self> {
+        let dialer = Arc::new(SshDialer::new(cfg.host.clone(), deadlines.connect));
+        Self::over_dialer(dialer, &cfg.base, cfg.links, deadlines).await
     }
 
     /// The same backend, speaking SFTP over an arbitrary byte-stream pair.
@@ -233,45 +251,159 @@ impl SftpBackend {
         stdout: R,
         base: &str,
         links: LinkPolicy,
+        deadlines: Deadlines,
     ) -> Result<Self>
     where
         W: tokio::io::AsyncWrite + Send + Unpin + 'static,
         R: tokio::io::AsyncRead + Send + Unpin + 'static,
     {
-        let sftp = Sftp::new(stdin, stdout, SftpOptions::default())
-            .await
-            .map_err(|e| StoreError::Backend(format!("open sftp subsystem on a stream: {e}")))?;
-        Self::over_sftp(None, sftp, base, links).await
+        let dialer = Arc::new(StreamDialer::new(stdin, stdout, "a stream"));
+        Self::over_dialer(dialer, base, links, deadlines).await
     }
 
-    /// The shared tail of both constructors: normalize the base, and decide once
-    /// whether a write may create it.
+    /// The same backend, opening every conversation through `dialer`.
     ///
-    /// One function rather than two copies, because the probe is the *decision*
-    /// half of the vanished-base guard and a second spelling of it is a second
-    /// place for it to be got wrong.
-    async fn over_sftp(
-        session: Option<Arc<Session>>,
-        sftp: Sftp,
+    /// **The seam that makes re-dialling testable**, and the reason it is public.
+    /// A re-dial whose only witness needs a real `sshd` is a re-dial the stated
+    /// gate does not hold — which is the position two of this backend's other
+    /// guarantees were in, and what `HANDOVER.md` §11.3 item 10 is about. A
+    /// dialer that serves the protocol in this process closes it: the real
+    /// backend, the real client library, the real packets, dialled again for
+    /// real after a session is severed.
+    ///
+    /// # Errors
+    /// Whatever the first dial reported.
+    pub async fn over_dialer(
+        dialer: Arc<dyn SftpDial>,
         base: &str,
         links: LinkPolicy,
+        deadlines: Deadlines,
     ) -> Result<Self> {
         let base = normalize_base(base);
-        // One `stat` at connect. A base that is absent now may be created by the
-        // first write; one that is present may never be re-created by any write
-        // in this run. See [`SftpBackend::may_create_base`].
+        let link = Arc::new(dialer.dial().await?);
+        // One `stat`, on the first connection only. A base that is absent now
+        // may be created by the first write; one that is present may never be
+        // re-created by any write in this run — and neither answer is re-asked
+        // on a later connection. See [`SftpBackend::may_create_base`].
         let may_create_base = {
             let probe = if base.is_empty() { "." } else { &base };
-            sftp.fs().metadata(probe).await.is_err()
+            link.sftp.fs().metadata(probe).await.is_err()
         };
         Ok(Self {
-            session,
-            sftp,
+            dialer,
+            link: RwLock::new(Some(link)),
             base,
             links,
             meter: meter::unmetered(),
             may_create_base,
+            deadlines,
         })
+    }
+
+    /// The live conversation, opening one if the last ended.
+    ///
+    /// Read-locked on the happy path so concurrent requests on a healthy session
+    /// do not serialise. The re-check after taking the write lock is not
+    /// belt-and-braces: two operations that both found the cell empty would
+    /// otherwise dial twice and leave one connection with no owner.
+    pub(crate) async fn link(&self) -> Result<Arc<Link>> {
+        if let Some(live) = self.link.read().await.as_ref()
+            && !live.is_dead()
+        {
+            return Ok(Arc::clone(live));
+        }
+        let mut cell = self.link.write().await;
+        if let Some(live) = cell.as_ref()
+            && !live.is_dead()
+        {
+            return Ok(Arc::clone(live));
+        }
+        tracing::debug!(
+            destination = self.dialer.destination(),
+            "re-dialling the sftp session"
+        );
+        let fresh = Arc::new(self.dialer.dial().await?);
+        *cell = Some(Arc::clone(&fresh));
+        Ok(fresh)
+    }
+
+    /// Drop `dead` so the next operation dials a new conversation.
+    ///
+    /// The [`Arc::ptr_eq`] guard is the whole correctness of this function. Two
+    /// operations that fail on the same dead session both arrive here, and the
+    /// second must not discard the *replacement* the first one's retry has
+    /// already dialled — which would turn one dead connection into an unbounded
+    /// sequence of them, each killed by the previous failure's bookkeeping.
+    pub(crate) async fn discard(&self, dead: &Arc<Link>) {
+        // Marked first, so anything already holding this connection — a staging
+        // file being written to, a listing being paged — sees it even if the
+        // cell has since been refilled by somebody else's re-dial.
+        dead.mark_dead();
+        let mut cell = self.link.write().await;
+        if cell.as_ref().is_some_and(|live| Arc::ptr_eq(live, dead)) {
+            tracing::debug!(
+                destination = self.dialer.destination(),
+                "discarding a dead sftp session"
+            );
+            *cell = None;
+        }
+    }
+
+    /// A fresh inactivity watch for one operation.
+    ///
+    /// Handed out for the write path, where the operation outlives any single
+    /// call: `ops::SftpStagedFile` holds one for a whole object and every chunk
+    /// that lands feeds it.
+    pub(crate) fn watch(&self) -> IdleWatch {
+        self.deadlines.watch()
+    }
+
+    /// Run one protocol operation on the live conversation, under this run's
+    /// inactivity deadline, discarding the conversation if it does not survive.
+    ///
+    /// Every request this backend makes goes through here, which is what makes
+    /// the two guarantees uniform rather than remembered. A stall and a lost
+    /// session are treated identically and deliberately: dropping the future is
+    /// how a timeout cancels a request, and a cancelled request leaves a reply
+    /// nobody will read on a multiplexed channel, so a session that has just
+    /// timed out is no more reusable than one that died. Putting it back would
+    /// turn one slow request into every later request failing.
+    pub(crate) async fn on_link<T, F, Fut>(&self, op: F) -> Result<T>
+    where
+        F: FnOnce(Arc<Link>) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        self.watched(|link, _| op(link)).await
+    }
+
+    /// The same, for an operation that moves a body and must therefore report
+    /// its own progress.
+    ///
+    /// The distinction is not cosmetic and the first draft of this module got it
+    /// wrong. [`on_link`](Self::on_link) is right for a request that is over in
+    /// one exchange — a `stat`, a `rename` — where "the operation finished" and
+    /// "bytes moved" are the same event. For a download that reads a 4 GiB
+    /// object in 4 MiB chunks they are not: a watch nothing touched would be a
+    /// deadline on the **whole transfer**, so `--timeout 300` would kill every
+    /// restore that took longer than five minutes *while it was succeeding*.
+    /// That is precisely the failure an idle timeout exists not to have.
+    pub(crate) async fn watched<T, F, Fut>(&self, op: F) -> Result<T>
+    where
+        F: FnOnce(Arc<Link>, IdleWatch) -> Fut,
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let link = self.link().await?;
+        let watch = self.deadlines.watch();
+        let outcome = match watch.guard(op(Arc::clone(&link), watch.clone())).await {
+            Ok(result) => result,
+            Err(expired) => Err(expired.into_store_error(SFTP_BACKEND_NAME)),
+        };
+        if let Err(error) = &outcome
+            && is_session_lost(error)
+        {
+            self.discard(&link).await;
+        }
+        outcome
     }
 
     /// The same backend, declaring every chunk it moves to `meter`.
@@ -318,17 +450,20 @@ impl Backend for SftpBackend {
         } else {
             &self.base
         };
-        let mut fs = self.sftp.fs();
-        match fs.metadata(base).await {
-            Ok(md) => Ok(md
-                .file_type()
-                .is_none_or(|kind| kind.is_dir())
-                .then(crate::guard::StoreIdentity::existence_only)),
-            Err(e) => match map_sftp_err(base, e) {
-                StoreError::NotFound(_) => Ok(None),
-                other => Err(other),
-            },
-        }
+        let base = base.to_string();
+        self.on_link(|link| async move {
+            match link.sftp.fs().metadata(&base).await {
+                Ok(md) => Ok(md
+                    .file_type()
+                    .is_none_or(|kind| kind.is_dir())
+                    .then(crate::guard::StoreIdentity::existence_only)),
+                Err(e) => match map_sftp_err(&base, e) {
+                    StoreError::NotFound(_) => Ok(None),
+                    other => Err(other),
+                },
+            }
+        })
+        .await
     }
 
     /// Verified, atomic write of bytes already in hand.
@@ -400,15 +535,16 @@ impl Backend for SftpBackend {
 
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
         let remote = remote_path(&self.base, key)?;
-        let mut fs = self.sftp.fs();
-        match fs.read(&remote).await {
-            Ok(buf) => {
-                let bytes = buf.freeze();
-                meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
-                Ok(bytes)
-            }
-            Err(e) => Err(map_sftp_err(&remote, e)),
-        }
+        let bytes = self
+            .on_link(|link| async move {
+                match link.sftp.fs().read(&remote).await {
+                    Ok(buf) => Ok(buf.freeze()),
+                    Err(e) => Err(map_sftp_err(&remote, e)),
+                }
+            })
+            .await?;
+        meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
+        Ok(bytes)
     }
 
     async fn get_to_path(&self, key: &ObjectKey, dest: &Path) -> Result<()> {
@@ -417,99 +553,127 @@ impl Backend for SftpBackend {
         // Size first (also the missing→NotFound check), then stream the body down
         // in bounded chunks to a local temp, fsync, and atomically rename — so a
         // failure mid-transfer never leaves a partial object at `dest`.
-        let mut file = self
-            .sftp
-            .open(&remote)
-            .await
-            .map_err(|e| map_sftp_err(&remote, e))?;
-        let total = file
-            .metadata()
-            .await
-            .map_err(|e| map_sftp_err(&remote, e))?
-            .len()
-            .ok_or_else(|| StoreError::Backend("sftp server did not return file size".into()))?;
+        //
+        // One `on_link` for the whole download rather than one per chunk,
+        // because the file handle belongs to the conversation that opened it: a
+        // session that dies halfway invalidates the handle as well as the
+        // request in flight, and the two have to end together. The deadline
+        // therefore spans the transfer and is reset by every chunk that lands,
+        // which is what makes an hours-long restore never approach it.
+        self.watched(|link, watch| async move {
+            let mut file = link
+                .sftp
+                .open(&remote)
+                .await
+                .map_err(|e| map_sftp_err(&remote, e))?;
+            let total = file
+                .metadata()
+                .await
+                .map_err(|e| map_sftp_err(&remote, e))?
+                .len()
+                .ok_or_else(|| {
+                    StoreError::Backend("sftp server did not return file size".into())
+                })?;
 
-        if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent).await?;
-        }
-        let tmp = local_temp(dest);
-        let out = tokio::fs::File::create(&tmp).await?;
-        let mut writer = tokio::io::BufWriter::with_capacity(CHUNK_LEN as usize, out);
+            if let Some(parent) = dest.parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            let tmp = local_temp(dest);
+            let out = tokio::fs::File::create(&tmp).await?;
+            let mut writer = tokio::io::BufWriter::with_capacity(CHUNK_LEN as usize, out);
 
-        for span in chunk_spans(total, CHUNK_LEN) {
-            let chunk = match file.read_all(span.len as usize, BytesMut::new()).await {
-                Ok(c) => c,
-                Err(e) => {
+            for span in chunk_spans(total, CHUNK_LEN) {
+                let chunk = match file.read_all(span.len as usize, BytesMut::new()).await {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tokio::fs::remove_file(&tmp).await;
+                        return Err(map_sftp_err(&remote, e));
+                    }
+                };
+                // The deadline own heartbeat, and the reason this loop uses
+                // `watched` rather than `on_link`: a chunk that arrived is proof
+                // the link is alive, so an hours-long restore over a slow uplink
+                // resets its patience every 4 MiB instead of running out of it.
+                watch.touch();
+                if let Err(e) = writer.write_all(&chunk).await {
                     let _ = tokio::fs::remove_file(&tmp).await;
-                    return Err(map_sftp_err(&remote, e));
+                    return Err(e.into());
                 }
-            };
-            if let Err(e) = writer.write_all(&chunk).await {
+                // Charged per chunk, after it has landed. This loop is the whole
+                // reason `--bwlimit` can now pace one enormous restore: the download
+                // is already windowed, and it simply never said so.
+                meter::charge(self.meter.as_ref(), chunk.len() as u64).await;
+            }
+
+            if let Err(e) = writer.flush().await {
                 let _ = tokio::fs::remove_file(&tmp).await;
                 return Err(e.into());
             }
-            // Charged per chunk, after it has landed. This loop is the whole
-            // reason `--bwlimit` can now pace one enormous restore: the download
-            // is already windowed, and it simply never said so.
-            meter::charge(self.meter.as_ref(), chunk.len() as u64).await;
-        }
-
-        if let Err(e) = writer.flush().await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(e.into());
-        }
-        let out = writer.into_inner();
-        if let Err(e) = out.sync_all().await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(e.into());
-        }
-        drop(out);
-        if let Err(e) = tokio::fs::rename(&tmp, dest).await {
-            let _ = tokio::fs::remove_file(&tmp).await;
-            return Err(e.into());
-        }
-        Ok(())
+            let out = writer.into_inner();
+            if let Err(e) = out.sync_all().await {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(e.into());
+            }
+            drop(out);
+            if let Err(e) = tokio::fs::rename(&tmp, dest).await {
+                let _ = tokio::fs::remove_file(&tmp).await;
+                return Err(e.into());
+            }
+            Ok(())
+        })
+        .await
     }
 
     async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Bytes> {
         let remote = remote_path(&self.base, key)?;
-        let mut file = self
-            .sftp
-            .open(&remote)
-            .await
-            .map_err(|e| map_sftp_err(&remote, e))?;
-        let size = file
-            .metadata()
-            .await
-            .map_err(|e| map_sftp_err(&remote, e))?
-            .len()
-            .ok_or_else(|| StoreError::Backend("sftp server did not return file size".into()))?;
+        let bytes = self
+            .on_link(|link| async move {
+                let mut file = link
+                    .sftp
+                    .open(&remote)
+                    .await
+                    .map_err(|e| map_sftp_err(&remote, e))?;
+                let size = file
+                    .metadata()
+                    .await
+                    .map_err(|e| map_sftp_err(&remote, e))?
+                    .len()
+                    .ok_or_else(|| {
+                        StoreError::Backend("sftp server did not return file size".into())
+                    })?;
 
-        if range.offset > size {
-            return Err(StoreError::RangeOutOfBounds { size });
-        }
-        let available = size - range.offset;
-        let to_read = range.length.map_or(available, |len| len.min(available));
+                if range.offset > size {
+                    return Err(StoreError::RangeOutOfBounds { size });
+                }
+                let available = size - range.offset;
+                let to_read = range.length.map_or(available, |len| len.min(available));
 
-        // Streaming seek: read exactly the requested window at `offset`, never the
-        // whole object. `read_all` internally chunks to the sftp v3 max read length.
-        file.seek(std::io::SeekFrom::Start(range.offset)).await?;
-        let buf = file
-            .read_all(to_read as usize, BytesMut::with_capacity(to_read as usize))
-            .await
-            .map_err(|e| map_sftp_err(&remote, e))?;
-        let bytes = buf.freeze();
+                // Streaming seek: read exactly the requested window at `offset`,
+                // never the whole object. `read_all` internally chunks to the
+                // sftp v3 max read length.
+                file.seek(std::io::SeekFrom::Start(range.offset)).await?;
+                let buf = file
+                    .read_all(to_read as usize, BytesMut::with_capacity(to_read as usize))
+                    .await
+                    .map_err(|e| map_sftp_err(&remote, e))?;
+                Ok(buf.freeze())
+            })
+            .await?;
         meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
         Ok(bytes)
     }
 
     async fn head(&self, key: &ObjectKey) -> Result<ObjectMeta> {
         let remote = remote_path(&self.base, key)?;
-        let mut fs = self.sftp.fs();
-        let md = fs
-            .metadata(&remote)
-            .await
-            .map_err(|e| map_sftp_err(&remote, e))?;
+        let md = self
+            .on_link(|link| async move {
+                link.sftp
+                    .fs()
+                    .metadata(&remote)
+                    .await
+                    .map_err(|e| map_sftp_err(&remote, e))
+            })
+            .await?;
         // A directory (or other non-file) at the key is "not an object".
         if let Some(ft) = md.file_type() {
             if !ft.is_file() {
@@ -528,27 +692,31 @@ impl Backend for SftpBackend {
 
     async fn exists(&self, key: &ObjectKey) -> Result<bool> {
         let remote = remote_path(&self.base, key)?;
-        let mut fs = self.sftp.fs();
-        match fs.metadata(&remote).await {
-            Ok(md) => Ok(md.file_type().is_none_or(|t| t.is_file())),
-            Err(e) => match map_sftp_err(&remote, e) {
-                StoreError::NotFound(_) => Ok(false),
-                other => Err(other),
-            },
-        }
+        self.on_link(|link| async move {
+            match link.sftp.fs().metadata(&remote).await {
+                Ok(md) => Ok(md.file_type().is_none_or(|t| t.is_file())),
+                Err(e) => match map_sftp_err(&remote, e) {
+                    StoreError::NotFound(_) => Ok(false),
+                    other => Err(other),
+                },
+            }
+        })
+        .await
     }
 
     async fn delete(&self, key: &ObjectKey) -> Result<()> {
         let remote = remote_path(&self.base, key)?;
-        let mut fs = self.sftp.fs();
-        match fs.remove_file(&remote).await {
-            Ok(()) => Ok(()),
-            // Deleting a missing object is a no-op success (idempotent).
-            Err(e) => match map_sftp_err(&remote, e) {
-                StoreError::NotFound(_) => Ok(()),
-                other => Err(other),
-            },
-        }
+        self.on_link(|link| async move {
+            match link.sftp.fs().remove_file(&remote).await {
+                Ok(()) => Ok(()),
+                // Deleting a missing object is a no-op success (idempotent).
+                Err(e) => match map_sftp_err(&remote, e) {
+                    StoreError::NotFound(_) => Ok(()),
+                    other => Err(other),
+                },
+            }
+        })
+        .await
     }
 
     async fn list_page(&self, prefix: &str, cursor: Option<String>) -> Result<Page> {
@@ -561,8 +729,12 @@ impl Backend for SftpBackend {
             let j = join(&self.base, &key_root);
             if j.is_empty() { ".".to_string() } else { j }
         };
-        let walked =
-            tree::collect(&self.sftp, open_root, key_root, self.links, Want::Objects).await?;
+        let links = self.links;
+        let walked = self
+            .on_link(|link| async move {
+                tree::collect(&link.sftp, open_root, key_root, links, Want::Objects).await
+            })
+            .await?;
 
         // First page only. This backend re-walks the whole subtree per call
         // (`HANDOVER.md` §9.3 item 10), so attaching the report to every page
@@ -598,14 +770,18 @@ impl Backend for SftpBackend {
             let j = join(&self.base, &key_root);
             if j.is_empty() { ".".to_string() } else { j }
         };
-        let walked = tree::collect(
-            &self.sftp,
-            open_root,
-            key_root,
-            LinkPolicy::Skip,
-            Want::Staging,
-        )
-        .await?;
+        let walked = self
+            .on_link(|link| async move {
+                tree::collect(
+                    &link.sftp,
+                    open_root,
+                    key_root,
+                    LinkPolicy::Skip,
+                    Want::Staging,
+                )
+                .await
+            })
+            .await?;
         Ok(StagingListing::Page(path::staging_page(
             walked.found,
             prefix,
@@ -655,35 +831,80 @@ impl Backend for SftpBackend {
 ///   retried, a permission denial is not
 ///   (`crate::retry::observed`, following `fs/fserrors/retriable_errors.go`).
 /// * **The session itself is gone** — every remaining variant of
-///   [`SftpError`] means the multiplexed `ssh` session or the remote
-///   `sftp-server` has died, and **this backend cannot re-dial one**. So it is
-///   reported as terminal, with a message that says the run has to be started
-///   again, rather than being spent five times into a socket that is not there.
-///   rclone re-dials from a connection pool (`backend/sftp/sftp.go`); DCTL does
-///   not, and classifying this as temporary would buy nothing but a slower way
-///   to report the same failure — the exact shape of claim `HANDOVER.md` §11.2
-///   already records against the old hint.
+///   [`SftpError`], plus the `io` kinds that mean the pipe to `ssh` has closed.
+///   [`StoreError::Transport`], because nothing answered and because another
+///   attempt now genuinely differs: [`SftpBackend::on_link`] discards the dead
+///   conversation and the next one dials a fresh session.
+///
+///   This arm used to say the opposite — terminal, *"run the command again to
+///   open a new one"* — and that was the honest classification for a backend
+///   that could not re-dial: spending five attempts into a socket that is not
+///   there and then reporting that five attempts were made is the shape of
+///   claim `PLAN.md` §6 forbids. What changed is not the wording but the
+///   capability, which is the only thing that makes the new answer true. rclone
+///   reaches the same place from a connection pool
+///   (`backend/sftp/sftp.go:804-833`).
 ///
 /// The protocol's other server-side codes — `PermDenied`, `Failure`,
 /// `BadMessage`, `OpUnsupported` — are statements about the request and are
-/// equally true next time, so they take the same terminal path.
+/// equally true next time, so they stay terminal.
 fn map_sftp_err(key: &str, e: SftpError) -> StoreError {
     match e {
         SftpError::SftpError(SftpErrorKind::NoSuchFile, _) => StoreError::NotFound(key.to_string()),
+        // The server answered. Whatever it said, the conversation carried it,
+        // so the conversation is not what is wrong.
         SftpError::SftpError(kind, message) => {
             StoreError::Backend(format!("sftp server reported {kind:?}: {message}"))
         }
         SftpError::IOError(io) => {
             if io.kind() == std::io::ErrorKind::NotFound {
                 StoreError::NotFound(key.to_string())
+            } else if is_link_failure(io.kind()) {
+                StoreError::Transport {
+                    backend: SFTP_BACKEND_NAME,
+                    detail: format!("the sftp session ended ({io})"),
+                }
             } else {
                 StoreError::Io(io)
             }
         }
-        other => StoreError::Backend(format!(
-            "the sftp session to this host is no longer usable ({other});              run the command again to open a new one"
-        )),
+        other => StoreError::Transport {
+            backend: SFTP_BACKEND_NAME,
+            detail: format!("the sftp session is no longer usable ({other})"),
+        },
     }
+}
+
+/// Whether an `io` error kind means the conversation itself has ended.
+///
+/// The client library reads and writes one pair of pipes to the `ssh` process,
+/// so these kinds are never a statement about a *file* on the server — they are
+/// the channel closing under the request. A remote file error arrives as
+/// `SftpError::SftpError` carrying a protocol status instead, which is why the
+/// two can be told apart structurally rather than by reading a message.
+const fn is_link_failure(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::BrokenPipe
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::NotConnected
+            | std::io::ErrorKind::UnexpectedEof
+            | std::io::ErrorKind::TimedOut
+    )
+}
+
+/// Whether this failure means the conversation must be thrown away.
+///
+/// One predicate, read off the error's *shape*, so the decision to re-dial is
+/// made in exactly one place and cannot drift from the decision to retry:
+/// `crate::retry::observed` reads the same variant as transient, so everything
+/// discarded here is also everything the layer above will attempt again.
+fn is_session_lost(error: &StoreError) -> bool {
+    matches!(
+        error,
+        StoreError::Transport { backend, .. } if *backend == SFTP_BACKEND_NAME
+    )
 }
 
 /// A unique sibling temp path for the local download staging file: appending the

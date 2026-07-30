@@ -18,6 +18,7 @@
 pub mod b2;
 pub mod backend;
 pub mod checksum;
+pub mod deadline;
 pub mod durable;
 pub mod error;
 pub mod guard;
@@ -41,6 +42,7 @@ mod tls;
 
 pub use backend::{Backend, UploadTicket};
 pub use checksum::{ContentHash, HashAlgo, Hasher};
+pub use deadline::{Deadlines, Expired, IdleWatch};
 pub use error::{Result, StoreError};
 pub use guard::{Guarded, StoreIdentity};
 pub use incoming::{ObjectStream, ObjectWriter, object_stream};

@@ -19,6 +19,7 @@ use bytes::Bytes;
 
 use crate::backend::{Backend, UploadTicket};
 use crate::checksum::ContentHash;
+use crate::deadline::Deadlines;
 use crate::error::Result;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
@@ -31,10 +32,19 @@ pub struct S3Backend {
 }
 
 impl S3Backend {
-    /// Create a backend from an [`S3Config`], with hybrid post-quantum TLS.
-    pub fn new(config: S3Config) -> Result<Self> {
+    /// Create a backend from an [`S3Config`], with hybrid post-quantum TLS and
+    /// the run's `--timeout` / `--contimeout`.
+    ///
+    /// `deadlines` is a required argument rather than a builder, and the
+    /// difference is the point. A builder can be forgotten, and this crate has
+    /// already paid for that once: `crate::meter` was written into each arm of
+    /// the CLI's construction match and four of the five arms dropped it, so
+    /// `--bwlimit` was inert on every cloud provider with nothing to indicate
+    /// it. A positional argument cannot be dropped — the compiler will not
+    /// accept the call without it.
+    pub fn new(config: S3Config, deadlines: Deadlines) -> Result<Self> {
         Ok(Self {
-            client: S3Client::new(config)?,
+            client: S3Client::new(config, deadlines)?,
         })
     }
 

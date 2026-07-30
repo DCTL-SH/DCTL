@@ -48,6 +48,7 @@
 mod gated;
 
 use bytes::Bytes;
+use dctl_store::Deadlines;
 use dctl_store::b2::{B2Backend, B2Credentials};
 use dctl_store::{Backend, ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, SourceModified};
 
@@ -71,6 +72,7 @@ fn backend_or_fail(test: &str) -> B2Backend {
     B2Backend::new(
         B2Credentials::new(creds[0].clone(), creds[1].clone()),
         creds[2].clone(),
+        Deadlines::default(),
     )
     .expect("a b2 backend from live credentials")
 }

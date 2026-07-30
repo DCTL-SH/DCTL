@@ -31,6 +31,7 @@
 mod gated;
 
 use bytes::Bytes;
+use dctl_store::Deadlines;
 use dctl_store::{
     Backend, ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, SftpBackend, SftpConfig,
     SourceModified,
@@ -91,9 +92,12 @@ async fn sftp_full_round_trip() {
     // cleanup can remove exactly what this run created.
     let run = format!("run-{}", std::process::id());
     let base = format!("{}/{run}", base_from_env());
-    let sftp = SftpBackend::connect(SftpConfig::new(host.clone(), base.clone()))
-        .await
-        .expect("connect + open sftp");
+    let sftp = SftpBackend::connect(
+        SftpConfig::new(host.clone(), base.clone()),
+        Deadlines::default(),
+    )
+    .await
+    .expect("connect + open sftp");
 
     // ---- small object: put → verify → head/exists → get → range → list -------
     let small_key = ObjectKey::new("nested/dir/small.bin");
@@ -428,9 +432,12 @@ async fn sftp_symlink_policy_over_the_wire() {
     };
 
     // ── the default: nothing followed, everything counted ────────────────
-    let skipping = SftpBackend::connect(SftpConfig::new(host.clone(), srv.clone()))
-        .await
-        .expect("connect for the default policy");
+    let skipping = SftpBackend::connect(
+        SftpConfig::new(host.clone(), srv.clone()),
+        Deadlines::default(),
+    )
+    .await
+    .expect("connect for the default policy");
     let page = skipping.list_page("", None).await.expect("list");
     assert_eq!(
         keys(&page),
@@ -458,6 +465,7 @@ async fn sftp_symlink_policy_over_the_wire() {
     // ── --links follow: the tree behind the link arrives, and it terminates ──
     let following = SftpBackend::connect(
         SftpConfig::new(host.clone(), srv.clone()).with_links(LinkPolicy::Follow),
+        Deadlines::default(),
     )
     .await
     .expect("connect for the following policy");
@@ -500,6 +508,7 @@ async fn sftp_symlink_policy_over_the_wire() {
     // ── --links in-tree: the outward link is refused by name ─────────────
     let confined = SftpBackend::connect(
         SftpConfig::new(host.clone(), srv.clone()).with_links(LinkPolicy::InTree),
+        Deadlines::default(),
     )
     .await
     .expect("connect for the confined policy");

@@ -25,6 +25,7 @@ use bytes::Bytes;
 
 use crate::backend::UploadTicket;
 use crate::checksum::{ContentHash, Hasher};
+use crate::deadline::Answered;
 use crate::error::{Result, StoreError};
 use crate::model::{ObjectKey, PutOutcome};
 use crate::modified::SourceModified;
@@ -37,7 +38,7 @@ use super::api::{
 };
 use super::name::encode_file_name;
 use super::retry::{self, Attempt};
-use super::{B2Backend, constants, read_json, transport_attempt};
+use super::{B2Backend, constants, read_json, stalled_attempt, transport_attempt};
 
 /// The `fileInfo` B2 stores with an object, as the JSON body of
 /// `b2_start_large_file` wants it.
@@ -189,14 +190,18 @@ async fn upload_single(
         }
         // The object's one buffer, re-sent rather than re-copied: `Bytes::clone`
         // moves a refcount, so a retried upload costs no memory beyond the
-        // allocation the first attempt already had.
-        let resp = request
-            .body(data.clone())
-            .send()
+        // allocation the first attempt already had. Framing it for the deadline
+        // costs nothing further: the frames are views of that same buffer.
+        let watch = b2.deadlines.watch();
+        let response = watch
+            .guard(request.body(watch.body(data.clone())).send())
             .await
+            .map_err(stalled_attempt)?
             .map_err(transport_attempt)?;
 
-        let info: UploadFileResponse = b2.observe_expiry(read_json(resp).await).await?;
+        let info: UploadFileResponse = b2
+            .observe_expiry(read_json(Answered { watch, response }).await)
+            .await?;
         // A SHA-1 B2 echoes back wrong is not a busy pod: B2 already checked the
         // body against the header it was sent, so a different digest in the
         // answer is what it holds. Settled, so it is reported as the mismatch it
@@ -473,19 +478,25 @@ async fn upload_one_part(
             )
             .await?;
 
-        let resp = b2
-            .client
-            .post(&part_url.upload_url)
-            .header(constants::H_AUTHORIZATION, &part_url.authorization_token)
-            .header(constants::H_PART_NUMBER, part_number.to_string())
-            .header(constants::H_CONTENT_SHA1, &sha1_hex)
-            .header(constants::H_CONTENT_LENGTH, chunk.len().to_string())
-            .body(chunk.clone())
-            .send()
+        let watch = b2.deadlines.watch();
+        let response = watch
+            .guard(
+                b2.client
+                    .post(&part_url.upload_url)
+                    .header(constants::H_AUTHORIZATION, &part_url.authorization_token)
+                    .header(constants::H_PART_NUMBER, part_number.to_string())
+                    .header(constants::H_CONTENT_SHA1, &sha1_hex)
+                    .header(constants::H_CONTENT_LENGTH, chunk.len().to_string())
+                    .body(watch.body(chunk.clone()))
+                    .send(),
+            )
             .await
+            .map_err(stalled_attempt)?
             .map_err(transport_attempt)?;
 
-        let part: UploadPartResponse = b2.observe_expiry(read_json(resp).await).await?;
+        let part: UploadPartResponse = b2
+            .observe_expiry(read_json(Answered { watch, response }).await)
+            .await?;
         // Settled, exactly as on the single-shot path above — and it matters
         // more here, because the thing that would be re-sent is a whole part.
         verify_sha1(&sha1_hex, &part.content_sha1).map_err(Attempt::settled)

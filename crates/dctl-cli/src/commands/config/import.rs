@@ -135,7 +135,7 @@ pub async fn run(ctx: &Ctx, args: &ImportArgs) -> Result<()> {
         );
     }
 
-    let backend = crate::remote::build_backend(&args.location, ctx.globals.links)?;
+    let backend = crate::remote::build_backend(&args.location, ctx.globals.links, ctx.deadlines)?;
     let slots = confirm_vault_present(ctx, &args.location, envelope::probe(&backend).await?)?;
 
     pair.apply(&mut configured, ctx.globals.force)?;

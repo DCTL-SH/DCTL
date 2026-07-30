@@ -413,16 +413,16 @@ checked before anything is listed).
 | `--bwlimit` | `RATE` | unlimited | — |
 | `--retries` | `N` | `3` | — |
 | `--low-level-retries` | `N` | **refused** | — |
-| `--timeout` | `SECONDS` | **refused** | — |
-| `--contimeout` | `SECONDS` | **refused** | — |
+| `--timeout` | `SECONDS` | `300` | — |
+| `--contimeout` | `SECONDS` | `60` | — |
 | `--max-transfer` | `SIZE` | unlimited | — |
 
-Every flag in this group used to parse and do nothing. Three now act
-(`--bwlimit`, `--retries`, `--max-transfer`), two accept only the value that is
-true of this build (`--transfers 1`, `--checkers 1`), and three are **refused**
-with the reason — exit **7**, before anything is read or written, the way
-[`--key-file`](#--key-file-path) is. There is no fourth outcome; see
-[Flags that are refused](#flags-that-are-refused).
+Every flag in this group used to parse and do nothing. Five now act
+(`--bwlimit`, `--retries`, `--max-transfer`, `--timeout`, `--contimeout`), two
+accept only the value that is true of this build (`--transfers 1`,
+`--checkers 1`), and one is **refused** with the reason — exit **7**, before
+anything is read or written, the way [`--key-file`](#--key-file-path) is. There
+is no fourth outcome; see [Flags that are refused](#flags-that-are-refused).
 
 ### `--transfers N`
 
@@ -523,17 +523,62 @@ Whole-file retries are separate and are what `--retries` controls.
 
 ### `--timeout SECONDS`
 
-**Refused** (exit 7). No backend in this build applies an inactivity timeout: the
-storage layer constructs its HTTP clients and its ssh session without one, so
-there is nothing for this to set. It cannot honestly be approximated by a
-deadline on the whole operation either — that would abort a large transfer that
-is progressing perfectly, which is the opposite of what an idle timeout is for.
+Give up on a transfer that has moved **no data at all** for this long. Default
+`300` (five minutes); `0` waits forever.
+
+**It is an inactivity deadline, not a deadline on the operation**, and the
+difference is the whole flag. `--timeout 300` does not mean "fail after five
+minutes" — a 4 GiB restore over a domestic uplink takes hours and never comes
+close to it, because every frame that moves resets the clock. It means "fail
+after five minutes in which nothing moved". This is rclone's meaning of the same
+flag (`fs/config.go:122`: *"IO idle timeout"*) and the reason its default is
+generous: a deadline that fires on a transfer which is succeeding destroys work,
+where one that fires late only costs you the difference.
+
+It bounds **one attempt**. A run that meets a genuinely dead network spends this
+long per attempt across the request-level schedule
+([`--low-level-retries`](#--low-level-retries-n) describes it), so the bound on
+the whole run is the product — roughly six times this number plus the backoff.
+An operator sizing a backup window needs the product, so it is stated here rather
+than left to be discovered.
+
+Where it reaches, and how closely:
+
+| Backend | What is watched | Grain |
+|---|---|---|
+| `b2`, `s3`, `r2` | the connection taking the next slice of a request body, and each chunk of a response arriving | 64 KiB out, one network chunk in |
+| `sftp` | each protocol operation completing | one operation — up to a 4 MiB read or write |
+| `local:` | — | not applied; see below |
+
+The grain is coarser than rclone's, which arms the deadline on the socket itself
+and re-arms it per `read`/`write` syscall (`fs/fshttp/dialer.go:101-127`). DCTL
+cannot: `reqwest` owns its connector and the connection type it hands to hyper is
+private, so the closest seam available is hyper asking for the next body frame —
+which it only does once the socket has taken the previous one. The practical
+difference appears only on a link so slow that a single frame or chunk takes
+longer than the whole deadline; at the default that is under 14 KiB/s on `sftp`,
+and the remedy is a larger `--timeout`.
+
+**`local:` applies neither this nor `--contimeout`**, and that is a statement
+rather than an omission. There is no connection to establish, and the case that
+would want a deadline — a wedged network mount — blocks in uninterruptible sleep
+inside the kernel, where abandoning the wait does not stop the read. A timeout
+there would be a report, not a remedy. The errors a local filesystem does produce
+are covered by its own retry schedule.
 
 ### `--contimeout SECONDS`
 
-**Refused** (exit 7). No backend sets a connection-establishment timeout: the
-HTTP clients take the default and the sftp backend takes `ssh`'s, neither of
-which this flag is wired to.
+Give up on **reaching** a host after this long. Default `60`; `0` waits forever.
+
+Separate from `--timeout` because the two bound different failures. Nothing is at
+risk while a connection is being established, so abandoning one costs a round of
+backoff and nothing else — which is why this is an order of magnitude more
+impatient than the deadline on a transfer already carrying data.
+
+On `b2`, `s3` and `r2` it bounds the TCP connect **and** the TLS handshake. On
+`sftp` it becomes `ssh -o ConnectTimeout`, so it bounds the whole chain — a
+`ProxyCommand` building a tunnel, the TLS session inside it, and the SSH
+handshake — rather than only the part DCTL could see for itself.
 
 ### `--max-transfer SIZE`
 
@@ -1219,9 +1264,8 @@ instead. Nothing here is silently ignored.
 * `--verify-samples` — there is no sampled read to set a depth on. `--verify
   sample` reads and authenticates the *whole* object on the vault path, so it
   costs a full egress and a depth would describe nothing.
-* `--low-level-retries` — request-level retries exist for B2 only.
-* `--timeout`, `--contimeout` — no backend applies an inactivity or connection
-  timeout.
+* `--low-level-retries` — request-level retries exist on every backend, but on
+  a per-provider schedule of four numbers that one `N` cannot set.
 * `--dump` — the protocol tracing layer these select from is not installed, so
   every target would produce silence. Raise `-vvv` for the tracing this build
   does emit.

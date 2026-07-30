@@ -15,6 +15,8 @@ use crate::audit::sink::Sink;
 use crate::cli::globals::{GlobalArgs, VerifyMode};
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
+use dctl_store::Deadlines;
+
 use crate::limits::Limits;
 use crate::output::{Out, Progress, Stats};
 
@@ -50,6 +52,16 @@ pub struct Ctx {
     /// that could forget to, which is how eleven flags came to do nothing.
     pub limits: Limits,
 
+    /// How long this run waits — `--contimeout` to reach a host, `--timeout` for
+    /// one that has gone quiet.
+    ///
+    /// On the context for the same reason [`Ctx::limits`] is: patience is a
+    /// property of the *invocation*, not of each destination, and an operator
+    /// who said "my backup window is thirty seconds" means it about the run. A
+    /// command that had to construct its own is a command that could forget to,
+    /// which is the failure that put eleven flags on `cli::reach`'s list.
+    pub deadlines: Deadlines,
+
     /// The tamper-evident log every data-changing operation appends to
     /// (`PLAN.md` §7).
     ///
@@ -68,6 +80,7 @@ impl Ctx {
     pub fn new(globals: GlobalArgs) -> Self {
         let audit = Sink::new(&globals);
         let limits = Limits::resolve(&globals);
+        let deadlines = Deadlines::from_seconds(globals.contimeout, globals.timeout);
         let out = Out::new(
             globals.effective_format(),
             globals.color,
@@ -97,6 +110,7 @@ impl Ctx {
             stats,
             progress,
             limits,
+            deadlines,
             audit,
         }
     }

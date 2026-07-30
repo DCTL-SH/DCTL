@@ -144,12 +144,20 @@ pub async fn run(ctx: &Ctx, args: &ReplicateArgs) -> Result<()> {
     filters::refuse(&ctx.globals)?;
 
     let configured = config::load_or_default(&config::resolve_path(ctx.globals.config.as_deref()))?;
-    let source = target::open(&configured, &args.source, Side::Source, ctx.globals.links).await?;
+    let source = target::open(
+        &configured,
+        &args.source,
+        Side::Source,
+        ctx.globals.links,
+        ctx.deadlines,
+    )
+    .await?;
     let destination = target::open(
         &configured,
         &args.destination,
         Side::Destination,
         ctx.globals.links,
+        ctx.deadlines,
     )
     .await?;
     target::refuse_same_place(&source, &destination)?;

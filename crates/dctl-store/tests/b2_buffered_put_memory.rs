@@ -22,6 +22,7 @@
 mod support;
 
 use bytes::Bytes;
+use dctl_store::Deadlines;
 use dctl_store::b2::{B2Backend, B2Credentials};
 use dctl_store::{Backend, ContentHash, HashAlgo, ObjectKey, SourceModified};
 use support::mock_b2::{APP_KEY, BUCKET, KEY_ID, MockB2};
@@ -42,10 +43,14 @@ const SLACK: u64 = 8 * 1024 * 1024;
 #[tokio::test]
 async fn a_buffered_put_allocates_nothing_in_proportion_to_the_object_it_was_given() {
     let mock = MockB2::start(7_000_000).await;
-    let b2 = B2Backend::new(B2Credentials::new(KEY_ID, APP_KEY), BUCKET)
-        .expect("the backend builds")
-        .with_authorize_url(mock.authorize_url())
-        .with_part_size(Some(PART));
+    let b2 = B2Backend::new(
+        B2Credentials::new(KEY_ID, APP_KEY),
+        BUCKET,
+        Deadlines::default(),
+    )
+    .expect("the backend builds")
+    .with_authorize_url(mock.authorize_url())
+    .with_part_size(Some(PART));
 
     // The caller's buffer, allocated and hashed before the baseline: it is the
     // cost of calling this API, not the cost of the upload, and the point of the

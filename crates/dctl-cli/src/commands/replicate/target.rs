@@ -48,7 +48,7 @@
 
 use std::sync::Arc;
 
-use dctl_store::{Backend, LinkPolicy};
+use dctl_store::{Backend, Deadlines, LinkPolicy};
 
 use crate::commands::config::settings;
 use crate::config::{Config, RemoteDef};
@@ -165,7 +165,13 @@ impl Store {
 /// store, or a vault remote. [`ExitCode::FatalError`] for an unresolvable
 /// remote, missing credentials, or a location that is neither declared a store
 /// nor holds a vault's envelope.
-pub async fn open(config: &Config, spec: &str, side: Side, links: LinkPolicy) -> Result<Store> {
+pub async fn open(
+    config: &Config,
+    spec: &str,
+    side: Side,
+    links: LinkPolicy,
+    deadlines: Deadlines,
+) -> Result<Store> {
     let parsed = RemoteSpec::parse(spec)?;
     refuse_subpath(&parsed, spec, side)?;
 
@@ -184,7 +190,7 @@ pub async fn open(config: &Config, spec: &str, side: Side, links: LinkPolicy) ->
     // flag under `Filtering`; `--bwlimit` is not among the flags it honours, and
     // silently pacing it from a global would be a behaviour its own refusal says
     // it does not have.
-    let backend = registry::build(&resolved, links, dctl_store::unmetered())?;
+    let backend = registry::build(&resolved, links, dctl_store::unmetered(), deadlines)?;
     let standing = admit(&parsed, config, &backend, spec, side).await?;
 
     Ok(Store {
@@ -355,9 +361,15 @@ mod tests {
         // would have failed with something else entirely.
         let config = vault_pair();
         for side in [Side::Source, Side::Destination] {
-            let error = open(&config, "archive:", side, LinkPolicy::default())
-                .await
-                .unwrap_err();
+            let error = open(
+                &config,
+                "archive:",
+                side,
+                LinkPolicy::default(),
+                Deadlines::default(),
+            )
+            .await
+            .unwrap_err();
             assert_eq!(error.code(), ExitCode::Usage);
             assert!(error.message().contains("decrypts"), "{}", error.message());
             // The remediation has to be the exact argument that works.
@@ -419,6 +431,7 @@ mod tests {
             "offsite-store:",
             Side::Destination,
             LinkPolicy::default(),
+            Deadlines::default(),
         )
         .await
         .unwrap();
@@ -440,6 +453,7 @@ mod tests {
             &format!("local:{}", store.display()),
             Side::Source,
             LinkPolicy::default(),
+            Deadlines::default(),
         )
         .await
         .unwrap();
@@ -460,6 +474,7 @@ mod tests {
             &format!("local:{}", empty.display()),
             Side::Destination,
             LinkPolicy::default(),
+            Deadlines::default(),
         )
         .await
         .unwrap_err();
@@ -487,6 +502,7 @@ mod tests {
             "archive-store:photos",
             Side::Source,
             LinkPolicy::default(),
+            Deadlines::default(),
         )
         .await
         .unwrap_err();
@@ -523,6 +539,7 @@ mod tests {
             "primary-store:",
             Side::Source,
             LinkPolicy::default(),
+            Deadlines::default(),
         )
         .await
         .unwrap();
@@ -531,6 +548,7 @@ mod tests {
             "offsite-store:",
             Side::Destination,
             LinkPolicy::default(),
+            Deadlines::default(),
         )
         .await
         .unwrap();

@@ -3592,7 +3592,7 @@ fn stats_one_line_condenses_a_record_that_is_otherwise_a_block() {
 
 #[test]
 fn every_inert_flag_is_now_refused_by_name_before_anything_runs() {
-    // The seven that cannot be honoured. Each must fail the run, name itself,
+    // The five that cannot be honoured. Each must fail the run, name itself,
     // explain what the tool does instead, and leave the destination untouched —
     // the `--key-file` contract, applied to every one of them.
     //
@@ -3600,12 +3600,14 @@ fn every_inert_flag_is_now_refused_by_name_before_anything_runs() {
     // purpose: the unit test proves the table refuses, and this proves the table
     // is *reached* by a real command line. Those are different claims, and the
     // second one is what `--key-file` got wrong for a whole release.
+    //
+    // It was seven. `--timeout` and `--contimeout` left this list because they
+    // are honoured now, and the test directly below is the other half of that
+    // move: a flag may only leave here by arriving there.
     let cases: &[(&[&str], &str)] = &[
         (&["--transfers", "8"], "--transfers"),
         (&["--checkers", "16"], "--checkers"),
         (&["--low-level-retries", "5"], "--low-level-retries"),
-        (&["--timeout", "30"], "--timeout"),
-        (&["--contimeout", "10"], "--contimeout"),
         (&["--verify-samples", "4"], "--verify-samples"),
         (&["--dump", "headers"], "--dump"),
     ];
@@ -3633,6 +3635,67 @@ fn every_inert_flag_is_now_refused_by_name_before_anything_runs() {
             "{name} must be refused before anything is written"
         );
     }
+}
+
+#[test]
+fn the_two_deadlines_are_accepted_and_a_healthy_transfer_is_untouched() {
+    // The other half of the list above: these two used to be refused with exit
+    // 7, so a run that named them transferred nothing at all. Now they are
+    // honoured, which has to mean two things at once — the run is accepted, and
+    // the data actually arrives.
+    //
+    // The second half is the one worth having. An idle deadline that fired on a
+    // transfer which was progressing would be worse than no deadline: it would
+    // destroy work that was succeeding, and it would do it silently on exactly
+    // the large transfers that take longest to redo. A local copy is instant, so
+    // this cannot catch a deadline that is merely too short — but it does catch
+    // one that is armed wrongly, which is the failure that would land here.
+    for flag in [
+        vec!["--timeout", "30"],
+        vec!["--contimeout", "10"],
+        vec!["--timeout", "300", "--contimeout", "60"],
+        // Zero is rclone's "wait forever" and must be a legal answer rather than
+        // a deadline of no length at all.
+        vec!["--timeout", "0", "--contimeout", "0"],
+    ] {
+        let sandbox = Sandbox::new();
+        sandbox.write("src/a.txt", b"data");
+
+        let mut command = sandbox.dctl();
+        command.args(&flag).args(["copy", "src", "dst"]);
+        command.assert().success();
+
+        assert!(
+            sandbox.exists("dst/a.txt"),
+            "{flag:?} must transfer the file, not merely be accepted"
+        );
+    }
+}
+
+#[test]
+fn the_deadlines_publish_the_defaults_they_apply() {
+    // A default is a published claim. `--timeout` printed `[default: 300]` for a
+    // five-minute idle timeout no backend applied, which is why it carried no
+    // default at all until this pass. It carries one again because it is true,
+    // and `--help` is where an operator reads it.
+    let sandbox = Sandbox::new();
+    let mut command = sandbox.dctl();
+    command.arg("--help");
+    let shown = command.assert().success();
+    let stdout = String::from_utf8_lossy(&shown.get_output().stdout).into_owned();
+
+    assert!(stdout.contains("--timeout"), "{stdout}");
+    assert!(stdout.contains("--contimeout"), "{stdout}");
+    // rclone's own two numbers (`fs/config.go:115-123`), which is what makes a
+    // migrating script's expectations hold.
+    assert!(
+        stdout.contains("[default: 300]"),
+        "the idle deadline must publish its five minutes:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("[default: 60]"),
+        "and the connect deadline its sixty seconds:\n{stdout}"
+    );
 }
 
 #[test]

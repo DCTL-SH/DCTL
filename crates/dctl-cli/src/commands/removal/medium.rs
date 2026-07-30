@@ -124,8 +124,12 @@ impl Medium {
         let resolved = crate::remote::resolve::resolve(&spec, &config)?;
         // Unmetered: a delete moves no body. Pacing it would charge a rate
         // limit for bytes that never crossed the link.
-        let backend =
-            crate::remote::registry::build(&resolved, ctx.globals.links, dctl_store::unmetered())?;
+        let backend = crate::remote::registry::build(
+            &resolved,
+            ctx.globals.links,
+            dctl_store::unmetered(),
+            ctx.deadlines,
+        )?;
         Ok(Self::Plain {
             source: PlainSource::new(Arc::clone(&backend)),
             backend,
@@ -259,6 +263,7 @@ impl Medium {
                     &resolved,
                     ctx.globals.links,
                     dctl_store::unmetered(),
+                    ctx.deadlines,
                 )
             }
         }

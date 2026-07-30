@@ -60,8 +60,10 @@
 use std::collections::BTreeMap;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use dctl_store::sftp::dial::{Link, SftpDial};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 // ── the wire, as version 3 defines it ────────────────────────────────────────
@@ -203,6 +205,7 @@ pub fn start() -> (MockSftp, ClientPipes) {
         handles: BTreeMap::new(),
         next_handle: 0,
         log: Arc::clone(&log),
+        silent_on_write: Arc::new(AtomicBool::new(false)),
     };
     tokio::spawn(async move {
         // A pipe that closes is the client going away, which every test does at
@@ -217,6 +220,174 @@ pub fn start() -> (MockSftp, ClientPipes) {
             reads: client_reads,
         },
     )
+}
+
+// ── re-dialling: many conversations, one directory ───────────────────────────
+//
+// `start` above hands over one pipe pair and is right for every test whose
+// subject is a request. It cannot express the subject of `HANDOVER.md` §11.2's
+// last open entry — *re-dial a dead connection* — because that needs three
+// things this file did not have: a **second** conversation, served on the **same
+// directory** so the recovered operation can be seen to have really happened,
+// and a way to **kill** the first one mid-run.
+//
+// Without them the re-dial would be provable only against a real `sshd`, which
+// is the position `HANDOVER.md` §11.3 item 10 already records for two other
+// guarantees: a promise whose only witness needs a host is a promise the stated
+// gate does not hold.
+
+/// A server that will answer as many conversations as it is asked for, all of
+/// them over one directory.
+///
+/// Handed to the backend as a [`SftpDial`], so what runs is the real
+/// `SftpBackend` re-dialling through the real client library and the real
+/// version-3 packet encoding — not a stub that reports having reconnected.
+pub struct RedialableSftp {
+    root: tempfile::TempDir,
+    log: Arc<Mutex<Vec<Seen>>>,
+    /// Whether the server should stop answering at the first write. See
+    /// [`RedialableSftp::go_silent_on_write`].
+    silent_on_write: Arc<AtomicBool>,
+    /// Conversations opened so far. The number a re-dial test asserts on.
+    dials: Arc<AtomicUsize>,
+    /// The task serving the newest conversation, so a test can end it.
+    live: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
+}
+
+impl RedialableSftp {
+    /// A server over a fresh temporary directory, with nothing dialled yet.
+    #[must_use]
+    pub fn start() -> Self {
+        Self {
+            root: tempfile::TempDir::new().expect("a temporary directory"),
+            log: Arc::new(Mutex::new(Vec::new())),
+            silent_on_write: Arc::new(AtomicBool::new(false)),
+            dials: Arc::new(AtomicUsize::new(0)),
+            live: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// The directory every conversation resolves paths under.
+    #[must_use]
+    pub fn root(&self) -> &Path {
+        self.root.path()
+    }
+
+    /// How many conversations have been opened.
+    ///
+    /// One after construction. Two means something re-dialled, which is the
+    /// whole assertion — and it is a count rather than a boolean so a test can
+    /// also prove the *absence* of a re-dial on the healthy path, where an extra
+    /// connection per request would be a silent performance defect.
+    #[must_use]
+    pub fn dials(&self) -> usize {
+        self.dials.load(Ordering::SeqCst)
+    }
+
+    /// Every request every conversation has answered, in arrival order.
+    #[must_use]
+    pub fn seen(&self) -> Vec<Seen> {
+        self.log
+            .lock()
+            .expect("the request log is not poisoned")
+            .clone()
+    }
+
+    /// Answer every request up to the first `SSH_FXP_WRITE`, and then nothing,
+    /// ever.
+    ///
+    /// A different fault from [`sever`](Self::sever) and a more searching one.
+    /// Severing kills the wire, which every layer notices sooner or later; this
+    /// leaves the wire perfectly healthy and simply stops replying — a server
+    /// whose disk has wedged, a network that black-holes one direction, a pod
+    /// that has stopped scheduling. Nothing is broken, so nothing reports
+    /// anything, and without a deadline the write waits for as long as TCP
+    /// allows.
+    ///
+    /// Aimed at the **write** specifically because that is where the deadline
+    /// was missing: `RemoteFs::create` was guarded and every `write_all` after
+    /// it was not, so a session that went quiet mid-object hung. A test that
+    /// stalled the `open` instead would have passed against that gap.
+    pub fn go_silent_on_write(&self) {
+        self.silent_on_write.store(true, Ordering::SeqCst);
+    }
+
+    /// Kill the live conversation, as a dropped `ssh` session does.
+    ///
+    /// Aborting the task drops both pipe ends, so the client's next read reaches
+    /// end-of-file and its next write meets a broken pipe — which is what the
+    /// far end of a severed multiplexed session looks like from inside
+    /// `openssh_sftp_client`, and what `sftp::is_link_failure` classifies.
+    ///
+    /// Deliberately *not* a clean protocol shutdown: a server that said goodbye
+    /// would be testing a case that does not happen. A connection dies without
+    /// warning or it does not die at all.
+    pub fn sever(&self) {
+        if let Some(task) = self
+            .live
+            .lock()
+            .expect("the live-session handle is not poisoned")
+            .take()
+        {
+            task.abort();
+        }
+    }
+
+    /// A dialer for this server, for [`SftpBackend::over_dialer`].
+    #[must_use]
+    pub fn dialer(&self) -> Arc<RedialDialer> {
+        Arc::new(RedialDialer {
+            root: self.root.path().to_path_buf(),
+            log: Arc::clone(&self.log),
+            silent_on_write: Arc::clone(&self.silent_on_write),
+            dials: Arc::clone(&self.dials),
+            live: Arc::clone(&self.live),
+        })
+    }
+}
+
+/// The [`SftpDial`] half of [`RedialableSftp`].
+pub struct RedialDialer {
+    root: PathBuf,
+    log: Arc<Mutex<Vec<Seen>>>,
+    silent_on_write: Arc<AtomicBool>,
+    dials: Arc<AtomicUsize>,
+    live: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
+}
+
+#[async_trait::async_trait]
+impl SftpDial for RedialDialer {
+    async fn dial(&self) -> dctl_store::Result<Link> {
+        let (server_reads, client_writes) = tokio::io::simplex(PIPE_CAPACITY);
+        let (client_reads, server_writes) = tokio::io::simplex(PIPE_CAPACITY);
+
+        let mut server = Server {
+            root: self.root.clone(),
+            handles: BTreeMap::new(),
+            next_handle: 0,
+            log: Arc::clone(&self.log),
+            silent_on_write: Arc::clone(&self.silent_on_write),
+        };
+        // Handles are per conversation, exactly as they are on a real server:
+        // the `Server` is new each time, so a handle issued before a sever is
+        // meaningless afterwards. A shared handle table would let a re-dialled
+        // client keep using a file it opened on a session that no longer exists,
+        // which is the one thing this test must not accidentally permit.
+        let task = tokio::spawn(async move {
+            let _ = server.serve(server_reads, server_writes).await;
+        });
+        *self
+            .live
+            .lock()
+            .expect("the live-session handle is not poisoned") = Some(task.abort_handle());
+        self.dials.fetch_add(1, Ordering::SeqCst);
+
+        Link::over_stream(client_writes, client_reads, "the in-process server").await
+    }
+
+    fn destination(&self) -> &str {
+        "the in-process server"
+    }
 }
 
 /// The two ends a client is built from.
@@ -241,6 +412,9 @@ struct Server {
     handles: BTreeMap<u32, Handle>,
     next_handle: u32,
     log: Arc<Mutex<Vec<Seen>>>,
+    /// Stop answering once a write arrives. Default `false`, so `start` and
+    /// every existing test are untouched.
+    silent_on_write: Arc<AtomicBool>,
 }
 
 impl Server {
@@ -261,6 +435,12 @@ impl Server {
             let Some((&kind, rest)) = packet.split_first() else {
                 return Ok(());
             };
+            if kind == SSH_FXP_WRITE && self.silent_on_write.load(Ordering::SeqCst) {
+                // The wire stays up and the request is never answered. Returning
+                // would close the pipes, which the client reports at once — and
+                // an error it reports at once is not the case being tested.
+                std::future::pending::<()>().await;
+            }
             let reply = if kind == SSH_FXP_INIT {
                 version_packet()
             } else {

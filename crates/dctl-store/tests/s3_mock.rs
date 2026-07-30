@@ -20,6 +20,7 @@
 mod support;
 
 use bytes::Bytes;
+use dctl_store::Deadlines;
 use dctl_store::{
     Backend, ByteRange, ContentHash, HashAlgo, ObjectKey, R2Backend, RetryPolicy, Retrying,
     S3Backend, S3Config, SourceModified, StoreError,
@@ -58,7 +59,7 @@ fn config(endpoint: &str) -> S3Config {
 }
 
 fn backend(mock: &MockS3) -> S3Backend {
-    S3Backend::new(config(mock.endpoint())).expect("the backend builds")
+    S3Backend::new(config(mock.endpoint()), Deadlines::default()).expect("the backend builds")
 }
 
 /// A backend cut at the 5 MiB floor, for the tests whose subject is the parts.
@@ -69,7 +70,11 @@ fn backend(mock: &MockS3) -> S3Backend {
 /// sent — it does not fail loudly, it stops testing its own subject, which is
 /// why this is a named helper and not a `with_part_size` repeated four times.
 fn multipart_backend(mock: &MockS3) -> S3Backend {
-    S3Backend::new(config(mock.endpoint()).with_part_size(Some(PART))).expect("the backend builds")
+    S3Backend::new(
+        config(mock.endpoint()).with_part_size(Some(PART)),
+        Deadlines::default(),
+    )
+    .expect("the backend builds")
 }
 
 fn hash(data: &[u8]) -> ContentHash {
@@ -134,7 +139,7 @@ async fn a_wrong_secret_is_rejected_by_the_signature_rather_than_accepted() {
         ACCESS_KEY,
         "not-the-right-secret",
     );
-    let s3 = S3Backend::new(cfg).expect("the backend builds");
+    let s3 = S3Backend::new(cfg, Deadlines::default()).expect("the backend builds");
 
     let data = Bytes::from_static(b"x");
     let error = s3
@@ -460,8 +465,11 @@ async fn an_object_at_the_cutoff_is_one_request_and_one_byte_more_is_multipart()
     // inclusive — `use_multipart` compares with `>` — so exactly `PART` bytes
     // stays a single PUT.
     let mock = MockS3::start().await;
-    let s3 = S3Backend::new(config(mock.endpoint()).with_part_size(Some(PART)))
-        .expect("the backend builds");
+    let s3 = S3Backend::new(
+        config(mock.endpoint()).with_part_size(Some(PART)),
+        Deadlines::default(),
+    )
+    .expect("the backend builds");
 
     let exact = Bytes::from(vec![b'a'; PART as usize]);
     s3.put(
@@ -500,8 +508,11 @@ async fn a_multipart_upload_cuts_parts_at_the_configured_size() {
     // nothing. The setting was in the config file, in `config providers`, and
     // read by no code at all.
     let mock = MockS3::start().await;
-    let s3 = S3Backend::new(config(mock.endpoint()).with_part_size(Some(PART)))
-        .expect("the backend builds");
+    let s3 = S3Backend::new(
+        config(mock.endpoint()).with_part_size(Some(PART)),
+        Deadlines::default(),
+    )
+    .expect("the backend builds");
 
     let size = PART as usize * 2 + 17;
     let data = Bytes::from(vec![b'c'; size]);
@@ -532,8 +543,11 @@ async fn a_streamed_upload_from_a_file_cuts_the_same_parts_as_a_buffered_one() {
     // The two paths are separate code and have to agree, or a large file behaves
     // one way through `put` and another through `put_from_path`.
     let mock = MockS3::start().await;
-    let s3 = S3Backend::new(config(mock.endpoint()).with_part_size(Some(PART)))
-        .expect("the backend builds");
+    let s3 = S3Backend::new(
+        config(mock.endpoint()).with_part_size(Some(PART)),
+        Deadlines::default(),
+    )
+    .expect("the backend builds");
 
     let size = PART as usize * 2 + 17;
     let data = vec![b'd'; size];
@@ -573,8 +587,11 @@ async fn a_multipart_upload_that_fails_partway_is_aborted_rather_than_left_billi
     // client aborts on any error; this makes that observable, because the only
     // other evidence is a bill.
     let mock = MockS3::start().await;
-    let s3 = S3Backend::new(config(mock.endpoint()).with_part_size(Some(PART)))
-        .expect("the backend builds");
+    let s3 = S3Backend::new(
+        config(mock.endpoint()).with_part_size(Some(PART)),
+        Deadlines::default(),
+    )
+    .expect("the backend builds");
 
     let data = Bytes::from(vec![b'e'; PART as usize * 2]);
     // The create succeeds; the first part upload is answered 500.
@@ -610,8 +627,11 @@ async fn a_streamed_upload_verifies_the_whole_file_hash_before_committing() {
     // checked, and only then is the upload completed. A file that changed under
     // the read must not be committed, and the abort must clean up after it.
     let mock = MockS3::start().await;
-    let s3 = S3Backend::new(config(mock.endpoint()).with_part_size(Some(PART)))
-        .expect("the backend builds");
+    let s3 = S3Backend::new(
+        config(mock.endpoint()).with_part_size(Some(PART)),
+        Deadlines::default(),
+    )
+    .expect("the backend builds");
 
     let data = vec![b'f'; PART as usize + 1];
     let dir = tempfile::tempdir().expect("temp dir");
@@ -860,7 +880,7 @@ async fn the_r2_backend_speaks_the_same_protocol_through_its_own_config() {
     assert_eq!(cfg.region, "auto");
     cfg.endpoint = mock.endpoint().to_string();
 
-    let r2 = R2Backend::from_config(cfg).expect("the backend builds");
+    let r2 = R2Backend::from_config(cfg, Deadlines::default()).expect("the backend builds");
     let data = Bytes::from_static(b"cloudflare");
 
     r2.put(
@@ -909,7 +929,7 @@ async fn r2_cuts_multipart_uploads_the_same_way_s3_does() {
     let mut cfg =
         R2Backend::config("account-id", BUCKET, ACCESS_KEY, SECRET_KEY).with_part_size(Some(PART));
     cfg.endpoint = mock.endpoint().to_string();
-    let r2 = R2Backend::from_config(cfg).expect("the backend builds");
+    let r2 = R2Backend::from_config(cfg, Deadlines::default()).expect("the backend builds");
 
     let data = Bytes::from(vec![b'g'; PART as usize + 100]);
     r2.put(
@@ -1184,5 +1204,204 @@ async fn the_s3_upload_listing_is_scoped_by_prefix_and_paged_by_key_and_id() {
         seen.iter().collect::<std::collections::BTreeSet<_>>().len(),
         4,
         "the pager repeated a page: {seen:?}"
+    );
+}
+
+// ── the deadline, and the framing it needs ───────────────────────────────────
+
+/// A backend that gives up after `idle` seconds of silence.
+fn deadlined(mock: &MockS3, idle: u64) -> S3Backend {
+    S3Backend::new(
+        config(mock.endpoint()),
+        Deadlines::from_seconds(DEADLINE_CONNECT_SECS, idle),
+    )
+    .expect("the backend builds")
+}
+
+/// Long enough that connecting to loopback is never the thing that fails.
+const DEADLINE_CONNECT_SECS: u64 = 30;
+
+/// Short enough to measure inside a test, long enough that a loaded machine does
+/// not decide the outcome.
+const IDLE_SECS: u64 = 2;
+
+#[tokio::test]
+async fn a_framed_request_body_still_declares_its_length() {
+    // The property the whole upload path rests on, and the one whose failure
+    // would look like a provider problem rather than a DCTL one.
+    //
+    // `--timeout` is an inactivity deadline, so an upload has to report progress
+    // as it goes; DCTL cannot see the socket, so it frames the body and reports
+    // hyper taking each frame (`dctl_store::deadline::http` says why that is the
+    // closest seam reqwest leaves open). A framed body would ordinarily become
+    // `Transfer-Encoding: chunked` — and B2's uploader requires `Content-Length`
+    // while S3 signs a payload whose length is part of the canonical request, so
+    // both would break.
+    //
+    // `ReportingBody::size_hint` is what prevents it. This is that, asserted on
+    // the bytes the server actually received.
+    let mock = MockS3::start().await;
+    let s3 = backend(&mock);
+
+    let data = Bytes::from(vec![7u8; 300 * 1024]);
+    s3.put(
+        &key("framed.bin"),
+        data.clone(),
+        &hash(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("a framed body is accepted");
+
+    let state = mock.state();
+    let put = state
+        .requests_for("PUT", "framed.bin")
+        .first()
+        .copied()
+        .cloned()
+        .expect("the upload really happened");
+
+    assert_eq!(
+        put.headers.get("content-length").map(String::as_str),
+        Some(data.len().to_string().as_str()),
+        "a framed body must declare its exact length: {:?}",
+        put.headers
+    );
+    assert!(
+        !put.headers.contains_key("transfer-encoding"),
+        "and must not fall back to chunked, which neither provider accepts: {:?}",
+        put.headers
+    );
+    assert_eq!(
+        put.body_len,
+        data.len(),
+        "and every byte must arrive — framing is invisible to the provider or it \
+         is a corruption bug rather than a timeout feature"
+    );
+}
+
+#[tokio::test]
+async fn a_provider_that_accepts_and_then_goes_silent_is_given_up_on() {
+    // The failure `--timeout` exists for, and the one no status code can
+    // express: the connection is established, the request is delivered, and the
+    // answer never comes. Without a deadline this is a hang — the retry layer
+    // never gets a turn, because nothing ever fails.
+    let mock = MockS3::start().await;
+    let s3 = deadlined(&mock, IDLE_SECS);
+    mock.stall_next();
+
+    let started = std::time::Instant::now();
+    let error = s3
+        .head(&key("anything.bin"))
+        .await
+        .expect_err("a request nobody answers must not succeed");
+    let took = started.elapsed();
+
+    assert!(
+        matches!(&error, StoreError::Transport { .. }),
+        "a stall is a transport failure — nothing answered: {error:?}"
+    );
+    assert!(
+        error.to_string().contains("--timeout"),
+        "and the report names the dial the operator would turn: {error}"
+    );
+    assert!(
+        took >= Duration::from_secs(IDLE_SECS),
+        "it must wait the time it was told to, not less: {took:?}"
+    );
+    assert!(
+        took < Duration::from_secs(IDLE_SECS * 5),
+        "and not appreciably more: {took:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_operator_chooses_the_number_and_a_larger_one_really_waits_longer() {
+    // The point of the whole entry. `HANDOVER.md` §11.2 recorded that a
+    // black-holed network *did* terminate — at 200 s — and that the problem was
+    // that 200 s was nobody's choice. Two runs, two numbers, and the difference
+    // has to be the operator's.
+    let brisk = {
+        let mock = MockS3::start().await;
+        let s3 = deadlined(&mock, 1);
+        mock.stall_next();
+        let started = std::time::Instant::now();
+        let _ = s3.head(&key("x.bin")).await;
+        started.elapsed()
+    };
+    let patient = {
+        let mock = MockS3::start().await;
+        let s3 = deadlined(&mock, 4);
+        mock.stall_next();
+        let started = std::time::Instant::now();
+        let _ = s3.head(&key("x.bin")).await;
+        started.elapsed()
+    };
+
+    assert!(
+        patient > brisk + Duration::from_secs(1),
+        "the flag has to change the answer: 1 s waited {brisk:?}, 4 s waited {patient:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_transfer_that_keeps_moving_outlives_a_deadline_shorter_than_itself() {
+    // **The direction that matters more**, and the one a total-operation
+    // deadline would fail. reqwest's own `read_timeout` is armed once per
+    // request and never re-armed until the response headers arrive, so wiring
+    // `--timeout` to it would have aborted every upload slower than the
+    // deadline *while it was succeeding* — which is worse than having no
+    // deadline at all, because it destroys work rather than merely waiting.
+    //
+    // Here the object is large enough to take many frames and the deadline is
+    // short. The transfer must complete: every frame the connection takes is
+    // progress, and progress is what the deadline is measured against.
+    let mock = MockS3::start().await;
+    let s3 = deadlined(&mock, IDLE_SECS);
+
+    let data = Bytes::from(vec![3u8; 4 * 1024 * 1024]);
+    s3.put(
+        &key("slow.bin"),
+        data.clone(),
+        &hash(&data),
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("a transfer that is moving must never be given up on");
+
+    assert_eq!(
+        mock.state().objects.get("slow.bin").map(|o| o.body.len()),
+        Some(data.len()),
+        "and all of it must land"
+    );
+
+    let read = s3.get(&key("slow.bin")).await.expect("and read back");
+    assert_eq!(read, data);
+}
+
+#[tokio::test]
+async fn a_run_that_asked_for_no_deadline_waits_for_a_silent_provider() {
+    // Zero is rclone's "wait forever" (`fs/fshttp/dialer.go:102`,
+    // `if c.timeout > 0`), and it has to genuinely disable the clock rather than
+    // be read as a deadline of no length — which would abort every request
+    // instantly and look, from the outside, like a broken network.
+    //
+    // Proved by outliving a deadline that would have fired several times over,
+    // rather than by waiting forever, which no test can do.
+    let mock = MockS3::start().await;
+    let s3 =
+        S3Backend::new(config(mock.endpoint()), Deadlines::none()).expect("the backend builds");
+    mock.stall_next();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(IDLE_SECS * 2),
+        s3.head(&key("anything.bin")),
+    )
+    .await;
+
+    assert!(
+        outcome.is_err(),
+        "with no deadline the request must still be waiting, not reporting a \
+         timeout DCTL invented: {outcome:?}"
     );
 }

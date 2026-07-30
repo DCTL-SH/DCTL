@@ -50,10 +50,9 @@
 //! which is a field nothing mentions at all.
 
 use crate::constants::{
-    CHECKERS_PERFORMED, CHECKERS_UNSUPPORTED_REASON, CONTIMEOUT_UNSUPPORTED_REASON,
-    DUMP_UNSUPPORTED_REASON, KEY_FILE_UNSUPPORTED_REASON, LOW_LEVEL_RETRIES_UNSUPPORTED_REASON,
-    TIMEOUT_UNSUPPORTED_REASON, TRANSFERS_PERFORMED, TRANSFERS_UNSUPPORTED_REASON,
-    VERIFY_SAMPLES_UNSUPPORTED_REASON,
+    CHECKERS_PERFORMED, CHECKERS_UNSUPPORTED_REASON, DUMP_UNSUPPORTED_REASON,
+    KEY_FILE_UNSUPPORTED_REASON, LOW_LEVEL_RETRIES_UNSUPPORTED_REASON, TRANSFERS_PERFORMED,
+    TRANSFERS_UNSUPPORTED_REASON, VERIFY_SAMPLES_UNSUPPORTED_REASON,
 };
 
 use super::GlobalArgs;
@@ -195,18 +194,8 @@ pub const FLAGS: &[Flag] = &[
         LOW_LEVEL_RETRIES_UNSUPPORTED_REASON,
         |globals| globals.low_level_retries.is_some(),
     ),
-    Flag::refused(
-        "--timeout",
-        "timeout",
-        TIMEOUT_UNSUPPORTED_REASON,
-        |globals| globals.timeout.is_some(),
-    ),
-    Flag::refused(
-        "--contimeout",
-        "contimeout",
-        CONTIMEOUT_UNSUPPORTED_REASON,
-        |globals| globals.contimeout.is_some(),
-    ),
+    Flag::honoured("--timeout", "timeout"),
+    Flag::honoured("--contimeout", "contimeout"),
     Flag::honoured("--max-transfer", "max_transfer"),
     // ── Filtering ────────────────────────────────────────────────────────
     Flag::honoured("--include", "include"),
@@ -479,15 +468,22 @@ mod tests {
             "and an absent one must not"
         );
 
-        // The fixture that makes the loosening detectable. `timeout` is written
-        // all over this crate — in prose, in refusal text, in `contimeout` — and
-        // is read by nothing, because this build refuses the flag.
+        // The fixture that makes the loosening detectable. It has to be a word
+        // this crate writes often *and* a field nothing reads, or it proves
+        // nothing about the predicate.
+        //
+        // It used to be `timeout`, which stopped qualifying the moment
+        // `--timeout` was honoured — a fixture going stale is the good failure
+        // mode here, because it fails loudly at the assertion below rather than
+        // quietly weakening the guard. `dump` replaces it: the word appears in
+        // eighteen files of this crate, and `.dump` appears in none of them
+        // outside the two the scan already skips.
         assert!(
-            corpus.contains("timeout"),
+            corpus.contains("dump"),
             "the fixture must appear in the corpus as a word"
         );
         assert!(
-            !reads_field(&corpus, "timeout"),
+            !reads_field(&corpus, "dump"),
             "…but appearing as a word is not being read, and a scan that \
              conflated the two would pass every flag on this list"
         );
@@ -502,7 +498,6 @@ mod tests {
         match long {
             "--transfers" | "--checkers" => Some("2"),
             "--verify-samples" | "--low-level-retries" => Some("4"),
-            "--timeout" | "--contimeout" => Some("30"),
             "--dump" => Some("headers"),
             "--key-file" => Some("/dev/null"),
             _ => None,

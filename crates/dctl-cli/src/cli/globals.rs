@@ -303,15 +303,43 @@ pub struct GlobalArgs {
     #[arg(long, global = true, value_name = "N", help_heading = "Transfer")]
     pub low_level_retries: Option<u32>,
 
-    /// Inactivity timeout on a transfer, in seconds. REFUSED in this build —
-    /// no backend applies one.
-    #[arg(long, global = true, value_name = "SECONDS", help_heading = "Transfer")]
-    pub timeout: Option<u64>,
+    /// Give up on a transfer that has moved no data for this long, in seconds.
+    /// 0 waits forever.
+    ///
+    /// An **inactivity** deadline, which is rclone's meaning of the same flag
+    /// (`fs/config.go:122`, `Help: "IO idle timeout"`) and not a deadline on the
+    /// operation. A 4 GiB restore over a slow link takes hours and never
+    /// approaches this, because every frame that moves resets it. Getting that
+    /// backwards would destroy exactly the transfers worth protecting, which is
+    /// why `dctl_store::deadline::watch` is built around the distinction.
+    ///
+    /// It bounds **one attempt**, as rclone's does. A run that meets a dead
+    /// network spends this much per attempt across the request-level schedule in
+    /// `dctl_store::retry`, so the whole-run bound is the product — which is
+    /// stated here because an operator sizing a backup window needs the product
+    /// and not the factor.
+    #[arg(
+        long,
+        global = true,
+        default_value_t = constants::DEFAULT_TIMEOUT_SECS,
+        value_name = "SECONDS",
+        help_heading = "Transfer"
+    )]
+    pub timeout: u64,
 
-    /// Connection timeout, in seconds. REFUSED in this build — no backend
-    /// applies one.
-    #[arg(long, global = true, value_name = "SECONDS", help_heading = "Transfer")]
-    pub contimeout: Option<u64>,
+    /// Give up on reaching a host after this long, in seconds. 0 waits forever.
+    ///
+    /// Separate from `--timeout` because nothing is at risk while a connection
+    /// is being established: giving up costs one round of backoff and nothing
+    /// else, so this can be — and is — far more impatient.
+    #[arg(
+        long,
+        global = true,
+        default_value_t = constants::DEFAULT_CONTIMEOUT_SECS,
+        value_name = "SECONDS",
+        help_heading = "Transfer"
+    )]
+    pub contimeout: u64,
 
     /// Stop after transferring this much, e.g. 100G. Exits 8 at the limit,
     /// without starting a file that would exceed it.
@@ -704,15 +732,39 @@ mod tests {
 
     #[test]
     fn the_flags_this_build_cannot_honour_carry_no_default() {
-        // A default is a published claim. `--timeout` printing `[default: 300]`
-        // said this build applies a five-minute idle timeout, which it does
-        // not, and left no way to tell a user who asked from one who did not.
+        // A default is a published claim, and a flag that cannot be honoured has
+        // nothing to claim. `--timeout` used to be on this list, printing
+        // `[default: 300]` for a five-minute idle timeout no backend applied;
+        // it left below because something now applies it, which is the only
+        // reason a flag may leave.
         let g = parse(&[]);
         assert_eq!(g.verify_samples, None);
         assert_eq!(g.low_level_retries, None);
-        assert_eq!(g.timeout, None);
-        assert_eq!(g.contimeout, None);
         assert!(g.dump.is_empty());
+    }
+
+    #[test]
+    fn the_two_deadlines_publish_the_defaults_the_backends_apply() {
+        // The other half of the same rule. These do carry a default, so the
+        // number `--help` prints has to be the number `dctl_store` uses — not a
+        // copy of it that can drift, which is why both constants are derived
+        // from that crate rather than restated here.
+        let g = parse(&[]);
+        assert_eq!(g.timeout, constants::DEFAULT_TIMEOUT_SECS);
+        assert_eq!(g.contimeout, constants::DEFAULT_CONTIMEOUT_SECS);
+        assert_eq!(
+            dctl_store::Deadlines::from_seconds(g.contimeout, g.timeout),
+            dctl_store::Deadlines::default(),
+            "a run that names neither flag must get the storage layer's own defaults"
+        );
+
+        // And zero really reaches the "wait forever" answer rather than being
+        // read as a very short deadline.
+        let g = parse(&["--timeout", "0", "--contimeout", "0"]);
+        assert_eq!(
+            dctl_store::Deadlines::from_seconds(g.contimeout, g.timeout),
+            dctl_store::Deadlines::none()
+        );
     }
 
     #[test]

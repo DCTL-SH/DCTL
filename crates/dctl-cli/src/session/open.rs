@@ -292,7 +292,12 @@ fn build_backend(ctx: &Ctx, spec: &RemoteSpec) -> Result<(Arc<dyn Backend>, bool
     let resolved = crate::remote::resolve::resolve(&storage, &config)?;
     Ok((
         // Metered: a vault's object traffic is the run's traffic.
-        crate::remote::registry::build(&resolved, ctx.globals.links, ctx.limits.meter())?,
+        crate::remote::registry::build(
+            &resolved,
+            ctx.globals.links,
+            ctx.limits.meter(),
+            ctx.deadlines,
+        )?,
         declared_vault,
         chunk_size,
     ))

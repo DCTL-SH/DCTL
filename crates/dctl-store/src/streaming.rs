@@ -8,10 +8,19 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::deadline::IdleWatch;
 use crate::error::{Result, StoreError};
 
 /// Working-buffer size for the streaming download copy.
 const STREAM_BUF_LEN: usize = 128 * 1024;
+
+/// What a stall in this module is attributed to.
+///
+/// This code is shared by b2, s3 and r2, and it does not know which of the three
+/// called it. Naming the layer is honest where naming a guessed provider would
+/// not be — and the provider is already in the operator's command line, while
+/// "which part of DCTL stopped" is the thing they cannot see.
+const BACKEND_NAME: &str = "streaming download";
 
 /// The provider-wide cap on the number of parts in a single multipart/large-file
 /// upload. Both S3 and B2 reject an upload with more than this many parts, so part
@@ -150,11 +159,21 @@ pub(crate) async fn fill_buf(file: &mut tokio::fs::File, buf: &mut [u8]) -> std:
 /// temp is removed and an integrity error is returned (nothing is renamed into place).
 /// When `expected_len` is `None` (chunked transfer, no declared size) the length cannot
 /// be verified and the streamed bytes are kept as-is.
+///
+/// `watch` is the exchange's inactivity deadline, still running from the request
+/// that produced `resp`. It is a parameter rather than something made here for
+/// the reason `crate::deadline::http::Answered` gives: a body that had its own
+/// fresh deadline would be a download that could never be late, because every
+/// chunk would start the clock again from a full stop rather than from the last
+/// byte. This is the longest-lived thing the deadline covers — a 4 GiB restore
+/// is hours of body against milliseconds of headers — so it is also where a
+/// deadline scoped to the wrong half would be least visible and cost most.
 pub(crate) async fn stream_to_file(
     mut resp: reqwest::Response,
     dest: &Path,
     expected_len: Option<u64>,
     meter: &dyn crate::meter::Meter,
+    watch: &IdleWatch,
 ) -> Result<()> {
     use tokio::io::AsyncWriteExt as _;
 
@@ -165,7 +184,11 @@ pub(crate) async fn stream_to_file(
     let file = tokio::fs::File::create(&tmp).await?;
     let mut writer = tokio::io::BufWriter::with_capacity(STREAM_BUF_LEN, file);
 
-    let bytes_written = match copy_body(&mut resp, &mut writer, meter).await {
+    let bytes_written = match watch
+        .guard(copy_body(&mut resp, &mut writer, meter, watch))
+        .await
+        .unwrap_or_else(|expired| Err(expired.into_store_error(BACKEND_NAME)))
+    {
         Ok(n) => n,
         Err(e) => {
             let _ = tokio::fs::remove_file(&tmp).await;
@@ -206,12 +229,17 @@ async fn copy_body(
     resp: &mut reqwest::Response,
     writer: &mut (impl tokio::io::AsyncWrite + Unpin),
     meter: &dyn crate::meter::Meter,
+    watch: &IdleWatch,
 ) -> Result<u64> {
     use tokio::io::AsyncWriteExt as _;
     let mut written = 0u64;
     loop {
         match resp.chunk().await {
             Ok(Some(chunk)) => {
+                // Before the write, not after: the deadline is about the link,
+                // and a chunk that arrived has already proved the link is alive
+                // whatever the local disk goes on to do with it.
+                watch.touch();
                 writer.write_all(&chunk).await?;
                 written += chunk.len() as u64;
                 // Every network chunk, as it lands. Pausing here applies TCP

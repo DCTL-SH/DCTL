@@ -954,21 +954,23 @@ pub const LOW_LEVEL_RETRIES_UNSUPPORTED_REASON: &str = "Request-level retries ex
      tell which runs were protected. Whole-file retries are honoured on every \
      backend — see --retries.";
 
-/// Why `--timeout` is refused.
-pub const TIMEOUT_UNSUPPORTED_REASON: &str = "No backend in this build applies an inactivity timeout: \
-     dctl_store constructs its HTTP clients and its ssh session without one, so \
-     there is nothing for this to set. It cannot honestly be approximated by a \
-     deadline on the whole operation either — that would abort a large transfer \
-     that is progressing perfectly, which is the opposite of what an idle \
-     timeout is for.";
+/// Default `--timeout`, the inactivity deadline on a transfer, in seconds.
+///
+/// Derived from the storage layer's own constant rather than restated, because
+/// two numbers that must agree and can be edited separately are two numbers that
+/// eventually do not. `dctl_store::deadline::constants::DEFAULT_IDLE` carries
+/// the reasoning; this is only the CLI's spelling of it, so `--help` prints a
+/// figure the backends genuinely apply.
+///
+/// A default is a published claim, and this one is now true. The flag carried no
+/// default at all until something honoured it, because printing `[default: 300]`
+/// for a five-minute idle timeout no backend applied is worse than printing
+/// nothing.
+pub const DEFAULT_TIMEOUT_SECS: u64 = dctl_store::deadline::constants::DEFAULT_IDLE.as_secs();
 
-/// Why `--contimeout` is refused. Separate from [`TIMEOUT_UNSUPPORTED_REASON`]
-/// because the missing piece is a different one — connection establishment, not
-/// stream inactivity — and a shared sentence would be true of neither.
-pub const CONTIMEOUT_UNSUPPORTED_REASON: &str = "No backend in this build sets a connection-establishment \
-     timeout: dctl_store's HTTP clients take reqwest's default and the sftp \
-     backend takes ssh's, neither of which this flag is wired to. Connecting \
-     therefore takes as long as the platform allows.";
+/// Default `--contimeout`, the deadline on establishing a connection, in
+/// seconds. See [`DEFAULT_TIMEOUT_SECS`] for why it is derived and not restated.
+pub const DEFAULT_CONTIMEOUT_SECS: u64 = dctl_store::deadline::constants::DEFAULT_CONNECT.as_secs();
 
 /// Why `--verify-samples` is refused.
 ///

@@ -29,6 +29,7 @@
 mod gated;
 
 use bytes::Bytes;
+use dctl_store::Deadlines;
 use dctl_store::{
     Backend, ByteRange, ContentHash, HashAlgo, Hasher, ObjectKey, S3Backend, S3Config,
     SourceModified,
@@ -97,7 +98,7 @@ fn hash_file(path: &std::path::Path, algo: HashAlgo) -> ContentHash {
 async fn s3_full_round_trip() {
     let config = config_or_fail("s3_full_round_trip");
 
-    let s3 = S3Backend::new(config).unwrap();
+    let s3 = S3Backend::new(config, Deadlines::default()).unwrap();
     let key = ObjectKey::new(format!("dctl-s3-test/roundtrip-{}.bin", std::process::id()));
     let data = Bytes::from((0u8..=255).cycle().take(5000).collect::<Vec<u8>>());
     let expected = ContentHash::blake3(&data);
@@ -133,7 +134,7 @@ async fn s3_full_round_trip() {
 async fn s3_stream_from_path_round_trip() {
     let config = config_or_fail("s3_stream_from_path_round_trip");
 
-    let s3 = S3Backend::new(config).unwrap();
+    let s3 = S3Backend::new(config, Deadlines::default()).unwrap();
     let key = ObjectKey::new(format!("dctl-s3-test/stream-{}.bin", std::process::id()));
 
     // Build a >100 MiB source on disk (constant memory) and its blake3 (DCTL's algo).

@@ -486,11 +486,11 @@ never prompt for a password.
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--transfers <N>` | `4` | Files transferred in parallel. |
-| `--checkers <N>` | `8` | Metadata checks run in parallel. |
+| `--transfers <N>` | `1` | Files transferred in parallel. The executor is sequential, so any value above `1` is refused rather than silently ignored. |
+| `--checkers <N>` | `1` | Metadata checks run in parallel. As above: `1` is a true statement about this build and anything larger is refused. |
 | `--bwlimit <RATE>` | | Bandwidth limit, e.g. `10M`. `off` for unlimited. |
 | `--retries <N>` | `3` | Retries of a whole failed file. |
-| `--low-level-retries <N>` | `10` | Retries of an individual network request. |
+| `--low-level-retries <N>` | **refused** | Request-level retries exist on every backend, but on a per-provider schedule of four numbers one `N` cannot set. |
 | `--timeout <SECONDS>` | `300` | Inactivity timeout on a transfer. |
 | `--contimeout <SECONDS>` | `60` | Connection timeout. |
 | `--max-transfer <SIZE>` | | Stop after transferring this much, e.g. `100G`. Exits **8**. |

@@ -24,6 +24,7 @@
 //! operations" would grow a second, partial SFTP client that has to be kept in
 //! step with the first, and the write path is where the §6 contract lives.
 
+use std::sync::Arc;
 use std::time::SystemTime;
 
 use async_trait::async_trait;
@@ -31,9 +32,11 @@ use openssh_sftp_client::file::File;
 use openssh_sftp_client::metadata::MetaDataBuilder;
 use openssh_sftp_client::{Error as SftpError, UnixTimeStamp};
 
+use crate::deadline::IdleWatch;
 use crate::error::{Result, StoreError};
 use crate::modified::SourceModified;
 
+use super::dial::Link;
 use super::path::{ancestor_dirs_at_or_below, ancestor_dirs_below};
 use super::{SftpBackend, map_sftp_err};
 
@@ -142,15 +145,66 @@ pub(super) struct SftpStagedFile {
     file: File,
     /// The path, kept so an error names what failed rather than a file handle.
     remote: String,
+    /// The conversation this handle was opened on.
+    ///
+    /// Held, and nothing reads it. An SFTP file handle is meaningful only to the
+    /// session that issued it, so keeping the session alive for as long as the
+    /// handle exists is what stops a re-dial elsewhere in the backend from
+    /// closing the channel this writer is still streaming down. Dropping it here
+    /// is what releases the last reference once the staging file is closed.
+    #[allow(dead_code)]
+    link: Arc<Link>,
+    /// The inactivity deadline covering this object's whole write.
+    ///
+    /// One watch for the file rather than one per call, because an upload is one
+    /// operation to the operator and a chunk landing is what proves it is still
+    /// moving.
+    ///
+    /// Without it this path had **no deadline at all**. `RemoteFs::create`
+    /// travelled through [`SftpBackend::on_link`] and every `write_all` after it
+    /// did not, so a session that went quiet in the middle of an object hung for
+    /// as long as TCP allowed — the one place in this backend where `--timeout`
+    /// would have been a published claim reaching nothing. Found by asking where
+    /// the bytes actually move rather than where the trait methods are.
+    watch: IdleWatch,
+}
+
+/// What one step of a staged write does about its outcome.
+///
+/// Two things, and both are needed wherever bytes move. A step that succeeded is
+/// progress, so the deadline starts again from full rather than from what is
+/// left of this object's. A failure meaning the conversation has ended marks the
+/// connection dead — and [`Link::mark_dead`] lives on the connection precisely so
+/// this type can reach it: a staging file holds the link and not the backend, so
+/// left unsaid the retry's `create` would open on the same dead session, fail,
+/// and only then discard it. One attempt of six spent on bookkeeping.
+fn note(watch: &IdleWatch, link: &Arc<Link>, outcome: &Result<()>) {
+    match outcome {
+        Ok(()) => watch.touch(),
+        Err(StoreError::Transport { backend, .. }) if *backend == super::SFTP_BACKEND_NAME => {
+            link.mark_dead();
+        }
+        Err(_) => {}
+    }
 }
 
 #[async_trait]
 impl StagedFile for SftpStagedFile {
     async fn write_all(&mut self, data: &[u8]) -> Result<()> {
-        self.file
-            .write_all(data)
-            .await
-            .map_err(|e| map_sftp_err(&self.remote, e))
+        // Destructured so the future may borrow `file` mutably while the watch
+        // is borrowed immutably; one borrow of `self` could not be both.
+        let Self {
+            file,
+            remote,
+            link,
+            watch,
+        } = self;
+        let outcome = match watch.guard(file.write_all(data)).await {
+            Ok(result) => result.map_err(|e| map_sftp_err(remote, e)),
+            Err(expired) => Err(expired.into_store_error(super::SFTP_BACKEND_NAME)),
+        };
+        note(watch, link, &outcome);
+        outcome
     }
 
     /// Durability where the server offers it: fsync the handle, tolerating only
@@ -167,23 +221,37 @@ impl StagedFile for SftpStagedFile {
     /// "Best effort" is an honest description of doing less when the server
     /// cannot do more. It is not a licence to ignore the server saying no.
     async fn sync(&mut self) -> Result<()> {
-        match self.file.sync_all().await {
-            Ok(()) => Ok(()),
+        let Self {
+            file,
+            remote,
+            link,
+            watch,
+        } = self;
+        // Under the deadline like every other step. An `fsync` on a server whose
+        // disk has stopped answering is exactly the quiet failure `--timeout`
+        // bounds, and it is the last thing standing between a staging file and
+        // the rename that publishes it.
+        let outcome = match watch.guard(file.sync_all()).await {
+            Ok(Ok(())) => Ok(()),
             // Server lacks the fsync extension — durability is best-effort here.
-            Err(SftpError::UnsupportedExtension(_)) => {
+            Ok(Err(SftpError::UnsupportedExtension(_))) => {
                 tracing::debug!("sftp server has no fsync extension; write is not forced to disk");
                 Ok(())
             }
-            Err(e) => Err(map_sftp_err(&self.remote, e)),
-        }
+            Ok(Err(e)) => Err(map_sftp_err(remote, e)),
+            Err(expired) => Err(expired.into_store_error(super::SFTP_BACKEND_NAME)),
+        };
+        note(watch, link, &outcome);
+        outcome
     }
 
     async fn close(self) -> Result<()> {
-        let remote = self.remote;
-        self.file
-            .close()
-            .await
-            .map_err(|e| map_sftp_err(&remote, e))
+        let outcome = match self.watch.guard(self.file.close()).await {
+            Ok(result) => result.map_err(|e| map_sftp_err(&self.remote, e)),
+            Err(expired) => Err(expired.into_store_error(super::SFTP_BACKEND_NAME)),
+        };
+        note(&self.watch, &self.link, &outcome);
+        outcome
     }
 }
 
@@ -192,32 +260,52 @@ impl RemoteFs for SftpBackend {
     type File = SftpStagedFile;
 
     async fn mkdir_p(&self, remote_file: &str) {
-        let mut fs = self.sftp.fs();
-        // Whether the base itself may be created was decided once, at connect,
-        // and is not re-decided per write — see [`SftpBackend::may_create_base`].
+        // Whether the base itself may be created was decided once, on the first
+        // connection, and is not re-decided per write or per re-dial — see
+        // [`SftpBackend::may_create_base`].
         let dirs = if self.may_create_base {
             ancestor_dirs_at_or_below(&self.base, remote_file)
         } else {
             ancestor_dirs_below(&self.base, remote_file)
         };
-        for dir in dirs {
-            let _ = fs.create_dir(&dir).await;
-        }
+        // Errors are ignored here exactly as before — a directory that already
+        // exists is the ordinary case — but the operation still travels through
+        // `on_link`, so a session that has died is noticed and thrown away
+        // rather than being carried into the `create` immediately after it.
+        let _ = self
+            .on_link(|link| async move {
+                let mut fs = link.sftp.fs();
+                for dir in dirs {
+                    let _ = fs.create_dir(&dir).await;
+                }
+                Ok(())
+            })
+            .await;
     }
 
     async fn create(&self, remote: &str) -> Result<Self::File> {
+        // The handle belongs to the conversation that opened it, so the staged
+        // file holds the link alive for as long as it is being written to. A
+        // re-dial underneath an open handle would leave the writer addressing a
+        // file on a session nobody is listening to any more.
+        let link = self.link().await?;
         let file = self
-            .sftp
-            .options()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(remote)
-            .await
-            .map_err(|e| map_sftp_err(remote, e))?;
+            .on_link(|link| async move {
+                link.sftp
+                    .options()
+                    .write(true)
+                    .create(true)
+                    .truncate(true)
+                    .open(remote)
+                    .await
+                    .map_err(|e| map_sftp_err(remote, e))
+            })
+            .await?;
         Ok(SftpStagedFile {
             file,
             remote: remote.to_string(),
+            link,
+            watch: self.watch(),
         })
     }
 
@@ -238,24 +326,34 @@ impl RemoteFs for SftpBackend {
             )));
         };
         let metadata = MetaDataBuilder::new().time(accessed, modified).create();
-        self.sftp
-            .fs()
-            .set_metadata(remote, metadata)
-            .await
-            .map_err(|e| map_sftp_err(remote, e))
+        self.on_link(|link| async move {
+            link.sftp
+                .fs()
+                .set_metadata(remote, metadata)
+                .await
+                .map_err(|e| map_sftp_err(remote, e))
+        })
+        .await
     }
 
     async fn rename(&self, from: &str, to: &str) -> Result<()> {
-        self.sftp
-            .fs()
-            .rename(from, to)
-            .await
-            .map_err(|e| map_sftp_err(to, e))
+        self.on_link(|link| async move {
+            link.sftp
+                .fs()
+                .rename(from, to)
+                .await
+                .map_err(|e| map_sftp_err(to, e))
+        })
+        .await
     }
 
     async fn remove_quiet(&self, remote: &str) {
-        let mut fs = self.sftp.fs();
-        let _ = fs.remove_file(remote).await;
+        let _ = self
+            .on_link(|link| async move {
+                let _ = link.sftp.fs().remove_file(remote).await;
+                Ok(())
+            })
+            .await;
     }
 }
 

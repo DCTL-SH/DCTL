@@ -42,6 +42,11 @@ rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 postcard = { version = "1", features = ["alloc"] }
+# The `Body` trait, so a request body can report progress to the inactivity
+# deadline while still declaring an exact Content-Length. `reqwest` offers no
+# seam closer to the wire — its connection type is `pub(crate)` — and the
+# reasoning is in `dctl_store::deadline::http`.
+http-body = "1"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "json"] }
 rustls = "0.23"
 rustls-post-quantum = "0.2"

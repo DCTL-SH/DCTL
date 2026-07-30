@@ -80,6 +80,7 @@ pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Box<dyn Source>> {
         &config,
         spec,
         ctx.globals.links,
+        ctx.deadlines,
     )?))
 }
 

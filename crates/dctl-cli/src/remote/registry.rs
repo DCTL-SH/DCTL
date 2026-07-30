@@ -37,7 +37,8 @@ use std::sync::Arc;
 
 use dctl_store::b2::{B2Backend, B2Credentials};
 use dctl_store::{
-    Backend, LinkPolicy, LocalFs, R2Backend, S3Backend, S3Config, SftpBackend, SftpConfig,
+    Backend, Deadlines, LinkPolicy, LocalFs, R2Backend, S3Backend, S3Config, SftpBackend,
+    SftpConfig,
 };
 
 use crate::constants::{
@@ -177,10 +178,20 @@ impl Target {
 /// line. Only the two backends that walk a real filesystem can use it; passing
 /// it to the object stores would be offering a dial that does nothing, which is
 /// the class of defect `HANDOVER.md` §11.3 item 10 already tracks.
+/// `deadlines` is the run's `--timeout` and `--contimeout`. It is a parameter
+/// for the same reason `links` and `meter` are: it belongs to the invocation
+/// rather than to the place, and a backend that read it for itself would be a
+/// backend that could disagree with the rest of the run about how long to wait.
+///
+/// It reaches every provider that has something to wait for, and `local:` is the
+/// one arm that takes none — see `dctl_store::deadline`, which says why a
+/// user-space deadline cannot help a wedged filesystem and would only be a
+/// report rather than a remedy.
 pub fn build(
     resolved: &Resolved,
     links: LinkPolicy,
     meter: Arc<dyn dctl_store::Meter>,
+    deadlines: Deadlines,
 ) -> Result<Arc<dyn Backend>> {
     let target = resolved.target();
 
@@ -196,7 +207,7 @@ pub fn build(
         Target::B2 { bucket, chunk_size } => {
             let key_id = env_required(ENV_B2_KEY_ID)?;
             let app_key = env_required(ENV_B2_APP_KEY)?;
-            Built::B2(b2_backend(key_id, app_key, bucket, *chunk_size)?)
+            Built::B2(b2_backend(key_id, app_key, bucket, *chunk_size, deadlines)?)
         }
 
         Target::S3 {
@@ -211,7 +222,7 @@ pub fn build(
             let secret_key = env_required(ENV_S3_SECRET_KEY)?;
             let config = S3Config::new(endpoint, region, bucket.clone(), access_key, secret_key)
                 .with_part_size(*chunk_size);
-            Built::S3(S3Backend::new(config)?)
+            Built::S3(S3Backend::new(config, deadlines)?)
         }
 
         Target::R2 {
@@ -224,14 +235,14 @@ pub fn build(
             let secret_key = env_required(ENV_R2_SECRET_KEY)?;
             let config = R2Backend::config(&account, bucket.clone(), access_key, secret_key)
                 .with_part_size(*chunk_size);
-            Built::R2(R2Backend::from_config(config)?)
+            Built::R2(R2Backend::from_config(config, deadlines)?)
         }
 
         // No credential is read: `ssh` authenticates the transport from the
         // user's own config, which is the whole reason a cloudflared-proxied host
         // works. This is also the one arm that opens a connection to build, so it
         // is the one that bridges to the async `connect` — see [`connect_sftp`].
-        Target::Sftp { host, base } => Built::Sftp(connect_sftp(host, base, links)?),
+        Target::Sftp { host, base } => Built::Sftp(connect_sftp(host, base, links, deadlines)?),
     };
     // Metered, then made to try again. The order matters and is not arbitrary: a
     // retried request really did cross the link on every attempt, so the meter
@@ -310,14 +321,19 @@ impl Built {
 /// for the backend's lifetime. [`Handle::try_current`](tokio::runtime::Handle::try_current)
 /// is used rather than `current` so the "not on a runtime" case is a typed error
 /// rather than a panic, keeping this lib code panic-free.
-fn connect_sftp(host: &str, base: &str, links: LinkPolicy) -> Result<SftpBackend> {
+fn connect_sftp(
+    host: &str,
+    base: &str,
+    links: LinkPolicy,
+    deadlines: Deadlines,
+) -> Result<SftpBackend> {
     let handle = tokio::runtime::Handle::try_current().map_err(|_| {
         CliError::fatal("the sftp backend must be built inside the async runtime")
             .with_hint("This is an internal error. Please report the command that produced it.")
     })?;
     let config = SftpConfig::new(host, base).with_links(links);
     Ok(tokio::task::block_in_place(|| {
-        handle.block_on(SftpBackend::connect(config))
+        handle.block_on(SftpBackend::connect(config, deadlines))
     })?)
 }
 
@@ -342,10 +358,14 @@ fn connect_sftp(host: &str, base: &str, links: LinkPolicy) -> Result<SftpBackend
 /// was meant therefore builds a filesystem backend rooted at `./b2` and reports
 /// no error at all. A caller that already holds a [`RemoteSpec`] must resolve
 /// that value directly rather than reconstructing text for this entry point.
-pub fn build_backend(spec: &str, links: LinkPolicy) -> Result<Arc<dyn Backend>> {
+pub fn build_backend(
+    spec: &str,
+    links: LinkPolicy,
+    deadlines: Deadlines,
+) -> Result<Arc<dyn Backend>> {
     let parsed = RemoteSpec::parse(spec)?;
     let resolved = super::resolve::resolve(&parsed, &())?;
-    build(&resolved, links, dctl_store::unmetered())
+    build(&resolved, links, dctl_store::unmetered(), deadlines)
 }
 
 /// Take a setting the config pinned, or fall back to its environment variable.
@@ -409,8 +429,12 @@ fn b2_backend(
     app_key: String,
     bucket: &str,
     chunk_size: Option<u64>,
+    deadlines: Deadlines,
 ) -> Result<B2Backend> {
-    Ok(B2Backend::new(B2Credentials::new(key_id, app_key), bucket)?.with_part_size(chunk_size))
+    Ok(
+        B2Backend::new(B2Credentials::new(key_id, app_key), bucket, deadlines)?
+            .with_part_size(chunk_size),
+    )
 }
 
 /// Build the failure for an unusable credential variable.
@@ -440,7 +464,13 @@ mod tests {
         // The only provider that must work on a machine with no environment set
         // up at all — `dctl copy a b` between two directories.
         let resolved = Resolved::new(PROVIDER_LOCAL, local_target(), String::new());
-        let backend = build(&resolved, LinkPolicy::default(), dctl_store::unmetered()).unwrap();
+        let backend = build(
+            &resolved,
+            LinkPolicy::default(),
+            dctl_store::unmetered(),
+            Deadlines::default(),
+        )
+        .unwrap();
         assert_eq!(backend.name(), PROVIDER_LOCAL);
     }
 
@@ -451,8 +481,14 @@ mod tests {
         // the number it must not drop is the upload's peak memory, which is what
         // `upload_peak_bytes` reports.
         let asked = 8 * 1024 * 1024;
-        let backend = b2_backend("k".into(), "a".into(), "bucket", Some(asked))
-            .expect("a b2 backend builds from a key pair");
+        let backend = b2_backend(
+            "k".into(),
+            "a".into(),
+            "bucket",
+            Some(asked),
+            Deadlines::default(),
+        )
+        .expect("a b2 backend builds from a key pair");
         assert_eq!(
             backend.upload_peak_bytes(),
             asked,
@@ -462,7 +498,7 @@ mod tests {
 
         // And with nothing configured, the compiled default — not zero, and not
         // whatever B2 advertises when the run authorizes.
-        let default = b2_backend("k".into(), "a".into(), "bucket", None)
+        let default = b2_backend("k".into(), "a".into(), "bucket", None, Deadlines::default())
             .expect("a b2 backend builds without a chunk_size");
         assert_eq!(default.upload_peak_bytes(), 100 * 1024 * 1024);
     }
@@ -567,12 +603,17 @@ mod tests {
     fn the_config_free_entry_point_still_builds_a_local_backend() {
         // What `dctl init` uses: a vault has to be creatable on a machine whose
         // config file does not exist yet.
-        let backend = build_backend("/srv/data", LinkPolicy::default()).unwrap();
+        let backend =
+            build_backend("/srv/data", LinkPolicy::default(), Deadlines::default()).unwrap();
         assert_eq!(backend.name(), PROVIDER_LOCAL);
         assert_eq!(
-            build_backend("local:/srv/data", LinkPolicy::default())
-                .unwrap()
-                .name(),
+            build_backend(
+                "local:/srv/data",
+                LinkPolicy::default(),
+                Deadlines::default()
+            )
+            .unwrap()
+            .name(),
             PROVIDER_LOCAL
         );
     }
@@ -582,7 +623,9 @@ mod tests {
         // It has no catalog to look one up in, so failing is the only honest
         // answer; silently treating `vault:` as a directory would create the
         // vault in the working directory and report success.
-        assert!(build_backend("vault:photos", LinkPolicy::default()).is_err());
+        assert!(
+            build_backend("vault:photos", LinkPolicy::default(), Deadlines::default()).is_err()
+        );
     }
 
     #[test]
