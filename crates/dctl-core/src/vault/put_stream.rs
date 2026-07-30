@@ -1,64 +1,143 @@
-//! `put_file_from_path`: the constant-memory streaming store for huge files.
+//! `put_file_from_path`: sealing a file straight onto the wire, with no scratch
+//! disk at all.
 //!
-//! Where [`Vault::put_file`](super::Vault::put_file) buffers the whole plaintext (and
-//! seals it) in RAM, this path seals the source **straight from disk to a temp object**
-//! with [`object::seal_stream`] and hands that temp file to the backend's streaming
-//! [`put_from_path`](dctl_store::Backend::put_from_path). No stage ever holds the whole
-//! file or the whole object in memory, so peak memory is `O(chunk_size)` regardless of
-//! file size — the fix for the ~2×-file-size RAM blow-up on huge video.
+//! Where [`Vault::put_file`](super::Vault::put_file) buffers the whole plaintext
+//! (and seals it) in RAM, this path seals the source **into a bounded pipe** that
+//! the backend drains, chunk by chunk, as fast as the link will take it. No stage
+//! holds the whole file and no stage holds the whole object — and, since the
+//! rewrite this module documents, no stage writes either of them to local disk.
 //!
-//! The store order is identical to the buffered path — object written+verified → §5 name
-//! record → durable index commit — so success is reported only once the data is durably
-//! and correctly stored.
+//! ## What used to be here, and what it cost
+//!
+//! The previous shape sealed the source to a temporary file, hashed that file,
+//! and handed the path to the backend's
+//! [`put_from_path`](dctl_store::Backend::put_from_path). Memory was bounded and
+//! **disk was not**: every upload needed one object of free scratch space, and —
+//! because a spool's page cache is charged to the same cgroup as the program —
+//! a hard memory cap had to be sized for the writeback as well as for the
+//! process. Measured, that was 491–504 MiB of *file* charge against a 512 MiB cap
+//! at every object size, and on one 1 GiB copy to `sftp:` reclaim lost the race
+//! and the kernel OOM-killed the run at 12.2 seconds. `docker run -m 512m` was
+//! not a safe way to run DCTL, and the reason was a temporary file.
+//!
+//! The spool was never there for memory. It was there because a caller could not
+//! *address* an object it had not produced: the destination key is
+//! `o/<hex file_id>` and the `file_id` is generated inside the sealer, and a
+//! multipart upload additionally has to know the object's exact length before its
+//! first part. [`PlannedSeal`](dctl_crypto::object::PlannedSeal) answers both
+//! before a payload byte exists, which is what let the file go.
+//!
+//! ## The memory contract, and every term in it
+//!
+//! The transfer's own working set:
+//!
+//! ```text
+//! 2 × chunk_size                              the sealer: one scratch buffer and
+//!                                             the ciphertext it produces from it
+//! + WINDOW_LEN × (WINDOWS_IN_FLIGHT + 2)      the pipe (dctl_store::incoming)
+//! + part_size × UPLOAD_PARTS_IN_FLIGHT        the object stores only
+//! ```
+//!
+//! Every term is a named constant and **not one of them is a function of the
+//! object's size**. There is no page-cache term because there is no file. At the
+//! defaults that is 8 MiB on `local:` and `sftp:`, and 108 MiB on `b2:` — where
+//! the part size is the whole of the difference and is what a remote's
+//! `chunk_size` lowers.
+//!
+//! ## What a container must be sized for, which is **not** that number
+//!
+//! Quoting the figures above as the program's cost would be the same shape of
+//! false claim this module exists to retire, so: a run that writes into a vault
+//! **unlocks** it first, and unlocking is Argon2id at
+//! [`DEFAULT_ARGON2_M_COST`](dctl_crypto::constants::DEFAULT_ARGON2_M_COST) —
+//! 128 MiB, on purpose, because a password-derived key is worth exactly the
+//! memory an attacker must spend to guess it. That allocation is one-shot and is
+//! released before the first window is sealed, so the peak is a **maximum and
+//! not a sum**:
+//!
+//! ```text
+//! peak = max(Argon2id m_cost, the transfer terms above) + the runtime's overhead
+//! ```
+//!
+//! and at every default the first term wins, on every backend. Measured on the
+//! release binary under a 256 MiB cgroup cap, copy in and copy out, at 256 MiB,
+//! 1 GiB and 4 GiB objects: **144 MiB of peak RSS on `local:` and `sftp:`, 147 MiB
+//! on `b2:`, and 131 MiB of anonymous memory on all three — the same figures a
+//! 1 MiB object produces.** That the b2 column does not sit 108 MiB higher is the
+//! measurement that proves the max: the KDF's arena is gone by the time the first
+//! part is bought.
+//!
+//! Two consequences worth stating plainly, because an operator sizing a container
+//! will meet both. The flatness in object size is what this module bought. The
+//! *height* is the KDF's, it was there before any of this, and it is why the
+//! number to provision is in the region of 192 MiB rather than the 8 MiB the
+//! transfer terms alone would suggest.
+//!
+//! ## The order, unchanged
+//!
+//! Object written and verified → the authoritative §5 name record → the durable
+//! index commit. Success is reported only once the data is durably and correctly
+//! stored, exactly as on the buffered path, and the *verification* now happens
+//! inside the backend against a digest the sealer folded as it produced —
+//! [`ObjectStream::agreed`](dctl_store::ObjectStream::agreed) states precisely
+//! what that proves and what proves the rest.
+//!
+//! ## Two passes over the source, and why there is no third
+//!
+//! The format requires two: `enc_metadata` ships before the payload and carries
+//! `content_blake3` of the whole plaintext, so the sealer hashes the input,
+//! rewinds, and encrypts it. This module used to make a **third** pass to compute
+//! the index row's plaintext digest — the same number the sealer had already
+//! folded in pass one. It is handed back from the plan now, so a four-gigabyte
+//! file is read twice rather than three times.
 
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use bytes::Bytes;
-use dctl_crypto::constants::OBJECT_HEAD_LEN;
-use dctl_crypto::object::{self, Metadata};
+use dctl_crypto::object::{Metadata, PlannedSeal};
 use dctl_crypto::path;
 use dctl_index::Record;
-use dctl_store::{ContentHash, HashAlgo, Hasher, ObjectKey, SourceModified};
+use dctl_store::{ContentHash, HashAlgo, ObjectKey, SourceModified};
 use zeroize::Zeroizing;
 
 use super::{Modified, Vault, layout};
 use crate::error::{CoreError, Result};
 use crate::streamed::Streamed;
 
-/// Working-buffer size for the vault's constant-memory hashing passes over the temp
-/// object and the source plaintext.
-const STREAM_BUF_LEN: usize = 128 * 1024;
-
-/// The product of sealing a source file to a temp object: the temp file (kept alive so
-/// it is not deleted before the backend reads it), plus everything the caller needs to
-/// key, verify, and index the object without touching the file body again.
-struct Sealed {
-    temp: tempfile::NamedTempFile,
-    file_id: [u8; 16],
-    /// BLAKE3 of the sealed object bytes — the verified-write `expected` for the backend.
-    object_hash: ContentHash,
-    plaintext_len: u64,
-    /// BLAKE3 of the source plaintext — what the index caches (parity with `put_file`).
-    plaintext_hash: Vec<u8>,
+/// What phase one of the seal produced: the framing, and the open source handle
+/// it was computed from.
+///
+/// The **same handle**, carried from one blocking task to the next rather than
+/// the file being re-opened between them. Re-opening would widen the window in
+/// which the source could change under the two passes — and a source that changed
+/// between the hash and the encryption produces an object whose sealed
+/// `content_blake3` does not describe its own payload, which nothing downstream
+/// would notice until somebody verified it years later.
+struct Planned {
+    plan: PlannedSeal,
+    source: std::fs::File,
 }
 
 impl Vault {
-    /// Store the file at `source` under the logical `logical_path`, streaming with
-    /// constant (`O(chunk_size)`) memory — never buffering the whole file or object.
+    /// Store the file at `source` under the logical `logical_path`, sealing it
+    /// straight to the backend in bounded windows and writing nothing to local
+    /// disk.
     ///
-    /// Byte-for-byte equivalent to [`put_file`](Vault::put_file) for the same content:
-    /// the resulting object decodes identically (same DSF1 framing via
-    /// [`object::seal_stream`]), so a file stored here opens through the very same
-    /// [`get_file`](Vault::get_file) path as a buffered put. The strict order — object
-    /// written and verified, then the authoritative §5 name record, then the durable
-    /// index commit — means success is never reported unless the data is correctly stored.
+    /// Byte-for-byte equivalent to [`put_file`](Vault::put_file) for the same
+    /// content: the object decodes identically, so a file stored here opens
+    /// through the very same [`get_file`](Vault::get_file) path as a buffered put.
     ///
-    /// `modified` is a required argument for the reason [`Modified`] gives, and it is
-    /// **not** read from `source` here even though this path opens the file: `source` is
-    /// frequently a spool of something that has no modification time of its own (a pipe
-    /// captured by `dctl rcat`), and taking the temporary file's time would record the
-    /// moment of the spool while looking exactly like a real answer.
+    /// `modified` is a required argument for the reason [`Modified`] gives, and it
+    /// is **not** read from `source` even though this path opens the file:
+    /// `source` is sometimes a spool of something that has no modification time of
+    /// its own (a pipe captured by `dctl rcat`), and taking the temporary file's
+    /// time would record the moment of the spool while looking exactly like a real
+    /// answer.
+    ///
+    /// # Errors
+    /// Whatever sealing, uploading or indexing reported. Nothing is committed on
+    /// any of them: the object is not finished, the name record is not written,
+    /// and the index row is not added.
     #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
     pub async fn put_file_from_path(
         &self,
@@ -75,53 +154,97 @@ impl Vault {
         // resolving it twice would seal one instant and index another.
         let modified_unix = modified.resolve();
 
-        // Seal the source straight to a temp object off the async runtime (heavy CPU +
-        // blocking file I/O). Everything here is O(chunk_size)/O(buffer) memory.
-        // A transient owned copy for the blocking sealer: `LockedSecret` is not `Clone`,
-        // so the root is copied into a `Zeroizing<[u8; 32]>` that wipes when the task
-        // returns. `seal_source_to_temp` still takes `&Zeroizing<[u8; 32]>`.
+        // ── Phase one, off the runtime: hash the source and build the framing. ──
+        // A transient owned copy of the root for the blocking task: `LockedSecret`
+        // is not `Clone`, so it is copied into a `Zeroizing<[u8; 32]>` that wipes
+        // when the task returns.
         let root_key = Zeroizing::new(*self.root()?);
         let chunk_size = self.chunk_size;
-        let source = source.to_path_buf();
+        let source_path = source.to_path_buf();
         let meta_path = path.clone();
-        let sealed = tokio::task::spawn_blocking(move || -> Result<Sealed> {
-            seal_source_to_temp(&root_key, &source, chunk_size, &meta_path, modified_unix)
+        let planned = tokio::task::spawn_blocking(move || -> Result<Planned> {
+            let mut file = std::fs::File::open(&source_path).map_err(io_err)?;
+            let plaintext_len = file.metadata().map_err(io_err)?.len();
+            let plan = PlannedSeal::prepare(
+                &root_key,
+                &mut file,
+                plaintext_len,
+                &Metadata::new(&meta_path).with_mtime(modified_unix),
+                chunk_size,
+            )?;
+            Ok(Planned { plan, source: file })
         })
         .await
-        .map_err(|e| {
-            CoreError::Store(dctl_store::StoreError::Backend(format!(
-                "streaming seal task failed: {e}"
-            )))
-        })??;
+        .map_err(|e| task_failed("streaming seal", &e))??;
 
-        let object_key = format!(
-            "{}{}",
-            layout::OBJECT_KEY_PREFIX,
-            hex::encode(sealed.file_id)
+        let Planned { plan, mut source } = planned;
+        // Read off the plan before it is moved into the sealing task: the key, the
+        // length and the two digests are everything the rest of this function
+        // needs, and taking them here is what lets the plan (which holds the DEK)
+        // travel to the thread that uses it and be wiped there.
+        let file_id = plan.file_id();
+        let object_key = format!("{}{}", layout::OBJECT_KEY_PREFIX, hex::encode(file_id));
+        let plaintext_len = plan.plaintext_len();
+        let plaintext_hash = plan.content_blake3();
+        tracing::debug!(
+            object = %object_key,
+            plaintext_len,
+            object_len = plan.object_len(),
+            "sealed object planned (streamed, no spool)"
         );
-        tracing::debug!(object = %object_key, plaintext_len = sealed.plaintext_len, "sealed object (streamed)");
 
-        // Verified streaming write of the content object: the backend copies the temp
-        // file into place and confirms the on-disk bytes hash to `object_hash`.
-        //
-        // No modification time on the provider's copy, for the reason
-        // `super::put` states at length: the time is a fact about the plaintext,
-        // it is already sealed inside the object's own metadata, and putting it in
-        // the bucket as well would publish a per-file edit history in the clear.
-        self.backend
-            .put_from_path(
+        // ── Phase two: the sealer and the backend run at the same time, with the
+        //    pipe's depth deciding how far ahead the sealer may get. ──
+        let (mut writer, stream) = dctl_store::object_stream(plan.object_len(), HashAlgo::Blake3);
+        let sealing = tokio::task::spawn_blocking(move || -> Result<()> {
+            match plan.emit(&mut source, &mut writer) {
+                Ok(()) => {
+                    // The terminal message carries the digest of everything
+                    // written, which is what the backend compares its own fold
+                    // against before it commits anything.
+                    writer.finish().map_err(io_err)?;
+                    Ok(())
+                }
+                Err(e) => {
+                    // Tell the consumer *why*, so the run reports the sealing
+                    // failure rather than a stream that stopped early. Then return
+                    // the original error, which is the one worth reporting if the
+                    // backend has already given up for its own reasons.
+                    writer.fail(e.to_string());
+                    Err(e.into())
+                }
+            }
+        });
+
+        // No modification time on the provider's copy, for the reason `super::put`
+        // states at length: the time is a fact about the plaintext, it is already
+        // sealed inside the object's own metadata, and putting it in the bucket as
+        // well would publish a per-file edit history in the clear.
+        let stored = self
+            .backend
+            .put_stream(
                 &ObjectKey::new(object_key.clone()),
-                sealed.temp.path(),
-                &sealed.object_hash,
+                stream,
                 SourceModified::unknown(),
             )
-            .await?;
+            .await;
+
+        // Joined either way. A backend that failed has dropped the stream, which
+        // closes the channel, which stops the sealer at its next window — so this
+        // is a wait for a task that is already finishing rather than a hang. When
+        // both went wrong the *sealer's* reason is the better one: it is upstream,
+        // and the backend's complaint will be a consequence of it.
+        let sealed = sealing
+            .await
+            .map_err(|e| task_failed("streaming seal", &e))?;
+        sealed?;
+        stored?;
         tracing::debug!(object = %object_key, "verified streaming write to backend complete");
 
         // Authoritative §5 name record: path → file_id (same as the buffered path).
         let (name_key, name_val) =
             self.name_keys
-                .seal_record(&self.vault_id, &path, &sealed.file_id, 0)?;
+                .seal_record(&self.vault_id, &path, &file_id, 0)?;
         let name_expected = ContentHash::blake3(&name_val);
         self.backend
             .put(
@@ -136,9 +259,9 @@ impl Vault {
         let record = Record {
             path: path.clone(),
             object_key: object_key.clone(),
-            size: sealed.plaintext_len,
+            size: plaintext_len,
             modified_unix,
-            content_hash: sealed.plaintext_hash,
+            content_hash: plaintext_hash.to_vec(),
         };
         self.index.put(&record)?;
         tracing::info!(object = %record.object_key, "file stored (streamed) and index committed");
@@ -148,89 +271,18 @@ impl Vault {
         // The digest the index just committed, handed back rather than left to be
         // recomputed: see [`Streamed`] for why a second pass over the source would
         // be both slower and less truthful.
-        let mut plaintext_hash = [0u8; 32];
-        plaintext_hash.copy_from_slice(&record.content_hash);
         Ok(Streamed {
-            bytes: sealed.plaintext_len,
+            bytes: plaintext_len,
             plaintext_hash,
         })
     }
 }
 
-/// Seal `source` into a fresh temp object under `root_key`, computing everything the
-/// caller needs without ever holding the whole file/object in memory.
-///
-/// Three constant-memory passes over file data: [`object::seal_stream`] streams the
-/// source into the temp object (itself `O(chunk_size)`), then the temp object is streamed
-/// once to hash it (verified-write `expected`), then the source is streamed once to hash
-/// the plaintext (index parity). Peak memory is a single working buffer plus the sealer's.
-fn seal_source_to_temp(
-    root_key: &Zeroizing<[u8; 32]>,
-    source: &Path,
-    chunk_size: u32,
-    nfc_path: &str,
-    modified_unix: Option<i64>,
-) -> Result<Sealed> {
-    let mut src = std::fs::File::open(source).map_err(io_err)?;
-    let plaintext_len = src.metadata().map_err(io_err)?.len();
-
-    // Seal source (Read + Seek) → temp object, constant memory.
-    // Not `NamedTempFile::new()`. That resolves to `/tmp`, which systemd mounts
-    // as `tmpfs` by default — and a sealed object staged in `tmpfs` is the whole
-    // file in RAM, which would quietly undo everything this streaming path
-    // exists for on the majority of modern Linux hosts. `crate::spool` chooses
-    // the directory deliberately and says so when it is memory.
-    let mut temp = tempfile::NamedTempFile::new_in(crate::spool::spool_dir()).map_err(io_err)?;
-    {
-        let mut writer = std::io::BufWriter::with_capacity(STREAM_BUF_LEN, temp.as_file_mut());
-        object::seal_stream(
-            root_key,
-            &mut src,
-            plaintext_len,
-            &Metadata::new(nfc_path).with_mtime(modified_unix),
-            chunk_size,
-            &mut writer,
-        )?;
-        writer.flush().map_err(io_err)?;
-    }
-
-    // file_id = bytes [52..68] of the sealed object — a 68-byte head read from the temp.
-    let f = temp.as_file_mut();
-    f.seek(SeekFrom::Start(0)).map_err(io_err)?;
-    let mut head = [0u8; OBJECT_HEAD_LEN];
-    f.read_exact(&mut head).map_err(io_err)?;
-    let mut file_id = [0u8; 16];
-    file_id.copy_from_slice(&head[52..68]);
-
-    // object_hash = BLAKE3 of the whole sealed object, streamed (constant memory).
-    f.seek(SeekFrom::Start(0)).map_err(io_err)?;
-    let object_hash = hash_reader(f)?;
-
-    // plaintext_hash = BLAKE3 of the source plaintext, streamed (constant memory).
-    src.seek(SeekFrom::Start(0)).map_err(io_err)?;
-    let plaintext_hash = hash_reader(&mut src)?.bytes;
-
-    Ok(Sealed {
-        temp,
-        file_id,
-        object_hash,
-        plaintext_len,
-        plaintext_hash,
-    })
-}
-
-/// Stream `r` through a BLAKE3 [`Hasher`] in fixed-size blocks — constant memory.
-fn hash_reader<R: Read>(r: &mut R) -> Result<ContentHash> {
-    let mut hasher = Hasher::new(HashAlgo::Blake3);
-    let mut buf = vec![0u8; STREAM_BUF_LEN];
-    loop {
-        let n = r.read(&mut buf).map_err(io_err)?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(hasher.finalize())
+/// Report a `spawn_blocking` join failure as a backend error naming the stage.
+fn task_failed(stage: &str, error: &tokio::task::JoinError) -> CoreError {
+    CoreError::Store(dctl_store::StoreError::Backend(format!(
+        "{stage} task failed: {error}"
+    )))
 }
 
 /// Map a filesystem error into a [`CoreError`] without a dedicated I/O variant.

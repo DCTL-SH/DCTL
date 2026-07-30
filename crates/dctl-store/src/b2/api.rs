@@ -145,6 +145,40 @@ pub(crate) struct VersionItem {
     pub file_id: String,
 }
 
+/// `b2_list_unfinished_large_files` — the large files this account started and
+/// never finished.
+///
+/// The parts of such a file are stored and billed and **no object listing shows
+/// them**: `b2_list_file_names` returns objects, and an unfinished large file is
+/// not one yet. This is the only call in the B2 API that can see them.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ListUnfinishedResponse {
+    pub files: Vec<UnfinishedItem>,
+    /// Where the next page starts, or `None` at the end.
+    ///
+    /// Keyed by `fileId` rather than by name, because an unfinished large file
+    /// has no committed name to key by and two of them may be aimed at the same
+    /// one.
+    pub next_file_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UnfinishedItem {
+    pub file_id: String,
+    pub file_name: String,
+    /// When `b2_start_large_file` was called, in epoch milliseconds.
+    ///
+    /// Optional because it is what `--min-age` reads, and a reply that omitted it
+    /// must produce "the age is unknown" — which the sweep holds on — rather than
+    /// a parse failure that makes the whole page unreadable. B2 documents it as
+    /// always present; the tolerance costs nothing and the alternative is a class
+    /// that cannot be swept at all because one field moved.
+    #[serde(default)]
+    pub upload_timestamp: Option<i64>,
+}
+
 #[derive(Deserialize)]
 pub(crate) struct DeleteFileVersionResponse {
     #[allow(dead_code)]

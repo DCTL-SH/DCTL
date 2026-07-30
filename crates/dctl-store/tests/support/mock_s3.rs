@@ -121,6 +121,12 @@ struct Upload {
     key: String,
     metadata: BTreeMap<String, String>,
     parts: BTreeMap<u32, Vec<u8>>,
+    /// What `ListMultipartUploads` reports as `<Initiated>`.
+    ///
+    /// Held as the string S3 sends rather than as a number, because the client's
+    /// job is to parse S3's spelling and a mock that handed it an integer would
+    /// be testing a parser nobody ships.
+    initiated: String,
 }
 
 /// Everything the server remembers.
@@ -136,7 +142,23 @@ pub struct State {
     pub requests: Vec<Seen>,
     /// Responses to give instead of the real answer, consumed in order.
     scripted: Vec<Scripted>,
+    /// Whether `AbortMultipartUpload` is refused rather than honoured.
+    ///
+    /// The only way to reach the state this whole capability exists to test. DCTL
+    /// aborts its own upload on every error path it can still run code on, so a
+    /// store holding an unfinished upload is by definition one whose client was
+    /// **killed** — `SIGKILL`, OOM, power cut — and a killed process does not send
+    /// a failing abort, it sends none at all. To the server those are the same
+    /// fact: the upload stays open. Refusing the call is how the mock reproduces
+    /// it without a second process to kill.
+    refuse_aborts: bool,
     next_upload_id: u64,
+    /// The `<Initiated>` the next `CreateMultipartUpload` records.
+    ///
+    /// Settable so a test can put an upload on the wrong side of a `--min-age`
+    /// without sleeping through one. Empty means "the mock has not been started",
+    /// which cannot happen through [`MockS3::start`].
+    initiated: String,
 }
 
 impl State {
@@ -175,7 +197,10 @@ impl MockS3 {
             .local_addr()
             .expect("the listener has an address")
             .port();
-        let state = Arc::new(Mutex::new(State::default()));
+        let state = Arc::new(Mutex::new(State {
+            initiated: iso8601_now(),
+            ..State::default()
+        }));
         let serving = Arc::clone(&state);
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
@@ -215,6 +240,26 @@ impl MockS3 {
             .clone()
     }
 
+    /// Stop honouring `AbortMultipartUpload`, as a client that is no longer
+    /// running does — see [`State::refuse_aborts`].
+    ///
+    /// Persistent rather than one-shot, because `script` is one-shot and that is
+    /// precisely what made this hard: a scripted refusal armed before a streamed
+    /// put is consumed by the `CreateMultipartUpload`, so the upload is never
+    /// started and the test that wanted one left open gets a clean server.
+    pub fn refuse_aborts(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.refuse_aborts = true;
+        }
+    }
+
+    /// Honour aborts again — the sweep is a live process.
+    pub fn allow_aborts(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.refuse_aborts = false;
+        }
+    }
+
     /// Queue a response to give instead of the real answer, once.
     pub fn script(&self, status: u16, body: &str) {
         self.script_with_headers(status, body, &[]);
@@ -238,6 +283,16 @@ impl MockS3 {
 
     /// Put an object into the server without going through the client, so a
     /// read path can be tested against bytes the client did not write.
+    /// The next `CreateMultipartUpload` records an upload started `seconds` ago.
+    ///
+    /// So a test can put an upload on the wrong side of a `--min-age` without
+    /// sleeping through one — which would be slower and no more convincing.
+    pub fn started_seconds_ago(&self, seconds: i64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.initiated = iso8601_at(unix_now() - seconds);
+        }
+    }
+
     pub fn seed(&self, key: &str, body: &[u8]) {
         self.state
             .lock()
@@ -394,6 +449,18 @@ fn handle(
     };
 
     match method {
+        // Before every other GET: `?uploads` on the bucket is the multipart
+        // listing, and an ordinary object GET would answer 404 for the empty key.
+        "GET" if has("uploads") => {
+            let prefix = param("prefix").unwrap_or_default();
+            let key_marker = param("key-marker").unwrap_or_default();
+            let id_marker = param("upload-id-marker").unwrap_or_default();
+            let max = param("max-uploads")
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or(1000);
+            list_uploads(&guard, &prefix, &key_marker, &id_marker, max)
+        }
+
         "PUT" if has("partNumber") => {
             let upload_id = param("uploadId").unwrap_or_default();
             let number: u32 = param("partNumber")
@@ -429,12 +496,14 @@ fn handle(
                 .filter(|(name, _)| name.starts_with("x-amz-meta-"))
                 .map(|(name, value)| (name.clone(), value.clone()))
                 .collect();
+            let initiated = guard.initiated.clone();
             guard.uploads.insert(
                 id.clone(),
                 Upload {
                     key: key.clone(),
                     metadata,
                     parts: BTreeMap::new(),
+                    initiated,
                 },
             );
             (
@@ -484,6 +553,15 @@ fn handle(
         }
 
         "DELETE" if has("uploadId") => {
+            if guard.refuse_aborts {
+                // The upload stays open and nothing is recorded, which is what a
+                // killed client leaves behind.
+                return (
+                    403,
+                    b"<Error><Code>AccessDenied</Code></Error>".to_vec(),
+                    Vec::new(),
+                );
+            }
             let id = param("uploadId").unwrap_or_default();
             guard.uploads.remove(&id);
             guard.aborted.push(id);
@@ -762,6 +840,107 @@ const fn reason(status: u16) -> &'static str {
         503 => "Service Unavailable",
         _ => "Unknown",
     }
+}
+
+/// `ListMultipartUploads`: every upload this server is still holding open.
+///
+/// Ordered by `(key, upload id)`, which is what S3 documents and what makes the
+/// two continuation markers meaningful — one key may carry any number of
+/// concurrent uploads, so a pager keyed on the name alone would loop.
+fn list_uploads(
+    state: &State,
+    prefix: &str,
+    key_marker: &str,
+    id_marker: &str,
+    max: usize,
+) -> Response {
+    let mut open: Vec<(&String, &Upload)> = state
+        .uploads
+        .iter()
+        .filter(|(_, upload)| upload.key.starts_with(prefix))
+        .collect();
+    open.sort_by(|a, b| (&a.1.key, a.0).cmp(&(&b.1.key, b.0)));
+
+    // The markers are **exclusive**: they name the last item of the previous
+    // page, not the first of this one, which is the opposite of B2's rule and is
+    // exactly the kind of detail a client gets wrong once.
+    let after: Vec<&(&String, &Upload)> = open
+        .iter()
+        .filter(|(id, upload)| {
+            key_marker.is_empty()
+                || upload.key.as_str() > key_marker
+                || (upload.key.as_str() == key_marker && id.as_str() > id_marker)
+        })
+        .collect();
+    let page: Vec<&&(&String, &Upload)> = after.iter().take(max).collect();
+    let truncated = after.len() > page.len();
+
+    let mut body = String::from(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\
+         <ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+         <Bucket>",
+    );
+    body.push_str(BUCKET);
+    body.push_str("</Bucket>");
+    for (id, upload) in page.iter().copied() {
+        body.push_str(&format!(
+            "<Upload><Key>{}</Key><UploadId>{id}</UploadId><Initiated>{}</Initiated></Upload>",
+            upload.key, upload.initiated
+        ));
+    }
+    // AWS sends the markers on a final page too, which is why the client must
+    // read `IsTruncated` rather than the presence of a marker.
+    if let Some((id, upload)) = page.last().copied() {
+        body.push_str(&format!(
+            "<NextKeyMarker>{}</NextKeyMarker><NextUploadIdMarker>{id}</NextUploadIdMarker>",
+            upload.key
+        ));
+    }
+    body.push_str(&format!(
+        "<IsTruncated>{truncated}</IsTruncated></ListMultipartUploadsResult>"
+    ));
+    (200, body.into_bytes(), Vec::new())
+}
+
+/// The clock in whole unix seconds.
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| i64::try_from(since.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
+}
+
+/// Now, spelled the way S3 spells `<Initiated>`.
+fn iso8601_now() -> String {
+    iso8601_at(unix_now())
+}
+
+/// `unix` seconds as `YYYY-MM-DDTHH:MM:SS.000Z`.
+///
+/// The inverse of the parser under test, written independently here rather than
+/// by calling it: a mock that produced its timestamps with the same code the
+/// client reads them with would agree with itself about a format neither of them
+/// had got right.
+fn iso8601_at(unix: i64) -> String {
+    let days = unix.div_euclid(86_400);
+    let seconds = unix.rem_euclid(86_400);
+    // Howard Hinnant's `civil_from_days`, shifted to a March-first year so the
+    // leap day falls at the end of it.
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = era * 400 + yoe + i64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}.000Z",
+        seconds / 3600,
+        (seconds % 3600) / 60,
+        seconds % 60
+    )
 }
 
 fn error_xml(code: &str, message: &str) -> String {

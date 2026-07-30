@@ -114,6 +114,119 @@ pub(crate) fn parse_list(xml: &str) -> Result<Listing> {
     Ok(Listing { items, next_token })
 }
 
+/// Parsed `ListMultipartUploads` page: the open uploads plus the two markers that
+/// continue the enumeration.
+///
+/// **Two markers, not one, and both are required together.** S3 keys this listing
+/// by `(Key, UploadId)`, because one key may have any number of concurrent
+/// multipart uploads against it — resuming from `NextKeyMarker` alone restarts at
+/// that key's first upload and loops forever over the first page. It is the same
+/// shape of defect `b2::api::ListFileVersionsResponse` documents for version
+/// listings, and it is written down here before it can be met a second time.
+#[derive(Debug, Default)]
+pub(crate) struct Uploads {
+    /// `(key, upload id, initiated)` for every open upload on this page.
+    pub items: Vec<(String, String, Option<String>)>,
+    /// Where the next page starts, or `None` when the listing is exhausted.
+    pub next_key_marker: Option<String>,
+    /// See [`Uploads::next_key_marker`].
+    pub next_upload_id_marker: Option<String>,
+}
+
+/// The root element every `ListMultipartUploads` response has.
+const UPLOADS_ROOT: &str = "ListMultipartUploadsResult";
+
+/// Parse a `ListMultipartUploads` page.
+///
+/// Holds the reply to the same completeness rule [`parse_list`] applies, for the
+/// same reason: `quick_xml` reports end-of-input as an ordinary `Eof`, so a body
+/// that stopped half way through — a dropped connection, a proxy's error page
+/// served with a 200 — would otherwise parse as *no open uploads*, and a sweep
+/// would report a bucket clean of billed parts it had never actually seen.
+///
+/// The markers are only reported when S3 says the listing **is** truncated.
+/// Amazon sends `NextKeyMarker` on a final page too, so believing it unguarded
+/// makes the pager ask for a page that comes back empty with the same marker —
+/// which the sweep's stall guard would stop, but only after one useless billed
+/// request per sweep per bucket.
+///
+/// # Errors
+/// [`StoreError::Backend`] when the body is not a complete listing.
+pub(crate) fn parse_uploads(xml: &str) -> Result<Uploads> {
+    let mut reader = Reader::from_str(xml);
+    reader.config_mut().trim_text(true);
+
+    let mut out = Uploads::default();
+    let mut current: Option<String> = None;
+    let mut in_upload = false;
+    let (mut key, mut id, mut initiated) = (None, None, None);
+    let (mut next_key, mut next_id) = (None, None);
+    let mut truncated = false;
+    let mut root_opened = false;
+    let mut root_closed = false;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(e)) => {
+                let name = local_name(e.name());
+                if name == UPLOADS_ROOT {
+                    root_opened = true;
+                }
+                if name == "Upload" {
+                    in_upload = true;
+                    key = None;
+                    id = None;
+                    initiated = None;
+                }
+                current = Some(name);
+            }
+            Ok(Event::Text(t)) => {
+                if let Some(name) = &current {
+                    let text = t.unescape().unwrap_or_default().into_owned();
+                    match name.as_str() {
+                        "Key" if in_upload => key = Some(text),
+                        "UploadId" if in_upload => id = Some(text),
+                        "Initiated" if in_upload => initiated = Some(text),
+                        "NextKeyMarker" => next_key = Some(text),
+                        "NextUploadIdMarker" => next_id = Some(text),
+                        "IsTruncated" => truncated = text.eq_ignore_ascii_case("true"),
+                        _ => {}
+                    }
+                }
+            }
+            Ok(Event::End(e)) => {
+                let name = local_name(e.name());
+                if name == UPLOADS_ROOT {
+                    root_closed = true;
+                }
+                if name == "Upload" {
+                    in_upload = false;
+                    if let (Some(k), Some(u)) = (key.take(), id.take()) {
+                        out.items.push((k, u, initiated.take()));
+                    }
+                }
+                current = None;
+            }
+            Ok(Event::Eof) => break,
+            Err(err) => return Err(StoreError::Backend(format!("s3 xml parse: {err}"))),
+            _ => {}
+        }
+    }
+
+    if !root_opened || !root_closed {
+        return Err(StoreError::Backend(format!(
+            "s3 multipart listing response is not a complete <{UPLOADS_ROOT}> document \
+             ({} bytes read); it was truncated, or the endpoint answered with something else",
+            xml.len()
+        )));
+    }
+    if truncated {
+        out.next_key_marker = next_key;
+        out.next_upload_id_marker = next_id;
+    }
+    Ok(out)
+}
+
 /// Extract the text of the first `<tag>...</tag>` (used for `UploadId`, error codes).
 pub(crate) fn extract_tag(xml: &str, tag: &str) -> Option<String> {
     let open = format!("<{tag}>");
@@ -125,6 +238,15 @@ pub(crate) fn extract_tag(xml: &str, tag: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    //! Nothing else in this workspace exercises the S3 listing parser.
+    //!
+    //! `tests/s3_live.rs` has never run — no S3 or R2 credentials have existed in
+    //! this environment — so until these tests, a listing parser that returned an
+    //! empty page for every request would have passed every gate DCTL has. An
+    //! empty listing is the worst possible wrong answer: `copy` reports zero files
+    //! and exit 0, `sync` re-uploads a whole tree it already holds, and `purge`
+    //! reports success over objects it never saw.
+
     use super::*;
 
     /// A real `ListObjectsV2` body, as AWS documents it — namespaced root,
@@ -156,14 +278,86 @@ mod tests {
   </CommonPrefixes>
 </ListBucketResult>"#;
 
-    /// Nothing else in this workspace exercises the S3 listing parser.
-    ///
-    /// `tests/s3_live.rs` has never run — no S3 or R2 credentials have existed in
-    /// this environment — so until this test, a listing parser that returned an
-    /// empty page for every request would have passed every gate DCTL has. An
-    /// empty listing is the worst possible wrong answer: `copy` reports zero files
-    /// and exit 0, `sync` re-uploads a whole tree it already holds, and `purge`
-    /// reports success over objects it never saw.
+    /// A real `ListMultipartUploads` body, as AWS documents it — namespaced root,
+    /// two uploads against the *same key*, and a truncated page with both markers.
+    const UPLOADS_RESPONSE: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ListMultipartUploadsResult xmlns="http://s3.amazonaws.com/doc/2006-03-01/">
+  <Bucket>bucket</Bucket>
+  <KeyMarker></KeyMarker>
+  <UploadIdMarker></UploadIdMarker>
+  <NextKeyMarker>o/abc</NextKeyMarker>
+  <NextUploadIdMarker>YW55IGlkZWEgd2h5IGVsdmluZw</NextUploadIdMarker>
+  <MaxUploads>1000</MaxUploads>
+  <IsTruncated>true</IsTruncated>
+  <Upload>
+    <Key>o/8f14e45fceea167a5a36dedd4bea2543</Key>
+    <UploadId>XMgbGlrZSBlbHZpbmcncyBub3QgaGF2aW5n</UploadId>
+    <Initiator><ID>arn:aws:iam::1:user/x</ID></Initiator>
+    <StorageClass>STANDARD</StorageClass>
+    <Initiated>2010-11-10T20:48:33.000Z</Initiated>
+  </Upload>
+  <Upload>
+    <Key>o/8f14e45fceea167a5a36dedd4bea2543</Key>
+    <UploadId>b3RoZXIgdXBsb2FkIGZvciB0aGUgc2FtZSBrZXk</UploadId>
+    <StorageClass>STANDARD</StorageClass>
+    <Initiated>2010-11-10T20:49:33.000Z</Initiated>
+  </Upload>
+</ListMultipartUploadsResult>"#;
+
+    #[test]
+    fn a_multipart_listing_yields_every_open_upload_and_both_markers() {
+        // Two uploads against one key, which is the case that makes the upload id
+        // load-bearing: a sweep keyed on the object name alone would cancel one of
+        // these and report both reclaimed.
+        let page = parse_uploads(UPLOADS_RESPONSE).expect("a documented response parses");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.items[0].0, "o/8f14e45fceea167a5a36dedd4bea2543");
+        assert_eq!(page.items[0].1, "XMgbGlrZSBlbHZpbmcncyBub3QgaGF2aW5n");
+        assert_eq!(page.items[0].2.as_deref(), Some("2010-11-10T20:48:33.000Z"));
+        assert_eq!(
+            page.items[1].0, page.items[0].0,
+            "same key, different upload"
+        );
+        assert_ne!(page.items[1].1, page.items[0].1);
+        assert_eq!(page.next_key_marker.as_deref(), Some("o/abc"));
+        assert_eq!(
+            page.next_upload_id_marker.as_deref(),
+            Some("YW55IGlkZWEgd2h5IGVsdmluZw")
+        );
+    }
+
+    #[test]
+    fn a_final_multipart_page_reports_no_markers_even_when_amazon_sends_them() {
+        // AWS sends `NextKeyMarker` on the last page as well. Believing it costs a
+        // billed request per sweep that returns the page just read.
+        let body = UPLOADS_RESPONSE.replace(
+            "<IsTruncated>true</IsTruncated>",
+            "<IsTruncated>false</IsTruncated>",
+        );
+        let page = parse_uploads(&body).expect("parses");
+        assert_eq!(page.items.len(), 2);
+        assert_eq!(page.next_key_marker, None);
+        assert_eq!(page.next_upload_id_marker, None);
+    }
+
+    #[test]
+    fn an_empty_multipart_listing_is_a_clean_bucket_and_not_an_error() {
+        let body = "<?xml version=\"1.0\"?><ListMultipartUploadsResult>\
+                    <Bucket>b</Bucket><IsTruncated>false</IsTruncated>\
+                    </ListMultipartUploadsResult>";
+        let page = parse_uploads(body).expect("parses");
+        assert!(page.items.is_empty());
+        assert_eq!(page.next_key_marker, None);
+    }
+
+    #[test]
+    fn a_truncated_multipart_body_is_an_error_and_never_an_empty_bucket() {
+        // The worst wrong answer this parser can give: a sweep that reports a
+        // bucket clean of billed parts because the reply was cut off.
+        let cut = &UPLOADS_RESPONSE[..UPLOADS_RESPONSE.len() / 2];
+        assert!(parse_uploads(cut).is_err());
+    }
+
     #[test]
     fn a_listing_page_yields_every_object_and_its_continuation() {
         let page = parse_list(LIST_RESPONSE).expect("a documented response parses");

@@ -461,6 +461,41 @@ fn chunk_size(name: &str, entry: &RemoteEntry) -> Result<Option<u64>> {
     }
 }
 
+/// The `chunk_size` of a **vault** remote — the setting that reaches the sealer.
+///
+/// A vault remote resolves to no [`Target`] of its own: it stores nothing, and
+/// [`crate::session::open`] follows its chain to the object store underneath and
+/// builds *that*. So the vault's own settings have no `Target` field to travel in,
+/// and this is the seam where the one that matters is picked up instead.
+///
+/// It goes through the same [`chunk_size`] parser every other provider's does, so
+/// a mistyped value on a vault is refused with the same message rather than
+/// quietly defaulted — which is the failure mode a newly-wired setting must not
+/// have, because it is indistinguishable from the inert behaviour it replaced.
+///
+/// [`None`] for anything that is not a configured vault remote: a bare path, a
+/// provider shorthand, or a named remote that is an object store. Those have no
+/// sealer to configure.
+///
+/// # Errors
+/// [`crate::exit::ExitCode::FatalError`] for a value that is not a positive whole
+/// number of bytes, naming the remote and the value.
+pub fn vault_chunk_size<C: RemoteCatalog + ?Sized>(
+    spec: &RemoteSpec,
+    catalog: &C,
+) -> Result<Option<u64>> {
+    let RemoteSpec::Named { remote, .. } = spec else {
+        return Ok(None);
+    };
+    let Some(entry) = catalog.lookup(remote) else {
+        return Ok(None);
+    };
+    if entry.provider != PROVIDER_VAULT {
+        return Ok(None);
+    }
+    chunk_size(remote, &entry)
+}
+
 /// The advertised provider types, for a hint. Derived from the table rather than
 /// written out, so a new provider appears in every message that lists them.
 fn provider_list() -> String {
@@ -505,16 +540,31 @@ mod tests {
     /// says which list to add it to and what that costs.
     const CHUNK_SIZE_HONOURED: &[&str] = &[PROVIDER_S3, PROVIDER_R2, PROVIDER_B2];
 
-    /// `chunk_size` on these providers is accepted by the parser and reaches
-    /// nothing. The vault's chunk size is `dctl_core::constants::DEFAULT_CHUNK_SIZE`
-    /// and has no setter — so wiring it is a change to that crate's construction,
-    /// not to this one, and is on the pre-production list in `HANDOVER.md` §11.3
-    /// rather than half-done here.
+    /// The provider whose `chunk_size` reaches the *sealer* rather than a
+    /// `Target`, and therefore cannot be checked by the loop above.
     ///
-    /// B2 left this list in §25. It had to: on B2 the part size *is* an upload's
-    /// peak memory, so leaving the setting inert meant an operator who had to run
-    /// inside a small container had no way to say so.
-    const CHUNK_SIZE_INERT: &[&str] = &[crate::constants::PROVIDER_VAULT];
+    /// A vault remote resolves to no target of its own — it stores nothing, and
+    /// the chain is followed to the object store beneath it — so its setting
+    /// travels through [`vault_chunk_size`] instead, and is asserted by
+    /// [`a_vaults_chunk_size_is_read_from_its_own_remote`] and, at the far end,
+    /// by `dctl_core`'s own `clamp_chunk_size`.
+    const CHUNK_SIZE_VIA_THE_SEALER: &[&str] = &[crate::constants::PROVIDER_VAULT];
+
+    /// `chunk_size` on these providers is accepted by the parser and reaches
+    /// nothing.
+    ///
+    /// One remains, and naming it is the whole point of this table: **sftp**.
+    /// Its streaming transfer window is the compiled-in `CHUNK_LEN` in
+    /// `dctl_store::sftp`, which the setting does not reach. It costs less than
+    /// the two that have been wired — an sftp write's peak is one window of the
+    /// streaming pipe now, not one of these chunks — so it is declared inert
+    /// rather than half-wired, and it is on the pre-production list in
+    /// `HANDOVER.md` §11.3 rather than quietly left for somebody to measure.
+    ///
+    /// B2 left this list in §25 and the vault left it in §27. Both had to: on B2
+    /// the part size *is* an upload's peak memory, and on a vault the chunk size
+    /// is two terms of it.
+    const CHUNK_SIZE_INERT: &[&str] = &[crate::constants::PROVIDER_SFTP];
 
     #[test]
     fn chunk_size_is_either_carried_to_the_backend_or_listed_as_inert() {
@@ -537,20 +587,100 @@ mod tests {
             );
         }
 
-        // The other two are named, so nobody has to rediscover that the setting
-        // is inert by measuring an upload.
-        for provider in CHUNK_SIZE_INERT {
+        // The rest are named, so nobody has to rediscover where a setting goes by
+        // measuring an upload.
+        for provider in CHUNK_SIZE_INERT.iter().chain(CHUNK_SIZE_VIA_THE_SEALER) {
             assert!(
                 !CHUNK_SIZE_HONOURED.contains(provider),
-                "'{provider}' is in both lists"
+                "'{provider}' is in two lists"
             );
         }
+        for provider in CHUNK_SIZE_INERT {
+            assert!(
+                !CHUNK_SIZE_VIA_THE_SEALER.contains(provider),
+                "'{provider}' is in two lists"
+            );
+        }
+        // **Five**, not four. This count was wrong: `SftpDef` declares
+        // `chunk_size` exactly as the other four do, and it was in neither list,
+        // so the one guard meant to stop a setting being silently inert had
+        // itself lost one. `RemoteDef::chunk_size` is the fold that decides, and
+        // it has five arms that answer with a value.
         assert_eq!(
-            CHUNK_SIZE_HONOURED.len() + CHUNK_SIZE_INERT.len(),
-            4,
-            "four provider definitions declare chunk_size; every one has to be in \
+            CHUNK_SIZE_HONOURED.len() + CHUNK_SIZE_VIA_THE_SEALER.len() + CHUNK_SIZE_INERT.len(),
+            5,
+            "five provider definitions declare chunk_size; every one has to be in \
              exactly one of these lists"
         );
+    }
+
+    /// The resolver's end of a vault's `chunk_size` journey.
+    ///
+    /// Half of §11.3 item 8, and the half that is checked here because the middle
+    /// is where this project has lost a setting before (§21.7). The other end —
+    /// that the number reaches the sealer and is clamped into the format's
+    /// envelope — is `dctl_core::vault::chunking`, and `session::open` is the one
+    /// line between them.
+    #[test]
+    fn a_vaults_chunk_size_is_read_from_its_own_remote() {
+        let configured = catalog(&[
+            (
+                "archive",
+                RemoteEntry::new(crate::constants::PROVIDER_VAULT)
+                    .with_setting(CONFIG_KEY_BASE, "archive-store")
+                    .with_setting(CONFIG_KEY_CHUNK_SIZE, "262144"),
+            ),
+            (
+                "archive-store",
+                RemoteEntry::new(PROVIDER_B2).with_setting(CONFIG_KEY_BUCKET, "b"),
+            ),
+        ]);
+
+        let spec = RemoteSpec::parse("archive:photos").expect("a well-formed spec");
+        assert_eq!(
+            vault_chunk_size(&spec, &configured).expect("the setting parses"),
+            Some(262_144),
+            "a vault's chunk_size must reach the sealer, or an operator's \
+             configuration is decoration"
+        );
+
+        // The object store underneath is not a vault, so it has no sealer to
+        // configure and answers nothing — its own chunk_size travels in its
+        // `Target`, which is what the loop above checks.
+        let base = RemoteSpec::parse("archive-store:").expect("a well-formed spec");
+        assert_eq!(vault_chunk_size(&base, &configured).expect("parses"), None);
+
+        // A vault that pins nothing takes the default, and says so by answering
+        // `None` rather than by inventing a number here.
+        let unpinned = catalog(&[(
+            "plainvault",
+            RemoteEntry::new(crate::constants::PROVIDER_VAULT).with_setting(CONFIG_KEY_BASE, "b2x"),
+        )]);
+        let spec = RemoteSpec::parse("plainvault:").expect("a well-formed spec");
+        assert_eq!(vault_chunk_size(&spec, &unpinned).expect("parses"), None);
+    }
+
+    #[test]
+    fn a_mistyped_vault_chunk_size_is_refused_by_the_same_parser_as_every_other() {
+        // The one thing a newly-wired setting must not do is accept a value it
+        // cannot use and fall back to the default, which looks exactly like the
+        // inert behaviour it replaced. A vault goes through the same function, so
+        // it cannot acquire a second, kinder dialect.
+        let configured = catalog(&[(
+            "archive",
+            RemoteEntry::new(crate::constants::PROVIDER_VAULT)
+                .with_setting(CONFIG_KEY_BASE, "b2x")
+                .with_setting(CONFIG_KEY_CHUNK_SIZE, "256KiB"),
+        )]);
+        let spec = RemoteSpec::parse("archive:").expect("a well-formed spec");
+        let error = vault_chunk_size(&spec, &configured).expect_err("a mistyped size is refused");
+        assert_eq!(error.code(), ExitCode::FatalError);
+        assert!(
+            error.message().contains("chunk_size"),
+            "{}",
+            error.message()
+        );
+        assert!(error.message().contains("archive"), "{}", error.message());
     }
 
     #[test]

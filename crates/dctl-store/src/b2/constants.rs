@@ -28,6 +28,7 @@ pub(super) const EP_START_LARGE_FILE: &str = "b2_start_large_file";
 pub(super) const EP_GET_UPLOAD_PART_URL: &str = "b2_get_upload_part_url";
 pub(super) const EP_FINISH_LARGE_FILE: &str = "b2_finish_large_file";
 pub(super) const EP_CANCEL_LARGE_FILE: &str = "b2_cancel_large_file";
+pub(super) const EP_LIST_UNFINISHED: &str = "b2_list_unfinished_large_files";
 pub(super) const EP_LIST_FILE_NAMES: &str = "b2_list_file_names";
 pub(super) const EP_LIST_FILE_VERSIONS: &str = "b2_list_file_versions";
 pub(super) const EP_DELETE_FILE_VERSION: &str = "b2_delete_file_version";
@@ -135,6 +136,21 @@ pub(super) const MIN_PART_SIZE: u64 = 5_000_000;
 pub(super) const B2_MAX_PART_SIZE: u64 = 5_000_000_000;
 /// Objects requested per listing page.
 pub(super) const LIST_PAGE_SIZE: u32 = 1000;
+/// Unfinished large files requested per listing page.
+///
+/// **One hundred, not [`LIST_PAGE_SIZE`]'s thousand**, because B2 documents a
+/// different ceiling for this endpoint: `b2_list_file_names` accepts up to
+/// 10 000 and `b2_list_unfinished_large_files` accepts up to 100, and sending
+/// the larger number is a `400 bad_request` — *"maxFileCount must be in the
+/// range 1 - 100"* — rather than a value the server quietly clamps.
+///
+/// It has its own constant rather than sharing the listing's because the two
+/// limits are set by two different endpoints and nothing about the code makes
+/// them move together. Sharing one was the defect: the sweep worked against the
+/// mock, passed the gate, and failed on the first real bucket it met.
+///
+/// See <https://www.backblaze.com/apidocs/b2-list-unfinished-large-files>.
+pub(super) const UNFINISHED_PAGE_SIZE: u32 = 100;
 /// The `action` value marking a real uploaded file (vs a hide marker).
 pub(super) const ACTION_UPLOAD: &str = "upload";
 /// B2 upload timestamps are epoch milliseconds; divide to get seconds.

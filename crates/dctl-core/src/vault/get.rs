@@ -1,6 +1,6 @@
 //! `get_file` / `verify_file` and path→object resolution.
 //!
-//! Resolution ([`Vault::lookup_object_key`]) prefers the local index but falls back to
+//! Resolution (`Vault::lookup_object_key`) prefers the local index but falls back to
 //! the backend's authoritative §5 name record, so a file is readable, verifiable, and
 //! deletable on **any** device with only the password and the shared backend — no prior
 //! local index required. Integrity is checked against the object's **own** DEK-

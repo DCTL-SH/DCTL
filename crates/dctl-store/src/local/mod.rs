@@ -168,6 +168,23 @@ impl Backend for LocalFs {
         verified_write::put_from_path(self, key, source, expected, modified).await
     }
 
+    /// A local write is a write: the windows go straight into the staging file.
+    ///
+    /// There is no protocol here to be adapted to — no parts, no lengths declared
+    /// in a header, no request that has to know its own size — so this is the one
+    /// backend where the streaming path is simply the buffered path with its
+    /// source replaced. What it keeps is the read-back: the staging file is
+    /// re-read and hashed before the rename, so "the bytes durably on disk match"
+    /// still means the disk and not the pipe.
+    async fn put_stream(
+        &self,
+        key: &ObjectKey,
+        source: crate::incoming::ObjectStream,
+        modified: SourceModified,
+    ) -> Result<PutOutcome> {
+        verified_write::put_stream(self, key, source, modified).await
+    }
+
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
         let bytes = read::get(self, key).await?;
         meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
@@ -217,5 +234,32 @@ impl Backend for LocalFs {
         cursor: Option<String>,
     ) -> Result<crate::staging::StagingListing> {
         walk::list_staging_page(self, prefix, cursor).await
+    }
+
+    /// A local write is one stream to one staging file, so there is no such thing
+    /// as half an upload here — what an interruption leaves is staging debris,
+    /// which [`list_staging`](Backend::list_staging) enumerates and `cleanup`
+    /// already reclaims.
+    async fn list_incomplete_uploads(
+        &self,
+        _prefix: &str,
+        _cursor: Option<String>,
+    ) -> Result<crate::multipart::IncompleteUploads> {
+        Ok(crate::multipart::IncompleteUploads::NotMultipart(
+            crate::multipart::NOT_MULTIPART_REASON,
+        ))
+    }
+
+    /// Unreachable by construction: this backend never returns an upload to
+    /// cancel, so nothing can hand one back. It refuses rather than succeeding
+    /// quietly, because a caller that got here has an upload from somewhere else.
+    async fn abort_incomplete_upload(
+        &self,
+        upload: &crate::multipart::IncompleteUpload,
+    ) -> Result<()> {
+        Err(crate::error::StoreError::Backend(format!(
+            "local: asked to cancel upload '{}', but this backend starts none",
+            upload.id
+        )))
     }
 }

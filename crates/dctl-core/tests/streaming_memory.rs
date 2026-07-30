@@ -67,6 +67,12 @@ struct Watched {
     largest_request: AtomicU64,
     /// Whether anything asked for an object whole.
     asked_for_whole_object: AtomicBool,
+    /// How many times the vault handed over a *file* to store rather than a
+    /// stream. The spool this pass removed is exactly this call, so a
+    /// reinstatement of it is a number moving off zero.
+    put_from_path_calls: AtomicU64,
+    /// How many windows the streaming write delivered.
+    windows: AtomicU64,
 }
 
 impl Watched {
@@ -76,7 +82,17 @@ impl Watched {
             largest_response: AtomicU64::new(0),
             largest_request: AtomicU64::new(0),
             asked_for_whole_object: AtomicBool::new(false),
+            put_from_path_calls: AtomicU64::new(0),
+            windows: AtomicU64::new(0),
         }
+    }
+
+    fn put_from_path_calls(&self) -> u64 {
+        self.put_from_path_calls.load(Ordering::Relaxed)
+    }
+
+    fn windows(&self) -> u64 {
+        self.windows.load(Ordering::Relaxed)
     }
 
     fn note_response(&self, bytes: usize) {
@@ -129,10 +145,40 @@ impl Backend for Watched {
         expected: &ContentHash,
         modified: SourceModified,
     ) -> dctl_store::Result<PutOutcome> {
+        self.put_from_path_calls.fetch_add(1, Ordering::Relaxed);
         self.inner
             .put_from_path(key, source, expected, modified)
             .await
     }
+
+    /// Drains the stream here rather than forwarding it, so the window sizes are
+    /// observable at all.
+    ///
+    /// Forwarding would hide them inside the local backend, and the size of the
+    /// largest thing the vault ever hands over is the whole property this file is
+    /// about. The double therefore takes the windows itself and stores the
+    /// assembled object through the ordinary buffered `put`. Holding the whole
+    /// object is the *test's* cost and not the code's: what is being measured is
+    /// what the code handed over, one window at a time.
+    async fn put_stream(
+        &self,
+        key: &ObjectKey,
+        mut source: dctl_store::ObjectStream,
+        modified: SourceModified,
+    ) -> dctl_store::Result<PutOutcome> {
+        let mut assembled = Vec::with_capacity(source.len() as usize);
+        while let Some(window) = source.window().await? {
+            self.largest_request
+                .fetch_max(window.len() as u64, Ordering::Relaxed);
+            self.windows.fetch_add(1, Ordering::Relaxed);
+            assembled.extend_from_slice(&window);
+        }
+        let expected = source.agreed()?;
+        self.inner
+            .put(key, Bytes::from(assembled), &expected, modified)
+            .await
+    }
+
     async fn get(&self, key: &ObjectKey) -> dctl_store::Result<Bytes> {
         // The call that cannot be bounded: it returns whatever is there.
         // A read path that reaches for it has already lost.
@@ -168,6 +214,21 @@ impl Backend for Watched {
         cursor: Option<String>,
     ) -> dctl_store::Result<dctl_store::StagingListing> {
         self.inner.list_staging(prefix, cursor).await
+    }
+
+    async fn list_incomplete_uploads(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> dctl_store::Result<dctl_store::IncompleteUploads> {
+        self.inner.list_incomplete_uploads(prefix, cursor).await
+    }
+
+    async fn abort_incomplete_upload(
+        &self,
+        upload: &dctl_store::IncompleteUpload,
+    ) -> dctl_store::Result<()> {
+        self.inner.abort_incomplete_upload(upload).await
     }
 }
 
@@ -227,6 +288,29 @@ async fn storing_a_file_never_hands_the_backend_the_whole_object() {
          file — the object was buffered",
         fixture.watched.largest_request()
     );
+    // More than one, because a single window carrying the whole object would
+    // satisfy every other assertion here while being the defect itself.
+    assert!(
+        fixture.watched.windows() > 1,
+        "a {OBJECT_BYTES}-byte object arrived in {} window(s)",
+        fixture.watched.windows()
+    );
+}
+
+#[tokio::test]
+async fn storing_a_file_hands_over_a_stream_and_never_a_scratch_file() {
+    // The spool, asserted gone. `put_from_path` is the call that takes a *path*,
+    // and the path it used to take was a temporary copy of the whole sealed
+    // object — one object of scratch disk per upload, whose page cache was
+    // charged to the same cgroup as the program. Reinstating the spool moves this
+    // number off zero.
+    let fixture = fixture().await;
+    assert_eq!(
+        fixture.watched.put_from_path_calls(),
+        0,
+        "the vault staged the object on disk and handed over a path"
+    );
+    assert!(fixture.watched.windows() > 1, "nothing was streamed at all");
 }
 
 #[tokio::test]

@@ -55,6 +55,29 @@ use super::constants::{
 /// `r2 error 503` would send a reader to Cloudflare's error catalogue for a code
 /// that is in Amazon's.
 const S3_BACKEND_NAME: &str = "s3";
+
+/// What joins the two halves of a multipart-listing cursor.
+///
+/// A newline, because it is the one byte that cannot appear in either half: an S3
+/// object key is UTF-8 and may contain almost anything including `/`, `|` and
+/// `\u{0}`-escapes, while an upload id is base64-ish — but neither can carry a raw
+/// newline through the XML the marker arrives in. Picking a printable separator
+/// would mean a key containing it split the cursor in the wrong place and the
+/// enumeration silently resumed somewhere else in the bucket.
+const CURSOR_SEPARATOR: char = '\n';
+
+/// Join the two halves of a multipart-listing cursor into one opaque token.
+fn join_cursor(key_marker: &str, upload_id_marker: &str) -> String {
+    format!("{key_marker}{CURSOR_SEPARATOR}{upload_id_marker}")
+}
+
+/// Split a cursor produced by [`join_cursor`] back into its two markers.
+///
+/// A cursor with no separator is read as a key marker with no upload marker,
+/// which is what a caller that stored only half of one would mean.
+fn split_cursor(cursor: &str) -> (&str, &str) {
+    cursor.split_once(CURSOR_SEPARATOR).unwrap_or((cursor, ""))
+}
 use super::sigv4;
 use super::xml;
 
@@ -552,6 +575,214 @@ impl S3Client {
             return Err(Self::error(complete).await);
         }
         Ok(verified)
+    }
+
+    /// Store an object that does not exist yet, taking its bytes from `source` in
+    /// bounded windows.
+    ///
+    /// The same two arms and the same one number as
+    /// [`put_from_path`](Self::put_from_path) — below the part size the object is
+    /// bounded by definition and takes the verified single-shot `PUT`, above it
+    /// one part at a time goes through the multipart API. `source.len()` is what
+    /// decides, declared before the first window.
+    ///
+    /// The commit is `CompleteMultipartUpload`, and it is below the line where
+    /// [`ObjectStream::agreed`](crate::ObjectStream::agreed) returns.
+    pub(crate) async fn put_stream(
+        &self,
+        key: &ObjectKey,
+        mut source: crate::incoming::ObjectStream,
+        modified: SourceModified,
+    ) -> Result<PutOutcome> {
+        let size = source.len();
+
+        if !streaming::use_multipart(size, self.config.part_size()) {
+            let mut whole = vec![
+                0u8;
+                usize::try_from(size).map_err(|_| {
+                    StoreError::Backend("object too large for this machine's address space".into())
+                })?
+            ];
+            let filled = source.fill(&mut whole).await?;
+            // `sealed` rather than `agreed`, for the reason that method gives:
+            // `fill` has not yet seen the stream's terminal message.
+            let expected = source.sealed().await?;
+            if filled as u64 != size {
+                return Err(StoreError::ShortWrite {
+                    expected: size,
+                    actual: filled as u64,
+                });
+            }
+            return self.put(key, Bytes::from(whole), &expected, modified).await;
+        }
+
+        let create = self
+            .send(
+                Method::POST,
+                Some(key.as_str()),
+                &[("uploads", String::new())],
+                &Self::metadata_headers(modified),
+                None,
+            )
+            .await?;
+        if !create.status().is_success() {
+            return Err(Self::error(create).await);
+        }
+        let body = create
+            .text()
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let upload_id = xml::extract_tag(&body, "UploadId")
+            .ok_or_else(|| StoreError::Backend("s3: no UploadId in response".into()))?;
+
+        match self
+            .stream_parts_and_complete(key.as_str(), &upload_id, &mut source, size)
+            .await
+        {
+            Ok(outcome) => Ok(outcome),
+            Err(e) => {
+                // Abort so no partial upload lingers as orphaned, billed parts.
+                let _ = self.abort_multipart(key.as_str(), &upload_id).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Send every part of a streamed object, then complete the upload.
+    ///
+    /// One part buffer at a time, handed to the request as an owned `Bytes` — the
+    /// whole of the multipart term in the memory contract.
+    async fn stream_parts_and_complete(
+        &self,
+        key: &str,
+        upload_id: &str,
+        source: &mut crate::incoming::ObjectStream,
+        size: u64,
+    ) -> Result<PutOutcome> {
+        let part_size = streaming::adaptive_part_size(
+            size,
+            self.config.part_size(),
+            MIN_PART_SIZE,
+            MAX_PART_SIZE,
+            streaming::MAX_PARTS,
+        )?;
+        let plan = streaming::plan_parts(size, part_size);
+        tracing::debug!(
+            bytes = size,
+            part_size,
+            parts = plan.len(),
+            "s3 stream (multipart, no spool)"
+        );
+
+        let mut parts_xml = String::from("<CompleteMultipartUpload>");
+        for span in &plan {
+            let want = usize::try_from(span.len)
+                .map_err(|_| StoreError::Backend("part larger than this machine's usize".into()))?;
+            let mut part = vec![0u8; want];
+            let n = source.fill(&mut part).await?;
+            if n != want {
+                return Err(StoreError::ShortWrite {
+                    expected: size,
+                    actual: span.offset + n as u64,
+                });
+            }
+            let etag = self
+                .upload_part(key, upload_id, span.number, Bytes::from(part))
+                .await?;
+            parts_xml.push_str(&format!(
+                "<Part><PartNumber>{}</PartNumber><ETag>{etag}</ETag></Part>",
+                span.number
+            ));
+            crate::meter::charge(self.meter.as_ref(), span.len).await;
+        }
+        parts_xml.push_str("</CompleteMultipartUpload>");
+
+        // Both ends agree, the object was as long as it said, and the producer
+        // had nothing left over. Only now is anything committed.
+        let verified = source.sealed().await?;
+
+        let complete = self
+            .send(
+                Method::POST,
+                Some(key),
+                &[("uploadId", upload_id.to_string())],
+                &[],
+                Some(Bytes::from(parts_xml)),
+            )
+            .await?;
+        if !complete.status().is_success() {
+            return Err(Self::error(complete).await);
+        }
+        Ok(PutOutcome { size, verified })
+    }
+
+    /// One page of the multipart uploads this bucket is still holding open.
+    ///
+    /// `ListMultipartUploads` is the only call in the S3 API that can see them —
+    /// their parts are stored and billed and `ListObjectsV2` steps over them,
+    /// because an upload that has not been completed is not an object.
+    ///
+    /// `prefix` is passed to the provider so a scoped sweep costs one request, and
+    /// the cursor is the **pair** `(key-marker, upload-id-marker)` joined by a
+    /// character no upload id contains: S3 keys this listing by both, and
+    /// resuming from the key alone restarts at that key's first upload forever.
+    pub(crate) async fn list_incomplete_uploads(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> Result<crate::multipart::IncompleteUploads> {
+        let mut query: Vec<(&str, String)> = vec![("uploads", String::new())];
+        if !prefix.is_empty() {
+            query.push(("prefix", prefix.to_string()));
+        }
+        if let Some(cursor) = cursor.as_deref() {
+            let (key_marker, upload_marker) = split_cursor(cursor);
+            query.push(("key-marker", key_marker.to_string()));
+            if !upload_marker.is_empty() {
+                query.push(("upload-id-marker", upload_marker.to_string()));
+            }
+        }
+
+        let resp = self.send(Method::GET, None, &query, &[], None).await?;
+        if !resp.status().is_success() {
+            return Err(Self::error(resp).await);
+        }
+        let body = resp
+            .text()
+            .await
+            .map_err(|e| StoreError::Backend(e.to_string()))?;
+        let page = xml::parse_uploads(&body)?;
+
+        let items = page
+            .items
+            .into_iter()
+            .map(|(key, id, initiated)| crate::multipart::IncompleteUpload {
+                key: ObjectKey::new(key),
+                id,
+                started_unix: initiated
+                    .as_deref()
+                    .and_then(super::instant::parse_iso8601_utc),
+            })
+            .collect();
+        let next_cursor = page
+            .next_key_marker
+            .map(|key| join_cursor(&key, page.next_upload_id_marker.as_deref().unwrap_or("")));
+        Ok(crate::multipart::IncompleteUploads::Page(
+            crate::multipart::IncompletePage { items, next_cursor },
+        ))
+    }
+
+    /// Cancel one open upload, releasing every part it holds.
+    ///
+    /// An upload that is already gone is a success — see
+    /// [`Backend::abort_incomplete_upload`](crate::Backend::abort_incomplete_upload).
+    /// [`abort_multipart`](Self::abort_multipart) already reads S3's `404
+    /// NoSuchUpload` that way.
+    pub(crate) async fn abort_incomplete_upload(
+        &self,
+        upload: &crate::multipart::IncompleteUpload,
+    ) -> Result<()> {
+        self.abort_multipart(upload.key.as_str(), &upload.id).await
     }
 
     /// Upload one part (S3 re-verifies the body against the SigV4 `x-amz-content-sha256`)

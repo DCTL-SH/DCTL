@@ -20,13 +20,24 @@
 //!   and charged for and no listing shows them.
 //! * **versions** — a superseded object still alive on a versioned bucket.
 //!
-//! ## Two of the four cannot be swept, and say so
+//! ## One of the four cannot be swept, and says so
 //!
-//! [`dctl_store::Backend`] has no API for in-progress multipart uploads and none
-//! for object versions, on any provider, because the trait does not have one. A
-//! sweep that reported "0 reclaimed" for a class it was never able to *look* at
-//! would be the misreport `PLAN.md` §6 forbids — so those two classes emit an
-//! explicit `unsupported` record instead, naming the capability that is missing.
+//! [`dctl_store::Backend`] has no API for object versions, on any provider,
+//! because the trait does not have one. A sweep that reported "0 reclaimed" for a
+//! class it was never able to *look* at would be the misreport `PLAN.md` §6
+//! forbids — so that class emits an explicit `unsupported` record instead, naming
+//! the capability that is missing.
+//!
+//! **`multipart` used to be the second, and is not.** The two calls this module
+//! named as what would close it —
+//! [`Backend::list_incomplete_uploads`](dctl_store::Backend::list_incomplete_uploads)
+//! and [`Backend::abort_incomplete_upload`](dctl_store::Backend::abort_incomplete_upload)
+//! — exist, on all five backends, with no default implementation, in the shape
+//! the staging enumeration already had. `b2_list_unfinished_large_files` plus
+//! `b2_cancel_large_file` answer it on B2; `ListMultipartUploads` plus
+//! `AbortMultipartUpload` answer it on S3 and R2; `local:` and `sftp:` answer
+//! [`IncompleteUploads::NotMultipart`](dctl_store::IncompleteUploads::NotMultipart),
+//! because they write one stream to a staging file and have no parts to abandon.
 //!
 //! Whether that is an *error* depends on what was asked for, and the rule is one
 //! sentence: **a class that could not be swept is an error only when the user
@@ -122,14 +133,15 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::ValueEnum;
-use dctl_store::{Backend, ObjectKey, StagingListing};
+use dctl_store::{Backend, IncompleteUpload, IncompleteUploads, ObjectKey, StagingListing};
 use serde::Serialize;
 
 use crate::audit::record::Entry as AuditEntry;
 use crate::audit::sink;
 use crate::constants::{
-    CLEANUP_STALE_INDEX_HINT, REMOVAL_ENGINE_HINT, REMOVAL_ENGINE_MISSING, REMOVAL_KIND_ORPHAN,
-    REMOVAL_KIND_STAGING, UNKNOWN_VALUE, VAULT_NAME_KEY_PREFIX, VAULT_OBJECT_KEY_PREFIX,
+    CLEANUP_STALE_INDEX_HINT, REMOVAL_ENGINE_HINT, REMOVAL_ENGINE_MISSING, REMOVAL_KIND_MULTIPART,
+    REMOVAL_KIND_ORPHAN, REMOVAL_KIND_STAGING, UNKNOWN_VALUE, VAULT_NAME_KEY_PREFIX,
+    VAULT_OBJECT_KEY_PREFIX,
 };
 use crate::ctx::Ctx;
 use crate::error::Result;
@@ -188,9 +200,8 @@ impl Class {
     /// rather than a boolean means the refusal cannot be worded twice.
     const fn missing_capability(self) -> Option<&'static str> {
         match self {
-            Self::Multipart => Some("listing a provider's in-progress multipart uploads"),
             Self::Versions => Some("listing an object's superseded versions"),
-            Self::Staging | Self::Orphans => None,
+            Self::Multipart | Self::Staging | Self::Orphans => None,
         }
     }
 }
@@ -312,12 +323,15 @@ pub async fn sweep(
 
         match class {
             Class::Staging => staging(ctx, &attribution, aging, &store, &prefix, report).await?,
+            Class::Multipart => {
+                multipart(ctx, &attribution, aging, &store, &prefix, report).await?;
+            }
             Class::Orphans => {
                 orphans(ctx, &attribution, aging, medium, &store, named, report).await?;
             }
             // Answered above, exhaustively, so a class added later is a compile
             // error here rather than a silent no-op.
-            Class::Multipart | Class::Versions => {}
+            Class::Versions => {}
         }
     }
 
@@ -399,6 +413,129 @@ async fn staging(
         }
         cursor = page.next_cursor;
     }
+}
+
+/// Sweep the multipart uploads a provider is still holding open.
+///
+/// The third question, after "what is stored?" and "what did we abandon under a
+/// temporary key?". Its subject is the only class of debris that **no object
+/// listing can show**: a part a provider has accepted is stored and billed and
+/// belongs to no object until the finish call arrives, so `b2_list_file_names`
+/// and `ListObjectsV2` both step over it. A 4 GiB upload killed at its third part
+/// leaves three hundred megabytes on somebody's monthly invoice, invisible, for
+/// as long as the bucket exists.
+///
+/// Age is load-bearing here more than anywhere else in this file. An upload four
+/// seconds old is *indistinguishable* from one another process is half way
+/// through — there is no lock, no owner and no name to compare — so `--min-age`
+/// is the only thing standing between a sweep and cancelling a live backup. An
+/// upload whose start time the provider will not give is held rather than
+/// guessed at, for the same reason, and B2 and S3 both give one.
+///
+/// Paged, with the same stall guard the staging sweep applies: a backend that
+/// returned nothing and handed back the cursor it was given has nothing further
+/// to say, and looping on it would hang a command whose whole job is to finish
+/// and report.
+async fn multipart(
+    ctx: &Ctx,
+    attribution: &Attribution<'_>,
+    aging: Aging,
+    store: &Store,
+    prefix: &str,
+    report: &mut Report<'_>,
+) -> Result<()> {
+    let mut cursor: Option<String> = None;
+    loop {
+        let page = match store
+            .backend
+            .list_incomplete_uploads(prefix, cursor.clone())
+            .await?
+        {
+            IncompleteUploads::Page(page) => page,
+            IncompleteUploads::NotMultipart(reason) => {
+                // Not an error and not a zero: the operator asked a question with
+                // a clean answer and is told the answer.
+                return report.not_staged(class_name(Class::Multipart), reason);
+            }
+        };
+
+        let stalled = page.items.is_empty() && page.next_cursor == cursor;
+        for upload in page.items {
+            // Whole components, never bytes — the same rule the object listing and
+            // the staging sweep are scoped by. A provider matches a prefix the way
+            // a provider does, so `photos` brings back `photos-backup/…` too.
+            if !path::is_under(prefix, upload.key.as_str()) {
+                continue;
+            }
+            reclaim_upload(ctx, attribution, aging, store, &upload, report).await?;
+        }
+
+        if stalled || page.next_cursor.is_none() {
+            return Ok(());
+        }
+        cursor = page.next_cursor;
+    }
+}
+
+/// Cancel one open upload, if it is old enough to be abandoned.
+///
+/// The sibling of [`reclaim`] for the class whose removal is not a `delete`. Two
+/// things differ and both are honest rather than convenient:
+///
+/// * **The size is unknown.** Neither provider reports how many bytes an
+///   unfinished upload is holding — B2's `b2_list_unfinished_large_files` and
+///   S3's `ListMultipartUploads` both name the upload and not its parts, and
+///   asking would be one further billed request per upload (`ListParts`). So the
+///   report carries no size and the reclaimed-bytes total does not move. That is
+///   an understatement of what a sweep freed, which is the right direction to be
+///   wrong in: an invented figure would be a number an operator could put in a
+///   cost report.
+/// * **The record names the key.** An upload has a destination key and an opaque
+///   provider handle; the handle means nothing to anybody reading an audit trail
+///   a year later, and the key is what the object *would* have been.
+async fn reclaim_upload(
+    ctx: &Ctx,
+    attribution: &Attribution<'_>,
+    aging: Aging,
+    store: &Store,
+    upload: &IncompleteUpload,
+    report: &mut Report<'_>,
+) -> Result<()> {
+    let item = Item {
+        path: upload.key.as_str().to_string(),
+        // See the doc comment: no provider reports it, and inventing one would put
+        // a fabricated figure in a report somebody bills against.
+        size: None,
+        kind: REMOVAL_KIND_MULTIPART,
+    };
+
+    let Some(started) = upload.started_unix else {
+        return report.held(&item, AGE_UNKNOWN_REASON);
+    };
+    let age = Duration::from_secs(aging.now.saturating_sub(started).max(0).unsigned_abs());
+    if age < aging.min_age {
+        return report.held(
+            &item,
+            format!("younger than {}", size::duration(aging.min_age.as_secs())),
+        );
+    }
+
+    if ctx.is_dry_run() {
+        return report.would_remove(&item);
+    }
+
+    let outcome = store.abort(upload).await;
+    match &outcome {
+        Ok(()) => report.removed(&item)?,
+        Err(error) => report.failed(&item, error.message())?,
+    }
+
+    ctx.audit.record(
+        &AuditEntry::new(attribution.op, sink::outcome(&outcome))
+            .path(&item.path)
+            .objects(1)
+            .remote(attribution.remote),
+    )
 }
 
 /// Sweep content objects no index row refers to.
@@ -566,6 +703,12 @@ impl Store {
         self.backend.delete(&ObjectKey::new(key)).await?;
         Ok(())
     }
+
+    /// Cancel one open upload, releasing the parts it holds.
+    async fn abort(&self, upload: &IncompleteUpload) -> Result<()> {
+        self.backend.abort_incomplete_upload(upload).await?;
+        Ok(())
+    }
 }
 
 /// Whether a backend key marks a staged, uncommitted object.
@@ -637,12 +780,15 @@ mod tests {
     }
 
     #[test]
-    fn exactly_the_two_provider_classes_are_unavailable() {
-        // Stated as a test rather than a comment: the day the storage trait
-        // grows a multipart listing, this is what fails and points at the arm
-        // to delete.
-        assert!(Class::Multipart.missing_capability().is_some());
+    fn exactly_one_provider_class_is_unavailable() {
+        // Stated as a test rather than a comment. It used to name two, and the
+        // day the storage trait grew a multipart listing this is what failed and
+        // pointed at the arm to delete — which is what it is for.
         assert!(Class::Versions.missing_capability().is_some());
+        assert!(
+            Class::Multipart.missing_capability().is_none(),
+            "the multipart class is enumerable now: `Backend::list_incomplete_uploads`"
+        );
         assert!(Class::Staging.missing_capability().is_none());
         assert!(Class::Orphans.missing_capability().is_none());
     }

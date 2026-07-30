@@ -381,6 +381,23 @@ impl Backend for SftpBackend {
         .await
     }
 
+    /// The same staged write, fed by a producer instead of by a file.
+    ///
+    /// SFTP takes a stream directly — the protocol has no parts and declares no
+    /// content length — so a window goes onto the wire as it arrives and the peak
+    /// is one window rather than one part. The order and every guarantee around it
+    /// live in [`write::put_object_stream`], stated against [`ops::RemoteFs`] so
+    /// they are provable with no server in reach.
+    async fn put_stream(
+        &self,
+        key: &ObjectKey,
+        mut source: crate::incoming::ObjectStream,
+        modified: SourceModified,
+    ) -> Result<PutOutcome> {
+        let remote = remote_path(&self.base, key)?;
+        write::put_object_stream(self, &remote, &mut source, modified, self.meter.as_ref()).await
+    }
+
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
         let remote = remote_path(&self.base, key)?;
         let mut fs = self.sftp.fs();
@@ -594,6 +611,31 @@ impl Backend for SftpBackend {
             prefix,
             cursor.as_deref(),
             PAGE_SIZE,
+        )))
+    }
+    /// SFTP writes one stream to one staging file — `SSH_FXP_WRITE` at an
+    /// offset, over and over — so there is no upload to leave half-started. An
+    /// interruption leaves staging debris, which
+    /// [`list_staging`](Backend::list_staging) enumerates and `cleanup` reclaims.
+    async fn list_incomplete_uploads(
+        &self,
+        _prefix: &str,
+        _cursor: Option<String>,
+    ) -> Result<crate::multipart::IncompleteUploads> {
+        Ok(crate::multipart::IncompleteUploads::NotMultipart(
+            crate::multipart::NOT_MULTIPART_REASON,
+        ))
+    }
+
+    /// Unreachable by construction, and a refusal rather than a quiet success —
+    /// see [`LocalFs::abort_incomplete_upload`](crate::LocalFs).
+    async fn abort_incomplete_upload(
+        &self,
+        upload: &crate::multipart::IncompleteUpload,
+    ) -> Result<()> {
+        Err(StoreError::Backend(format!(
+            "sftp: asked to cancel upload '{}', but this backend starts none",
+            upload.id
         )))
     }
     // `prepare_upload` keeps the trait default: SFTP has no presigned/delegated

@@ -513,13 +513,26 @@ from the command line. See [Architecture](ARCHITECTURE.md) and
 ## 10. Huge files & delegated uploads (concept)
 
 **Streaming is the default posture.** Sealed writes go through the core's
-streaming store (`Vault::put_file_from_path`): the source is sealed straight from
-disk into a temporary object and handed to the backend's streaming, constant-
-memory multipart write. No stage holds the whole file or the whole object, so
-peak memory is `O(chunk)` regardless of size, and part sizing adapts (up to
-`MAX_PARTS = 10_000`). This is why `backup` has no whole-file size limit and why
-the largest object in a vault restores on a laptop. `cat`/`rcat` are the
-constant-memory byte-stream pair for pipelines.
+streaming store (`Vault::put_file_from_path`): the source is sealed into a bounded
+pipe that the backend drains as fast as the link will take it, and `Backend::put_stream`
+is what takes it — a window at a time on `local:` and `sftp:`, a multipart part at
+a time on `b2:`, `s3:` and `r2:`. No stage holds the whole file, no stage holds the
+whole object, and **no stage writes either to local disk**: an upload needs no
+scratch space at all, measured at 0 MiB against a 4 GiB object. Part sizing adapts
+(up to `MAX_PARTS = 10_000`). This is why `backup` has no whole-file size limit and
+why the largest object in a vault restores on a laptop. `cat`/`rcat` are the
+constant-memory byte-stream pair for pipelines — and `rcat` is the one write that
+still spools, because a pipe has no length and a sealed object's head must state one.
+
+**Sizing a container.** Peak memory does not grow with the object: measured on the
+release binary under a hard 256 MiB cgroup cap, a 4 GiB file copies in and out on
+`local:`, `sftp:` and `b2:` at 144–147 MiB of peak RSS — the same figure a 1 MiB
+file produces. The constant is **not** the transfer, which costs 8 MiB on the
+filesystem backends and one part (100 MiB by default) on the object stores; it is
+the Argon2id vault unlock, which allocates 128 MiB on purpose and releases it
+before the first byte is sealed. Size a container at about **192 MiB** and it is
+safe at any object size. Lower the object stores' `chunk_size` if you need the
+transfer term smaller; you cannot go below the KDF without weakening it.
 
 **Delegated (presigned) uploads** are a format-level capability (a transient
 "upload ticket", FORMAT §12.9): a client can be handed a short-lived presigned

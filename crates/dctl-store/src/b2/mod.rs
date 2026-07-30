@@ -450,6 +450,25 @@ impl Backend for B2Backend {
         upload::put_from_path(self, key, source, expected, modified).await
     }
 
+    /// The same two arms as [`put_from_path`](Backend::put_from_path), fed by a
+    /// producer instead of by a file — so a sealed object reaches the bucket
+    /// without ever being written to local disk.
+    ///
+    /// The memory contract is unchanged and is still one part:
+    /// [`upload_peak_bytes`](B2Backend::upload_peak_bytes) states it, and the
+    /// pipe in front of it adds its own bounded term
+    /// ([`incoming::constants`](crate::incoming::constants)). What went is the
+    /// spool, and with it the page cache that used to be charged to the same
+    /// cgroup as the program.
+    async fn put_stream(
+        &self,
+        key: &ObjectKey,
+        source: crate::incoming::ObjectStream,
+        modified: SourceModified,
+    ) -> Result<PutOutcome> {
+        upload::put_stream(self, key, source, modified).await
+    }
+
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
         let bytes = download::get(self, key).await?;
         crate::meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
@@ -486,10 +505,10 @@ impl Backend for B2Backend {
     /// nothing else. The upload goes straight to the final key with a checksum
     /// the provider verifies, so there is no staging namespace to sweep.
     ///
-    /// What an interrupted *large* upload leaves is an unfinished multipart
-    /// upload, which is billed, which no listing shows, and which is a different
-    /// class — reported as `unsupported` by name, because no API in this build
-    /// can enumerate it.
+    /// What an interrupted *large* upload leaves is an unfinished large file,
+    /// which is billed and which no object listing shows — a different class,
+    /// asked for separately, and now answered:
+    /// [`list_incomplete_uploads`](Backend::list_incomplete_uploads).
     async fn list_staging(
         &self,
         _prefix: &str,
@@ -498,6 +517,25 @@ impl Backend for B2Backend {
         Ok(crate::staging::StagingListing::NotStaged(
             crate::staging::NOT_STAGED_REASON,
         ))
+    }
+
+    /// The large files this account started and never finished, through
+    /// `b2_list_unfinished_large_files` — the only call in the API that can see
+    /// them.
+    async fn list_incomplete_uploads(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> Result<crate::multipart::IncompleteUploads> {
+        upload::list_unfinished(self, prefix, cursor).await
+    }
+
+    /// `b2_cancel_large_file`, which releases every part the upload was holding.
+    async fn abort_incomplete_upload(
+        &self,
+        upload: &crate::multipart::IncompleteUpload,
+    ) -> Result<()> {
+        upload::abort_unfinished(self, upload).await
     }
 
     async fn list_page(&self, prefix: &str, cursor: Option<String>) -> Result<Page> {

@@ -56,7 +56,7 @@ impl Vault {
     /// object, its §5 name record, and the index row — so a delete truly leaves nothing
     /// behind on the untrusted backend.
     ///
-    /// Resolution goes through [`Vault::lookup_object_key`] (index → authoritative name
+    /// Resolution goes through `Vault::lookup_object_key` (index → authoritative name
     /// record), so a delete works on a fresh/wiped device *before* any `rebuild_index`
     /// — symmetric with `get_file`. `Ok(false)` only when the path is present nowhere.
     #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]

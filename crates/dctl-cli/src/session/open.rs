@@ -129,6 +129,14 @@ pub async fn open_with(ctx: &Ctx, spec: &RemoteSpec, not_a_vault: Option<&str>) 
 pub struct Prepared {
     backend: Arc<dyn Backend>,
     index: PathBuf,
+    /// The vault remote's own `chunk_size`, if its section pins one.
+    ///
+    /// Read here because this is where the configuration is in hand, and carried
+    /// because [`Prepared::unlock`] is the one place a [`Vault`] is built — the
+    /// middle of a setting's journey is where this project has lost one before
+    /// (`HANDOVER.md` §21.7), and a value picked up in one function and applied in
+    /// the next has exactly one seam rather than several.
+    chunk_size: Option<u64>,
     /// Whether the configuration already says this location holds a vault.
     ///
     /// Computed here because this is where the configuration is in hand, and
@@ -166,7 +174,7 @@ pub fn prepare(ctx: &Ctx, spec: &RemoteSpec) -> Result<Prepared> {
     // reported — a misspelled remote is a typo, a discarded factor is not.
     factor::refuse_if_present(&ctx.globals, "unlocking a vault", NOTHING_HAPPENED)?;
 
-    let (backend, declared_vault) = build_backend(ctx, spec)?;
+    let (backend, declared_vault, chunk_size) = build_backend(ctx, spec)?;
 
     // After the remote has resolved, so a typo does not leave a directory
     // behind, and before the secret is acquired, which is this module's ordering
@@ -180,6 +188,7 @@ pub fn prepare(ctx: &Ctx, spec: &RemoteSpec) -> Result<Prepared> {
     Ok(Prepared {
         backend,
         index,
+        chunk_size,
         declared_vault,
     })
 }
@@ -219,11 +228,18 @@ impl Prepared {
     ///
     /// [`ExitCode::VaultLocked`]: crate::exit::ExitCode::VaultLocked
     pub async fn unlock(self, spec: &RemoteSpec, key: UnlockKey<'_>) -> Result<Session> {
-        let vault = Vault::unlock(self.backend, &self.index, key).await?;
+        // The far end of the remote's `chunk_size`. Applied here rather than
+        // inside `Vault::unlock` because it is a *configuration* decision and
+        // `dctl-core` has no configuration — and applied at the one place a vault
+        // is built, so there is no second construction for it to be forgotten in.
+        let vault = Vault::unlock(self.backend, &self.index, key)
+            .await?
+            .with_chunk_size(self.chunk_size);
 
         tracing::debug!(
             { fields::REMOTE } = %spec,
             index = %self.index.display(),
+            chunk_size = vault.chunk_size(),
             "vault unlocked"
         );
 
@@ -257,21 +273,28 @@ impl Prepared {
 /// A missing config is not fatal: `load_or_default` yields an empty one, which
 /// is the headless case `PLAN.md` §14 requires to keep working from environment
 /// variables alone.
-/// Returns the backend and whether the configuration *declares* this location a
-/// vault's object store — the second is read here because this is the only place
-/// the configuration is loaded, and re-loading it to answer one boolean is how
-/// two answers to the same question start to disagree.
-fn build_backend(ctx: &Ctx, spec: &RemoteSpec) -> Result<(Arc<dyn Backend>, bool)> {
+/// Returns the backend, whether the configuration *declares* this location a
+/// vault's object store, and the vault remote's own `chunk_size`. All three are
+/// read here because this is the only place the configuration is loaded, and
+/// re-loading it to answer one of them is how two answers to the same question
+/// start to disagree.
+fn build_backend(ctx: &Ctx, spec: &RemoteSpec) -> Result<(Arc<dyn Backend>, bool, Option<u64>)> {
     let path = crate::config::resolve_path(ctx.globals.config.as_deref());
     let config = crate::config::load_or_default(&path)?;
 
     let storage = storage_remote(&config, spec)?;
     let declared_vault = declares_a_vault(&config, spec, &storage);
+    // Taken from the **vault** remote, not from the store underneath it: the two
+    // are different settings that happen to share a name. The store's
+    // `chunk_size` is its multipart part size and travels in its `Target`; the
+    // vault's is the sealer's chunk framing and has no target to travel in.
+    let chunk_size = crate::remote::resolve::vault_chunk_size(spec, &config)?;
     let resolved = crate::remote::resolve::resolve(&storage, &config)?;
     Ok((
         // Metered: a vault's object traffic is the run's traffic.
         crate::remote::registry::build(&resolved, ctx.globals.links, ctx.limits.meter())?,
         declared_vault,
+        chunk_size,
     ))
 }
 

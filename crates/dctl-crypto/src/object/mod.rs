@@ -19,6 +19,7 @@ mod nonce;
 pub mod range;
 mod recipient;
 mod seal;
+mod sealer;
 mod stream;
 
 pub use head::{Head, parse_head};
@@ -26,4 +27,5 @@ pub use meta::{Metadata, build_metadata, parse_metadata};
 pub use range::{ChunkSpan, HeaderExtent, RangeHeader, header_extent};
 pub use recipient::{open_as_recipient, open_with_kw, seal_to_recipients};
 pub use seal::{Opened, open, seal};
-pub use stream::{open_reader, open_stream, seal_stream};
+pub use sealer::{PlannedSeal, seal_stream};
+pub use stream::{open_reader, open_stream};

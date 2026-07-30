@@ -61,6 +61,17 @@ fn backend(mock: &MockS3) -> S3Backend {
     S3Backend::new(config(mock.endpoint())).expect("the backend builds")
 }
 
+/// A backend cut at the 5 MiB floor, for the tests whose subject is the parts.
+///
+/// [`backend`] keeps the shipped 100 MiB `DEFAULT_PART_SIZE`, which is right for
+/// every test about an ordinary write. A test about multipart built on it takes
+/// the single-shot arm instead and then asserts about parts that were never
+/// sent — it does not fail loudly, it stops testing its own subject, which is
+/// why this is a named helper and not a `with_part_size` repeated four times.
+fn multipart_backend(mock: &MockS3) -> S3Backend {
+    S3Backend::new(config(mock.endpoint()).with_part_size(Some(PART))).expect("the backend builds")
+}
+
 fn hash(data: &[u8]) -> ContentHash {
     ContentHash::compute(HashAlgo::Blake3, data)
 }
@@ -951,4 +962,227 @@ async fn a_download_to_a_file_commits_only_a_body_of_the_declared_length() {
         StoreError::NotFound(_)
     ));
     assert!(!absent.exists(), "a failed download left a file behind");
+}
+
+// ── the streaming put: no spool, same wire ───────────────────────────────────
+
+/// Feed `data` to `s3` through a streaming put, exactly as a vault's sealer does.
+async fn streamed_put(s3: &S3Backend, key: &str, data: &[u8]) -> dctl_store::Result<()> {
+    use std::io::Write as _;
+    let (mut writer, stream) = dctl_store::object_stream(data.len() as u64, HashAlgo::Blake3);
+    let owned = data.to_vec();
+    let producing = tokio::task::spawn_blocking(move || {
+        writer.write_all(&owned).expect("the pipe takes the bytes");
+        writer.finish().expect("and the end of them");
+    });
+    let outcome = s3
+        .put_stream(&ObjectKey::new(key), stream, SourceModified::unknown())
+        .await;
+    producing.await.expect("the producer finished");
+    outcome.map(|_| ())
+}
+
+#[tokio::test]
+async fn a_streamed_multipart_put_stores_the_object_byte_for_byte() {
+    // The vault's write path, end to end against a server that assembles the
+    // parts in the order it was given them: a client that sent the right bytes in
+    // the wrong parts would still round-trip through its own `get`, and would
+    // not through this.
+    let mock = support::mock_s3::MockS3::start().await;
+    let s3 = multipart_backend(&mock);
+    let data: Vec<u8> = (0..(PART as usize * 2 + 4096))
+        .map(|i| (i % 251) as u8)
+        .collect();
+
+    streamed_put(&s3, "o/streamed", &data)
+        .await
+        .expect("the streamed put stores");
+
+    let state = mock.state();
+    assert_eq!(state.completed.len(), 1, "the upload was never completed");
+    assert!(state.aborted.is_empty(), "{:?}", state.aborted);
+    let stored = s3
+        .get(&ObjectKey::new("o/streamed"))
+        .await
+        .expect("the object reads back");
+    assert_eq!(stored.as_ref(), data.as_slice());
+}
+
+#[tokio::test]
+async fn a_producer_that_dies_mid_object_aborts_the_upload_and_stores_nothing() {
+    let mock = support::mock_s3::MockS3::start().await;
+    let s3 = multipart_backend(&mock);
+
+    let (mut writer, stream) = dctl_store::object_stream(PART * 3, HashAlgo::Blake3);
+    let producing = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let part: Vec<u8> = (0..PART as usize + 4096).map(|i| (i % 251) as u8).collect();
+        let _ = writer.write_all(&part);
+        drop(writer);
+    });
+    let error = s3
+        .put_stream(
+            &ObjectKey::new("o/never-finished"),
+            stream,
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("a stream that stopped must not be committed");
+    producing.await.expect("the producer ran");
+
+    assert!(
+        error.to_string().contains("stopped before it finished"),
+        "{error}"
+    );
+    let state = mock.state();
+    assert!(state.completed.is_empty(), "an upload was completed anyway");
+    assert_eq!(state.aborted.len(), 1, "the parts were left billing");
+    assert!(!state.objects.contains_key("o/never-finished"));
+}
+
+// ── unfinished multipart uploads: seen, and reclaimed ────────────────────────
+
+/// Leave one open upload on the server, the way a `SIGKILL` does.
+///
+/// DCTL aborts its own on every error path, so the only way to reach the state a
+/// killed process leaves is to make the abort itself fail — which is exactly what
+/// a process that is no longer running looks like to the server.
+async fn abandon_one(mock: &support::mock_s3::MockS3, s3: &S3Backend, key: &str) {
+    let (mut writer, stream) = dctl_store::object_stream(PART * 3, HashAlgo::Blake3);
+    let producing = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let part: Vec<u8> = (0..PART as usize + 16).map(|i| (i % 251) as u8).collect();
+        let _ = writer.write_all(&part);
+        drop(writer);
+    });
+    // The abort is refused for as long as this is set, which is what the server
+    // sees when the client is no longer there to send one. A one-shot `script`
+    // cannot express it: armed before the put, it is spent on the
+    // CreateMultipartUpload and no upload is ever opened.
+    mock.refuse_aborts();
+    let _ = s3
+        .put_stream(&ObjectKey::new(key), stream, SourceModified::unknown())
+        .await;
+    producing.await.expect("the producer ran");
+}
+
+#[tokio::test]
+async fn an_upload_no_object_listing_shows_is_enumerated_and_aborted() {
+    // §11.3 item 12 on the S3 family. The parts of an incomplete upload are
+    // stored and billed and `ListObjectsV2` does not return them, so until
+    // `ListMultipartUploads` was wired the only honest thing `cleanup` could say
+    // was `unsupported`.
+    let mock = support::mock_s3::MockS3::start().await;
+    let s3 = multipart_backend(&mock);
+    mock.started_seconds_ago(3600);
+    abandon_one(&mock, &s3, "o/abandoned").await;
+
+    // It is really there and it is really not an object.
+    let objects = s3
+        .list_page("", None)
+        .await
+        .expect("the object listing works");
+    assert!(
+        objects.items.is_empty(),
+        "an incomplete upload must not appear as an object: {:?}",
+        objects.items
+    );
+
+    let dctl_store::IncompleteUploads::Page(page) = s3
+        .list_incomplete_uploads("", None)
+        .await
+        .expect("the upload listing works")
+    else {
+        panic!("s3 speaks multipart and must not answer NotMultipart");
+    };
+    assert_eq!(page.items.len(), 1, "{:?}", page.items);
+    assert_eq!(page.items[0].key.as_str(), "o/abandoned");
+    let started = page.items[0]
+        .started_unix
+        .expect("S3 dates every upload with <Initiated>, and --min-age reads it");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_secs() as i64;
+    assert!(
+        (3500..3700).contains(&(now - started)),
+        "an upload started an hour ago read as {} seconds old",
+        now - started
+    );
+
+    mock.allow_aborts();
+    s3.abort_incomplete_upload(&page.items[0])
+        .await
+        .expect("the abort succeeds");
+    let dctl_store::IncompleteUploads::Page(after) = s3
+        .list_incomplete_uploads("", None)
+        .await
+        .expect("the upload listing works")
+    else {
+        panic!("s3 speaks multipart");
+    };
+    assert!(after.items.is_empty(), "{:?}", after.items);
+}
+
+#[tokio::test]
+async fn the_s3_upload_listing_is_scoped_by_prefix_and_paged_by_key_and_id() {
+    // The two markers, exercised. S3 allows any number of concurrent uploads
+    // against one key, so a pager that resumed from `NextKeyMarker` alone would
+    // restart at that key's first upload and never terminate — which is the
+    // defect `b2::api::ListFileVersionsResponse` documents for version listings,
+    // arriving at a different endpoint.
+    let mock = support::mock_s3::MockS3::start().await;
+    let s3 = multipart_backend(&mock);
+    for key in ["photos/a", "photos/a", "photos/b", "docs/c"] {
+        abandon_one(&mock, &s3, key).await;
+    }
+
+    let dctl_store::IncompleteUploads::Page(scoped) = s3
+        .list_incomplete_uploads("photos/", None)
+        .await
+        .expect("the upload listing works")
+    else {
+        panic!("s3 speaks multipart");
+    };
+    assert_eq!(scoped.items.len(), 3, "{:?}", scoped.items);
+    assert!(
+        scoped
+            .items
+            .iter()
+            .all(|u| u.key.as_str().starts_with("photos/")),
+        "a scoped sweep must not see another prefix's uploads: {:?}",
+        scoped.items
+    );
+    // Two of them are the *same key* and different uploads, which is what makes
+    // the id half of the cursor load-bearing.
+    let same_key: Vec<&dctl_store::IncompleteUpload> = scoped
+        .items
+        .iter()
+        .filter(|u| u.key.as_str() == "photos/a")
+        .collect();
+    assert_eq!(same_key.len(), 2);
+    assert_ne!(same_key[0].id, same_key[1].id);
+
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor = None;
+    for _ in 0..10 {
+        let dctl_store::IncompleteUploads::Page(page) = s3
+            .list_incomplete_uploads("", cursor.clone())
+            .await
+            .expect("the upload listing works")
+        else {
+            panic!("s3 speaks multipart");
+        };
+        seen.extend(page.items.iter().map(|u| u.id.clone()));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 4, "{seen:?}");
+    assert_eq!(
+        seen.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        4,
+        "the pager repeated a page: {seen:?}"
+    );
 }

@@ -230,6 +230,25 @@ impl Backend for Guarded {
             .await
     }
 
+    /// Guarded like the other two writes, and checked **before** the producer is
+    /// asked for its first window.
+    ///
+    /// The ordering matters more here than anywhere else in this file: a streamed
+    /// write is what a large object takes, a large object is what is still running
+    /// when somebody swaps a disk, and the producer on the other end of the stream
+    /// is a sealer that would otherwise spend minutes encrypting into a store this
+    /// run never opened. Refusing first drops the stream, which closes the channel,
+    /// which stops the sealer at its next window.
+    async fn put_stream(
+        &self,
+        key: &ObjectKey,
+        source: crate::incoming::ObjectStream,
+        modified: SourceModified,
+    ) -> Result<PutOutcome> {
+        self.require_same_store().await?;
+        self.inner.put_stream(key, source, modified).await
+    }
+
     async fn delete(&self, key: &ObjectKey) -> Result<()> {
         self.require_same_store().await?;
         self.inner.delete(key).await
@@ -289,6 +308,33 @@ impl Backend for Guarded {
     ) -> Result<crate::staging::StagingListing> {
         self.opened_as().await?;
         self.inner.list_staging(prefix, cursor).await
+    }
+
+    /// Recorded on like every other read, and refused at the destructive end —
+    /// the same argument [`Guarded::list_staging`] makes and for the same reason:
+    /// the sweep's *cancellations* are what a replaced store must not receive, and
+    /// that is [`abort_incomplete_upload`](Guarded::abort_incomplete_upload).
+    async fn list_incomplete_uploads(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> Result<crate::multipart::IncompleteUploads> {
+        self.opened_as().await?;
+        self.inner.list_incomplete_uploads(prefix, cursor).await
+    }
+
+    /// Guarded, because it destroys stored bytes.
+    ///
+    /// An abort throws away every part an upload was holding, so it belongs with
+    /// `delete` and not with the listings: a sweep that enumerated a *replacement*
+    /// store must not be able to cancel that store's live uploads on the strength
+    /// of a listing it took from somewhere else.
+    async fn abort_incomplete_upload(
+        &self,
+        upload: &crate::multipart::IncompleteUpload,
+    ) -> Result<()> {
+        self.require_same_store().await?;
+        self.inner.abort_incomplete_upload(upload).await
     }
 
     async fn prepare_upload(

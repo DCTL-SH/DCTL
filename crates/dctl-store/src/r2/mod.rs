@@ -118,6 +118,17 @@ impl Backend for R2Backend {
             .put_from_path(key, source, expected, modified)
             .await
     }
+    /// The same streaming write S3 does, through the same client — R2 speaks the
+    /// S3 multipart API and differs in an endpoint and a region and in nothing
+    /// that moves bytes.
+    async fn put_stream(
+        &self,
+        key: &ObjectKey,
+        source: crate::incoming::ObjectStream,
+        modified: SourceModified,
+    ) -> Result<PutOutcome> {
+        self.client.put_stream(key, source, modified).await
+    }
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
         self.client.get(key).await
     }
@@ -145,9 +156,9 @@ impl Backend for R2Backend {
     /// the provider verifies, so there is no staging namespace to sweep.
     ///
     /// What an interrupted *large* upload leaves is an unfinished multipart
-    /// upload, which is billed, which no listing shows, and which is a different
-    /// class — reported as `unsupported` by name, because no API in this build
-    /// can enumerate it.
+    /// upload, which is billed and which no object listing shows — a different
+    /// class, asked for separately, and now answered:
+    /// [`list_incomplete_uploads`](Backend::list_incomplete_uploads).
     async fn list_staging(
         &self,
         _prefix: &str,
@@ -156,6 +167,23 @@ impl Backend for R2Backend {
         Ok(crate::staging::StagingListing::NotStaged(
             crate::staging::NOT_STAGED_REASON,
         ))
+    }
+
+    /// `ListMultipartUploads`, through the same client S3 uses.
+    async fn list_incomplete_uploads(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> Result<crate::multipart::IncompleteUploads> {
+        self.client.list_incomplete_uploads(prefix, cursor).await
+    }
+
+    /// `AbortMultipartUpload`, through the same client S3 uses.
+    async fn abort_incomplete_upload(
+        &self,
+        upload: &crate::multipart::IncompleteUpload,
+    ) -> Result<()> {
+        self.client.abort_incomplete_upload(upload).await
     }
 
     async fn list_page(&self, prefix: &str, cursor: Option<String>) -> Result<Page> {

@@ -279,6 +279,125 @@ fn put_from_path_blocking(
     })
 }
 
+/// Verified streaming write from a producer that has no file: take windows, write
+/// them, and publish only once both ends agree about what the object was.
+///
+/// The same five steps as [`put_from_path`] in the same order — stage, durable,
+/// read back and hash, stamp, rename — with one difference at the front and one
+/// in the middle. At the front there is no source file, so the bytes arrive from
+/// [`ObjectStream`] instead of from a `File`. In the middle the expected digest is
+/// not known when the write starts: it arrives as the stream's last message and
+/// is obtained from [`ObjectStream::agreed`], which is also what refuses an object
+/// that turned out shorter than its producer declared.
+///
+/// **The read-back is kept, and it is the reason this is not simply a copy.** The
+/// digest the stream agrees on describes what crossed the pipe; the digest this
+/// takes off the staging file describes what the filesystem actually holds. Only
+/// the second one can catch a disk that accepted a write and did not keep it, and
+/// dropping it because the bytes had "already been checked" would be checking the
+/// wrong thing twice.
+///
+/// The window loop is async and the read-back is blocking, which is why the two
+/// halves are split rather than the whole thing being one `spawn_blocking`: a
+/// blocking task cannot `await` the next window.
+pub(super) async fn put_stream(
+    fs: &LocalFs,
+    key: &ObjectKey,
+    mut source: crate::incoming::ObjectStream,
+    modified: SourceModified,
+) -> Result<PutOutcome> {
+    // The same guard as every other write, and the one most likely to matter
+    // here: a streamed object is a large one, and a large one is what is still
+    // being written when somebody unplugs the disk.
+    fs.require_same_root()?;
+
+    let dest = fs.resolve(key)?;
+    if let Some(parent) = dest.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    let tmp = temp_path(&dest);
+
+    let outcome = stream_to_staging(fs, &tmp, &mut source, &dest, modified).await;
+    if outcome.is_err() {
+        // Nothing was renamed, so what is left is a staging file — removed here
+        // rather than left for `cleanup`, because a write that ran out of space
+        // has taken the space its retry needs.
+        let _ = tokio::fs::remove_file(&tmp).await;
+    }
+    outcome
+}
+
+/// The body of [`put_stream`]: everything between creating the staging file and
+/// the rename that commits it.
+///
+/// Split out so the caller has exactly one place to remove the staging file from,
+/// rather than eight early returns each remembering to.
+async fn stream_to_staging(
+    fs: &LocalFs,
+    tmp: &Path,
+    source: &mut crate::incoming::ObjectStream,
+    dest: &Path,
+    modified: SourceModified,
+) -> Result<PutOutcome> {
+    let mut file = tokio::fs::File::create(tmp).await?;
+    let mut written: u64 = 0;
+    while let Some(window) = source.window().await? {
+        file.write_all(&window).await?;
+        written += window.len() as u64;
+        // After the window is written, never before: the charge is a measurement
+        // and the pause it produces belongs between this window and the next.
+        crate::meter::charge(fs.meter().as_ref(), window.len() as u64).await;
+    }
+    // Asking the write itself what went wrong, before any hash is compared — see
+    // the module docs for the `ENOSPC` this ordering exists to stop reporting as a
+    // checksum mismatch.
+    crate::durable::finish(&mut file).await?;
+    drop(file);
+
+    // Both ends of the pipe agree, and the object is as long as it was declared
+    // to be. Only now is there an expected digest to hold the disk to.
+    let expected = source.agreed()?;
+
+    // What the filesystem actually kept, read back and hashed in bounded blocks.
+    let staging = tmp.to_path_buf();
+    let algo = expected.algo;
+    let (on_disk, size) = tokio::task::spawn_blocking(move || hash_file(&staging, algo))
+        .await
+        .map_err(|e| StoreError::Backend(format!("read-back task failed: {e}")))??;
+    if size != written {
+        return Err(StoreError::ShortWrite {
+            expected: written,
+            actual: size,
+        });
+    }
+    if !on_disk.matches(&expected) {
+        return Err(StoreError::ChecksumMismatch {
+            expected: expected.hex(),
+            actual: on_disk.hex(),
+        });
+    }
+
+    // The writer's time, onto the inode that is about to be published.
+    {
+        let staging = tmp.to_path_buf();
+        tokio::task::spawn_blocking(move || stamp(&staging, modified))
+            .await
+            .map_err(|e| StoreError::Backend(format!("stamping task failed: {e}")))??;
+    }
+
+    tokio::fs::rename(tmp, dest).await?;
+    if let Some(parent) = dest.parent() {
+        if let Ok(dir) = std::fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+
+    Ok(PutOutcome {
+        size,
+        verified: on_disk,
+    })
+}
+
 /// Buffered copy of `source` → `tmp`, flushed and fsynced. Constant memory.
 ///
 /// Returns the number of bytes handed to the filesystem, so the caller can hold

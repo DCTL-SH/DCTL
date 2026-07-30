@@ -13,7 +13,8 @@
 //!   aborts leaves behind (`PLAN.md` §6 step 6). This is the command that cleans
 //!   up after that contract.
 //! * **Abandoned multipart uploads.** A crash between parts leaves one open. The
-//!   parts already stored are charged for and no listing shows them.
+//!   parts already stored are charged for and no *object* listing shows them —
+//!   which is why they have a listing of their own.
 //! * **Superseded versions.** On a versioned bucket, every overwrite and delete
 //!   keeps the previous object alive and billable.
 //!
@@ -40,16 +41,21 @@
 //! `cleanup` has to mean [`CLEANUP_DEFAULT_MIN_AGE`] or the safety margin
 //! disappears the moment somebody stops typing it.
 //!
-//! ## Two classes cannot be swept, and say so
+//! ## One class cannot be swept, and says so
 //!
-//! [`dctl_store::Backend`] exposes no way to list a provider's in-progress
-//! multipart uploads and no way to list an object's versions. A sweep reporting
-//! "0 reclaimed" for a class it was never able to *look* at would be the
-//! misreport `PLAN.md` §6 forbids, so those two emit an explicit `unsupported`
-//! record naming the missing capability — and count as an error only when the
-//! user asked for them by name. See [`super::removal::reclaim`], which also
-//! explains why the orphan sweep proves the index is complete before it trusts
-//! an absence.
+//! [`dctl_store::Backend`] exposes no way to list an object's superseded
+//! versions. A sweep reporting "0 reclaimed" for a class it was never able to
+//! *look* at would be the misreport `PLAN.md` §6 forbids, so it emits an explicit
+//! `unsupported` record naming the missing capability — and counts as an error
+//! only when the user asked for it by name. See [`super::removal::reclaim`],
+//! which also explains why the orphan sweep proves the index is complete before
+//! it trusts an absence.
+//!
+//! `multipart` used to be the second and is not: the trait now carries
+//! [`list_incomplete_uploads`](dctl_store::Backend::list_incomplete_uploads) and
+//! [`abort_incomplete_upload`](dctl_store::Backend::abort_incomplete_upload) on
+//! all five backends, so an upload a `SIGKILL` left open is reclaimed rather than
+//! named.
 //!
 //! What was reclaimed is counted through
 //! [`Stats::file_deleted`](crate::output::Stats::file_deleted) and the bytes
@@ -120,7 +126,7 @@ impl CleanupArgs {
     /// Decides one thing only, and it is the exit code: a class this backend
     /// cannot enumerate is a *failure to do what was asked* when it was asked
     /// for by name, and merely "nothing to do there" otherwise. Without the
-    /// distinction, every default `cleanup` against a provider with no multipart
+    /// distinction, every default `cleanup` against a provider with no version
     /// API would exit 6 for ever and operators would learn to ignore it.
     #[must_use]
     pub fn named(&self) -> bool {

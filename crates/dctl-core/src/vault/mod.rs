@@ -7,6 +7,7 @@
 //! replaces one way in without disturbing the others. Everything else in this
 //! directory operates on a vault that is already open.
 
+mod chunking;
 mod get;
 mod imported;
 mod init;
@@ -30,6 +31,7 @@ use dctl_store::Backend;
 
 use crate::error::{CoreError, Result};
 
+pub use chunking::{MIN_CHUNK_SIZE, clamp_chunk_size};
 pub use init::NewVault;
 pub use modified::Modified;
 pub use restore::Rebuilt;

@@ -6,8 +6,10 @@ use bytes::Bytes;
 use crate::checksum::ContentHash;
 use crate::error::{Result, StoreError};
 use crate::guard::StoreIdentity;
+use crate::incoming::ObjectStream;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
+use crate::multipart::{IncompleteUpload, IncompleteUploads};
 use crate::staging::StagingListing;
 
 /// A delegated (presigned) authorization to upload exactly ONE object key.
@@ -108,6 +110,65 @@ pub trait Backend: Send + Sync {
         self.put(key, Bytes::from(data), expected, modified).await
     }
 
+    /// Store an object that **does not exist yet**, taking its bytes in bounded
+    /// windows as something else produces them.
+    ///
+    /// The third source shape, beside [`put`](Backend::put)'s buffer and
+    /// [`put_from_path`](Backend::put_from_path)'s file, and the only one that
+    /// fits a vault: a sealed object is made by encrypting the user's file, and
+    /// before this method existed the only way to hand one to a backend was to
+    /// produce it onto local disk first. That spool cost one object of scratch
+    /// storage per upload — and, because a spool's page cache is charged to the
+    /// same cgroup as the program, it is why `docker run -m 512m` was not a safe
+    /// way to run a 4 GiB upload however flat the resident memory looked.
+    ///
+    /// # The memory contract
+    ///
+    /// ```text
+    /// peak = window × windows-in-flight  +  part size × parts-in-flight
+    /// ```
+    ///
+    /// Every term is a named constant — [`incoming::constants`](crate::incoming::constants)
+    /// for the first pair, the provider's own `constants` module for the second —
+    /// and **no term is a function of the object's size**. There is no page-cache
+    /// term because there is no spool.
+    ///
+    /// # The verified-write contract, with the promise at the other end
+    ///
+    /// Nobody knows a sealed object's digest before it has been sealed, so this
+    /// method cannot be handed an `expected` the way the other two are. The
+    /// promise arrives with the stream's last message instead, and
+    /// [`ObjectStream::agreed`] is where it is checked: it refuses an object that
+    /// did not turn out to be the length its producer declared, refuses one whose
+    /// bytes do not fold to the digest the producer folded, and refuses to answer
+    /// at all until the stream has been read to its end. **An implementation must
+    /// not commit anything until `agreed` has returned**, and it has no digest to
+    /// report in its [`PutOutcome`] until it does — which is the forcing function
+    /// rather than a rule to remember.
+    ///
+    /// # This stream is consumed once
+    ///
+    /// There is no rewind. [`Retrying`](crate::Retrying) therefore forwards this
+    /// call without retrying it, and says so at its own call site; retry for a
+    /// streamed write is per *request*, one layer down, where a part is re-sent
+    /// from the buffer already in hand.
+    ///
+    /// Deliberately **not** a provided method, for the reason
+    /// [`store_identity`](Backend::store_identity) has none: a default that
+    /// buffered the whole stream would compile everywhere, pass every correctness
+    /// test, and silently reintroduce the `O(object)` cost this exists to remove —
+    /// on whichever backend somebody forgot.
+    ///
+    /// # Errors
+    /// Whatever the write reported, plus the three refusals
+    /// [`ObjectStream::agreed`] can make. Nothing is left committed on any of them.
+    async fn put_stream(
+        &self,
+        key: &ObjectKey,
+        source: ObjectStream,
+        modified: SourceModified,
+    ) -> Result<PutOutcome>;
+
     /// Fetch the entire object.
     async fn get(&self, key: &ObjectKey) -> Result<Bytes>;
 
@@ -179,6 +240,52 @@ pub trait Backend: Send + Sync {
     /// page: "I could not look" and "there is nothing there" are the two answers
     /// this whole method exists to keep apart.
     async fn list_staging(&self, prefix: &str, cursor: Option<String>) -> Result<StagingListing>;
+
+    /// One page of the **multipart uploads** this backend started under `prefix`
+    /// and never finished — or the reason this backend cannot have any.
+    ///
+    /// The third question, after "what is stored?" and "what did we abandon under
+    /// a temporary key?". Its subject is the one class of debris that is billed
+    /// from the moment it exists and that **no object listing can show**: a part
+    /// accepted by a provider belongs to no object until the finish call arrives,
+    /// so `b2_list_file_names` and `ListObjectsV2` both step straight over it.
+    /// See [`multipart`](crate::multipart) for what that costs and why it needs
+    /// its own call.
+    ///
+    /// Deliberately **not** a provided method, for the reason
+    /// [`list_staging`](Backend::list_staging) is not: a default answering "none"
+    /// is a false all-clear about storage somebody is paying for, and
+    /// [`IncompleteUploads::NotMultipart`] is how a backend with no multipart
+    /// protocol says so honestly.
+    ///
+    /// # Errors
+    /// Whatever enumerating reported. A failure is an error and never an empty
+    /// page — "I could not look" and "there is nothing there" are the two answers
+    /// this method exists to keep apart.
+    async fn list_incomplete_uploads(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> Result<IncompleteUploads>;
+
+    /// Cancel one unfinished upload, releasing the parts it is holding.
+    ///
+    /// Idempotent in the way that matters: an upload that is already gone — swept
+    /// by another run, or finished by the process that owned it between the
+    /// listing and this call — succeeds rather than failing the sweep, because
+    /// the state the caller wanted is the state that obtains.
+    ///
+    /// `upload` must be one this backend returned from
+    /// [`list_incomplete_uploads`](Backend::list_incomplete_uploads): the handle
+    /// inside it is the provider's own and cannot be constructed from a key.
+    ///
+    /// Deliberately **not** a provided method, for the same reason as its
+    /// listing: a default that quietly did nothing would let a sweep report
+    /// reclaimed storage it had not reclaimed.
+    ///
+    /// # Errors
+    /// Whatever the provider said, except a "no such upload" which is success.
+    async fn abort_incomplete_upload(&self, upload: &IncompleteUpload) -> Result<()>;
 
     /// Issue a delegated authorization for a client to upload the single object `key`
     /// **directly** to the backend (see [`UploadTicket`]).

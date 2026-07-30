@@ -32,7 +32,8 @@ use crate::streaming;
 
 use super::api::{
     AuthState, CancelLargeFileResponse, FinishLargeFileResponse, GetUploadPartUrlResponse,
-    GetUploadUrlResponse, StartLargeFileResponse, UploadFileResponse, UploadPartResponse,
+    GetUploadUrlResponse, ListUnfinishedResponse, StartLargeFileResponse, UploadFileResponse,
+    UploadPartResponse,
 };
 use super::name::encode_file_name;
 use super::retry::{self, Attempt};
@@ -492,6 +493,218 @@ async fn upload_one_part(
     .await?;
     part_sha1s.push(sha1_hex);
     Ok(())
+}
+
+/// Store an object that does not exist yet, taking its bytes from `source` in
+/// bounded windows.
+///
+/// Same two arms and the same one number as [`put_from_path`], because the arms
+/// are what keeps the memory contract to a single figure: at or below the part
+/// size the whole object is read into one bounded buffer and sent by the verified
+/// single-shot path; above it, one part at a time goes through the native
+/// large-file API. `source.len()` is what decides — declared before the first
+/// window, which is why [`ObjectStream`](crate::ObjectStream) requires a length
+/// and why the vault's sealer was split in two to be able to supply one.
+///
+/// The digest arrives at the other end from where [`put_from_path`]'s does; see
+/// [`Backend::put_stream`](crate::Backend::put_stream). Nothing here is finished
+/// — `b2_finish_large_file` is the commit — until
+/// [`ObjectStream::agreed`](crate::ObjectStream::agreed) has returned.
+pub(super) async fn put_stream(
+    b2: &B2Backend,
+    key: &ObjectKey,
+    mut source: crate::incoming::ObjectStream,
+    modified: SourceModified,
+) -> Result<PutOutcome> {
+    let size = source.len();
+
+    // At or below one part: the object is bounded by the part size by definition,
+    // so it is drained into one buffer and takes the same verified single-shot
+    // path a buffered `put` takes.
+    if !streaming::use_multipart(size, b2.part_size()) {
+        let mut whole = vec![
+            0u8;
+            usize::try_from(size).map_err(|_| {
+                StoreError::Backend("object too large for this machine's address space".into())
+            })?
+        ];
+        let filled = source.fill(&mut whole).await?;
+        // `sealed` rather than `agreed`: `fill` stops when the buffer is full and
+        // has not yet seen the stream's terminal message, so a producer with
+        // bytes left over is caught here rather than after an upload.
+        let expected = source.sealed().await?;
+        if filled as u64 != size {
+            return Err(StoreError::ShortWrite {
+                expected: size,
+                actual: filled as u64,
+            });
+        }
+        let outcome = put(b2, key, Bytes::from(whole), &expected, modified).await?;
+        crate::meter::charge(b2.meter.as_ref(), size).await;
+        return Ok(outcome);
+    }
+
+    let auth = b2.auth().await?;
+    let start: StartLargeFileResponse = b2
+        .post_json(
+            constants::EP_START_LARGE_FILE,
+            start_large_file_body(&auth.bucket_id, key, modified),
+        )
+        .await?;
+
+    match stream_parts_and_finish(b2, &auth, &start.file_id, &mut source, size).await {
+        Ok(outcome) => Ok(outcome),
+        Err(e) => {
+            // Cancel so nothing partial is committed and no unfinished large file
+            // is left billing. Best-effort; the original error is what is reported.
+            let _ = cancel_large_file(b2, &auth, &start.file_id).await;
+            Err(e)
+        }
+    }
+}
+
+/// Send every part of a streamed object, then finish the large file.
+///
+/// One part buffer is live at a time and it is given away to the request as an
+/// owned `Bytes`, exactly as on the from-a-file path — that is the whole of the
+/// multipart term in the memory contract, and it is why nothing here calls
+/// `to_vec` or `copy_from_slice` on a body.
+async fn stream_parts_and_finish(
+    b2: &B2Backend,
+    auth: &AuthState,
+    file_id: &str,
+    source: &mut crate::incoming::ObjectStream,
+    size: u64,
+) -> Result<PutOutcome> {
+    // The one place the peak stops being flat, and it is B2's rule rather than a
+    // choice made here: past `part_size × MAX_PARTS` there is no way to send the
+    // object without larger parts. See `constants`.
+    let part_size = streaming::adaptive_part_size(
+        size,
+        b2.part_size(),
+        constants::MIN_PART_SIZE,
+        constants::B2_MAX_PART_SIZE,
+        streaming::MAX_PARTS,
+    )?;
+    let plan = streaming::plan_parts(size, part_size);
+    tracing::debug!(
+        bytes = size,
+        part_size,
+        parts = plan.len(),
+        "b2 stream (multipart, no spool)"
+    );
+
+    let mut part_sha1s: Vec<String> = Vec::with_capacity(plan.len());
+    for span in &plan {
+        let want = usize::try_from(span.len)
+            .map_err(|_| StoreError::Backend("part larger than this machine's usize".into()))?;
+        // One allocation per part, handed to the request as an owned `Bytes`, and
+        // dropped when its upload returns before the next one is taken.
+        let mut part = vec![0u8; want];
+        let n = source.fill(&mut part).await?;
+        if n != want {
+            return Err(StoreError::ShortWrite {
+                expected: size,
+                actual: span.offset + n as u64,
+            });
+        }
+        upload_one_part(
+            b2,
+            auth,
+            file_id,
+            span.number,
+            Bytes::from(part),
+            &mut part_sha1s,
+        )
+        .await?;
+        crate::meter::charge(b2.meter.as_ref(), span.len).await;
+    }
+
+    // Both ends of the pipe agree about what the object was, it was as long as it
+    // said, and the producer had nothing left over. Only now is anything
+    // committed — `b2_finish_large_file` is the commit, and it is below this line
+    // for the same reason the rename is below the read-back on `local:`.
+    let verified = source.sealed().await?;
+
+    let _: FinishLargeFileResponse = b2
+        .post_json(
+            constants::EP_FINISH_LARGE_FILE,
+            serde_json::json!({ "fileId": file_id, "partSha1Array": part_sha1s }),
+        )
+        .await?;
+
+    Ok(PutOutcome { size, verified })
+}
+
+/// One page of the large files this account started and never finished.
+///
+/// `b2_list_unfinished_large_files` is the only call in the B2 API that can see
+/// them: their parts are stored and billed, and `b2_list_file_names` steps over
+/// them because an unfinished large file is not an object yet.
+///
+/// `namePrefix` is passed through so a sweep scoped to a path costs one request
+/// rather than a whole-bucket enumeration filtered afterwards, and `startFileId`
+/// is the cursor — keyed by id, because two unfinished uploads may be aimed at
+/// the same name.
+pub(super) async fn list_unfinished(
+    b2: &B2Backend,
+    prefix: &str,
+    cursor: Option<String>,
+) -> Result<crate::multipart::IncompleteUploads> {
+    let auth = b2.auth().await?;
+    let mut body = serde_json::json!({
+        "bucketId": auth.bucket_id,
+        "maxFileCount": constants::UNFINISHED_PAGE_SIZE,
+    });
+    if !prefix.is_empty() {
+        body["namePrefix"] = serde_json::Value::String(prefix.to_string());
+    }
+    if let Some(start) = cursor {
+        body["startFileId"] = serde_json::Value::String(start);
+    }
+
+    let page: ListUnfinishedResponse = b2.post_json(constants::EP_LIST_UNFINISHED, body).await?;
+    let items = page
+        .files
+        .into_iter()
+        .map(|file| crate::multipart::IncompleteUpload {
+            key: ObjectKey::new(file.file_name),
+            id: file.file_id,
+            // B2 dates a large file in epoch milliseconds; the sweep works in
+            // whole seconds, which is the resolution every age in this tool uses.
+            started_unix: file
+                .upload_timestamp
+                .map(|millis| millis / constants::MILLIS_PER_SECOND),
+        })
+        .collect();
+    Ok(crate::multipart::IncompleteUploads::Page(
+        crate::multipart::IncompletePage {
+            items,
+            next_cursor: page.next_file_id,
+        },
+    ))
+}
+
+/// Cancel one unfinished large file by the id the listing gave.
+///
+/// An upload that is already gone — finished by the process that owned it, or
+/// swept by a concurrent run — is a **success**: the state the caller asked for is
+/// the state that obtains, and failing a sweep because somebody else tidied first
+/// would make two DCTLs on one bucket report errors at each other.
+pub(super) async fn abort_unfinished(
+    b2: &B2Backend,
+    upload: &crate::multipart::IncompleteUpload,
+) -> Result<()> {
+    let auth = b2.auth().await?;
+    match cancel_large_file(b2, &auth, &upload.id).await {
+        Ok(()) => Ok(()),
+        Err(StoreError::NotFound(_)) => Ok(()),
+        // B2 answers a cancel of an id it does not hold with `400 bad_request`
+        // rather than a 404, so the status alone cannot tell "already gone" from
+        // "malformed request" — the code can, and it is the one B2 documents.
+        Err(StoreError::Provider { code, .. }) if code == "file_not_present" => Ok(()),
+        Err(other) => Err(other),
+    }
 }
 
 /// Cancel an unfinished large file so nothing partial remains. Best-effort: callers

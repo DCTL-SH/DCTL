@@ -119,6 +119,14 @@ pub struct LargeFile {
     pub cancelled: bool,
     /// The `partSha1Array` the finish call named, in order.
     pub finished_with: Vec<String>,
+    /// When `b2_start_large_file` was called, in epoch milliseconds — what
+    /// `b2_list_unfinished_large_files` reports and what `--min-age` reads.
+    ///
+    /// Settable by a test, because the whole point of the age is to separate an
+    /// upload somebody abandoned last week from one another process is half way
+    /// through, and a test that had to sleep through a `--min-age` to say so
+    /// would be slower and no more convincing.
+    pub started_millis: i64,
 }
 
 /// One object stored through the single-shot path: its length and hash.
@@ -168,6 +176,12 @@ pub struct State {
     /// against the digest it sent, so a mock that always echoes honestly can
     /// never show that the comparison happens.
     echoed_sha1: Option<String>,
+    /// The `uploadTimestamp` the next `b2_start_large_file` records, in epoch
+    /// milliseconds.
+    ///
+    /// Settable so a test can age an upload without sleeping through a
+    /// `--min-age`. Defaults to the clock, which is what a real server does.
+    start_time_millis: i64,
 }
 
 impl State {
@@ -214,6 +228,7 @@ impl MockB2 {
         let state = Arc::new(Mutex::new(State {
             recommended_part_size,
             bucket_id: Some(BUCKET_ID.to_string()),
+            start_time_millis: now_millis(),
             ..State::default()
         }));
         let base = format!("http://127.0.0.1:{port}");
@@ -266,6 +281,17 @@ impl MockB2 {
             .lock()
             .expect("the mock state is not poisoned")
             .bucket_id = None;
+    }
+
+    /// The next `b2_start_large_file` records an upload that started `seconds`
+    /// ago.
+    ///
+    /// So a test can put an upload on the wrong side of a `--min-age` without
+    /// sleeping through one — which would be slower and no more convincing.
+    pub fn started_seconds_ago(&self, seconds: i64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.start_time_millis = now_millis() - seconds * 1000;
+        }
     }
 
     /// Every subsequent upload response reports `sha1` rather than the hash of
@@ -466,6 +492,9 @@ fn handle(seen: &Seen, state: &mut State, base: &str) -> (u16, String) {
     if path.ends_with("/b2_cancel_large_file") {
         return cancel_large_file(seen, state);
     }
+    if path.ends_with("/b2_list_unfinished_large_files") {
+        return list_unfinished(seen, state);
+    }
     (404, error_body(404, "not_found", path))
 }
 
@@ -545,8 +574,10 @@ fn start_large_file(seen: &Seen, state: &mut State) -> (u16, String) {
     let Some(name) = seen.json().and_then(|b| string_field(&b, "fileName")) else {
         return (400, error_body(400, "bad_request", "no fileName"));
     };
+    let started_millis = state.start_time_millis;
     state.large.push(LargeFile {
         name,
+        started_millis,
         ..LargeFile::default()
     });
     let file_id = format!("large-{}", state.large.len());
@@ -633,6 +664,79 @@ fn finish_large_file(seen: &Seen, state: &mut State) -> (u16, String) {
     (200, format!(r#"{{"fileId":"{file_id}"}}"#))
 }
 
+/// `b2_list_unfinished_large_files`: every large file this server is still
+/// holding open.
+///
+/// The whole point of the endpoint is that these are **not** objects: nothing in
+/// `b2_list_file_names` mentions them, and their parts are stored and billed. So
+/// this reads from the same `large` list the finish and cancel handlers write to,
+/// and filters out exactly the ones that reached one of those two.
+///
+/// Honours `namePrefix`, `startFileId` and `maxFileCount`, because a client that
+/// ignored any of the three would still pass a single-page test and then either
+/// sweep the wrong prefix or loop forever on a big bucket.
+fn list_unfinished(seen: &Seen, state: &State) -> (u16, String) {
+    let body = seen.json().unwrap_or(serde_json::Value::Null);
+    let prefix = string_field(&body, "namePrefix").unwrap_or_default();
+    let start = string_field(&body, "startFileId");
+    // B2's ceiling for *this* endpoint is 100, not the 10 000 of
+    // `b2_list_file_names`, and it is a refusal rather than a clamp. Enforced
+    // here because a mock that accepted 1000 is exactly why a sweep that could
+    // never work passed every offline gate and then failed on the first real
+    // bucket with `400 bad_request`.
+    let max = body
+        .get("maxFileCount")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(100);
+    if !(1..=100).contains(&max) {
+        return (
+            400,
+            serde_json::json!({
+                "status": 400,
+                "code": "bad_request",
+                "message": "maxFileCount must be in the range 1 - 100",
+            })
+            .to_string(),
+        );
+    }
+    let max = max as usize;
+
+    let open: Vec<(String, &LargeFile)> = state
+        .large
+        .iter()
+        .enumerate()
+        .filter(|(_, file)| !file.finished && !file.cancelled)
+        .filter(|(_, file)| file.name.starts_with(&prefix))
+        .map(|(index, file)| (format!("large-{}", index + 1), file))
+        .collect();
+
+    // `startFileId` is *inclusive* in B2's API: the cursor names the first file of
+    // the next page rather than the last of the previous one.
+    let from = start.map_or(0, |start| {
+        open.iter().position(|(id, _)| *id == start).unwrap_or(0)
+    });
+    let page: Vec<&(String, &LargeFile)> = open[from..].iter().take(max).collect();
+    let next = open.get(from + page.len()).map(|(id, _)| id.clone());
+
+    let files: Vec<String> = page
+        .iter()
+        .map(|(id, file)| {
+            format!(
+                r#"{{"fileId":"{id}","fileName":"{}","uploadTimestamp":{}}}"#,
+                file.name, file.started_millis
+            )
+        })
+        .collect();
+    let next_json = next.map_or_else(|| "null".to_string(), |id| format!(r#""{id}""#));
+    (
+        200,
+        format!(
+            r#"{{"files":[{}],"nextFileId":{next_json}}}"#,
+            files.join(",")
+        ),
+    )
+}
+
 fn cancel_large_file(seen: &Seen, state: &mut State) -> (u16, String) {
     let Some(file_id) = seen.json().and_then(|b| string_field(&b, "fileId")) else {
         return (400, error_body(400, "bad_request", "no fileId"));
@@ -642,6 +746,14 @@ fn cancel_large_file(seen: &Seen, state: &mut State) -> (u16, String) {
     };
     file.cancelled = true;
     (200, format!(r#"{{"fileId":"{file_id}"}}"#))
+}
+
+/// The wall clock in epoch milliseconds, which is what B2 stamps an upload with.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 /// The large file `file_id` names, by the `large-N` id this server mints.

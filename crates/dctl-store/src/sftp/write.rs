@@ -161,6 +161,69 @@ where
     })
 }
 
+/// Store an object that does not exist yet: windows in, one staging file out.
+///
+/// SFTP is the backend this shape fits best. There are no parts and no declared
+/// content length in the protocol — a write is `SSH_FXP_WRITE` at an offset, over
+/// and over — so a producer's windows go onto the wire exactly as they arrive,
+/// and the peak is one window rather than one part.
+///
+/// The tail is [`publish`], shared with the other two writers, so the five
+/// guarantees at the top of this module hold here identically. What differs is
+/// where the digest comes from: [`ObjectStream::agreed`] supplies it after the
+/// last window, and refuses an object shorter than its producer declared, so the
+/// comparison still happens **before** the rename and a stream that went wrong
+/// leaves nothing on the server.
+pub(super) async fn put_object_stream<F: RemoteFs>(
+    fs: &F,
+    remote: &str,
+    source: &mut crate::incoming::ObjectStream,
+    modified: SourceModified,
+    meter: &dyn Meter,
+) -> Result<PutOutcome> {
+    fs.mkdir_p(remote).await;
+    let tmp = temp_path(remote);
+    let mut file = fs.create(&tmp).await?;
+
+    let mut written: u64 = 0;
+    loop {
+        let window = match source.window().await {
+            Ok(Some(window)) => window,
+            Ok(None) => break,
+            Err(e) => {
+                drop(file);
+                fs.remove_quiet(&tmp).await;
+                return Err(e);
+            }
+        };
+        if let Err(e) = file.write_all(&window).await {
+            drop(file);
+            fs.remove_quiet(&tmp).await;
+            return Err(e);
+        }
+        written += window.len() as u64;
+        // Charged per window, after it is on the link — the same rule the other
+        // streaming writer follows, and what lets `--bwlimit` pace inside one
+        // enormous object.
+        crate::meter::charge(meter, window.len() as u64).await;
+    }
+
+    let verified = match source.agreed() {
+        Ok(digest) => digest,
+        Err(e) => {
+            drop(file);
+            fs.remove_quiet(&tmp).await;
+            return Err(e);
+        }
+    };
+
+    publish(fs, file, &tmp, remote, modified).await?;
+    Ok(PutOutcome {
+        size: written,
+        verified,
+    })
+}
+
 /// Flush, close, stamp, rename — and remove the staging file if any of them
 /// fails.
 ///

@@ -151,6 +151,30 @@ impl Backend for CountingBackend {
         })
     }
 
+    /// Drains the stream and reports what it was told, so a decorator's
+    /// behaviour around a streamed write is observable without a provider.
+    ///
+    /// Draining is the point rather than an incidental: a fake that dropped the
+    /// stream would look identical to one that stored it, and the property the
+    /// retry wrapper is tested for — that a consumed stream is **not** offered a
+    /// second time — can only be seen by a fake that really consumed it.
+    async fn put_stream(
+        &self,
+        _key: &ObjectKey,
+        mut source: crate::incoming::ObjectStream,
+        _modified: SourceModified,
+    ) -> Result<PutOutcome> {
+        self.attempt("put_stream")?;
+        let mut size = 0u64;
+        while let Some(window) = source.window().await? {
+            size += window.len() as u64;
+        }
+        Ok(PutOutcome {
+            size,
+            verified: source.agreed()?,
+        })
+    }
+
     async fn get(&self, _key: &ObjectKey) -> Result<Bytes> {
         self.attempt("get")?;
         Ok(Bytes::from_static(b"payload"))
@@ -193,6 +217,24 @@ impl Backend for CountingBackend {
         Ok(crate::staging::StagingListing::Page(
             crate::staging::StagingPage::default(),
         ))
+    }
+
+    async fn list_incomplete_uploads(
+        &self,
+        _prefix: &str,
+        _cursor: Option<String>,
+    ) -> Result<crate::multipart::IncompleteUploads> {
+        self.attempt("list_incomplete_uploads")?;
+        Ok(crate::multipart::IncompleteUploads::Page(
+            crate::multipart::IncompletePage::default(),
+        ))
+    }
+
+    async fn abort_incomplete_upload(
+        &self,
+        _upload: &crate::multipart::IncompleteUpload,
+    ) -> Result<()> {
+        self.attempt("abort_incomplete_upload")
     }
 
     async fn store_identity(&self) -> Result<Option<StoreIdentity>> {
@@ -323,6 +365,25 @@ impl Backend for IdentifiedBackend {
         })
     }
 
+    /// Drains the stream, so a guard that refused before the producer was asked
+    /// is distinguishable from one that refused after it had encrypted an object.
+    async fn put_stream(
+        &self,
+        _key: &ObjectKey,
+        mut source: crate::incoming::ObjectStream,
+        _modified: SourceModified,
+    ) -> Result<PutOutcome> {
+        self.record("put_stream");
+        let mut size = 0u64;
+        while let Some(window) = source.window().await? {
+            size += window.len() as u64;
+        }
+        Ok(PutOutcome {
+            size,
+            verified: source.agreed()?,
+        })
+    }
+
     async fn get(&self, _key: &ObjectKey) -> Result<Bytes> {
         self.record("get");
         Ok(Bytes::from_static(b"payload"))
@@ -366,6 +427,25 @@ impl Backend for IdentifiedBackend {
         Ok(crate::staging::StagingListing::Page(
             crate::staging::StagingPage::default(),
         ))
+    }
+
+    async fn list_incomplete_uploads(
+        &self,
+        _prefix: &str,
+        _cursor: Option<String>,
+    ) -> Result<crate::multipart::IncompleteUploads> {
+        self.record("list_incomplete_uploads");
+        Ok(crate::multipart::IncompleteUploads::Page(
+            crate::multipart::IncompletePage::default(),
+        ))
+    }
+
+    async fn abort_incomplete_upload(
+        &self,
+        _upload: &crate::multipart::IncompleteUpload,
+    ) -> Result<()> {
+        self.record("abort_incomplete_upload");
+        Ok(())
     }
 }
 

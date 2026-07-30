@@ -511,6 +511,30 @@ mod tests {
         ) -> dctl_store::Result<dctl_store::StagingListing> {
             Ok(dctl_store::StagingListing::NotStaged("a fake"))
         }
+
+        async fn put_stream(
+            &self,
+            _key: &ObjectKey,
+            _source: dctl_store::ObjectStream,
+            _modified: dctl_store::SourceModified,
+        ) -> dctl_store::Result<dctl_store::PutOutcome> {
+            Err(StoreError::Backend("this fake is read-only".into()))
+        }
+
+        async fn list_incomplete_uploads(
+            &self,
+            _prefix: &str,
+            _cursor: Option<String>,
+        ) -> dctl_store::Result<dctl_store::IncompleteUploads> {
+            Ok(dctl_store::IncompleteUploads::NotMultipart("a fake"))
+        }
+
+        async fn abort_incomplete_upload(
+            &self,
+            _upload: &dctl_store::IncompleteUpload,
+        ) -> dctl_store::Result<()> {
+            Err(StoreError::Backend("this fake is read-only".into()))
+        }
     }
 
     /// A source over a store that declares `declared` bytes and holds `served`.

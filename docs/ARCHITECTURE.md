@@ -341,50 +341,94 @@ there can only leak storage — never lose the live object.
 
 ### 4.2 Constant-memory streaming
 
-> Peak memory for a put or get of a file is `O(chunk_size)`, independent of file
-> size.
+> Peak memory for a put or get of a file is independent of the file's size, and
+> a put needs **no scratch disk at all**.
 
-`put_file_from_path` seals the source straight from disk into a temp object with
-`object::seal_stream` (itself `O(chunk_size)`), then hands that temp file to the
-backend's `put_from_path`. Three passes over file data — seal, hash the sealed
-object for the verified-write `expected`, hash the source plaintext for index
-parity — are each a fixed working buffer. The heavy CPU + blocking file I/O runs
-off the async runtime via `spawn_blocking`. `get_file_to_path` mirrors this:
-stream the object to a temp file, then `object::open_reader` decrypts and
-verifies one chunk at a time into a temp sibling of the destination, folding a
-streaming BLAKE3 over the emitted plaintext.
+`put_file_from_path` seals the source into a **bounded pipe** that the backend
+drains as fast as the link will take it (`dctl_store::incoming`). No stage holds
+the whole file, no stage holds the whole object, and — since the streaming `put`
+on the `Backend` trait — no stage writes either of them to local disk. Two passes
+over the source, not three: the format needs one to hash the plaintext for
+`enc_metadata` and one to encrypt it, and the index row's digest is handed back
+from the first rather than recomputed in a third. The heavy CPU and the blocking
+file I/O run off the async runtime via `spawn_blocking`. `get_file_to_path`
+mirrors it, decrypting and verifying one chunk at a time.
 
-> **Where the bound holds.** `LocalFs`, S3, R2, and B2 **all stream** the transfer
-> stage — S3/R2 via multipart-from-file through the S3 client and B2 via its
-> large-file API — so the trait's in-memory buffering *default* for
-> `put_from_path`/`get_to_path` is **not used** by any shipped cloud backend. The
-> **decrypt / verify / write** stage is likewise always `O(chunk_size)` regardless
-> of backend. `put_file` and `get_file` (the buffered `Vec` variants) deliberately
-> hold the whole plaintext and are for small objects; large media should use the
-> `*_to_path` / `rcat` paths.
+> **What it costs, and the term that dominates it.** The transfer's own working
+> set is `2 × chunk_size` (the sealer) `+ WINDOW_LEN × (WINDOWS_IN_FLIGHT + 2)`
+> (the pipe) `+ part_size × UPLOAD_PARTS_IN_FLIGHT` (the object stores only).
+> Every term is a named constant, none is a function of the object's size, and
+> there is no page-cache term because there is no spool. At the defaults that is
+> 8 MiB on `local:`/`sftp:` and 108 MiB on `b2:`.
+>
+> **That is not what a container must be sized for.** Writing into a vault first
+> *unlocks* it, and unlocking is Argon2id at `DEFAULT_ARGON2_M_COST` = 128 MiB.
+> The arena is one-shot and is released before the first window is sealed, so the
+> process peak is `max(KDF, transfer) + runtime overhead` — a maximum, not a sum —
+> and at every default the KDF wins. Provision in the region of **192 MiB**, not
+> 8 MiB.
 
-> **What an upload holds, exactly.** On the object stores the transfer stage's
-> peak is **one part**, and on B2 that is a number the program will state:
-> `B2Backend::upload_peak_bytes()` is `part_size × UPLOAD_PARTS_IN_FLIGHT`, parts
-> go one at a time, and a remote's `chunk_size` sets the part size. Nothing in it
-> is a function of the object's size — measured on the release binary inside a
-> cgroup with `memory.max=512M`, peak RSS is flat from a 99 MiB object to a 4 GiB
-> one (`HANDOVER.md` §25).
+> **Measured, on the release binary, under a hard cgroup cap.** `memory.max` =
+> 256 MiB, `memory.swap.max` = 0, page cache dropped before every run, objects of
+> 256 MiB / 1 GiB / 4 GiB, copy in and copy out, every copy-out compared byte for
+> byte against its source:
+>
+> | backend | peak RSS | anon | flat across 256 MiB → 4 GiB? |
+> |---------|----------|------|------------------------------|
+> | `local:` | 144 MiB | 131 MiB | yes, in and out |
+> | `sftp:`  | 144 MiB | 133 MiB | yes, in and out |
+> | `b2:`    | 147 MiB | 131 MiB | yes, in and out |
+>
+> A 1 MiB object produces the same 144 MiB, which is what identifies the constant
+> as the KDF rather than the transfer. That the `b2:` row is not 108 MiB higher is
+> what proves the peak is a maximum and not a sum. The cap was shown to be real in
+> the same cgroup before anything was measured under it: a 1 GiB allocation is
+> OOM-killed at exit 137, a 32 MiB one is not.
+
+> **The scratch disk, which is the headline.** Sampled at 50 ms as the high-water
+> mark of the staging directory, against a binary identical except that the spool
+> is reinstated:
+>
+> | object | streaming | spooling | streaming time | spooling time |
+> |--------|-----------|----------|----------------|---------------|
+> | 256 MiB | **0 MiB** | 256 MiB | 16.0 s | 33.0 s |
+> | 1 GiB   | **0 MiB** | 1024 MiB | 41.4 s | 86.0 s |
+> | 4 GiB   | **0 MiB** | 4096 MiB | 155.1 s | 324.3 s |
+>
+> One object of scratch space per upload, exactly, and it is gone. The streaming
+> path is also about twice as fast, because writing the sealed object to disk and
+> reading it back is work that no longer happens.
+
+> **Where a spool remains, and why it cannot be removed.** `dctl rcat` — standard
+> input — still captures to disk first. The reason is the format, not the
+> backend: an object's head carries `plaintext_len` and `chunk_count`, and a
+> multipart upload must plan its parts, so the exact length has to be known before
+> the first byte is sealed. A pipe has no length and cannot be rewound. See
+> `dctl_core::spool`, which also refuses to let that file land silently on a
+> `tmpfs`.
+
+> **Where the bound holds.** All five backends implement the streaming `put`;
+> none inherits a buffering default, because the trait deliberately provides none
+> — a default that buffered would compile everywhere, pass every correctness test,
+> and silently reintroduce the `O(object)` cost on whichever backend somebody
+> forgot. `local:` and `sftp:` write a window straight out; `b2:`, `s3:` and `r2:`
+> add one part. `put_file` and `get_file` (the buffered `Vec` variants) still hold
+> the whole plaintext deliberately and are for small objects.
 >
 > Two caveats, both about the constant rather than the order. The part size is
-> **not free**: at the 100 MiB default an upload's working set is 100 MiB, so a
-> container sized below that has to lower `chunk_size` and pay in request count.
+> **not free**: at the 100 MiB default a `b2:` upload's transfer term is 100 MiB,
+> and a container below that has to lower `chunk_size` and pay in request count.
 > And B2 and S3 both cap a multipart upload at **10 000 parts**, so an object
 > larger than `part_size × 10 000` — 1 TiB at the default — must be cut into
-> bigger parts, and past that point the peak rises as `object / 10 000`. That
-> slope is the provider's rule, not a choice made here, and it is the only place
-> the figure stops being flat.
+> bigger parts, and past that point the transfer term rises as `object / 10 000`.
+> That slope is the provider's rule, not a choice made here, and it is the only
+> place the figure stops being flat.
 >
-> S3 and R2 hold one part by the same construction, in the same shape of code,
-> but that is **not** independently measured: this repository has no S3 account,
-> and the S3 mock buffers request bodies, so it cannot host the measurement
-> without being rewritten. B2 is measured live; the other two are argued from the
-> code, which is exactly the standing this section used to claim for all three.
+> S3 and R2 hold one part by the same construction and are exercised against a
+> loopback mock that verifies every SigV4 signature, including a streamed
+> multipart put, a producer that dies mid-object, and the unfinished-upload
+> listing. They are **not** measured live: this repository has no S3 account. B2
+> is measured live; the other two are argued from the code and pinned by the mock.
 
 ---
 

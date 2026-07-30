@@ -561,3 +561,280 @@ async fn a_put_whose_declared_hash_is_not_its_bytes_never_reaches_the_network() 
         "the refusal must come before the upload, not after it"
     );
 }
+
+// ── the streaming put: no spool, same wire ───────────────────────────────────
+
+/// Feed `data` to `b2` through a streaming put, exactly as a vault's sealer does:
+/// a blocking producer writing windows into a bounded pipe.
+async fn streamed_put(b2: &B2Backend, key: &str, data: &[u8]) -> dctl_store::Result<()> {
+    use std::io::Write as _;
+    let (mut writer, stream) = dctl_store::object_stream(data.len() as u64, HashAlgo::Blake3);
+    let owned = data.to_vec();
+    let producing = tokio::task::spawn_blocking(move || {
+        writer.write_all(&owned).expect("the pipe takes the bytes");
+        writer.finish().expect("and the end of them");
+    });
+    let outcome = b2
+        .put_stream(&ObjectKey::new(key), stream, SourceModified::unknown())
+        .await;
+    producing.await.expect("the producer finished");
+    outcome.map(|_| ())
+}
+
+#[tokio::test]
+async fn a_streamed_put_cuts_an_object_exactly_where_a_file_backed_one_does() {
+    // The two doors into one uploader. `put_from_path` is the shape a plain
+    // remote uses and `put_stream` is the shape a vault uses now that nothing is
+    // spooled, and an object that arrived cut differently through one of them
+    // would be a second uploader wearing the first one's memory contract.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = backend(&mock, Some(PART)).await;
+    let dir = TempDir::new().expect("a temporary directory");
+
+    let len = PART as usize * 2 + 1234;
+    let (path, data, hash) = source(&dir, "big.bin", len);
+    b2.put_from_path(
+        &ObjectKey::new("o/from-file"),
+        &path,
+        &hash,
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("the file-backed put stores");
+
+    streamed_put(&b2, "o/streamed", &data)
+        .await
+        .expect("the streamed put stores");
+
+    let state = mock.state();
+    assert_eq!(state.large.len(), 2, "both should be large files");
+    let from_file = &state.large[0];
+    let streamed = &state.large[1];
+    assert!(from_file.finished && streamed.finished);
+    assert_eq!(
+        streamed.parts.iter().map(|p| p.len).collect::<Vec<_>>(),
+        from_file.parts.iter().map(|p| p.len).collect::<Vec<_>>(),
+        "the two paths cut the object in different places"
+    );
+    assert_eq!(
+        streamed
+            .parts
+            .iter()
+            .map(|p| p.sha1.clone())
+            .collect::<Vec<_>>(),
+        from_file
+            .parts
+            .iter()
+            .map(|p| p.sha1.clone())
+            .collect::<Vec<_>>(),
+        "the two paths sent different bytes"
+    );
+    // …and the finish call named the hashes the server actually holds, which the
+    // mock enforces — so a client that sent the parts and named something else
+    // would have been refused above rather than asserted about here.
+    assert_eq!(streamed.finished_with, from_file.finished_with);
+}
+
+#[tokio::test]
+async fn a_streamed_put_below_the_part_size_is_one_request_like_every_other() {
+    // The small arm. It shares the cutoff with the large one, which is what keeps
+    // the memory contract to one figure — see the cutoff test above.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = backend(&mock, Some(PART)).await;
+    let data: Vec<u8> = (0..PART as usize).map(|i| (i % 251) as u8).collect();
+
+    streamed_put(&b2, "o/exactly-one-part", &data)
+        .await
+        .expect("an object of exactly one part stores");
+
+    let state = mock.state();
+    assert_eq!(state.singles.len(), 1, "{:?}", state.singles);
+    assert_eq!(state.singles[0].len as u64, PART);
+    assert!(state.large.is_empty(), "nothing should have gone multipart");
+}
+
+#[tokio::test]
+async fn a_producer_that_dies_mid_object_finishes_nothing_and_leaves_no_large_file() {
+    // The verified-write contract on the streaming path: the digest arrives with
+    // the stream's last message, so a producer that never sends one must not be
+    // able to commit the prefix it managed. `b2_finish_large_file` is the commit,
+    // and the cancel is what stops the parts already sent from billing.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = backend(&mock, Some(PART)).await;
+
+    let (mut writer, stream) = dctl_store::object_stream(PART * 3, HashAlgo::Blake3);
+    let producing = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        // A whole part and a bit, and then the producer vanishes without a
+        // terminal message — which is what a `SIGKILL` on the sealer looks like
+        // from this side.
+        let part: Vec<u8> = (0..PART as usize + 4096).map(|i| (i % 251) as u8).collect();
+        let _ = writer.write_all(&part);
+        drop(writer);
+    });
+    let error = b2
+        .put_stream(
+            &ObjectKey::new("o/never-finished"),
+            stream,
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("a stream that stopped must not be committed");
+    producing.await.expect("the producer ran");
+
+    assert!(
+        error.to_string().contains("stopped before it finished"),
+        "{error}"
+    );
+    let state = mock.state();
+    assert_eq!(state.large.len(), 1);
+    assert!(
+        !state.large[0].finished,
+        "a large file was finished from a stream that never ended"
+    );
+    assert!(
+        state.large[0].cancelled,
+        "the parts already sent were left billing"
+    );
+}
+
+// ── unfinished large files: seen, and reclaimed ──────────────────────────────
+
+/// Leave one unfinished large file on the server, the way a `SIGKILL` does.
+///
+/// DCTL cancels its own on every error path, so the only way to produce the state
+/// a killed process leaves is to make the cancel itself fail — which is exactly
+/// what a process that is no longer running looks like to the server.
+async fn abandon_one(mock: &MockB2, b2: &B2Backend, key: &str) {
+    // A **terminal** status, not a 503: the retry layer would try a 503 again and
+    // the second attempt would succeed, leaving nothing abandoned to find.
+    mock.fail_next("/b2_cancel_large_file", 400, "bad_request");
+    let (mut writer, stream) = dctl_store::object_stream(PART * 3, HashAlgo::Blake3);
+    let producing = tokio::task::spawn_blocking(move || {
+        use std::io::Write as _;
+        let part: Vec<u8> = (0..PART as usize + 16).map(|i| (i % 251) as u8).collect();
+        let _ = writer.write_all(&part);
+        drop(writer);
+    });
+    let _ = b2
+        .put_stream(&ObjectKey::new(key), stream, SourceModified::unknown())
+        .await;
+    producing.await.expect("the producer ran");
+}
+
+#[tokio::test]
+async fn an_upload_no_object_listing_shows_is_enumerated_and_cancelled() {
+    // §11.3 item 12, closed. A killed multipart upload leaves parts that are
+    // stored and billed and that `b2_list_file_names` does not return, so until
+    // `b2_list_unfinished_large_files` was wired the only honest thing `cleanup`
+    // could say was `unsupported`.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = backend(&mock, Some(PART)).await;
+    mock.started_seconds_ago(3600);
+    abandon_one(&mock, &b2, "o/abandoned").await;
+
+    // It is really there and it is really not an object: the server is holding a
+    // large file that was never finished and never cancelled, and no object was
+    // ever stored. That is the state `b2_list_file_names` steps over — which is
+    // the whole reason this class needed a listing of its own.
+    let state = mock.state();
+    assert_eq!(state.large.len(), 1);
+    assert!(!state.large[0].finished && !state.large[0].cancelled);
+    assert!(
+        state.singles.is_empty(),
+        "nothing was ever stored as an object: {:?}",
+        state.singles
+    );
+
+    // The second question finds it, with the age `--min-age` needs.
+    let listing = b2
+        .list_incomplete_uploads("", None)
+        .await
+        .expect("the upload listing works");
+    let dctl_store::IncompleteUploads::Page(page) = listing else {
+        panic!("b2 speaks multipart and must not answer NotMultipart");
+    };
+    assert_eq!(page.items.len(), 1);
+    assert_eq!(page.items[0].key.as_str(), "o/abandoned");
+    let started = page.items[0]
+        .started_unix
+        .expect("b2 dates every large file, and --min-age reads it");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("a clock after 1970")
+        .as_secs() as i64;
+    assert!(
+        (3500..3700).contains(&(now - started)),
+        "an upload started an hour ago read as {} seconds old",
+        now - started
+    );
+
+    // And cancelling it releases the parts.
+    b2.abort_incomplete_upload(&page.items[0])
+        .await
+        .expect("the cancel succeeds");
+    assert!(mock.state().large[0].cancelled);
+
+    // Which the listing then agrees about, rather than offering it again.
+    let dctl_store::IncompleteUploads::Page(after) = b2
+        .list_incomplete_uploads("", None)
+        .await
+        .expect("the upload listing works")
+    else {
+        panic!("b2 speaks multipart");
+    };
+    assert!(after.items.is_empty(), "{:?}", after.items);
+}
+
+#[tokio::test]
+async fn the_upload_listing_is_scoped_by_prefix_and_paged_by_id() {
+    // Two things a single-page test would not catch, both of which cost real
+    // money: a sweep scoped to `photos/` that cancelled uploads under `docs/`,
+    // and a pager that asked for the same page forever on a busy bucket.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = backend(&mock, Some(PART)).await;
+    for key in ["photos/a", "photos/b", "docs/c"] {
+        abandon_one(&mock, &b2, key).await;
+    }
+
+    let dctl_store::IncompleteUploads::Page(scoped) = b2
+        .list_incomplete_uploads("photos/", None)
+        .await
+        .expect("the upload listing works")
+    else {
+        panic!("b2 speaks multipart");
+    };
+    assert_eq!(
+        scoped
+            .items
+            .iter()
+            .map(|u| u.key.as_str().to_string())
+            .collect::<Vec<_>>(),
+        vec!["photos/a".to_string(), "photos/b".to_string()],
+        "a scoped sweep must not see another prefix's uploads"
+    );
+
+    // The pager terminates and covers everything exactly once.
+    let mut seen: Vec<String> = Vec::new();
+    let mut cursor = None;
+    for _ in 0..10 {
+        let dctl_store::IncompleteUploads::Page(page) = b2
+            .list_incomplete_uploads("", cursor.clone())
+            .await
+            .expect("the upload listing works")
+        else {
+            panic!("b2 speaks multipart");
+        };
+        seen.extend(page.items.iter().map(|u| u.key.as_str().to_string()));
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen.len(), 3, "{seen:?}");
+    assert_eq!(
+        seen.iter().collect::<std::collections::BTreeSet<_>>().len(),
+        3,
+        "the pager repeated a page: {seen:?}"
+    );
+}

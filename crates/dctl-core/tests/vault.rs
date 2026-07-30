@@ -180,6 +180,30 @@ async fn a_store_that_cannot_be_read_is_reported_as_that_rather_than_as_a_bad_pa
         ) -> Result<dctl_store::StagingListing, StoreError> {
             Err(StoreError::Backend("403 forbidden".into()))
         }
+
+        async fn put_stream(
+            &self,
+            _: &ObjectKey,
+            _: dctl_store::ObjectStream,
+            _: dctl_store::SourceModified,
+        ) -> Result<PutOutcome, StoreError> {
+            unimplemented!()
+        }
+
+        async fn list_incomplete_uploads(
+            &self,
+            _: &str,
+            _: Option<String>,
+        ) -> Result<dctl_store::IncompleteUploads, StoreError> {
+            Err(StoreError::Backend("403 forbidden".into()))
+        }
+
+        async fn abort_incomplete_upload(
+            &self,
+            _: &dctl_store::IncompleteUpload,
+        ) -> Result<(), StoreError> {
+            unimplemented!()
+        }
     }
 
     let index = TempDir::new().unwrap();
@@ -1193,6 +1217,30 @@ impl Backend for FaultyGrantGet {
         cursor: Option<String>,
     ) -> dctl_store::Result<dctl_store::StagingListing> {
         self.inner.list_staging(prefix, cursor).await
+    }
+
+    async fn put_stream(
+        &self,
+        key: &ObjectKey,
+        source: dctl_store::ObjectStream,
+        modified: dctl_store::SourceModified,
+    ) -> dctl_store::Result<PutOutcome> {
+        self.inner.put_stream(key, source, modified).await
+    }
+
+    async fn list_incomplete_uploads(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> dctl_store::Result<dctl_store::IncompleteUploads> {
+        self.inner.list_incomplete_uploads(prefix, cursor).await
+    }
+
+    async fn abort_incomplete_upload(
+        &self,
+        upload: &dctl_store::IncompleteUpload,
+    ) -> dctl_store::Result<()> {
+        self.inner.abort_incomplete_upload(upload).await
     }
 }
 

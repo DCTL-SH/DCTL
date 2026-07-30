@@ -122,6 +122,32 @@ impl Backend for Retrying {
         .await
     }
 
+    /// Forwarded **without** a retry, and that is a property of the argument
+    /// rather than an omission.
+    ///
+    /// Every other operation here is safe to attempt again because its input is
+    /// still in hand — a `Bytes` clones, a path re-opens, a listing re-runs. An
+    /// [`ObjectStream`](crate::ObjectStream) is none of those: it is a live pipe
+    /// from a producer that has already encrypted and discarded the windows the
+    /// first attempt consumed, so a second attempt would upload the *tail* of the
+    /// object and the verified-write check would refuse it — after the whole thing
+    /// had crossed the link. Retrying an unrewindable stream is not resilience,
+    /// it is a second failure at twice the cost.
+    ///
+    /// What does retry is the layer underneath, where it can: a B2 or S3 part is
+    /// re-sent from the buffer already in hand (`b2::retry`), which is the part of
+    /// the transfer a transient failure actually lands on. A whole-object retry is
+    /// the caller's, from the source file that is still on disk — and the caller
+    /// that seals is the one place that can rewind, because it owns the plaintext.
+    async fn put_stream(
+        &self,
+        key: &ObjectKey,
+        source: crate::incoming::ObjectStream,
+        modified: SourceModified,
+    ) -> Result<PutOutcome> {
+        self.inner.put_stream(key, source, modified).await
+    }
+
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
         run(
             "get",
@@ -185,6 +211,33 @@ impl Backend for Retrying {
         run("list_staging", self.policy, |_| {
             let cursor = cursor.clone();
             async move { self.inner.list_staging(prefix, cursor).await }
+        })
+        .await
+    }
+
+    /// Retried like every other read: enumeration stores nothing, and a sweep
+    /// that gave up on the first dropped packet would leave billed parts behind.
+    async fn list_incomplete_uploads(
+        &self,
+        prefix: &str,
+        cursor: Option<String>,
+    ) -> Result<crate::multipart::IncompleteUploads> {
+        run("list_incomplete_uploads", self.policy, |_| {
+            let cursor = cursor.clone();
+            async move { self.inner.list_incomplete_uploads(prefix, cursor).await }
+        })
+        .await
+    }
+
+    /// Retried, because it is idempotent by construction: an upload cancelled
+    /// twice is cancelled, and both providers' "no such upload" is read as success
+    /// at the backend. It is the same argument [`Backend::delete`] rests on.
+    async fn abort_incomplete_upload(
+        &self,
+        upload: &crate::multipart::IncompleteUpload,
+    ) -> Result<()> {
+        run("abort_incomplete_upload", self.policy, |_| async move {
+            self.inner.abort_incomplete_upload(upload).await
         })
         .await
     }

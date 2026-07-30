@@ -1,10 +1,22 @@
 //! Where a sealed object is assembled before it is uploaded — and why the answer
 //! is not "the system temp directory" without looking.
 //!
-//! The streaming store seals its source straight to a temporary object and hands
-//! that file to [`Backend::put_from_path`](dctl_store::Backend::put_from_path),
-//! so no stage holds the whole file *in memory*. That is the whole point of the
-//! path and it is measurably true — but only if the temporary file is on a disk.
+//! ## One caller is left, and it is the one that cannot be helped
+//!
+//! Storing a *file* into a vault no longer comes through here at all:
+//! [`Vault::put_file_from_path`](crate::Vault::put_file_from_path) seals straight into the backend in
+//! bounded windows and writes nothing to local disk, measured at 0 MiB of scratch
+//! against an object size of 4 GiB. What still spools is `dctl rcat` — standard
+//! input — and the reason is not the backend but the **format**: an object's head
+//! carries `plaintext_len` and `chunk_count`, and a multipart upload has to plan
+//! its parts, so the exact length must be known before the first byte is sealed.
+//! A pipe has no length and cannot be rewound to find one. Capturing it is the
+//! only way to learn what it was, and that is a property of pipes rather than a
+//! shortcut taken here.
+//!
+//! So this module is smaller than it was and everything below still holds for the
+//! one caller that remains — because for that caller the temporary file is the
+//! whole object, and it is only bounded memory if the file is on a disk.
 //!
 //! **On a great many Linux installations it is not.** systemd has mounted `/tmp`
 //! as `tmpfs` by default since v256, and Fedora, Arch and Ubuntu's cloud images

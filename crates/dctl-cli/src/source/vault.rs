@@ -565,6 +565,30 @@ mod tests {
         ) -> dctl_store::Result<dctl_store::StagingListing> {
             self.inner.list_staging(prefix, cursor).await
         }
+
+        async fn put_stream(
+            &self,
+            key: &ObjectKey,
+            source: dctl_store::ObjectStream,
+            modified: dctl_store::SourceModified,
+        ) -> dctl_store::Result<PutOutcome> {
+            self.inner.put_stream(key, source, modified).await
+        }
+
+        async fn list_incomplete_uploads(
+            &self,
+            prefix: &str,
+            cursor: Option<String>,
+        ) -> dctl_store::Result<dctl_store::IncompleteUploads> {
+            self.inner.list_incomplete_uploads(prefix, cursor).await
+        }
+
+        async fn abort_incomplete_upload(
+            &self,
+            upload: &dctl_store::IncompleteUpload,
+        ) -> dctl_store::Result<()> {
+            self.inner.abort_incomplete_upload(upload).await
+        }
     }
 
     async fn vault_with(files: &[(&str, &[u8])]) -> Fixture {

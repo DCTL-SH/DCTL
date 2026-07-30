@@ -4216,6 +4216,16 @@ pub const REMOVAL_KIND_STAGING: &str = "staging";
 /// Kind reported for a content object no index record refers to.
 pub const REMOVAL_KIND_ORPHAN: &str = "orphan";
 
+/// Kind reported for a multipart upload a provider is still holding open.
+///
+/// Its own kind rather than `orphan`, because what is reclaimed is different in
+/// a way an operator reading the report has to be able to see: an orphan is a
+/// whole stored object that nothing refers to, and this is a *set of parts* that
+/// never became an object. They are also removed by different calls — a `delete`
+/// against a key, and a provider-specific cancel against an upload handle — so a
+/// shared name would put two operations under one heading in the audit trail.
+pub const REMOVAL_KIND_MULTIPART: &str = "multipart";
+
 /// Width of the status column in the text report.
 ///
 /// Wide enough for the longest status above plus a space, so the size and path
@@ -6096,6 +6106,7 @@ mod tests {
             REMOVAL_KIND_DIRECTORY,
             REMOVAL_KIND_STAGING,
             REMOVAL_KIND_ORPHAN,
+            REMOVAL_KIND_MULTIPART,
         ];
         for (index, kind) in kinds.iter().enumerate() {
             assert_eq!(*kind, kind.to_lowercase());
