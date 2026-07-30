@@ -97,12 +97,14 @@ impl Side {
     /// every path as missing and invite a user to "repair" it by copying a whole
     /// dataset over one that was fine.
     pub async fn open(ctx: &Ctx, target: &super::Target, filter: Filter) -> Result<Self> {
-        let source = source::open(ctx, &target.spec()).await?;
-        let entries = source.enumerate(target.prefix()).await?;
+        let opened = source::open(ctx, &target.spec()).await?;
+        let entries = opened.enumerate().await?;
+        let root = opened.prefix().to_string();
+        let source = opened.into_source();
         Ok(Self {
             source,
             entries,
-            root: target.prefix().to_string(),
+            root,
             filter,
             head: None,
             exhausted: false,

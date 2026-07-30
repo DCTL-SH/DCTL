@@ -101,8 +101,8 @@ pub async fn measure(ctx: &Ctx, spec: &RemoteSpec) -> Result<Usage> {
     // volume nobody had mounted. That is the exact figure this module's own note
     // says gets believed and then gets used to decide whether a backup fits.
     readable_tree(ctx, spec)?;
-    let source = source::open(ctx, spec).await?;
-    let mut entries = source.enumerate(prefix_of(spec)).await?;
+    let opened = source::open(ctx, spec).await?;
+    let mut entries = opened.enumerate().await?;
 
     let mut usage = Usage {
         objects: 0,
@@ -113,7 +113,7 @@ pub async fn measure(ctx: &Ctx, spec: &RemoteSpec) -> Result<Usage> {
         unmeasured: 0,
         // Taken from the source rather than decided here: this command must not
         // become a second place that works out what a remote is.
-        sizes: source.sizes(),
+        sizes: opened.source().sizes(),
     };
 
     while let Some(entry) = entries.next().await? {
@@ -156,18 +156,14 @@ fn readable_tree(ctx: &Ctx, spec: &RemoteSpec) -> Result<()> {
     }
 }
 
-/// The prefix a spec asks about — its path component, or the whole remote.
-///
-/// A bare local path carries its whole self as the root (`crate::remote::Place`
-/// resolves `/srv/data` to `root: /srv/data, path: ""`), so there is nothing left
-/// to scope by and the empty prefix is correct for it. A named remote's path is
-/// the scope the operator typed.
-fn prefix_of(spec: &RemoteSpec) -> &str {
-    match spec {
-        RemoteSpec::Local(_) => "",
-        RemoteSpec::Named { path, .. } => path.as_str(),
-    }
-}
+// `prefix_of` used to live here: a spec's path component, or the empty string
+// for a bare local path. It is gone rather than kept, because it was one of nine
+// copies of a rule that was **wrong on the provider shorthands** — `b2:DCTL001`
+// carries the bucket in that path, so `dctl about b2:DCTL001` measured a subtree
+// that could not exist and reported `objects 0 / bytes 0 B`. This module's own
+// documentation says a failure is never reported as a zero; that was one.
+// `crate::source::open` now returns the scope beside the source, from the
+// resolver that split the bucket off — see `crate::source::Opened`.
 
 #[cfg(test)]
 mod tests {

@@ -292,7 +292,7 @@ pub fn untraversed() -> Listing {
 /// Enumerate an endpoint, whatever it turns out to be.
 async fn enumerate(ctx: &Ctx, endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
     match endpoint {
-        RemoteSpec::Named { path, .. } => walk_remote(ctx, endpoint, path, options).await,
+        RemoteSpec::Named { .. } => walk_remote(ctx, endpoint, options).await,
         RemoteSpec::Local(root) => walk_local(root, options),
     }
 }
@@ -304,13 +304,17 @@ async fn enumerate(ctx: &Ctx, endpoint: &RemoteSpec, options: &ListOptions) -> R
 /// all three. What is left to do here is the part that is specific to a
 /// *transfer*: re-rooting each path at the prefix the user named, applying the
 /// filters, and deciding whether the prefix named one object or a tree.
-async fn walk_remote(
-    ctx: &Ctx,
-    endpoint: &RemoteSpec,
-    prefix: &str,
-    options: &ListOptions,
-) -> Result<Listing> {
-    let source = crate::source::open(ctx, endpoint).await?;
+///
+/// The prefix is the **opened source's**, never the spec's. They differ on a
+/// provider shorthand — `b2:DCTL001/photos` names the bucket `DCTL001` and the
+/// prefix `photos` inside it — and using the spec's would enumerate a subtree
+/// that cannot exist, so the transfer would see an empty destination and copy
+/// everything again on every run. See [`crate::source::Opened`].
+async fn walk_remote(ctx: &Ctx, endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
+    let opened = crate::source::open(ctx, endpoint).await?;
+    let prefix = opened.prefix().to_string();
+    let prefix = prefix.as_str();
+    let source = opened.into_source();
     let mut cursor = source.enumerate(prefix).await?;
 
     let mut listing = Listing::default();

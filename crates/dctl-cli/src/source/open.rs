@@ -47,7 +47,71 @@ use super::Source;
 use super::plain::PlainSource;
 use super::vault::VaultSource;
 
-/// Open the source `spec` addresses.
+/// An open source, together with the prefix that scopes a read inside it.
+///
+/// ## Why the two travel together
+///
+/// They are one answer to one question and were being taken from two places. A
+/// source is built from the **resolved** remote — `b2:DCTL001` builds a client
+/// for the bucket `DCTL001` — while every read-side verb scoped its listing with
+/// the **spec's** path, which still said `DCTL001`. So `dctl ls b2:DCTL001`
+/// enumerated keys under `DCTL001/` inside the bucket of that name and reported
+/// nothing, on all three object-store shorthands. Nine call sites made the same
+/// mistake because each one had a spec in hand and nothing else, and the cost is
+/// not an empty listing: an incremental `sync` reads an empty destination on
+/// every run and re-uploads the whole dataset for as long as the job is
+/// scheduled (`HANDOVER.md` §11.3 item 6).
+///
+/// Returning a bare `Box<dyn Source>` is what made that reachable. A caller that
+/// receives one of these has the prefix in the same value as the source, and the
+/// spec's path is not a thing it needs to look at — which is the only version of
+/// this fix that a tenth call site cannot opt out of.
+pub struct Opened {
+    /// The source itself: sealed vault or plain store, indistinguishable above
+    /// this module.
+    source: Box<dyn Source>,
+    /// The logical prefix inside `source` that the spec addressed.
+    prefix: String,
+}
+
+impl Opened {
+    /// The prefix a read of this source must be scoped by.
+    #[must_use]
+    pub fn prefix(&self) -> &str {
+        &self.prefix
+    }
+
+    /// The source, for a caller that keeps its own scope.
+    #[must_use]
+    pub fn source(&self) -> &dyn Source {
+        self.source.as_ref()
+    }
+
+    /// Take the source, discarding the prefix.
+    ///
+    /// For the callers that address one *object* by name rather than a subtree —
+    /// `cat` opens a remote and each argument supplies its own path — and for
+    /// those that have already copied the prefix out. Named `into_` rather than
+    /// offered as a `Deref` so that discarding the scope is a visible decision at
+    /// the call site: `dctl ls` discarding it is the defect this type exists for.
+    #[must_use]
+    pub fn into_source(self) -> Box<dyn Source> {
+        self.source
+    }
+
+    /// Open a cursor over everything under this source's own prefix.
+    ///
+    /// The shape almost every caller wants, offered here so the prefix and the
+    /// source cannot be separated on the way to the one call that uses both.
+    ///
+    /// # Errors
+    /// Whatever the index or provider reported while opening the listing.
+    pub async fn enumerate(&self) -> Result<Box<dyn super::Entries>> {
+        self.source.enumerate(&self.prefix).await
+    }
+}
+
+/// Open the source `spec` addresses, scoped as `spec` scopes it.
 ///
 /// A missing configuration file is not an error: `load_or_default` yields an
 /// empty one, which is the headless case `PLAN.md` §14 requires to keep working
@@ -55,33 +119,50 @@ use super::vault::VaultSource;
 /// configuration simply defines no vaults, so every spec opens the plain view —
 /// which is the truth about a machine that has never run `dctl init`.
 ///
+/// The prefix comes back with the source, from
+/// [`logical_prefix`](crate::remote::resolve::logical_prefix), and never from the
+/// spec — see [`Opened`] for the failure that made the difference matter.
+///
 /// # Errors
 /// [`ExitCode::FatalError`](crate::exit::ExitCode::FatalError) for an unreadable
 /// configuration, an unresolvable remote, or a `--key-file` this build cannot
 /// apply; [`ExitCode::VaultLocked`](crate::exit::ExitCode::VaultLocked) when a
 /// sealed source will not unlock.
-pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Box<dyn Source>> {
+pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Opened> {
     let path = crate::config::resolve_path(ctx.globals.config.as_deref());
     let config = crate::config::load_or_default(&path)?;
+
+    // Before the source is built, so an unresolvable remote is diagnosed by the
+    // resolver rather than by a backend constructor that has already asked for a
+    // credential.
+    let prefix = crate::remote::resolve::logical_prefix(spec, &config)?;
 
     if is_sealed(&config, spec) {
         tracing::debug!(
             { crate::logging::fields::REMOTE } = %spec,
+            prefix = %prefix,
             "opening the sealed view"
         );
-        return Ok(Box::new(VaultSource::open(ctx, spec).await?));
+        return Ok(Opened {
+            source: Box::new(VaultSource::open(ctx, spec).await?),
+            prefix,
+        });
     }
 
     tracing::debug!(
         { crate::logging::fields::REMOTE } = %spec,
+        prefix = %prefix,
         "opening the plain view"
     );
-    Ok(Box::new(PlainSource::open(
-        &config,
-        spec,
-        ctx.globals.links,
-        ctx.deadlines,
-    )?))
+    Ok(Opened {
+        source: Box::new(PlainSource::open(
+            &config,
+            spec,
+            ctx.globals.links,
+            ctx.deadlines,
+        )?),
+        prefix,
+    })
 }
 
 /// Whether `spec` names a configured vault wrapper.
@@ -183,13 +264,69 @@ mod tests {
         std::fs::write(root.path().join("a.txt"), b"hello").unwrap();
 
         let spec = RemoteSpec::Local(root.path().to_path_buf());
-        let source = open(&ctx(&[]), &spec).await.expect("a directory opens");
+        let opened = open(&ctx(&[]), &spec).await.expect("a directory opens");
 
-        let mut cursor = source.enumerate("").await.expect("a listing opens");
+        // A bare path is its own root, so the scope that comes back is empty and
+        // the whole tree is in view — the property `prefix_is_the_resolvers_and_
+        // never_the_specs` states for every other shape.
+        assert_eq!(opened.prefix(), "");
+        let mut cursor = opened.enumerate().await.expect("a listing opens");
         let entry = cursor.next().await.unwrap().expect("one entry");
         assert_eq!(entry.path, "a.txt");
         assert_eq!(entry.size, Some(5));
-        assert_eq!(source.read("a.txt").await.unwrap().as_slice(), b"hello");
+        assert_eq!(
+            opened.source().read("a.txt").await.unwrap().as_slice(),
+            b"hello"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_named_remotes_scope_travels_with_the_source_it_scopes() {
+        // The end-to-end half of `HANDOVER.md` §11.3 item 6, on the one provider
+        // shape a test can reach without a credential. A configured `local`
+        // remote carries its root in a setting, so the whole spec path is the
+        // prefix; the shorthands are the shape where it is not, and they are
+        // asserted in `remote::resolve` because building one needs a key pair.
+        //
+        // What this pins is the *wiring*: the number `open` hands back is the
+        // number the listing is taken at, on a real directory, through the real
+        // resolver. A source opened at the wrong scope lists nothing, and an
+        // empty listing is what a `sync` reads as "copy it all again".
+        let dir = tempfile::TempDir::new().unwrap();
+        let root = dir.path().join("root");
+        std::fs::create_dir_all(root.join("photos")).unwrap();
+        std::fs::write(root.join("photos/a.jpg"), b"1").unwrap();
+        std::fs::write(root.join("other.txt"), b"2").unwrap();
+
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.store]\ntype = \"local\"\npath = {:?}\n",
+                root.to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let context = ctx(&["--config", &config.to_string_lossy()]);
+
+        let opened = open(
+            &context,
+            &RemoteSpec::Named {
+                remote: "store".into(),
+                path: "photos".into(),
+            },
+        )
+        .await
+        .expect("the remote opens");
+        assert_eq!(opened.prefix(), "photos");
+
+        let mut cursor = opened.enumerate().await.expect("a listing opens");
+        let first = cursor.next().await.unwrap().expect("one entry");
+        assert_eq!(first.path, "photos/a.jpg");
+        assert!(
+            cursor.next().await.unwrap().is_none(),
+            "scoped to the prefix"
+        );
     }
 
     #[tokio::test]

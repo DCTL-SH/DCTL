@@ -73,6 +73,13 @@ pub struct Source {
     /// re-resolving between the check and the read is how a command ends up
     /// having validated something it did not go on to read.
     origin: Option<Arc<dyn ReadSource>>,
+    /// The object's key **inside** [`Source::origin`], which is not the spec's
+    /// path whenever resolution consumed part of it.
+    ///
+    /// `b2:DCTL001/a.txt` names the bucket `DCTL001` and the object `a.txt`, so
+    /// a read of the spec's path asks that bucket for `DCTL001/a.txt`. Empty and
+    /// unused for a local argument, whose bytes are opened through its own path.
+    key: String,
 }
 
 impl Source {
@@ -90,18 +97,21 @@ impl Source {
             );
         }
 
-        let Some(remote) = spec.remote() else {
+        if spec.remote().is_none() {
             let size = local_size(&spec)?;
             return Ok(Self {
                 slice: span.resolve(size),
                 spec,
                 size,
                 origin: None,
+                key: String::new(),
             });
-        };
+        }
 
-        let source = opened.get(remote).await?;
-        let size = remote_size(&spec, source.as_ref()).await?;
+        let located = opened.get(&spec).await?;
+        let source = located.source;
+        let key = located.key;
+        let size = remote_size(&spec, &key, source.as_ref()).await?;
         let slice = span.resolve(size);
 
         // There used to be a warning here, because a vault served a byte window
@@ -116,6 +126,7 @@ impl Source {
             spec,
             size,
             origin: Some(source),
+            key,
         })
     }
 
@@ -150,7 +161,7 @@ impl Source {
         // what the operator asked for on the command line, so it is bounded by
         // the request rather than by the object.
         let bytes = source
-            .read_range(self.spec.path(), self.slice.start, Some(self.slice.length))
+            .read_range(&self.key, self.slice.start, Some(self.slice.length))
             .await?;
 
         Ok(Reader::Buffered { bytes, position: 0 })
@@ -178,6 +189,18 @@ impl Source {
     #[must_use]
     pub const fn spec(&self) -> &ObjectSpec {
         &self.spec
+    }
+
+    /// The object's key inside its source.
+    ///
+    /// Every read of a remote object goes through this rather than through
+    /// [`Source::spec`]'s path, because the two differ by whatever resolution
+    /// consumed — a bucket, on any provider shorthand. Kept as an accessor
+    /// rather than left to each caller to derive, so a third read path cannot
+    /// quietly go back to the spec.
+    #[must_use]
+    pub fn key(&self) -> &str {
+        &self.key
     }
 
     /// The object's total size in bytes.
@@ -240,8 +263,8 @@ impl Read for Reader {
 /// the authoritative name record. The hint names the remedy for that case
 /// explicitly, because "not found" for a file the user knows they stored is the
 /// most alarming message this command can produce.
-async fn remote_size(spec: &ObjectSpec, source: &dyn ReadSource) -> Result<u64> {
-    match source.stat(spec.path()).await? {
+async fn remote_size(spec: &ObjectSpec, key: &str, source: &dyn ReadSource) -> Result<u64> {
+    match source.stat(key).await? {
         // `Source::stat` promises a measured size — the sealed source pays a
         // read rather than pass an unmeasured index row on, precisely so that
         // `--offset` and `--tail` are resolved against a real length. The `None`

@@ -142,7 +142,7 @@ pub async fn run(ctx: &Ctx, args: &HashsumArgs) -> Result<()> {
     if let Ok(place) = Place::of(ctx, &target.spec()) {
         place.require_readable_tree()?;
     }
-    let source = crate::source::open(ctx, &target.spec()).await?;
+    let opened = crate::source::open(ctx, &target.spec()).await?;
 
     // `hashsum` mutates nothing, so --dry-run has nothing to suppress — and is
     // not permission to emit an empty checksum file, which a checker would
@@ -150,8 +150,8 @@ pub async fn run(ctx: &Ctx, args: &HashsumArgs) -> Result<()> {
     let mut report = Report::new(args.algorithm, args.binary);
     engine::hash(
         ctx,
-        source.as_ref(),
-        target.prefix(),
+        opened.source(),
+        opened.prefix(),
         &filter,
         args.algorithm,
         &mut report,
@@ -343,14 +343,14 @@ mod tests {
         // The rendering is asserted against the same report the run built, so
         // the shape of what reaches stdout is pinned without capturing it.
         let filter = Filter::from_globals(&ctx.globals).expect("no filters");
-        let source = crate::source::open(&ctx, &Target::parse("store:").unwrap().spec())
+        let opened = crate::source::open(&ctx, &Target::parse("store:").unwrap().spec())
             .await
             .expect("the remote opens");
         let mut report = Report::new(Algorithm::Sha256, false);
         engine::hash(
             &ctx,
-            source.as_ref(),
-            "",
+            opened.source(),
+            opened.prefix(),
             &filter,
             Algorithm::Sha256,
             &mut report,

@@ -461,6 +461,87 @@ fn chunk_size(name: &str, entry: &RemoteEntry) -> Result<Option<u64>> {
     }
 }
 
+/// The logical prefix `spec` addresses **inside the store that holds its bytes**.
+///
+/// ## The defect this closes
+///
+/// A provider shorthand carries two things in one path: `b2:DCTL001/photos` names
+/// the *bucket* `DCTL001` and the *prefix* `photos` inside it. [`resolve`] splits
+/// them — that is what [`Resolved::path`] is — but every read-side verb took its
+/// prefix from the spec instead, so `dctl ls b2:DCTL001` enumerated keys under
+/// `DCTL001/` **inside the bucket `DCTL001`** and found nothing. The consequence
+/// is not a cosmetic empty listing: a `sync` to `b2:DCTL001` reads an empty
+/// destination on every run and re-uploads the whole dataset, forever
+/// (`HANDOVER.md` §11.3 item 6).
+///
+/// One function rather than a rule each verb applies, because there were nine
+/// call sites and they all applied the same wrong one. [`crate::source::open`]
+/// now hands this back beside the source, so a caller cannot reach for
+/// `spec.path()` — the value it would have to use is not in its hand.
+///
+/// ## Why a vault answers differently, and why that is not an exception
+///
+/// A vault remote resolves to no [`Target`] at all: it stores nothing, and
+/// [`crate::session::open`] follows the chain to the object store beneath it. Its
+/// path is a logical path in the **vault's own namespace**, which no bucket split
+/// applies to — `archive:photos` addresses `photos` in the vault, whatever the
+/// bucket underneath is called. So the answer is the spec's path, and it is the
+/// same rule stated once: *the prefix is the one that addresses inside whatever
+/// this read will actually enumerate*.
+///
+/// # Errors
+/// Whatever [`resolve`] reported — an unknown remote, a missing required setting,
+/// a malformed `chunk_size`. A read that cannot say where it would look must not
+/// guess, because guessing produces an empty listing and an empty listing is a
+/// conclusion people act on.
+pub fn logical_prefix<C: RemoteCatalog + ?Sized>(spec: &RemoteSpec, catalog: &C) -> Result<String> {
+    match spec {
+        // A bare path is its own root; there is nothing left over to scope by.
+        RemoteSpec::Local(_) => Ok(String::new()),
+        RemoteSpec::Named { remote, path } => {
+            if catalog
+                .lookup(remote)
+                .is_some_and(|entry| entry.provider == PROVIDER_VAULT)
+            {
+                return Ok(path.clone());
+            }
+            Ok(resolve(spec, catalog)?.path().to_string())
+        }
+    }
+}
+
+/// The address of the *thing that gets opened*, as distinct from the scope
+/// inside it.
+///
+/// `b2:DCTL001/photos` opens the bucket `DCTL001` and scopes a read to `photos`;
+/// the container is `b2:DCTL001`. For every other spec shape resolution consumes
+/// nothing from the path, so the container is the remote itself and the whole
+/// path is the scope.
+///
+/// Derived from `prefix` rather than computed a second way, because two
+/// independent answers to "how much of this path was the container" is precisely
+/// how the bucket came to be counted twice. `prefix` is a suffix of the spec's
+/// path by construction on both branches of [`logical_prefix`]; a value that is
+/// not is treated as consuming nothing, which over-shares a cache entry rather
+/// than addressing the wrong bucket.
+///
+/// The one caller that needs it is `dctl cat`, which opens each argument's remote
+/// once per *container*: two arguments in one vault must not unlock it twice, and
+/// two arguments in two buckets of one provider must not share a client.
+#[must_use]
+pub fn container(spec: &RemoteSpec, prefix: &str) -> String {
+    match spec {
+        RemoteSpec::Local(path) => path.display().to_string(),
+        RemoteSpec::Named { remote, path } => {
+            let consumed = path
+                .strip_suffix(prefix)
+                .unwrap_or_default()
+                .trim_end_matches(PATH_SEPARATOR);
+            format!("{remote}{}{consumed}", crate::constants::REMOTE_SEPARATOR)
+        }
+    }
+}
+
 /// The `chunk_size` of a **vault** remote — the setting that reaches the sealer.
 ///
 /// A vault remote resolves to no [`Target`] of its own: it stores nothing, and
@@ -722,6 +803,119 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn a_read_is_scoped_by_the_resolvers_prefix_and_never_by_the_specs_path() {
+        // `HANDOVER.md` §11.3 item 6. The shorthand's first component is the
+        // *bucket*; a read that used the spec's path as its prefix looked for
+        // keys under `DCTL001/` inside the bucket `DCTL001` and found none. The
+        // cost is not an empty listing — it is a scheduled `sync` that reads an
+        // empty destination every night and re-uploads the whole dataset.
+        for (written, expected) in [
+            ("b2:DCTL001", ""),
+            ("b2:DCTL001/photos", "photos"),
+            ("b2:DCTL001/photos/2024", "photos/2024"),
+            ("s3:media", ""),
+            ("s3:media/raw", "raw"),
+            ("r2:cold", ""),
+            ("r2:cold/2019", "2019"),
+        ] {
+            let spec = RemoteSpec::parse(written).expect("a well-formed spec");
+            assert_eq!(
+                logical_prefix(&spec, &()).expect("a shorthand resolves"),
+                expected,
+                "'{written}' is enumerated at the wrong prefix"
+            );
+        }
+    }
+
+    #[test]
+    fn a_named_remote_and_a_bare_path_keep_the_prefixes_they_always_had() {
+        // The other half of the property, and the reason it is stated as one
+        // function rather than a special case for buckets: a named remote's path
+        // *is* the prefix inside it, and a bare path has no prefix at all
+        // because the whole path became the root. Getting either of these wrong
+        // while fixing the shorthand would move every existing listing.
+        let configured = catalog(&[
+            (
+                "store",
+                RemoteEntry::new(PROVIDER_LOCAL).with_setting(CONFIG_KEY_PATH, "/srv/v"),
+            ),
+            (
+                "cold",
+                RemoteEntry::new(PROVIDER_B2).with_setting(CONFIG_KEY_BUCKET, "bucket"),
+            ),
+        ]);
+
+        for (written, expected) in [
+            ("store:", ""),
+            ("store:photos", "photos"),
+            ("store:photos/2024", "photos/2024"),
+            // A *named* b2 remote carries its bucket in a setting, so the whole
+            // path is the prefix — the exact opposite of the shorthand, which is
+            // why this cannot be a rule about the provider.
+            ("cold:", ""),
+            ("cold:photos", "photos"),
+        ] {
+            let spec = RemoteSpec::parse(written).expect("a well-formed spec");
+            assert_eq!(
+                logical_prefix(&spec, &configured).expect("a configured remote resolves"),
+                expected,
+                "'{written}'"
+            );
+        }
+
+        let bare = RemoteSpec::parse("/srv/photos").expect("a well-formed spec");
+        assert_eq!(
+            logical_prefix(&bare, &configured).expect("a path resolves"),
+            ""
+        );
+    }
+
+    #[test]
+    fn a_vaults_prefix_is_its_own_namespace_and_not_a_bucket_split() {
+        // A vault resolves to no target: it stores nothing, and the chain is
+        // followed to the store beneath it. `archive:photos` therefore addresses
+        // `photos` in the vault's own namespace whatever the bucket underneath
+        // is called — and asking `resolve` would fail outright, because a vault
+        // wrapper is not a place bytes go.
+        let configured = catalog(&[
+            (
+                "archive",
+                RemoteEntry::new(PROVIDER_VAULT).with_setting(CONFIG_KEY_BASE, "archive-store"),
+            ),
+            (
+                "archive-store",
+                RemoteEntry::new(PROVIDER_B2).with_setting(CONFIG_KEY_BUCKET, "cold"),
+            ),
+        ]);
+        for (written, expected) in [
+            ("archive:", ""),
+            ("archive:photos", "photos"),
+            ("archive:photos/2024", "photos/2024"),
+        ] {
+            let spec = RemoteSpec::parse(written).expect("a well-formed spec");
+            assert_eq!(
+                logical_prefix(&spec, &configured).expect("a vault answers"),
+                expected,
+                "'{written}'"
+            );
+        }
+    }
+
+    #[test]
+    fn a_prefix_cannot_be_produced_for_a_remote_that_does_not_resolve() {
+        // Never `Ok("")`. An empty prefix on an unresolvable remote would list
+        // the whole of some other store, or nothing at all and exit 0 — and
+        // "the backup is empty" is a conclusion people act on.
+        let error = logical_prefix(
+            &RemoteSpec::parse("nosuchremote:photos").expect("a well-formed spec"),
+            &(),
+        )
+        .expect_err("an unknown remote has no prefix");
+        assert_eq!(error.code(), ExitCode::FatalError);
+        assert!(error.message().contains("nosuchremote"));
     }
 
     #[test]

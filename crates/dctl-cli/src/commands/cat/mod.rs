@@ -163,10 +163,7 @@ async fn stream<W: Write + Send>(
             // straight into the sink. This is the case that used to materialise
             // the file — `dctl cat` of an 806 MiB object peaked at 1624 MiB —
             // and it is the one `dctl cat` exists for.
-            match remote
-                .stream_to(source.spec().path(), &mut sink.as_async())
-                .await
-            {
+            match remote.stream_to(source.key(), &mut sink.as_async()).await {
                 Ok(_) => Flow::Continue,
                 Err(error) if sink::is_closed_pipe(&error) => Flow::Stop,
                 Err(error) => return Err(error),

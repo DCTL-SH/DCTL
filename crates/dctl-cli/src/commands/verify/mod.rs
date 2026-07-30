@@ -124,8 +124,8 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     // Compiled before the remote opens, so a malformed `--include` fails before
     // a password is asked for.
     let filter = Filter::from_globals(&ctx.globals)?;
-    let source = crate::source::open(ctx, &target.spec()).await?;
-    let assurance = source.assurance();
+    let opened = crate::source::open(ctx, &target.spec()).await?;
+    let assurance = opened.source().assurance();
 
     // Every object is read back in full, so the strength that ran is `strict`
     // whatever was asked for. Reporting the requested one instead would name a
@@ -178,8 +178,8 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     report.filters_restricted(filter.is_restricting());
     engine::verify(
         ctx,
-        source.as_ref(),
-        target.prefix(),
+        opened.source(),
+        opened.prefix(),
         &filter,
         args.fail_fast,
         &mut report,

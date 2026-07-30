@@ -267,9 +267,14 @@ impl Pages for Pager {
 /// [`ExitCode::VaultLocked`]: crate::exit::ExitCode::VaultLocked
 pub async fn open(ctx: &Ctx, target: &Target) -> Result<Box<dyn Pages>> {
     require_readable_tree(ctx, target)?;
-    let source = source::open(ctx, &target.spec()).await?;
-    let entries = source.enumerate(target.prefix()).await?;
-    Ok(Box::new(Streamed::new(source, entries, target.prefix())))
+    let opened = source::open(ctx, &target.spec()).await?;
+    let entries = opened.enumerate().await?;
+    let root = opened.prefix().to_string();
+    Ok(Box::new(Streamed::new(
+        opened.into_source(),
+        entries,
+        &root,
+    )))
 }
 
 /// Refuse a target whose filesystem tree is not there, before anything is

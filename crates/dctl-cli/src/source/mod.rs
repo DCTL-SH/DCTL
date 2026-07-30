@@ -100,6 +100,10 @@ pub mod vault;
 
 pub use assurance::Assurance;
 pub use entry::Entry;
+// `Opened` is deliberately not re-exported: nothing names the type, because the
+// point of it is that a caller receives the source and its scope together and
+// asks the value for both. A name in this list would be an invitation to take
+// one of the two apart somewhere else.
 pub use open::open;
 pub use sizes::Sizes;
 

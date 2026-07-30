@@ -259,7 +259,12 @@ async fn serve(ctx: &Ctx, args: &MountArgs, source: &Source) -> Result<()> {
         remote: source.remote.clone(),
         path: String::new(),
     };
-    let opened: Arc<dyn crate::source::Source> = Arc::from(crate::source::open(ctx, &spec).await?);
+    // The spec's path is empty by construction above, so the scope this opens at
+    // is the remote's root and the mount tree is built from `source.path`. Taking
+    // the source out of the pair is therefore a decision rather than an oversight
+    // — a mount addresses a whole namespace, not a prefix inside one.
+    let opened: Arc<dyn crate::source::Source> =
+        Arc::from(crate::source::open(ctx, &spec).await?.into_source());
 
     let mounted = crate::mount::mount(
         opened,
