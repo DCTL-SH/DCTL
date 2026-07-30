@@ -106,6 +106,7 @@ mod tests {
     use crate::cli::GlobalArgs;
     use crate::exit::ExitCode;
     use crate::session::Session;
+    use crate::source::Assurance;
     use crate::source::plain::PlainSource;
     use crate::source::vault::VaultSource;
     use clap::Parser;
@@ -124,8 +125,13 @@ mod tests {
         Ctx::new(Harness::parse_from(std::iter::once("dctl").chain(args.iter().copied())).globals)
     }
 
+    /// A report for the `sealed()` tests, whose source is a vault and whose
+    /// clean reads really are authenticated. Passing the assurance the source
+    /// actually has, rather than a convenient constant, is the point of the
+    /// argument: a report that names a stronger claim than its source can make
+    /// is the defect this field exists to prevent.
     fn report() -> Report {
-        Report::new("archive:", "strict")
+        Report::new("archive:", "strict", Assurance::Authenticated)
     }
 
     /// A real directory behind a real backend.
@@ -360,7 +366,7 @@ mod tests {
         // has to happen, because a replica quietly losing objects is exactly
         // what it catches.
         let (_root, source) = store(&[("a.txt", b"1"), ("sub/b.txt", b"22")]);
-        let mut report = Report::new("store:", "strict");
+        let mut report = Report::new("store:", "strict", Assurance::ReadBack);
         verify(
             &ctx(&[]),
             &source,
@@ -382,7 +388,7 @@ mod tests {
             ("photos-backup/b.jpg", b"b"),
             ("other/c.jpg", b"c"),
         ]);
-        let mut report = Report::new("store:photos", "strict");
+        let mut report = Report::new("store:photos", "strict", Assurance::ReadBack);
         verify(
             &ctx(&[]),
             &source,
@@ -401,7 +407,7 @@ mod tests {
         let (_root, source) = store(&[("a.jpg", b"1"), ("b.txt", b"22")]);
         let context = ctx(&["--include", "*.jpg"]);
         let filter = Filter::from_globals(&context.globals).expect("the pattern compiles");
-        let mut report = Report::new("store:", "strict");
+        let mut report = Report::new("store:", "strict", Assurance::ReadBack);
         verify(&context, &source, "", &filter, false, &mut report)
             .await
             .unwrap();

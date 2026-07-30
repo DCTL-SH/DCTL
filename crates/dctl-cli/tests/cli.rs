@@ -4883,3 +4883,262 @@ fn a_scoped_sweep_reclaims_the_debris_under_the_path_it_was_given_and_no_other()
         "a neighbouring directory was swept because its name starts the same way"
     );
 }
+
+// ── verify: what an `ok` proved, and where a machine can read it ─────────────
+
+#[test]
+fn a_verify_over_a_plain_remote_publishes_what_its_ok_actually_proved() {
+    // The measurement behind this test: an 8 MiB object on a plain `local:`
+    // remote was truncated to zero bytes on disk, and `dctl verify` printed
+    // `ok`, exited 0, and emitted
+    // `{"status":"ok", "verified":1, "failed":0, "verify_mode":"strict"}`
+    // with nothing anywhere in the document saying that a plain remote records
+    // no hash of its own and that the pass was therefore a retrievability check
+    // rather than a statement about the bytes.
+    //
+    // `scrub` has carried exactly that distinction since it was written — its
+    // report has an `assurance` field, its grade line names it, and
+    // `a_grade_always_says_what_the_reading_could_prove` pins it. `verify`
+    // computes the same value at the same point in `run` and spends it on a
+    // stderr warning, which a redirected stdout and a cron job both discard. Two
+    // sibling commands, one shared truth, and only one of them telling it.
+    //
+    // The assertion is on the document a monitor parses, because that is the
+    // consumer that cannot see the warning.
+    const PAYLOAD: &[u8] = b"bytes a plain remote keeps no hash of";
+
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", PAYLOAD);
+    let root = sandbox.dir("store");
+
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", root.display()))
+        .assert()
+        .success();
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success();
+
+    let report = json(
+        &sandbox
+            .dctl()
+            .arg("--no-ask-password")
+            .args(["--format", "json", "verify"])
+            .arg(format!("{PLAIN_REMOTE}:"))
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    assert_eq!(report["summary"]["verified"], 1, "the run did examine it");
+    assert_eq!(
+        report["assurance"], "read-back",
+        "a verify of a plain remote must publish that its `ok` is a \
+         retrievability claim, not a statement about the bytes; got: {report}"
+    );
+}
+
+#[test]
+fn a_verify_over_a_vault_publishes_the_stronger_claim_it_can_make() {
+    // The other half, and the reason one field is enough: the two remotes must
+    // not produce the same document. A vault authenticates every chunk against a
+    // key and compares the object's own recorded content hash, so its `ok` means
+    // *these are the bytes that were written* — and a consumer that cannot tell
+    // the two apart has to treat both as the weaker one, which throws away the
+    // guarantee the vault exists to provide.
+    let sandbox = a_sealed_vault_with_content();
+
+    let report = json(
+        &sandbox
+            .dctl()
+            .env("DCTL_PASSWORD", GOOD_PASSWORD)
+            .args(["--format", "json", "verify"])
+            .arg(format!("{VAULT_NAME}:"))
+            .assert()
+            .success()
+            .get_output()
+            .stdout,
+    );
+
+    assert_eq!(
+        report["assurance"], "authenticated",
+        "a verify of a vault must publish the stronger claim it really made; got: {report}"
+    );
+}
+
+#[test]
+fn a_verify_says_what_it_covered_and_what_that_proved_without_being_asked() {
+    // `verify`'s only text output was a table of rows: no count, no byte figure,
+    // and no statement of what the rows proved. The assurance reached the
+    // operator through one warning that fires only when the remote *cannot*
+    // detect corruption, so a vault's verify never said what it had proved
+    // either, and neither run left a sentence a ticket or a monitor could carry.
+    //
+    // The line goes to stderr, not stdout: stdout carries either the table or a
+    // JSON document, and a prose sentence appended to the latter would corrupt
+    // it. That is where `scrub` puts its coverage, for the same reason and with
+    // the same argument (`a_scrub_says_what_it_covered_without_being_asked_to`).
+    const PAYLOAD: &[u8] = b"a plain object";
+
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", PAYLOAD);
+    let root = sandbox.dir("store");
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", root.display()))
+        .assert()
+        .success();
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success();
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("verify")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success()
+        // How much was covered, and what covering it proved.
+        .stderr(predicates::str::contains("1 object examined"))
+        .stderr(predicates::str::contains("read-back"));
+}
+
+#[test]
+fn a_coverage_line_about_damage_does_not_wear_a_success_mark() {
+    // `Out::success` prefixes its line with a check glyph (`SUCCESS_MARK`, or
+    // `OK` where ANSI is off). A coverage sentence that ends "1 of them did not
+    // verify" carrying one would be the same misreport as an unqualified `ok`,
+    // one line further down — so the emitter follows the verdict.
+    //
+    // Asserted through the shipped binary and on the real stream, because the
+    // mark is added by the sink and a unit test of the report cannot see it.
+    let sandbox = a_sealed_vault_with_content();
+
+    // Damage every stored object, so the run cannot end clean.
+    let store = sandbox.path("vault").join("o");
+    for entry in std::fs::read_dir(&store).expect("the object directory exists") {
+        let path = entry.expect("a readable entry").path();
+        if path.is_file() {
+            let mut bytes = std::fs::read(&path).expect("the object reads");
+            let last = bytes.len() - 1;
+            bytes[last] ^= 0x01;
+            std::fs::write(&path, &bytes).expect("the object writes back");
+        }
+    }
+
+    let output = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("verify")
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        // IntegrityFailure (21): the damage is what the run is for.
+        .code(21)
+        .get_output()
+        .stderr
+        .clone();
+    let text = String::from_utf8_lossy(&output);
+
+    let coverage = text
+        .lines()
+        .find(|line| line.contains("objects examined"))
+        .unwrap_or_else(|| panic!("no coverage line on stderr:\n{text}"));
+    assert!(
+        coverage.contains("did not verify"),
+        "the coverage line must say how many failed; got: {coverage}"
+    );
+    assert!(
+        !coverage.contains("OK") && !coverage.contains('\u{2713}'),
+        "a line about damage is wearing a success mark: {coverage}"
+    );
+}
+
+// ── rcat: the directory it was asked to write into ──────────────────────────
+
+#[test]
+fn rcat_creates_the_directory_it_was_asked_to_write_into() {
+    // Measured: `printf x | dctl rcat pl:2026-07-30/db.sql` exits 4 with
+    // `.../2026-07-30/.dctl-staging.NNN.0: No such file or directory`, while
+    // `dctl copyto file pl:2026-07-30/db.sql` — the same destination, the same
+    // backend, the same staging rule — succeeds and creates the tree. Two
+    // spellings of "write this stream to here", and only one of them makes the
+    // directory.
+    //
+    // `Staging::create` in `commands::rcat::local` reaches straight for
+    // `File::create` on the staging sibling; every other verified write in the
+    // workspace calls `create_dir_all` on the parent first
+    // (`dctl_store::local::verified_write`, three separate entry points). The
+    // shape that meets it is the ordinary one: a nightly dump piped into a
+    // dated directory, which fails on the first night of every month.
+    const PAYLOAD: &[u8] = b"a stream bound for a directory that is not there yet";
+
+    let sandbox = Sandbox::new();
+
+    // The comparison first, so the test pins an asymmetry rather than a guess:
+    // `copyto` into exactly this shape already works.
+    sandbox.write("src.bin", PAYLOAD);
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("copyto")
+        .arg(sandbox.path("src.bin"))
+        .arg(sandbox.path("by-copyto/2026-07-30/db.sql"))
+        .assert()
+        .success();
+    assert_eq!(sandbox.read("by-copyto/2026-07-30/db.sql"), PAYLOAD);
+
+    // ...and now the same destination shape through `rcat`.
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("rcat")
+        .arg(sandbox.path("by-rcat/2026-07-30/db.sql"))
+        .write_stdin(PAYLOAD)
+        .assert()
+        .success();
+    assert_eq!(sandbox.read("by-rcat/2026-07-30/db.sql"), PAYLOAD);
+}
+
+#[test]
+fn rcat_creates_the_directory_under_a_plain_remote_too() {
+    // The same defect reached through a configured `local:` remote, which is how
+    // an operator addresses a backup target. Separate from the bare-path case
+    // because the two go through different resolvers to reach one writer, and a
+    // fix that only covered one would leave the other exactly as broken.
+    const PAYLOAD: &[u8] = b"piped into a dated directory on a plain remote";
+
+    let sandbox = Sandbox::new();
+    let root = sandbox.dir("store");
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", root.display()))
+        .assert()
+        .success();
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("rcat")
+        .arg(format!("{PLAIN_REMOTE}:2026-07-30/db.sql"))
+        .write_stdin(PAYLOAD)
+        .assert()
+        .success();
+
+    assert_eq!(sandbox.read("store/2026-07-30/db.sql"), PAYLOAD);
+}

@@ -65,9 +65,24 @@
 //! object's own recorded content hash, so `ok` means *these are the bytes that
 //! were written*. A plain remote — including the object store a vault's
 //! ciphertext lives in — records no hash of its own, so the strongest honest
-//! claim is *the object was still there and every byte came back*. The run says
-//! which one it is on stderr before it starts; see
+//! claim is *the object was still there and every byte came back*. See
 //! [`Assurance`](crate::source::Assurance).
+//!
+//! **The report says which one it is**, and that is newer than it looks. The
+//! value was computed here and spent on a single stderr warning — one that fires
+//! only when the remote *cannot* detect corruption, so a vault's run never
+//! stated its assurance at all, and no run stated it anywhere a machine could
+//! read. Measured: an 8 MiB object on a plain `local:` remote, truncated to zero
+//! bytes on disk, produced `ok` in the table, exit 0, and a JSON document
+//! carrying `"status": "ok"`, `"verified": 1`, `"failed": 0` and `"verify_mode":
+//! "strict"` with no field to say the pass could not have noticed.
+//!
+//! Two things follow from that, and both are now here rather than in a warning:
+//! `assurance` is a field of the report in every format, and a text-mode run
+//! ends with one line naming what it covered and what covering it proved. Both
+//! are what [`super::scrub`] has done since it was written — the two commands
+//! share `Verdict`, share their failure wording and share their exit codes, and
+//! a claim only one of them published was a claim nobody could rely on.
 
 pub mod engine;
 pub mod report;
@@ -176,7 +191,7 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     // `verify` mutates nothing, so --dry-run has nothing to suppress. It must
     // still not be treated as permission to claim the work was done, which is
     // why there is no dry-run branch here at all: the command simply runs.
-    let mut report = Report::new(target.to_string(), mode::slug(performed));
+    let mut report = Report::new(target.to_string(), mode::slug(performed), assurance);
     report.filters_restricted(filter.is_restricting());
     engine::verify(
         ctx,
@@ -189,6 +204,14 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     .await?;
 
     report.emit(&ctx.out)?;
+    // Text mode only, exactly as `scrub` does it: the JSON document already
+    // carries `assurance` and the whole `summary` object, and a second, prose
+    // rendering of the same numbers would be one more thing that can disagree
+    // with the data. In text mode there is no such document and the coverage
+    // would otherwise be invisible, which was half the defect.
+    if !ctx.out.is_json() {
+        report.announce(&ctx.out);
+    }
     report.outcome().map_or(Ok(()), Err)
 }
 

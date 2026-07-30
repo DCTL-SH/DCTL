@@ -35,7 +35,22 @@ use crate::exit::ExitCode;
 /// The conclusion for one object.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Verdict {
-    /// Decrypted, authenticated, and matched the hash recorded in the index.
+    /// The object read back without complaint.
+    ///
+    /// **What that proves depends on the source, and this verdict does not say
+    /// which.** Over a vault it means decrypted, authenticated, and matched the
+    /// hash recorded in the index — which is what this doc comment used to claim
+    /// unconditionally, and it was false for half the remotes that produce the
+    /// verdict. Over a plain object store, which records no hash of its own, it
+    /// means the object was still there and every byte of it came back; a
+    /// provider that returned different bytes would produce this same `Ok`.
+    ///
+    /// The distinction is carried beside the verdict rather than folded into it,
+    /// by the report's `assurance` field
+    /// ([`Assurance`](crate::source::Assurance)), because `verify` and `scrub`
+    /// share this vocabulary and a fifth variant would fork it — and because a
+    /// per-object word cannot state a property of the whole source. A consumer
+    /// reading `Ok` without reading `assurance` is reading half a sentence.
     #[default]
     Ok,
     /// AEAD authentication or the plaintext hash comparison failed. The bytes

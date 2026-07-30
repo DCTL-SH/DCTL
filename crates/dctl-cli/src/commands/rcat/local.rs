@@ -87,6 +87,30 @@ impl Staging {
             }
         }
 
+        // The directory the caller named, before anything is created inside it.
+        //
+        // This was missing, and it made `rcat` the one write in the workspace
+        // that could not create its own destination: `printf x | dctl rcat
+        // backup:2026-07-30/db.sql` exited 4 with
+        // `.../2026-07-30/.dctl-staging.NNN.0: No such file or directory`, while
+        // `dctl copyto file backup:2026-07-30/db.sql` — same destination, same
+        // backend, same staging rule — made the tree and succeeded. Every entry
+        // point in `dctl_store::local::verified_write` calls `create_dir_all`
+        // first; this one reached straight for the staging sibling.
+        //
+        // Creating it is also what rclone does on every write rather than a
+        // convenience invented here: `Object.Update` opens with `o.mkdirAll()`
+        // (`backend/local/local.go:1555`), and `rclone rcat` goes through it.
+        //
+        // The shape that met the defect is the ordinary one — a nightly dump
+        // piped into a dated directory — so it failed on the first night of
+        // every month and left no backup.
+        if let Some(parent) = destination.parent() {
+            if !parent.as_os_str().is_empty() {
+                fs::create_dir_all(parent).map_err(|error| at_path(parent, error))?;
+            }
+        }
+
         // The staging name comes from `dctl_store::staging`, shared with every
         // other verified write in the workspace. A destination directory can
         // also be a configured `local:` remote, and a staging spelling the

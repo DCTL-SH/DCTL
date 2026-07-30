@@ -23,7 +23,9 @@ use crate::constants::{
 };
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
-use crate::output::{Align, Border, Column, Format, Out, Table, size};
+use crate::output::size::count;
+use crate::output::{Align, Border, Column, Format, Out, Table, Units, size};
+use crate::source::Assurance;
 
 /// One object's verification result.
 #[derive(Clone, Debug, Serialize)]
@@ -107,6 +109,24 @@ pub struct Report {
     pub target: String,
     /// Which `--verify` strength produced these verdicts.
     pub verify_mode: String,
+    /// What a clean read actually proved: `authenticated` or `read-back`.
+    ///
+    /// Carried beside the strength because the two answer different questions
+    /// and only both together are a complete claim. `verify_mode` says *how much
+    /// was read*; this says *what the reading could prove*. A full read of a
+    /// remote that records no hashes is still only a retrievability check, and
+    /// an `ok` over one of those must not be mistaken for an `ok` over a vault
+    /// (`PLAN.md` §6).
+    ///
+    /// It was measured absent: an 8 MiB object on a plain `local:` remote was
+    /// truncated to zero bytes on disk and this document reported
+    /// `"status": "ok"`, `"verified": 1`, `"failed": 0` and `"verify_mode":
+    /// "strict"` with nothing in it to say the pass could not have noticed. The
+    /// value was computed in [`super::run`] and spent on a stderr warning, which
+    /// is the one consumer a monitor does not have. [`super::super::scrub`] has
+    /// published it since it was written; this is the same field for the same
+    /// reason.
+    pub assurance: &'static str,
     /// Whether the run stopped at the first failure because `--fail-fast` asked
     /// it to.
     ///
@@ -133,12 +153,23 @@ pub struct Report {
 }
 
 impl Report {
-    /// An empty report for `target`, verified at `verify_mode`.
+    /// An empty report for `target`, verified at `verify_mode`, proving
+    /// `assurance`.
+    ///
+    /// `assurance` is a constructor argument rather than a setter for the reason
+    /// [`Report::assurance`] gives: a report that does not know what its `ok`
+    /// proved is the report this field exists to retire, and a setter is
+    /// something a later caller can forget.
     #[must_use]
-    pub fn new(target: impl Into<String>, verify_mode: impl Into<String>) -> Self {
+    pub fn new(
+        target: impl Into<String>,
+        verify_mode: impl Into<String>,
+        assurance: Assurance,
+    ) -> Self {
         Self {
             target: target.into(),
             verify_mode: verify_mode.into(),
+            assurance: assurance.slug(),
             stopped_early: false,
             objects: Vec::new(),
             summary: Summary::default(),
@@ -258,6 +289,81 @@ impl Report {
         }
     }
 
+    /// The one line a text-mode verify always prints once it has examined
+    /// something.
+    ///
+    /// `verify`’s stdout was a table of rows and nothing else: no count, no byte
+    /// figure, and no statement of what the rows proved. The assurance reached
+    /// the operator only through a warning that fires when the remote *cannot*
+    /// detect corruption, so a vault’s verify never said what it had proved
+    /// either, and neither run left a sentence a monitor or a ticket could carry.
+    ///
+    /// It names the assurance as well as the counts, for the reason
+    /// [`super::super::scrub::report::Report::summary`] gives about its own
+    /// grade: `ok` over a plain store is a retrievability claim and `ok` over a
+    /// vault is a claim about the bytes, and this is the line that will be
+    /// pasted somewhere without its context.
+    #[must_use]
+    pub fn summary(&self, units: Units) -> String {
+        let mut line = format!(
+            "{} {} examined, {} ({}) under '{}'",
+            count(self.summary.examined),
+            objects(self.summary.examined),
+            size::bytes_or_unknown(self.summary.bytes, units),
+            self.assurance,
+            self.target
+        );
+        if self.summary.failed > 0 {
+            line.push_str(&format!(
+                "; {} of them did not verify",
+                count(self.summary.failed)
+            ));
+        }
+        if self.summary.unmeasured > 0 {
+            line.push_str(&format!(
+                "; {} carried no recorded size, so the byte figure is a lower bound",
+                count(self.summary.unmeasured)
+            ));
+        }
+        line
+    }
+
+    /// Put [`summary`](Report::summary) where the operator is already looking.
+    ///
+    /// Guarded on having examined something because a run that examined nothing
+    /// already fails with [`failure::nothing_examined`], which says more than a
+    /// coverage line could.
+    ///
+    /// The emitter follows the verdict rather than the command. A run that found
+    /// damage goes out through [`Out::warn`], because
+    /// [`Out::success`] prefixes its line with a success mark and a coverage
+    /// sentence about corrupt objects wearing one is the same misreport this
+    /// whole field exists to retire — one line further down.
+    pub fn announce(&self, out: &Out) {
+        if self.summary.examined == 0 {
+            return;
+        }
+        let line = self.summary(out.units());
+        if self.found_damage() {
+            out.warn(line);
+        } else {
+            out.success(line);
+        }
+    }
+
+    /// Whether this run has anything to report as damage.
+    ///
+    /// Named rather than spelled inline at its two readers — [`announce`] and
+    /// the test that pins it — so the decision exists once. A test that
+    /// re-implemented the condition would agree with itself whatever the code
+    /// did, which is not a test.
+    ///
+    /// [`announce`]: Report::announce
+    #[must_use]
+    pub const fn found_damage(&self) -> bool {
+        self.summary.failed > 0
+    }
+
     /// Whether any record carries a detail, and therefore whether the text table
     /// needs a fourth column.
     ///
@@ -341,6 +447,14 @@ impl Report {
     }
 }
 
+/// `object` or `objects`, agreeing with `count`.
+///
+/// A summary line is the sentence most likely to be pasted into a ticket, and
+/// “1 objects examined” reads as a tool that was not finished.
+const fn objects(count: u64) -> &'static str {
+    if count == 1 { "object" } else { "objects" }
+}
+
 /// Serialise a value, turning a serde failure into a classified CLI error.
 fn encode<T: Serialize>(format: Format, value: &T) -> Result<String> {
     format.encode(value).map_err(|error| {
@@ -361,13 +475,68 @@ mod tests {
     }
 
     fn sample() -> Report {
-        let mut report = Report::new("vault:photos", "strict");
+        let mut report = Report::new("vault:photos", "strict", Assurance::Authenticated);
         report.push(Record::new("photos/a.jpg", Verdict::Ok, Some(2048)));
         report.push(
             Record::new("photos/b.jpg", Verdict::Corrupt, Some(4096))
                 .with_detail("chunk 3 failed authentication"),
         );
         report
+    }
+
+    #[test]
+    fn a_document_always_says_what_a_clean_read_could_prove() {
+        // `ok` over a remote that records no hashes is a statement about
+        // retrievability, not about the bytes. The document has to carry the
+        // difference or the weaker claim reads as the stronger one — measured:
+        // an object truncated to zero bytes on a plain `local:` remote produced
+        // `"status": "ok"`, `"verified": 1`, `"failed": 0`, `"verify_mode":
+        // "strict"` and nothing else at all.
+        //
+        // The twin of `scrub`'s `a_grade_always_says_what_the_reading_could_prove`,
+        // deliberately: the two commands share `Verdict`, share their failure
+        // wording and share their exit codes, and a claim only one of them
+        // publishes is a claim an operator cannot rely on.
+        let mut plain = Report::new("store:", "strict", Assurance::ReadBack);
+        plain.push(Record::new("a", Verdict::Ok, Some(1)));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&plain.render(&json_out(Format::Json)).unwrap()).unwrap();
+        assert_eq!(parsed["assurance"], Assurance::ReadBack.slug());
+        assert_ne!(parsed["assurance"], Assurance::Authenticated.slug());
+
+        let mut sealed = Report::new("vault:", "strict", Assurance::Authenticated);
+        sealed.push(Record::new("a", Verdict::Ok, Some(1)));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&sealed.render(&json_out(Format::Json)).unwrap()).unwrap();
+        assert_eq!(parsed["assurance"], Assurance::Authenticated.slug());
+    }
+
+    #[test]
+    fn the_summary_names_the_coverage_and_the_claim_together() {
+        // Either half alone is misleading: a count with no assurance reads as a
+        // statement about the bytes, and an assurance with no count says nothing
+        // about how much of the target it applies to.
+        let mut report = Report::new("store:", "strict", Assurance::ReadBack);
+        report.push(Record::new("a", Verdict::Ok, Some(1)));
+        let line = report.summary(Units::Binary);
+        assert!(line.contains("1 object examined"), "{line}");
+        assert!(line.contains(Assurance::ReadBack.slug()), "{line}");
+        assert!(line.contains("store:"), "{line}");
+
+        // ...and the plural agrees, because this sentence gets pasted into
+        // tickets.
+        report.push(Record::new("b", Verdict::Ok, Some(1)));
+        assert!(report.summary(Units::Binary).contains("2 objects examined"));
+    }
+
+    #[test]
+    fn the_summary_says_how_many_did_not_verify() {
+        // A coverage line that counted damage silently would be the same defect
+        // one level up: the number examined is not the number that passed.
+        let report = sample();
+        let line = report.summary(Units::Binary);
+        assert!(line.contains("2 objects examined"), "{line}");
+        assert!(line.contains("1 of them did not verify"), "{line}");
     }
 
     #[test]
@@ -383,7 +552,7 @@ mod tests {
     fn a_run_that_stopped_early_says_so_in_the_document() {
         // Without it, `"failed": 1` from a `--fail-fast` run reads as the full
         // extent of the damage rather than as the first of it.
-        let mut report = Report::new("vault:", "strict");
+        let mut report = Report::new("vault:", "strict", Assurance::Authenticated);
         report.push(Record::new("a", Verdict::Corrupt, Some(1)));
         assert!(!report.stopped_early);
         report.stopped_early();
@@ -395,7 +564,7 @@ mod tests {
 
     #[test]
     fn a_clean_run_has_no_outcome_error() {
-        let mut report = Report::new("vault:", "checksum");
+        let mut report = Report::new("vault:", "checksum", Assurance::Authenticated);
         report.push(Record::new("a", Verdict::Ok, Some(1)));
         assert!(report.outcome().is_none());
         assert_eq!(report.worst(), Verdict::Ok);
@@ -415,7 +584,7 @@ mod tests {
     #[test]
     fn corruption_outranks_an_unreadable_object() {
         // The worst verdict decides, whatever order the records arrived in.
-        let mut report = Report::new("vault:", "strict");
+        let mut report = Report::new("vault:", "strict", Assurance::Authenticated);
         report.push(Record::new("a", Verdict::Unreadable, Some(0)));
         report.push(Record::new("b", Verdict::Corrupt, Some(0)));
         report.push(Record::new("c", Verdict::Missing, Some(0)));
@@ -476,7 +645,7 @@ mod tests {
     #[test]
     fn the_detail_column_appears_only_when_something_failed() {
         // A clean run should not pay for a column of dashes.
-        let mut clean = Report::new("vault:", "checksum");
+        let mut clean = Report::new("vault:", "checksum", Assurance::Authenticated);
         clean.push(Record::new("a", Verdict::Ok, Some(1)));
         let rendered = clean.render(&Out::plain()).unwrap();
         assert!(!rendered.contains(INTEGRITY_COLUMN_DETAIL));
@@ -490,7 +659,7 @@ mod tests {
     fn an_empty_report_puts_nothing_on_stdout() {
         // Not even a header: a bare header row reads as output to a pipeline,
         // and to most humans.
-        let report = Report::new("vault:", "checksum");
+        let report = Report::new("vault:", "checksum", Assurance::Authenticated);
         for format in [Format::Text, Format::JsonLines] {
             assert_eq!(report.render(&json_out(format)).unwrap(), "");
         }

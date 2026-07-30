@@ -177,9 +177,24 @@ impl IdleWatch {
 
         loop {
             let quiet = self.activity.quiet_for();
-            let Some(remaining) = idle.checked_sub(quiet) else {
-                return Err(Expired { idle });
-            };
+            // `None` means the clock is already past the deadline. That is
+            // **not** a reason to return yet: this used to be an early `return
+            // Err(Expired)` above the `select!`, so a watch that had gone quiet
+            // before `guard` was called failed the operation *without polling it
+            // once* — and then reported that it "moved nothing", about work that
+            // had never started. An operation that completes immediately was
+            // failed by it. The window is real wherever a watch outlives the
+            // call that made it, which is by design: `streaming::stream_to_file`
+            // takes a watch still running from the request that produced its
+            // response, and every `--timeout` an operator lowers narrows the gap
+            // further. It was found by two tests in this file failing under a
+            // full `cargo test --workspace` on a loaded machine, where the gap
+            // was nothing but scheduler latency.
+            let remaining = idle.checked_sub(quiet);
+            // Zero, so the `biased` arm below still gets to run the operation
+            // first. A ready operation wins even at a deadline already passed,
+            // which is the whole of the correction.
+            let wait = remaining.unwrap_or(Duration::ZERO);
 
             tokio::select! {
                 // Biased so the operation is polled first. Without it, an
@@ -190,7 +205,13 @@ impl IdleWatch {
                 biased;
 
                 out = &mut op => return Ok(out),
-                () = tokio::time::sleep(remaining) => {
+                () = tokio::time::sleep(wait) => {
+                    if remaining.is_none() {
+                        // Polled, still not ready, and the patience really is
+                        // spent. This is the only path to `Expired`, and it is
+                        // reached only after the operation has had its turn.
+                        return Err(Expired { idle });
+                    }
                     // The deadline elapsed. Whether that is a stall depends on
                     // what happened *while* we slept, which is why the loop goes
                     // round rather than failing here: a transfer that moved a
@@ -205,15 +226,60 @@ impl IdleWatch {
 mod tests {
     use super::*;
 
-    /// Shorter than any real deadline, long enough that a loaded test machine
+    /// Shorter than any real deadline, and sized so that a loaded test machine
     /// does not decide the outcome.
-    const IDLE: Duration = Duration::from_millis(200);
+    ///
+    /// That second half was already claimed at 200 ms, and it was measured
+    /// false: under a full
+    /// `cargo test --workspace` on a box already running a 6 GB transfer,
+    /// `an_operation_that_finishes_is_untouched` and
+    /// `a_slow_transfer_that_keeps_moving_never_expires` both failed on
+    /// scheduler latency alone. The first of those turned out to be a real
+    /// defect and is fixed (`an_operation_is_always_given_one_chance_to_run`);
+    /// the second is genuinely a race against the clock, so the budget is what
+    /// protects it, and the tests that step the clock now do so in eighths of
+    /// this rather than halves — eight times the headroom per gap, and a shorter
+    /// run than 200 ms bought.
+    const IDLE: Duration = Duration::from_millis(400);
+
+    /// One step of a transfer that is still moving: small enough against
+    /// [`IDLE`] that a stalled scheduler, not a stalled transfer, cannot be what
+    /// the assertion measures.
+    const STEP: Duration = Duration::from_millis(IDLE.as_millis() as u64 / 8);
 
     #[tokio::test]
     async fn an_operation_that_finishes_is_untouched() {
         let watch = IdleWatch::new(Some(IDLE));
         let out = watch.guard(async { 7 }).await;
         assert_eq!(out, Ok(7));
+    }
+
+    #[tokio::test]
+    async fn an_operation_is_always_given_one_chance_to_run() {
+        // Found by the gate flaking under load, which is the only way this was
+        // ever going to surface. `guard` reads the clock and returns `Expired`
+        // *before* the `select!`, so a watch that was already quiet for longer
+        // than the deadline fails the operation without polling it once — and
+        // then reports that it "moved nothing", about work that never started.
+        //
+        // The window is real wherever a watch outlives the call that made it:
+        // `streaming::stream_to_file` takes a watch "still running from the
+        // request that produced `resp`", and every `--timeout` an operator
+        // lowers narrows the gap further. Under a full `cargo test --workspace`
+        // on a loaded machine the gap was scheduler latency alone, and two tests
+        // in this file failed for it.
+        let watch = IdleWatch::new(Some(IDLE));
+        // Quiet for longer than the deadline before the operation is even
+        // handed over — the shape of a caller that did some work in between.
+        tokio::time::sleep(IDLE * 2).await;
+
+        let out = watch.guard(async { 7 }).await;
+        assert_eq!(
+            out,
+            Ok(7),
+            "an operation that completes immediately was reported as a stall \
+             without ever being polled"
+        );
     }
 
     #[tokio::test]
@@ -239,7 +305,7 @@ mod tests {
         let out = watch
             .guard(async {
                 for _ in 0..10 {
-                    tokio::time::sleep(IDLE / 2).await;
+                    tokio::time::sleep(STEP).await;
                     activity.touch();
                 }
                 "arrived"
@@ -258,8 +324,12 @@ mod tests {
         let started = std::time::Instant::now();
         let out = watch
             .guard(async {
-                for _ in 0..4 {
-                    tokio::time::sleep(IDLE / 2).await;
+                // Sixteen steps, not four: the moving half has to outlast IDLE
+                // for the assertion below to mean anything, and a STEP is an
+                // eighth of it. The count follows the constant rather than the
+                // constant following the count.
+                for _ in 0..16 {
+                    tokio::time::sleep(STEP).await;
                     activity.touch();
                 }
                 std::future::pending::<()>().await;
