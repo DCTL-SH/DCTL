@@ -99,6 +99,24 @@ impl Opened {
         self.source
     }
 
+    /// Pair a source with a prefix, for a test that needs an [`Opened`] without
+    /// a configuration file to open.
+    ///
+    /// `#[cfg(test)]` and no other constructor exists, which is the point. The
+    /// three integrity engines take an `Opened` rather than a source and a
+    /// prefix precisely so that a call site cannot supply a prefix from
+    /// somewhere else — and a constructor reachable from production would hand
+    /// that ability straight back. The engines' own tests still need to drive
+    /// prefix scoping, and this is how they do it.
+    #[cfg(test)]
+    #[must_use]
+    pub fn for_test(source: Box<dyn Source>, prefix: impl Into<String>) -> Self {
+        Self {
+            source,
+            prefix: prefix.into(),
+        }
+    }
+
     /// Open a cursor over everything under this source's own prefix.
     ///
     /// The shape almost every caller wants, offered here so the prefix and the

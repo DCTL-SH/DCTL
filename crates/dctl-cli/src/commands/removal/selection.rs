@@ -45,7 +45,7 @@ use crate::source::Entry;
 use super::dirs::{self, Directories};
 use super::medium::Medium;
 use super::operation::Operation;
-use super::target::Target;
+use super::target::{Scoped, Target};
 
 /// One thing a removal will remove.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -96,12 +96,16 @@ pub struct Selection {
 /// the destructive gate, so a malformed `--include` is refused before anybody is
 /// asked to confirm anything. It is [`Filter::default`] for the verbs that
 /// document themselves as ignoring filters, and those verbs never consult it.
+/// Takes a [`Scoped`] rather than a [`Target`], because selecting addresses
+/// inside a store the remote has already named — see [`Scoped`] for what the two
+/// mean and what swapping them costs.
 pub async fn select(
     medium: &Medium,
-    target: &Target,
+    scoped: &Scoped,
     operation: &Operation,
     filter: &Filter,
 ) -> Result<Selection> {
+    let target = scoped.inside();
     // `cleanup` addresses provider keys, not logical paths, so there is nothing
     // for this module to select. It is an explicit arm rather than a fallthrough
     // so that a seventh verb cannot silently inherit "selects nothing".

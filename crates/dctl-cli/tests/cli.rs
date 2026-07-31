@@ -4711,6 +4711,12 @@ fn a_sweep_that_left_debris_because_it_was_young_says_so_rather_than_reporting_n
     let assertion = sandbox
         .dctl()
         .arg("--no-ask-password")
+        // `-v`, and it is the whole reason this test can fail. The false
+        // all-clear is emitted through `Out::info`, which is silent below
+        // verbosity 1 — so this assertion used to be the absence of a sentence
+        // the command would not have printed either way, and deleting the guard
+        // that suppresses it left the gate green. Measured: `HANDOVER.md` §35.3.
+        .arg("-v")
         .arg("cleanup")
         .arg(format!("{PLAIN_REMOTE}:"))
         .args(["--class", "staging"])
@@ -4750,17 +4756,28 @@ fn a_sweep_that_left_debris_because_it_was_young_says_so_rather_than_reporting_n
 
 #[cfg(unix)]
 #[test]
-fn debris_whose_age_cannot_be_established_is_held_and_named_rather_than_passed_over() {
-    // The other arm of the same silence. `reclaim` refuses to sweep an object
-    // whose modification time the provider will not report — unknown is not old,
-    // and guessing means deleting another process's live work — and it used to
-    // do that by returning, so the run reported `removed: 0` and said nothing
-    // about the object it had decided not to touch. The refusal is right; the
-    // silence was the same false all-clear one branch further down.
+fn an_explicit_min_age_that_holds_everything_still_names_what_it_held() {
+    // What this test is, and what it is not.
     //
-    // Driven through the same door as the age case, because both arms end in the
-    // one `held` record and a test that only covered one of them would let the
-    // other go quiet again.
+    // It used to be called `debris_whose_age_cannot_be_established_is_held_and_
+    // named_rather_than_passed_over`, and its comment said it drove the arm that
+    // holds debris whose modification time the provider will not report. It does
+    // not: `local:` reports a modification time for every file, so what a
+    // 36-hour minimum over a file planted a moment ago exercises is the
+    // *younger-than* arm — the same one the test above it drives, through a
+    // different door. Deleting the unknown-age arm therefore left the gate
+    // green, and the name said otherwise (`HANDOVER.md` §35.3).
+    //
+    // No shipped backend can be made to omit a modification time from a listing
+    // on demand, so that arm is held where it can be held honestly: in
+    // `removal::reclaim`'s own tests, against `Aging::verdict`, which is the one
+    // place both call sites now make the decision.
+    //
+    // What is left here is worth keeping on its own account. It is the operator
+    // path where **every** candidate is held: an explicit `--min-age` larger
+    // than anything on the store, which is what a first sweep after an incident
+    // looks like, and the run still has to name what it left and must not report
+    // a clean store.
     let sandbox = Sandbox::new();
     let store = sandbox.dir("store");
     plant_staging_file(&store.join("o"), &vec![1u8; 512]);
@@ -4772,12 +4789,14 @@ fn debris_whose_age_cannot_be_established_is_held_and_named_rather_than_passed_o
         .assert()
         .success();
 
-    // A day and a half in the future: the file cannot be `min_age` old however
-    // the clock is read, so this exercises the same branch a young file does
-    // without depending on the test machine's clock resolution.
+    // A day and a half: the file cannot be `min_age` old however the clock is
+    // read, so the hold does not depend on the test machine's clock resolution.
     let assertion = sandbox
         .dctl()
         .arg("--no-ask-password")
+        // See the test above: below `-v` the sentence this asserts the absence
+        // of is never printed, so the assertion could not fail.
+        .arg("-v")
         .arg("cleanup")
         .arg(format!("{PLAIN_REMOTE}:"))
         .args(["--class", "staging", "--min-age", "36h"])

@@ -260,15 +260,7 @@ pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
         plan.seed(),
         plan.repairs(),
     );
-    engine::scrub(
-        ctx,
-        opened.source(),
-        opened.prefix(),
-        &filter,
-        &plan,
-        &mut report,
-    )
-    .await?;
+    engine::scrub(ctx, &opened, &filter, &plan, &mut report).await?;
 
     report.emit(&ctx.out)?;
     // Text mode only: the JSON document already carries `health` and the whole

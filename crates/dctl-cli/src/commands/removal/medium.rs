@@ -56,6 +56,26 @@ use crate::source::{Entry, Source as _};
 
 use super::target::Target;
 
+/// The spec a removal opens its store with, from the target the operator typed.
+///
+/// A function of its own so it can be asserted without opening anything, which
+/// is the whole of what was missing: this is one line, it was wrong once — the
+/// path was blanked, so `deletefile b2:DCTL001/a.txt` reached the resolver as
+/// `b2:` and answered "'b2' needs a bucket name" about a command line that had
+/// given one — and blanking it again left `cargo test --workspace` entirely
+/// green (`HANDOVER.md` §35.3).
+///
+/// The whole spec, never the bare name: a name has no colon, so anything that
+/// re-parses one turns `archive:` into the *directory* `archive`. And the whole
+/// spec means **with its path**, because for a provider shorthand the first path
+/// component is the bucket and the resolver is the thing that splits it off.
+fn spec_of(target: &Target) -> RemoteSpec {
+    RemoteSpec::Named {
+        remote: target.remote.clone(),
+        path: target.path.clone(),
+    }
+}
+
 /// A store a removal may read from and delete in.
 pub enum Medium {
     /// A sealed vault, addressed by plaintext path.
@@ -108,10 +128,7 @@ impl Medium {
         // name" about a command line that had given one. The read family was
         // fixed at `2e6d180`; these six verbs were not, and `purge`, `cleanup`
         // and `deletefile` all failed the same way.
-        let spec = RemoteSpec::Named {
-            remote: target.remote.clone(),
-            path: target.path.clone(),
-        };
+        let spec = spec_of(target);
 
         if is_sealed(&config, &target.remote) {
             tracing::debug!(
@@ -337,6 +354,50 @@ mod tests {
     use super::*;
     use crate::config::{LocalDef, VaultDef};
     use std::path::PathBuf;
+
+    #[test]
+    fn the_store_a_removal_opens_is_addressed_by_the_whole_argument() {
+        // **The line nothing could turn red.** `Medium::open` builds the spec it
+        // resolves from the target the operator typed, and it once built it with
+        // the path blanked. For a configured remote that is invisible — the
+        // remote's own settings say where the store is — so every test passed.
+        // For a **provider shorthand** the first path component is the bucket,
+        // and blanking the path leaves the resolver `b2:` with nothing to split:
+        //
+        //     dctl deletefile b2:DCTL001/a.txt   error: 'b2' needs a bucket name
+        //     dctl purge b2:DCTL001 --force      error: 'b2' needs a bucket name
+        //     dctl cleanup b2:DCTL001 --dry-run  error: 'b2' needs a bucket name
+        //
+        // Asserted here rather than through `open`, because opening a `b2:`
+        // store needs a credential in the process environment and this is the
+        // half that goes wrong without one.
+        for spelling in [
+            "b2:DCTL001/a.txt",
+            "b2:DCTL001",
+            "archive:photos/2024",
+            "archive:",
+        ] {
+            let target = Target::parse(spelling).expect("a well-formed target");
+            assert_eq!(
+                spec_of(&target),
+                RemoteSpec::Named {
+                    remote: target.remote.clone(),
+                    path: target.path.clone(),
+                },
+                "'{spelling}' would open a store the operator did not name"
+            );
+        }
+        // And the shorthand, spelled out: what reaches the resolver still has a
+        // bucket in it. A blank path is the defect, so it is named as one.
+        let shorthand = Target::parse("b2:DCTL001/2019").expect("a well-formed target");
+        match spec_of(&shorthand) {
+            RemoteSpec::Named { remote, path } => {
+                assert_eq!(remote, "b2");
+                assert_eq!(path, "DCTL001/2019", "the bucket was thrown away");
+            }
+            RemoteSpec::Local(_) => panic!("a removal target is never a local path"),
+        }
+    }
 
     /// The pair `dctl init --name archive --base local:/srv/v` registers.
     fn initialised() -> Config {

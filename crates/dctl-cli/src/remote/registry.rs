@@ -48,6 +48,7 @@ use crate::constants::{
 };
 use crate::error::{CliError, Result};
 use crate::logging::fields;
+use crate::remote::vars::{ProcessVars, Vars};
 
 use super::resolve::Resolved;
 use super::spec::RemoteSpec;
@@ -241,77 +242,7 @@ pub fn build(
         "building backend"
     );
 
-    let built = match target {
-        Target::Local { root } => Built::Local(LocalFs::new(root.clone()).with_links(links)),
-
-        Target::B2 {
-            bucket,
-            endpoint,
-            chunk_size,
-        } => {
-            let key_id = env_required(ENV_B2_KEY_ID)?;
-            let app_key = env_required(ENV_B2_APP_KEY)?;
-            Built::B2(b2_backend(
-                key_id,
-                app_key,
-                bucket,
-                endpoint.as_deref(),
-                *chunk_size,
-                deadlines,
-            )?)
-        }
-
-        Target::S3 {
-            bucket,
-            endpoint,
-            region,
-            chunk_size,
-        } => {
-            let endpoint = setting_or_env(endpoint.as_deref(), ENV_S3_ENDPOINT)?;
-            let region = setting_or_env(region.as_deref(), ENV_S3_REGION)?;
-            let access_key = env_required(ENV_S3_ACCESS_KEY)?;
-            let secret_key = env_required(ENV_S3_SECRET_KEY)?;
-            let config = S3Config::new(endpoint, region, bucket.clone(), access_key, secret_key)
-                .with_part_size(*chunk_size);
-            Built::S3(S3Backend::new(config, deadlines)?)
-        }
-
-        Target::R2 {
-            bucket,
-            account,
-            endpoint,
-            chunk_size,
-        } => {
-            let access_key = env_required(ENV_R2_ACCESS_KEY)?;
-            let secret_key = env_required(ENV_R2_SECRET_KEY)?;
-            // An explicit endpoint replaces the derived one, and with it the
-            // reason the account id is needed at all — so it is only demanded
-            // when it is the thing that builds the hostname. Asking for both
-            // would make a jurisdiction-specific endpoint impossible to
-            // configure without inventing an account id nobody uses.
-            let config = match endpoint {
-                Some(endpoint) => {
-                    R2Backend::config_at(endpoint.clone(), bucket.clone(), access_key, secret_key)
-                }
-                None => {
-                    let account = setting_or_env(account.as_deref(), ENV_R2_ACCOUNT_ID)?;
-                    R2Backend::config(&account, bucket.clone(), access_key, secret_key)
-                }
-            }
-            .with_part_size(*chunk_size);
-            Built::R2(R2Backend::from_config(config, deadlines)?)
-        }
-
-        // No credential is read: `ssh` authenticates the transport from the
-        // user's own config, which is the whole reason a cloudflared-proxied host
-        // works. This is also the one arm that opens a connection to build, so it
-        // is the one that bridges to the async `connect` — see [`connect_sftp`].
-        Target::Sftp {
-            host,
-            base,
-            chunk_size,
-        } => Built::Sftp(connect_sftp(host, base, *chunk_size, links, deadlines)?),
-    };
+    let built = assemble(&ProcessVars, target, links, deadlines)?;
     // Metered, then made to try again. The order matters and is not arbitrary: a
     // retried request really did cross the link on every attempt, so the meter
     // has to sit *underneath* the retry layer and be charged once per attempt.
@@ -331,6 +262,108 @@ pub fn build(
     // not know when the run had to be over is the whole of `HANDOVER.md` §32.9.
     let backend = dctl_store::Retrying::wrap(built.metered(meter), deadlines.run);
     Ok(dctl_store::Guarded::wrap(backend, target.container()))
+}
+
+/// Construct the provider's own backend for `target`, reading credentials from
+/// `vars`.
+///
+/// **Split out of [`build`] so a test can reach these arms at all.** What each
+/// arm does is take the fields a resolved `Target` carries and hand them to a
+/// constructor, and the fields include every per-remote setting that survived
+/// the configuration file and the resolver — `chunk_size`, `endpoint`,
+/// `region`, `account`. Each is one argument in one call, each is the last step
+/// of a journey `config::reach` proves the first three quarters of, and dropping
+/// one is invisible: the setting still parses, still round-trips through
+/// `config show`, and still reaches the `Target`. `HANDOVER.md` §21.7 is that
+/// defect on the meter — written into one arm of this match and silently omitted
+/// from four — and §35.3 measured it on B2's `chunk_size`: dropped at this call
+/// and `cargo test --workspace` stayed entirely green.
+///
+/// The environment is a parameter because it was the reason there was no way in.
+/// Four of the five arms demand a credential, `std::env::set_var` is `unsafe`
+/// under Rust 2024, and a test that mutated the process environment would be
+/// changing another test's answer. See [`crate::remote::vars`].
+///
+/// # Errors
+/// A missing or unusable credential (exit 7), an `sftp` session that would not
+/// open, or an `s3`/`r2` configuration a client refuses.
+fn assemble(
+    vars: &dyn Vars,
+    target: &Target,
+    links: LinkPolicy,
+    deadlines: Deadlines,
+) -> Result<Built> {
+    Ok(match target {
+        Target::Local { root } => Built::Local(LocalFs::new(root.clone()).with_links(links)),
+
+        Target::B2 {
+            bucket,
+            endpoint,
+            chunk_size,
+        } => {
+            let key_id = env_required(vars, ENV_B2_KEY_ID)?;
+            let app_key = env_required(vars, ENV_B2_APP_KEY)?;
+            Built::B2(b2_backend(
+                key_id,
+                app_key,
+                bucket,
+                endpoint.as_deref(),
+                *chunk_size,
+                deadlines,
+            )?)
+        }
+
+        Target::S3 {
+            bucket,
+            endpoint,
+            region,
+            chunk_size,
+        } => {
+            let endpoint = setting_or_env(vars, endpoint.as_deref(), ENV_S3_ENDPOINT)?;
+            let region = setting_or_env(vars, region.as_deref(), ENV_S3_REGION)?;
+            let access_key = env_required(vars, ENV_S3_ACCESS_KEY)?;
+            let secret_key = env_required(vars, ENV_S3_SECRET_KEY)?;
+            let config = S3Config::new(endpoint, region, bucket.clone(), access_key, secret_key)
+                .with_part_size(*chunk_size);
+            Built::S3(S3Backend::new(config, deadlines)?)
+        }
+
+        Target::R2 {
+            bucket,
+            account,
+            endpoint,
+            chunk_size,
+        } => {
+            let access_key = env_required(vars, ENV_R2_ACCESS_KEY)?;
+            let secret_key = env_required(vars, ENV_R2_SECRET_KEY)?;
+            // An explicit endpoint replaces the derived one, and with it the
+            // reason the account id is needed at all — so it is only demanded
+            // when it is the thing that builds the hostname. Asking for both
+            // would make a jurisdiction-specific endpoint impossible to
+            // configure without inventing an account id nobody uses.
+            let config = match endpoint {
+                Some(endpoint) => {
+                    R2Backend::config_at(endpoint.clone(), bucket.clone(), access_key, secret_key)
+                }
+                None => {
+                    let account = setting_or_env(vars, account.as_deref(), ENV_R2_ACCOUNT_ID)?;
+                    R2Backend::config(&account, bucket.clone(), access_key, secret_key)
+                }
+            }
+            .with_part_size(*chunk_size);
+            Built::R2(R2Backend::from_config(config, deadlines)?)
+        }
+
+        // No credential is read: `ssh` authenticates the transport from the
+        // user's own config, which is the whole reason a cloudflared-proxied host
+        // works. This is also the one arm that opens a connection to build, so it
+        // is the one that bridges to the async `connect` — see [`connect_sftp`].
+        Target::Sftp {
+            host,
+            base,
+            chunk_size,
+        } => Built::Sftp(connect_sftp(host, base, *chunk_size, links, deadlines)?),
+    })
 }
 
 /// A backend that has been constructed but not yet told who is watching it.
@@ -449,17 +482,17 @@ pub fn build_backend(
 /// It exists so a named remote can pin its endpoint permanently while a bare
 /// `s3:bucket` — no config at all — still works from exported variables, which
 /// is how the CLI behaved before named remotes and how CI jobs are written.
-fn setting_or_env(configured: Option<&str>, setting: &str) -> Result<String> {
+fn setting_or_env(vars: &dyn Vars, configured: Option<&str>, setting: &str) -> Result<String> {
     match configured {
         Some(value) => Ok(value.to_string()),
-        None => env_required(setting),
+        None => env_required(vars, setting),
     }
 }
 
 /// Read a required setting from the environment, named `DCTL_<SETTING>`.
-fn env_required(setting: &str) -> Result<String> {
+fn env_required(vars: &dyn Vars, setting: &str) -> Result<String> {
     let variable = dctl_meta::env_var(setting);
-    let value = std::env::var(&variable);
+    let value = vars.get(&variable);
     classify(&variable, value)
 }
 
@@ -553,6 +586,191 @@ mod tests {
         )
         .unwrap();
         assert_eq!(backend.name(), PROVIDER_LOCAL);
+    }
+
+    /// Everything four of the five arms demand, and nothing a real deployment
+    /// would recognise. Values are placeholders on purpose: nothing here
+    /// authorizes, and a credential-shaped literal in a test file is how a real
+    /// one eventually gets committed beside it.
+    fn credentials() -> crate::remote::vars::FixedVars {
+        crate::remote::vars::FixedVars::of(&[
+            ("DCTL_B2_KEY_ID", "key-id"),
+            ("DCTL_B2_APP_KEY", "app-key"),
+            ("DCTL_S3_ACCESS_KEY", "access"),
+            ("DCTL_S3_SECRET_KEY", "secret"),
+            ("DCTL_R2_ACCESS_KEY", "access"),
+            ("DCTL_R2_SECRET_KEY", "secret"),
+        ])
+    }
+
+    #[test]
+    fn every_object_stores_chunk_size_reaches_the_arm_that_builds_it() {
+        // **The last step of the journey, and the one nothing could turn red.**
+        // `config::reach` proves a `chunk_size` survives the configuration file
+        // and the resolver; `a_b2_remotes_chunk_size_reaches_the_backend_that_
+        // cuts_the_parts` below proves the *helper* keeps it. What was between
+        // them was the line in each arm of `assemble` that passes the resolved
+        // `Target`'s field to the constructor — and dropping it on the B2 arm
+        // left `cargo test --workspace` entirely green (`HANDOVER.md` §35.3).
+        //
+        // Three arms, because the setting has three copies of the same one-line
+        // wiring and a test covering one leaves the other two deletable — which
+        // is `HANDOVER.md` §26.1's shape and §21.7's actual history, where the
+        // meter was written into one arm of this very match and omitted from
+        // four.
+        //
+        // What it costs is not a lost tuning hint. On every one of these the
+        // part size **is** the upload's peak working set, so a dropped
+        // `chunk_size` is an operator's container memory limit silently ignored
+        // and an OOM kill at the first large object.
+        let asked = 8 * 1024 * 1024;
+        let vars = credentials();
+
+        let b2 = assemble(
+            &vars,
+            &Target::B2 {
+                bucket: "bucket".into(),
+                endpoint: None,
+                chunk_size: Some(asked),
+            },
+            LinkPolicy::default(),
+            Deadlines::default(),
+        )
+        .unwrap_or_else(|_| panic!("a b2 target builds from a key pair"));
+        let Built::B2(b2) = b2 else {
+            panic!("a b2 target must build the b2 backend");
+        };
+        assert_eq!(
+            b2.upload_peak_bytes(),
+            asked,
+            "b2: a configured chunk_size that stops here is a memory ceiling \
+             that parses and does nothing"
+        );
+
+        let s3 = assemble(
+            &vars,
+            &Target::S3 {
+                bucket: "bucket".into(),
+                endpoint: Some("https://s3.example.invalid".into()),
+                region: Some("us-east-1".into()),
+                chunk_size: Some(asked),
+            },
+            LinkPolicy::default(),
+            Deadlines::default(),
+        )
+        .unwrap_or_else(|_| panic!("an s3 target builds"));
+        let Built::S3(s3) = s3 else {
+            panic!("an s3 target must build the s3 backend");
+        };
+        assert_eq!(s3.part_size(), asked, "s3");
+
+        let r2 = assemble(
+            &vars,
+            &Target::R2 {
+                bucket: "bucket".into(),
+                account: Some("account".into()),
+                endpoint: None,
+                chunk_size: Some(asked),
+            },
+            LinkPolicy::default(),
+            Deadlines::default(),
+        )
+        .unwrap_or_else(|_| panic!("an r2 target builds"));
+        let Built::R2(r2) = r2 else {
+            panic!("an r2 target must build the r2 backend");
+        };
+        assert_eq!(r2.part_size(), asked, "r2");
+    }
+
+    #[test]
+    fn a_target_that_configured_no_chunk_size_gets_the_compiled_default() {
+        // The control that makes the test above mean something. Without it an
+        // arm that ignored its argument and happened to default to 8 MiB would
+        // pass, and so would one that returned the number it was asked for from
+        // a constant. These are the shipped defaults, and they are not equal to
+        // each other or to `asked`.
+        let vars = credentials();
+        let Ok(Built::B2(b2)) = assemble(
+            &vars,
+            &Target::B2 {
+                bucket: "bucket".into(),
+                endpoint: None,
+                chunk_size: None,
+            },
+            LinkPolicy::default(),
+            Deadlines::default(),
+        ) else {
+            panic!("a b2 target builds without a chunk_size");
+        };
+        assert_eq!(b2.upload_peak_bytes(), 100 * 1024 * 1024);
+
+        let Ok(Built::S3(s3)) = assemble(
+            &vars,
+            &Target::S3 {
+                bucket: "bucket".into(),
+                endpoint: Some("https://s3.example.invalid".into()),
+                region: Some("us-east-1".into()),
+                chunk_size: None,
+            },
+            LinkPolicy::default(),
+            Deadlines::default(),
+        ) else {
+            panic!("an s3 target builds without a chunk_size");
+        };
+        assert_eq!(s3.part_size(), 100 * 1024 * 1024);
+    }
+
+    /// The refusal `assemble` produced, or a panic naming what it built instead.
+    ///
+    /// `Built` holds live backends and does not implement `Debug` — deriving it
+    /// would put a credential-bearing client's fields one `{:?}` away from a log
+    /// — so `expect_err` is not available and this says the same thing without
+    /// it.
+    fn refusal(built: Result<Built>) -> CliError {
+        match built {
+            Ok(_) => panic!("a target that cannot be addressed must not build"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn an_endpoint_that_is_configured_nowhere_is_named_rather_than_guessed_at() {
+        // The other settings with a far end in this match. An `endpoint` dropped
+        // on the `s3` arm sends every request to AWS instead of the operator's
+        // MinIO, with a credential that will not authorize there — so the arm
+        // that has neither a pinned setting nor an exported variable has to say
+        // which variable is missing.
+        let error = refusal(assemble(
+            &credentials(),
+            &Target::S3 {
+                bucket: "bucket".into(),
+                endpoint: None,
+                region: None,
+                chunk_size: None,
+            },
+            LinkPolicy::default(),
+            Deadlines::default(),
+        ));
+        assert_eq!(error.code(), ExitCode::FatalError);
+        assert!(error.message().contains("DCTL_S3_ENDPOINT"), "{error:?}");
+    }
+
+    #[test]
+    fn a_missing_credential_is_named_rather_than_guessed_at() {
+        // And the arm's other half: a credential that is not there is a fatal,
+        // named refusal — not a client that fails opaquely at the first request.
+        let error = refusal(assemble(
+            &crate::remote::vars::FixedVars::of(&[]),
+            &Target::B2 {
+                bucket: "bucket".into(),
+                endpoint: None,
+                chunk_size: None,
+            },
+            LinkPolicy::default(),
+            Deadlines::default(),
+        ));
+        assert_eq!(error.code(), ExitCode::FatalError);
+        assert!(error.message().contains("DCTL_B2_KEY_ID"), "{error:?}");
     }
 
     #[test]
@@ -782,9 +1000,20 @@ mod tests {
     fn a_pinned_setting_wins_over_the_environment() {
         // A named remote's endpoint is part of its identity: it must not change
         // because an unrelated variable happens to be exported in this shell.
+        // Asserted against an environment that *does* export the variable, so
+        // the precedence is what is measured rather than the variable's absence.
+        let vars = crate::remote::vars::FixedVars::of(&[(
+            "DCTL_S3_ENDPOINT",
+            "https://aws.example.invalid",
+        )]);
         assert_eq!(
-            setting_or_env(Some("https://minio.internal"), ENV_S3_ENDPOINT).unwrap(),
+            setting_or_env(&vars, Some("https://minio.internal"), ENV_S3_ENDPOINT).unwrap(),
             "https://minio.internal"
+        );
+        // …and with nothing pinned, the exported one is what is used.
+        assert_eq!(
+            setting_or_env(&vars, None, ENV_S3_ENDPOINT).unwrap(),
+            "https://aws.example.invalid"
         );
     }
 }

@@ -31,13 +31,30 @@ use crate::commands::listing::{self, Filter};
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::source::Source;
+use crate::source::open::Opened;
 
 use super::report::{Record, Report};
 
-/// Verify everything under `prefix` that `filter` admits, recording what was
-/// found.
+/// Verify everything `opened` addresses that `filter` admits, recording what
+/// was found.
 ///
 /// `fail_fast` stops at the first object that does not verify.
+///
+/// # Why this takes an [`Opened`] rather than a source and a prefix
+///
+/// Because the two used to be separate parameters and the caller passed the
+/// wrong prefix. `dctl verify b2:DCTL001/photos` scoped its listing with
+/// `DCTL001/photos` — the *spec's* path, which still carries the bucket — rather
+/// than with `photos`, the prefix the resolver produced when it turned the
+/// shorthand into a client for that bucket. The run enumerated nothing and
+/// reported a clean tree. `2e6d180` fixed the value at the call site; nothing
+/// held it there, and putting the defect back left `cargo test --workspace`
+/// entirely green (`HANDOVER.md` §35.3).
+///
+/// One parameter is the fix, because the caller no longer chooses. The prefix
+/// comes out of the same value the source does, from
+/// [`logical_prefix`](crate::remote::resolve::logical_prefix), and there is no
+/// second prefix in scope that would type-check here.
 ///
 /// # Errors
 /// Only a failure of the *listing* — an index or provider that could not be
@@ -45,13 +62,14 @@ use super::report::{Record, Report};
 /// never an error here; see the module documentation.
 pub async fn verify(
     ctx: &Ctx,
-    source: &dyn Source,
-    prefix: &str,
+    opened: &Opened,
     filter: &Filter,
     fail_fast: bool,
     report: &mut Report,
 ) -> Result<()> {
-    let mut entries = source.enumerate(prefix).await?;
+    let source = opened.source();
+    let prefix = opened.prefix();
+    let mut entries = opened.enumerate().await?;
 
     while let Some(entry) = entries.next().await? {
         // Building the listing view costs a clone, so it is skipped entirely
@@ -102,6 +120,17 @@ async fn examine(ctx: &Ctx, source: &dyn Source, path: &str) -> (Verdict, Option
 
 #[cfg(test)]
 mod tests {
+
+    /// Pair a source with the prefix a read of it is scoped by, the way
+    /// `crate::source::open` does for a real run.
+    ///
+    /// The engines take the two together rather than as separate parameters,
+    /// because as separate parameters the call site passed the wrong prefix and
+    /// nothing in the workspace could turn that red — see the function's own
+    /// documentation.
+    fn opened(source: impl Source + 'static, prefix: &str) -> Opened {
+        Opened::for_test(Box::new(source), prefix)
+    }
     use super::*;
     use crate::cli::GlobalArgs;
     use crate::exit::ExitCode;
@@ -209,8 +238,7 @@ mod tests {
         let mut report = report();
         verify(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             false,
             &mut report,
@@ -235,8 +263,7 @@ mod tests {
         let mut report = report();
         verify(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             false,
             &mut report,
@@ -275,8 +302,7 @@ mod tests {
         let mut report = report();
         verify(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             false,
             &mut report,
@@ -299,8 +325,7 @@ mod tests {
         let mut report = report();
         verify(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             true,
             &mut report,
@@ -322,8 +347,7 @@ mod tests {
         let mut report = report();
         verify(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             true,
             &mut report,
@@ -344,8 +368,7 @@ mod tests {
         let mut report = report();
         verify(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             false,
             &mut report,
@@ -369,8 +392,7 @@ mod tests {
         let mut report = Report::new("store:", "strict", Assurance::ReadBack);
         verify(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             false,
             &mut report,
@@ -391,8 +413,7 @@ mod tests {
         let mut report = Report::new("store:photos", "strict", Assurance::ReadBack);
         verify(
             &ctx(&[]),
-            &source,
-            "photos",
+            &opened(source, "photos"),
             &Filter::default(),
             false,
             &mut report,
@@ -408,7 +429,7 @@ mod tests {
         let context = ctx(&["--include", "*.jpg"]);
         let filter = Filter::from_globals(&context.globals).expect("the pattern compiles");
         let mut report = Report::new("store:", "strict", Assurance::ReadBack);
-        verify(&context, &source, "", &filter, false, &mut report)
+        verify(&context, &opened(source, ""), &filter, false, &mut report)
             .await
             .unwrap();
         assert_eq!(report.summary.examined, 1);
@@ -430,8 +451,7 @@ mod tests {
         let mut report = report();
         verify(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             false,
             &mut report,

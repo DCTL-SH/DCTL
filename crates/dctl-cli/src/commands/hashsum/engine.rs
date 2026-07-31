@@ -49,6 +49,7 @@ use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::output::hex;
 use crate::source::Source;
+use crate::source::open::Opened;
 
 use super::algo::Algorithm;
 use super::digest;
@@ -61,15 +62,21 @@ use super::report::{Record, Report};
 /// [`ExitCode::IntegrityFailure`](crate::exit::ExitCode::IntegrityFailure) for
 /// an object that did not authenticate, in which case no line for it, and no
 /// line after it, is produced.
+/// Takes an [`Opened`] rather than a source and a prefix for the reason
+/// [`crate::commands::verify::engine::verify`] gives. `hashsum` is the third
+/// copy of that call shape and had the same nothing holding it: a checksum file
+/// written from the wrong prefix is empty, and an empty one passes
+/// `sha256sum -c` without a word.
 pub async fn hash(
     ctx: &Ctx,
-    source: &dyn Source,
-    prefix: &str,
+    opened: &Opened,
     filter: &Filter,
     algorithm: Algorithm,
     report: &mut Report,
 ) -> Result<()> {
-    let mut entries = source.enumerate(prefix).await?;
+    let source = opened.source();
+    let prefix = opened.prefix();
+    let mut entries = opened.enumerate().await?;
 
     while let Some(entry) = entries.next().await? {
         // Building the listing view costs a clone, so it is skipped entirely
@@ -126,6 +133,17 @@ async fn read(ctx: &Ctx, source: &dyn Source, path: &str) -> Result<Zeroizing<Ve
 
 #[cfg(test)]
 mod tests {
+
+    /// Pair a source with the prefix a read of it is scoped by, the way
+    /// `crate::source::open` does for a real run.
+    ///
+    /// The engines take the two together rather than as separate parameters,
+    /// because as separate parameters the call site passed the wrong prefix and
+    /// nothing in the workspace could turn that red — see the function's own
+    /// documentation.
+    fn opened(source: impl Source + 'static, prefix: &str) -> Opened {
+        Opened::for_test(Box::new(source), prefix)
+    }
     use super::*;
     use crate::cli::GlobalArgs;
     use crate::exit::ExitCode;
@@ -224,14 +242,14 @@ mod tests {
     /// `sha256sum -c` would be handed and not about an intermediate a user never
     /// sees.
     async fn run(
-        source: &dyn Source,
+        opened: &Opened,
         algorithm: Algorithm,
         flags: &[&str],
     ) -> Result<Vec<(String, String)>> {
         let context = ctx(flags);
         let filter = Filter::from_globals(&context.globals).expect("the flags compile");
         let mut report = Report::new(algorithm, false);
-        hash(&context, source, "", &filter, algorithm, &mut report).await?;
+        hash(&context, opened, &filter, algorithm, &mut report).await?;
 
         let rendered = report
             .render(&crate::output::Out::plain())
@@ -250,13 +268,14 @@ mod tests {
     #[tokio::test]
     async fn a_plain_store_is_read_and_hashed_for_every_algorithm() {
         let (_root, source) = store(&[("a.txt", b"abc"), ("sub/b.txt", b"")]);
+        let opened = opened(source, "");
 
         for (algorithm, first) in [
             (Algorithm::Sha256, ABC_SHA256.to_string()),
             (Algorithm::Sha1, ABC_SHA1.to_string()),
             (Algorithm::Blake3, digest::of(Algorithm::Blake3, b"abc")),
         ] {
-            let lines = run(&source, algorithm, &[])
+            let lines = run(&opened, algorithm, &[])
                 .await
                 .expect("the walk succeeds");
             assert_eq!(
@@ -277,11 +296,11 @@ mod tests {
         // `sha256sum` prints for the file the user put in, not for the sealed
         // bytes the provider is holding.
         let (_store, _index, path, vault) = sealed(&[("notes.txt", b"abc")]).await;
-        let source = source_for(vault, path);
+        let opened = opened(source_for(vault, path), "");
 
         for (algorithm, expected) in [(Algorithm::Sha256, ABC_SHA256), (Algorithm::Sha1, ABC_SHA1)]
         {
-            let lines = run(&source, algorithm, &[])
+            let lines = run(&opened, algorithm, &[])
                 .await
                 .expect("the walk succeeds");
             assert_eq!(lines, vec![("notes.txt".to_string(), expected.to_string())]);
@@ -293,9 +312,9 @@ mod tests {
         // Same digest reading and re-hashing would produce — which is the only
         // reason the shortcut is allowed to exist.
         let (_store, _index, path, vault) = sealed(&[("a.txt", b"hello world")]).await;
-        let source = source_for(vault, path);
+        let opened = opened(source_for(vault, path), "");
 
-        let lines = run(&source, Algorithm::Blake3, &[])
+        let lines = run(&opened, Algorithm::Blake3, &[])
             .await
             .expect("the walk succeeds");
         assert_eq!(
@@ -317,9 +336,9 @@ mod tests {
             .rebuild_index()
             .await
             .expect("the index rebuilds from the backend");
-        let source = source_for(vault, path);
+        let opened = opened(source_for(vault, path), "");
 
-        let lines = run(&source, Algorithm::Blake3, &[])
+        let lines = run(&opened, Algorithm::Blake3, &[])
             .await
             .expect("the walk succeeds");
         assert_eq!(
@@ -352,9 +371,9 @@ mod tests {
         // certify the corruption as though it were the file.
         let (store, _index, path, vault) = sealed(&[("a.txt", b"one"), ("b.txt", b"two")]).await;
         damage_objects(store.path());
-        let source = source_for(vault, path);
+        let opened = opened(source_for(vault, path), "");
 
-        let error = run(&source, Algorithm::Sha256, &[])
+        let error = run(&opened, Algorithm::Sha256, &[])
             .await
             .expect_err("damaged objects must not be hashed");
         assert_eq!(error.code(), ExitCode::IntegrityFailure);
@@ -376,9 +395,9 @@ mod tests {
         // `dctl verify` exists and why this command does not claim to verify.
         let (store, _index, path, vault) = sealed(&[("a.txt", b"one")]).await;
         damage_objects(store.path());
-        let source = source_for(vault, path);
+        let opened = opened(source_for(vault, path), "");
 
-        let lines = run(&source, Algorithm::Blake3, &[])
+        let lines = run(&opened, Algorithm::Blake3, &[])
             .await
             .expect("the index still answers");
         assert_eq!(lines[0].1, digest::of(Algorithm::Blake3, b"one"));
@@ -386,7 +405,7 @@ mod tests {
         // Asking for an algorithm the index does not hold reads the object, and
         // then the damage is found.
         assert_eq!(
-            run(&source, Algorithm::Sha256, &[])
+            run(&opened, Algorithm::Sha256, &[])
                 .await
                 .expect_err("the read authenticates")
                 .code(),
@@ -399,7 +418,8 @@ mod tests {
         // `dctl hashsum sha256 vault: --include '*.jpg' > SUMS` has to cover the
         // same objects `dctl ls --include '*.jpg'` listed.
         let (_root, source) = store(&[("a.jpg", b"1"), ("b.txt", b"22")]);
-        let lines = run(&source, Algorithm::Sha256, &["--include", "*.jpg"])
+        let opened = opened(source, "");
+        let lines = run(&opened, Algorithm::Sha256, &["--include", "*.jpg"])
             .await
             .expect("the walk succeeds");
         assert_eq!(lines.len(), 1);
@@ -411,8 +431,9 @@ mod tests {
         // "There is nothing here" is an answer; the command decides whether an
         // empty checksum file is acceptable, not this walk.
         let (_root, source) = store(&[]);
+        let opened = opened(source, "");
         assert!(
-            run(&source, Algorithm::Sha256, &[])
+            run(&opened, Algorithm::Sha256, &[])
                 .await
                 .expect("an empty listing still succeeds")
                 .is_empty()

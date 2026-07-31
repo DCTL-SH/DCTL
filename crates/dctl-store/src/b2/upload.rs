@@ -533,24 +533,13 @@ pub(super) async fn put_stream(
     // so it is drained into one buffer and takes the same verified single-shot
     // path a buffered `put` takes.
     if !streaming::use_multipart(size, b2.part_size()) {
-        let mut whole = vec![
-            0u8;
-            usize::try_from(size).map_err(|_| {
-                StoreError::Backend("object too large for this machine's address space".into())
-            })?
-        ];
-        let filled = source.fill(&mut whole).await?;
-        // `sealed` rather than `agreed`: `fill` stops when the buffer is full and
-        // has not yet seen the stream's terminal message, so a producer with
-        // bytes left over is caught here rather than after an upload.
-        let expected = source.sealed().await?;
-        if filled as u64 != size {
-            return Err(StoreError::ShortWrite {
-                expected: size,
-                actual: filled as u64,
-            });
-        }
-        let outcome = put(b2, key, Bytes::from(whole), &expected, modified).await?;
+        // The buffer and both of the questions that have to be answered before it
+        // may be committed — shared with S3's identical arm, and behind a seam,
+        // because through an `ObjectStream` the two answers cannot disagree and
+        // a check no input reaches is a check no test holds. See
+        // `crate::incoming::whole`.
+        let (whole, expected) = crate::incoming::drain_whole(&mut source, size).await?;
+        let outcome = put(b2, key, whole, &expected, modified).await?;
         crate::meter::charge(b2.meter.as_ref(), size).await;
         return Ok(outcome);
     }

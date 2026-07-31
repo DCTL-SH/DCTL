@@ -148,15 +148,7 @@ pub async fn run(ctx: &Ctx, args: &HashsumArgs) -> Result<()> {
     // not permission to emit an empty checksum file, which a checker would
     // happily accept as "nothing to verify".
     let mut report = Report::new(args.algorithm, args.binary);
-    engine::hash(
-        ctx,
-        opened.source(),
-        opened.prefix(),
-        &filter,
-        args.algorithm,
-        &mut report,
-    )
-    .await?;
+    engine::hash(ctx, &opened, &filter, args.algorithm, &mut report).await?;
 
     // The last guard before a file somebody will later trust. A digest of the
     // wrong width makes `sha256sum -c` report a mismatch, which sends a person
@@ -347,16 +339,9 @@ mod tests {
             .await
             .expect("the remote opens");
         let mut report = Report::new(Algorithm::Sha256, false);
-        engine::hash(
-            &ctx,
-            opened.source(),
-            opened.prefix(),
-            &filter,
-            Algorithm::Sha256,
-            &mut report,
-        )
-        .await
-        .expect("the walk succeeds");
+        engine::hash(&ctx, &opened, &filter, Algorithm::Sha256, &mut report)
+            .await
+            .expect("the walk succeeds");
 
         let rendered = report.render(&Out::plain()).expect("the report renders");
         assert_eq!(rendered.lines().count(), 2);

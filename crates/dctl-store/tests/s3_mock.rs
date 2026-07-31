@@ -1686,39 +1686,33 @@ async fn a_producer_that_declares_more_than_it_supplies_commits_nothing() {
 }
 
 #[test]
-fn the_single_shot_arms_own_length_check_cannot_fire_and_the_line_above_it_is_why() {
-    // An **arithmetic argument** rather than a test, in the shape
-    // `HANDOVER.md` §26.5 names for exactly this case — a guard whose
-    // precondition the code above it already disposes of. It is here so that
-    // the claim is checked by the compiler and by a reader, rather than being a
-    // comment somebody deletes.
+fn the_single_shot_arm_refuses_a_short_producer_with_the_seals_own_numbers() {
+    // What this test used to be, and why it is not that any more.
     //
-    // `put_object_stream`'s sub-multipart arm reads:
+    // It was an **arithmetic argument**: the sub-multipart arm's own
+    // `filled != size` comparison cannot fire, because `sealed()` one line
+    // above it refuses the only input that could reach it, with an identical
+    // error. That argument is correct and was re-measured — deleting the
+    // comparison leaves the whole workspace gate green (`HANDOVER.md` §35.2).
     //
-    //     let filled = source.fill(&mut whole).await?;
-    //     let expected = source.sealed().await?;      // <-- returns ShortWrite
-    //     if filled as u64 != size { return Err(ShortWrite { .. }) }
+    // What was **not** correct was the sentence it ended with: that an edit
+    // moving `sealed` below the comparison "would make the check reachable and
+    // this test's name a lie — which is the failure mode worth a test". That
+    // edit was made and the gate stayed green, this test included. Through an
+    // `ObjectStream` the two orderings are indistinguishable: both refuse, with
+    // the same error and the same two numbers. A test cannot see the difference,
+    // and a comment claiming it can is the kind of claim this project treats as
+    // a defect in its own right.
     //
-    // `sealed` is `window()` followed by `agreed()`, and `agreed` refuses with
-    // `StoreError::ShortWrite { expected: len, actual: consumed }` whenever the
-    // producer handed over fewer bytes than it declared
-    // (`incoming/stream.rs`). `filled` **is** `consumed` for this arm — one
-    // `fill` over one buffer of exactly `size` — so `filled != size` implies
-    // `consumed != len`, which means the `?` one line earlier has already
-    // returned. The third line is unreachable, and its error would be identical
-    // if it were not.
+    // The comparison now lives in `dctl_store::incoming::whole`, behind a trait
+    // narrow enough that a fake can answer the two questions differently — which
+    // is the only way either the comparison or the ordering becomes something a
+    // test can turn red. Those tests are there.
     //
-    // The `?` ordering is the whole of it, and it is not accidental: `sealed`
-    // has to run before anything is committed, and running it before the length
-    // check is what makes the *stricter* refusal the one that fires. A future
-    // edit that moved `sealed` below the check would make the check reachable
-    // and this test's name a lie — which is the failure mode worth a test.
-    //
-    // Asserted rather than asserted-about: the same short-producer input, driven
-    // through the real backend, must come back with the error `agreed` produces.
-    // The assertion is on the *numbers*, because that is what tells the two
-    // apart — `agreed` reports the whole object's declaration and what arrived,
-    // while the dead check would report the same two values by construction.
+    // What is left here is the half that belongs to **this backend**: the same
+    // short producer, driven through the real S3 client against the mock, comes
+    // back with the seal's refusal and its numbers, and the provider is left
+    // holding nothing.
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -1735,7 +1729,7 @@ fn the_single_shot_arms_own_length_check_cannot_fire_and_the_line_above_it_is_wh
         let error = s3
             .put_stream(&key("dead-check"), stream, SourceModified::unknown())
             .await
-            .expect_err("a short object is refused either way");
+            .expect_err("a short object is refused");
         producing.await.expect("the producer ran");
 
         match error {

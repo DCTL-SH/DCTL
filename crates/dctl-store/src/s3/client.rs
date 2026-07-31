@@ -132,6 +132,12 @@ pub(crate) struct S3Client {
 }
 
 impl S3Client {
+    /// The multipart part size this client cuts at. See
+    /// [`S3Backend::part_size`](super::S3Backend::part_size).
+    pub(crate) const fn part_size(&self) -> u64 {
+        self.config.part_size()
+    }
+
     pub(crate) fn new(config: S3Config, deadlines: Deadlines) -> Result<Self> {
         Ok(Self {
             http: crate::tls::post_quantum_client(deadlines)?,
@@ -636,23 +642,13 @@ impl S3Client {
         let size = source.len();
 
         if !streaming::use_multipart(size, self.config.part_size()) {
-            let mut whole = vec![
-                0u8;
-                usize::try_from(size).map_err(|_| {
-                    StoreError::Backend("object too large for this machine's address space".into())
-                })?
-            ];
-            let filled = source.fill(&mut whole).await?;
-            // `sealed` rather than `agreed`, for the reason that method gives:
-            // `fill` has not yet seen the stream's terminal message.
-            let expected = source.sealed().await?;
-            if filled as u64 != size {
-                return Err(StoreError::ShortWrite {
-                    expected: size,
-                    actual: filled as u64,
-                });
-            }
-            return self.put(key, Bytes::from(whole), &expected, modified).await;
+            // The buffer and both of the questions that have to be answered
+            // before it may be committed — shared with B2's identical arm, and
+            // behind a seam, because through an `ObjectStream` the two answers
+            // cannot disagree and a check no input reaches is a check no test
+            // holds. See `crate::incoming::whole`.
+            let (whole, expected) = crate::incoming::drain_whole(&mut source, size).await?;
+            return self.put(key, whole, &expected, modified).await;
         }
 
         let create = self

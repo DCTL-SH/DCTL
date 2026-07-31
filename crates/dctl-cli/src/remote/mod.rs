@@ -74,6 +74,7 @@ pub mod registry;
 pub mod resolve;
 pub mod sftp_base;
 pub mod spec;
+pub mod vars;
 
 pub use place::Place;
 pub use plain::PlainRemote;

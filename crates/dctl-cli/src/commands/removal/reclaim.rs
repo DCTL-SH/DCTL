@@ -152,7 +152,7 @@ use crate::source::{Entry, Source as _};
 
 use super::report::Report;
 use super::selection::Item;
-use super::target::Target;
+use super::target::Scoped;
 
 /// A class of reclaimable debris.
 ///
@@ -256,20 +256,84 @@ struct Aging {
     min_age: Duration,
 }
 
+/// What a sweep may do with one piece of debris, once its age has been read.
+///
+/// The whole of the decision, and the reason it is a value rather than two
+/// `return`s inside a loop: the two things a sweep enumerates — staged and
+/// orphaned *objects*, and unfinished multipart *uploads* — reach it down
+/// different paths, and the decision used to be written out separately in each.
+/// Two copies of a rule are two rules the day one is edited, and a test covering
+/// one copy leaves the other deletable with the gate staying green. That is
+/// exactly what had happened: deleting the "unknown is not old" arm from both
+/// left `cargo test --workspace` entirely green (`HANDOVER.md` §35.3).
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Sweepable {
+    /// Old enough that nothing living can plausibly still be using it.
+    Reclaim,
+    /// Left where it is, carrying the sentence that says why — which is
+    /// reported rather than swallowed, because debris that was seen and left is
+    /// not debris that was not there.
+    Held(String),
+}
+
+impl Aging {
+    /// How long ago something last written at `modified_unix` was written, or
+    /// [`None`] when the provider would not say.
+    ///
+    /// A modification time in the future yields [`Duration::ZERO`] rather than
+    /// an error: clock skew between a provider and this machine is ordinary, and
+    /// the effect of clamping is that a skewed object is treated as brand new —
+    /// the conservative direction, since the alternative is sweeping live work.
+    fn age_of(self, modified_unix: Option<i64>) -> Option<Duration> {
+        let modified = modified_unix?;
+        Some(Duration::from_secs(
+            self.now.saturating_sub(modified).max(0).unsigned_abs(),
+        ))
+    }
+
+    /// The verdict on one piece of debris last written at `modified_unix`.
+    fn verdict(self, modified_unix: Option<i64>) -> Sweepable {
+        let Some(age) = self.age_of(modified_unix) else {
+            // Unknown is not old. A provider that reports no modification time
+            // gives no basis for calling anything abandoned, and guessing here
+            // would mean deleting another process's live work. Held rather than
+            // passed over: the object is real, it is being paid for, and a sweep
+            // that decided not to touch it has to say which object and why.
+            return Sweepable::Held(AGE_UNKNOWN_REASON.to_string());
+        };
+        if age < self.min_age {
+            // The first sweep after any interruption lands here — the default
+            // `--min-age` is a day and the debris is minutes old — so this is
+            // the branch a real operator actually meets, and it used to return
+            // in silence, which is what let `no reclaimable debris found` be
+            // printed over a full-size staging file.
+            return Sweepable::Held(format!(
+                "younger than {}",
+                size::duration(self.min_age.as_secs())
+            ));
+        }
+        Sweepable::Reclaim
+    }
+}
+
 /// Sweep every requested class.
 ///
 /// # Errors
 /// Whatever building the backend, listing it, or writing the report reported. A
 /// failure to delete one object is recorded and the sweep continues, exactly as
 /// on the object side.
+/// Takes a [`Scoped`] rather than a [`Target`], because a sweep addresses inside
+/// a store the remote has already named — see [`Scoped`] for what the two mean
+/// and what swapping them costs.
 pub async fn sweep(
     ctx: &Ctx,
     op: &'static str,
     medium: &super::medium::Medium,
-    target: &Target,
+    scoped: &Scoped,
     request: &Request<'_>,
     report: &mut Report<'_>,
 ) -> Result<()> {
+    let target = scoped.inside();
     let Request {
         classes,
         min_age,
@@ -509,15 +573,8 @@ async fn reclaim_upload(
         kind: REMOVAL_KIND_MULTIPART,
     };
 
-    let Some(started) = upload.started_unix else {
-        return report.held(&item, AGE_UNKNOWN_REASON);
-    };
-    let age = Duration::from_secs(aging.now.saturating_sub(started).max(0).unsigned_abs());
-    if age < aging.min_age {
-        return report.held(
-            &item,
-            format!("younger than {}", size::duration(aging.min_age.as_secs())),
-        );
+    if let Sweepable::Held(reason) = aging.verdict(upload.started_unix) {
+        return report.held(&item, reason);
     }
 
     if ctx.is_dry_run() {
@@ -610,7 +667,7 @@ async fn reclaim(
     kind: &'static str,
     report: &mut Report<'_>,
 ) -> Result<()> {
-    let age = age_of(&entry, aging.now);
+    let verdict = aging.verdict(entry.modified_unix);
 
     let item = Item {
         path: entry.path,
@@ -618,24 +675,8 @@ async fn reclaim(
         kind,
     };
 
-    let Some(age) = age else {
-        // Unknown is not old. A provider that reports no modification time gives
-        // no basis for calling anything abandoned, and guessing here would mean
-        // deleting another process's live work. Held rather than passed over:
-        // the object is real, it is being paid for, and a sweep that decided not
-        // to touch it has to say which object and why.
-        return report.held(&item, AGE_UNKNOWN_REASON);
-    };
-    if age < aging.min_age {
-        // The first sweep after any interruption lands here — the default
-        // `--min-age` is a day and the debris is minutes old — so this is the
-        // branch a real operator actually meets, and it used to return in
-        // silence, which is what let `no reclaimable debris found` be printed
-        // over a full-size staging file.
-        return report.held(
-            &item,
-            format!("younger than {}", size::duration(aging.min_age.as_secs())),
-        );
+    if let Sweepable::Held(reason) = verdict {
+        return report.held(&item, reason);
     }
 
     if ctx.is_dry_run() {
@@ -726,19 +767,6 @@ impl Store {
 /// opinion; it is the one opinion, checked where the irreversible thing happens.
 fn is_staged(key: &str) -> bool {
     dctl_store::is_staging_key(key)
-}
-
-/// How long ago `entry` was last written, or [`None`] if that is not knowable.
-///
-/// A modification time in the future yields [`Duration::ZERO`] rather than an
-/// error: clock skew between a provider and this machine is ordinary, and the
-/// effect of clamping is that a skewed object is treated as brand new — the
-/// conservative direction, since the alternative is sweeping live work.
-fn age_of(entry: &Entry, now: i64) -> Option<Duration> {
-    let modified = entry.modified_unix?;
-    Some(Duration::from_secs(
-        now.saturating_sub(modified).max(0).unsigned_abs(),
-    ))
 }
 
 /// The current time in unix seconds, or [`None`] if the clock is unreadable.
@@ -833,24 +861,84 @@ mod tests {
         }
     }
 
+    /// A sweep started at `now`, refusing to touch anything younger than a day.
+    const fn aging(now: i64) -> Aging {
+        Aging {
+            now,
+            min_age: Duration::from_secs(24 * 60 * 60),
+        }
+    }
+
     #[test]
     fn age_is_measured_from_the_modification_time() {
-        let entry = Entry::new("o/a", 10).with_modified(Some(1_000));
-        assert_eq!(age_of(&entry, 1_060), Some(Duration::from_secs(60)));
+        assert_eq!(
+            aging(1_060).age_of(Some(1_000)),
+            Some(Duration::from_secs(60))
+        );
     }
 
     #[test]
     fn an_object_with_no_modification_time_has_no_age() {
         // Unknown is not old. Anything else would sweep another run's live work.
-        assert_eq!(age_of(&Entry::new("o/a", 10), 1_000), None);
+        assert_eq!(aging(1_000).age_of(None), None);
     }
 
     #[test]
     fn a_future_timestamp_is_clamped_to_brand_new_rather_than_wrapping() {
         // Provider clock skew is ordinary; a wrapped age would read as ancient
         // and sweep an object written seconds ago.
-        let entry = Entry::new("o/a", 10).with_modified(Some(i64::MAX));
-        assert_eq!(age_of(&entry, 0), Some(Duration::ZERO));
+        assert_eq!(aging(0).age_of(Some(i64::MAX)), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn debris_whose_age_the_provider_will_not_state_is_held_and_the_reason_says_so() {
+        // **The arm nothing in the workspace could turn red.** Both call sites
+        // used to spell it out for themselves, and deleting it from both — so
+        // that a sweep silently passed over debris it could not age — left
+        // `cargo test --workspace --no-fail-fast` entirely green.
+        //
+        // What deleting it costs is not a missing line of output. `report.held`
+        // is what stops `note_empty` printing `no reclaimable debris found`, so
+        // a sweep that passed over an unageable object in silence reports a
+        // clean store over debris it had just looked at and declined to touch —
+        // the false all-clear this family exists not to print.
+        assert_eq!(
+            aging(1_000).verdict(None),
+            Sweepable::Held(AGE_UNKNOWN_REASON.to_string()),
+            "unknown is not old, and it is not nothing either"
+        );
+    }
+
+    #[test]
+    fn debris_younger_than_the_minimum_is_held_and_the_reason_names_the_minimum() {
+        // The branch a real operator meets: the first sweep after an interrupted
+        // transfer, minutes after it. The reason has to carry the number,
+        // because the operator's next move is to decide whether to lower it.
+        let verdict = aging(1_000).verdict(Some(940));
+        let Sweepable::Held(reason) = verdict else {
+            panic!("an hour-old file must not be swept under a day's minimum");
+        };
+        assert!(reason.contains("younger than"), "{reason}");
+        assert!(
+            reason.contains("1d"),
+            "the minimum has to be in it: {reason}"
+        );
+    }
+
+    #[test]
+    fn debris_older_than_the_minimum_is_what_a_sweep_is_for() {
+        // The control that makes the two above mean something: with the same
+        // `Aging`, something genuinely old is reclaimable — so a `verdict` that
+        // held everything would fail here rather than read as caution.
+        assert_eq!(aging(1_000_000).verdict(Some(1_000)), Sweepable::Reclaim);
+        // And exactly at the boundary, which is the one an operator setting
+        // `--min-age` to match their transfer timeout is relying on.
+        let day = 24 * 60 * 60;
+        assert_eq!(aging(day).verdict(Some(0)), Sweepable::Reclaim);
+        assert!(matches!(
+            aging(day - 1).verdict(Some(0)),
+            Sweepable::Held(_)
+        ));
     }
 
     #[test]

@@ -168,24 +168,11 @@ impl Target {
                 path: self.path.clone(),
             },
             // The local path is the source's root, so the whole of it goes into
-            // the spec and none of it into the prefix — see [`Target::prefix`].
+            // the spec and none of it into the prefix. The prefix is not this
+            // type's to state: `crate::source::open` produces it, from the
+            // resolver, and hands it back joined to the source it scopes — see
+            // `crate::source::open::Opened`.
             None => RemoteSpec::Local(PathBuf::from(&self.path)),
-        }
-    }
-
-    /// The logical prefix a source opened on [`Target::spec`] should be scoped
-    /// to.
-    ///
-    /// Empty for a local target, and that is not an oversight: a
-    /// [`RemoteSpec::Local`] addresses a *directory*, so the scoping has already
-    /// been applied by pointing the source at it. Passing the same path again as
-    /// a prefix would look for `./photos/./photos` and find nothing, while
-    /// reporting an empty tree as though the directory were empty.
-    #[must_use]
-    pub fn prefix(&self) -> &str {
-        match &self.remote {
-            Some(_) => &self.path,
-            None => "",
         }
     }
 
@@ -373,8 +360,6 @@ mod tests {
                 path: "photos/2024".into(),
             }
         );
-        assert_eq!(remote.prefix(), "photos/2024");
-
         let whole = Target::parse("vault:").unwrap();
         assert_eq!(
             whole.spec(),
@@ -383,17 +368,17 @@ mod tests {
                 path: String::new(),
             }
         );
-        assert_eq!(whole.prefix(), "");
     }
 
     #[test]
-    fn a_local_target_carries_its_whole_path_into_the_spec_and_none_into_the_prefix() {
-        // Scoping a local source twice — once by pointing it at the directory
-        // and again by prefix — would look for `./photos/./photos` and report an
-        // empty tree rather than the files that are there.
+    fn a_local_target_carries_its_whole_path_into_the_spec() {
+        // The whole path goes into the spec, so the source is pointed straight at
+        // the directory. Scoping it a second time by prefix would look for
+        // `./photos/./photos` and report an empty tree rather than the files
+        // that are there — which is why the prefix a read is scoped by comes
+        // from `crate::source::open` and not from here.
         let local = Target::parse("./photos").unwrap();
         assert_eq!(local.spec(), RemoteSpec::Local(PathBuf::from("./photos")));
-        assert_eq!(local.prefix(), "");
 
         // The drive-letter rule survives the conversion, whichever way this
         // platform answers it — the two parsers must never disagree.

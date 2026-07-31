@@ -205,15 +205,7 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     // why there is no dry-run branch here at all: the command simply runs.
     let mut report = Report::new(target.to_string(), mode::slug(performed), assurance);
     report.filters_restricted(filter.is_restricting());
-    engine::verify(
-        ctx,
-        opened.source(),
-        opened.prefix(),
-        &filter,
-        args.fail_fast,
-        &mut report,
-    )
-    .await?;
+    engine::verify(ctx, &opened, &filter, args.fail_fast, &mut report).await?;
 
     report.emit(&ctx.out)?;
     // Text mode only, exactly as `scrub` does it: the JSON document already

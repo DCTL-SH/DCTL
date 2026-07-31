@@ -77,3 +77,16 @@ pub const WINDOWS_IN_FLIGHT: usize = 4;
 pub const fn pipe_peak_bytes() -> u64 {
     WINDOW_LEN as u64 * (WINDOWS_IN_FLIGHT as u64 + 2)
 }
+
+/// What a whole-object arm says when the declared length will not fit a
+/// `usize`.
+///
+/// A named constant rather than a literal in each backend because both of them
+/// used to carry their own copy of the sentence, and two copies of a message are
+/// two messages the day one of them is reworded — an operator grepping their logs
+/// for the first spelling would find half their failures.
+///
+/// It is a real case rather than a formality on a 32-bit target, where the
+/// largest object this arm could hold is 4 GiB and a provider will happily
+/// declare more.
+pub const WHOLE_OBJECT_TOO_LARGE: &str = "object too large for this machine's address space";

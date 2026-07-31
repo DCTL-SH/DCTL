@@ -120,25 +120,64 @@ impl Target {
     /// The *typed* target stays the one the report and every message quote, so
     /// an operator still reads their own argument back.
     ///
+    /// It comes back as a [`Scoped`] rather than as another `Target` because
+    /// "remembering which of two to use" is not something a comment can enforce.
+    /// Both halves of this fix — the store opened with the typed target, the
+    /// selection made with the scoped one — were a single line each, both were
+    /// got wrong once already, and putting either back left
+    /// `cargo test --workspace` entirely green (`HANDOVER.md` §35.3). Two types
+    /// is what makes each of them a compile error instead.
+    ///
     /// # Errors
     /// Whatever [`crate::remote::resolve`] reported — an unknown remote, a
     /// missing required setting, a malformed `chunk_size`. A removal that cannot
     /// say where it would look must not guess: guessing produces an empty
     /// selection, and an empty selection is reported as `0 object(s)` at exit 0.
-    pub fn scoped_to(&self, ctx: &crate::ctx::Ctx) -> Result<Self> {
+    pub fn scoped_to(&self, ctx: &crate::ctx::Ctx) -> Result<Scoped> {
         let path = crate::config::resolve_path(ctx.globals.config.as_deref());
         let configured = crate::config::load_or_default(&path)?;
         let spec = crate::remote::RemoteSpec::Named {
             remote: self.remote.clone(),
             path: self.path.clone(),
         };
-        Ok(Self {
+        Ok(Scoped(Self {
             remote: self.remote.clone(),
             path: crate::remote::resolve::logical_prefix(
                 &spec,
                 &crate::commands::config::settings::catalog(&configured),
             )?,
-        })
+        }))
+    }
+}
+
+/// A target whose path addresses **inside** the store its remote already named.
+///
+/// The output of [`Target::scoped_to`], and a type of its own so that the two
+/// cannot be swapped. They are the same shape and mean opposite things:
+///
+/// * [`Medium::open`](super::medium::Medium::open) takes the **typed** target,
+///   because opening the store is what *consumes* the bucket —
+///   `b2:DCTL001/2019` has to reach the resolver whole or there is nothing to
+///   split. Handing it a scoped one makes the resolver read `2019` as the bucket
+///   name, which is what a first attempt at this fix produced against live B2:
+///   `deletefile b2:DCTL001/a.txt` answered `object not found: bucket a.txt`.
+/// * [`selection::select`](super::selection::select) and
+///   [`reclaim::sweep`](super::reclaim::sweep) take the **scoped** one, because
+///   selecting addresses inside the store the bucket already named. Handing
+///   either the typed one looks under `DCTL001/2019/` *inside* `DCTL001`,
+///   matches nothing, and reports `OK removed: 0 object(s)` at exit 0 — which a
+///   retention job records as a year reclaimed.
+///
+/// Deliberately no `Deref` and no `From`: either would make `&Scoped` coerce
+/// back to `&Target` and hand the mistake straight back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Scoped(Target);
+
+impl Scoped {
+    /// The target underneath, for the two calls that address inside a store that
+    /// is already open.
+    pub(super) const fn inside(&self) -> &Target {
+        &self.0
     }
 }
 
@@ -205,11 +244,15 @@ mod tests {
                 .scoped_to(&ctx)
                 .expect("a shorthand resolves with no config file");
             assert_eq!(
-                scoped.path, expected,
+                scoped.inside().path,
+                expected,
                 "'{written}' would delete under the wrong prefix"
             );
             // The remote half is untouched: only the path is re-scoped.
-            assert_eq!(scoped.remote, parse(written).expect("parses").remote);
+            assert_eq!(
+                scoped.inside().remote,
+                parse(written).expect("parses").remote
+            );
         }
     }
 

@@ -103,6 +103,14 @@ impl R2Backend {
         })
     }
 
+    /// The multipart part size this backend will cut at, after a remote's
+    /// `chunk_size` — or the compiled default — has been applied. See
+    /// [`S3Backend::part_size`](crate::s3::S3Backend::part_size).
+    #[must_use]
+    pub const fn part_size(&self) -> u64 {
+        self.client.part_size()
+    }
+
     /// The same backend, declaring every part and body chunk it moves to
     /// `meter`. A builder, for the reason [`crate::LocalFs::with_meter`] gives.
     #[must_use]

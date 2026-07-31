@@ -39,6 +39,7 @@ use crate::commands::listing::{self, Filter};
 use crate::ctx::Ctx;
 use crate::error::Result;
 use crate::source::Source;
+use crate::source::open::Opened;
 
 use super::plan::Plan;
 use super::report::{Record, Report};
@@ -50,15 +51,20 @@ use super::report::{Record, Report};
 /// enumerated. A failure to read one object is a verdict on that object and
 /// never an error here, because a run that stopped at the first damaged file
 /// would answer a much less useful question than the one that was asked.
+/// Takes an [`Opened`] rather than a source and a prefix for the reason
+/// [`super::super::verify::engine::verify`] gives: the two were separate
+/// parameters, `scrub` passed the spec's path instead of the resolver's prefix,
+/// and nothing in the workspace could turn that red.
 pub async fn scrub(
     ctx: &Ctx,
-    source: &dyn Source,
-    prefix: &str,
+    opened: &Opened,
     filter: &Filter,
     plan: &Plan,
     report: &mut Report,
 ) -> Result<()> {
-    let mut entries = source.enumerate(prefix).await?;
+    let source = opened.source();
+    let prefix = opened.prefix();
+    let mut entries = opened.enumerate().await?;
     let mut errors = 0;
 
     while let Some(entry) = entries.next().await? {
@@ -118,6 +124,17 @@ async fn examine(ctx: &Ctx, source: &dyn Source, path: &str) -> Verdict {
 
 #[cfg(test)]
 mod tests {
+
+    /// Pair a source with the prefix a read of it is scoped by, the way
+    /// `crate::source::open` does for a real run.
+    ///
+    /// The engines take the two together rather than as separate parameters,
+    /// because as separate parameters the call site passed the wrong prefix and
+    /// nothing in the workspace could turn that red — see the function's own
+    /// documentation.
+    fn opened(source: impl Source + 'static, prefix: &str) -> Opened {
+        Opened::for_test(Box::new(source), prefix)
+    }
     use super::*;
     use crate::cli::GlobalArgs;
     use crate::constants::{SCRUB_FULL_SAMPLE_PERCENT, SCRUB_MAX_ERRORS_UNLIMITED};
@@ -173,8 +190,7 @@ mod tests {
         let mut report = report();
         scrub(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             &full_plan(),
             &mut report,
@@ -206,8 +222,7 @@ mod tests {
         let mut report = report();
         scrub(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             &plan,
             &mut report,
@@ -230,8 +245,7 @@ mod tests {
         let mut report = report();
         scrub(
             &ctx(&[]),
-            &source,
-            "photos",
+            &opened(source, "photos"),
             &Filter::default(),
             &full_plan(),
             &mut report,
@@ -319,8 +333,7 @@ mod tests {
         );
         scrub(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             &full_plan(),
             &mut report,
@@ -351,8 +364,7 @@ mod tests {
         );
         scrub(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             &full_plan(),
             &mut report,
@@ -388,8 +400,7 @@ mod tests {
         );
         scrub(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             &plan,
             &mut report,
@@ -417,8 +428,7 @@ mod tests {
         let mut report = report();
         scrub(
             &ctx(&[]),
-            &source,
-            "",
+            &opened(source, ""),
             &Filter::default(),
             &plan,
             &mut report,
@@ -435,9 +445,15 @@ mod tests {
         let context = ctx(&["--include", "*.jpg"]);
         let filter = Filter::from_globals(&context.globals).expect("the pattern compiles");
         let mut report = report();
-        scrub(&context, &source, "", &filter, &full_plan(), &mut report)
-            .await
-            .unwrap();
+        scrub(
+            &context,
+            &opened(source, ""),
+            &filter,
+            &full_plan(),
+            &mut report,
+        )
+        .await
+        .unwrap();
         assert_eq!(report.coverage.scanned, 1);
     }
 }

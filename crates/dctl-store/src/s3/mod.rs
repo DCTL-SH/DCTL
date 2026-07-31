@@ -48,6 +48,21 @@ impl S3Backend {
         })
     }
 
+    /// The multipart part size this backend will cut at, after a remote's
+    /// `chunk_size` — or the compiled default — has been applied.
+    ///
+    /// Public for the reason
+    /// [`B2Backend::upload_peak_bytes`](crate::b2::B2Backend::upload_peak_bytes)
+    /// is: a setting that travels four layers — configuration file, resolver,
+    /// `Target`, constructor — needs something observable at the far end, or the
+    /// last step of the journey is a line no test can check. It was exactly that
+    /// line on B2 that `HANDOVER.md` §35.3 measured as deletable with the whole
+    /// gate staying green.
+    #[must_use]
+    pub const fn part_size(&self) -> u64 {
+        self.client.part_size()
+    }
+
     /// The same backend, declaring every part and body chunk it moves to
     /// `meter`. A builder, for the reason [`crate::LocalFs::with_meter`] gives.
     #[must_use]

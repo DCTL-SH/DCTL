@@ -56,11 +56,14 @@
 
 pub mod constants;
 mod stream;
+mod whole;
 mod writer;
 
 pub use constants::{WINDOW_LEN, WINDOWS_IN_FLIGHT, pipe_peak_bytes};
 pub use stream::ObjectStream;
 pub use writer::ObjectWriter;
+
+pub(crate) use whole::drain_whole;
 
 use crate::checksum::{ContentHash, HashAlgo};
 
