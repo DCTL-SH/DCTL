@@ -162,6 +162,17 @@ impl From<StoreError> for CliError {
                     .with_hint(retry_hint(attempts))
             }
 
+            // The run's own `--max-duration`, and its own exit code. Reporting
+            // it as a temporary error — which is what `Transport` would have
+            // made it — would tell a scheduler to back off and try again, about
+            // a run that did exactly what it was told to do. `HANDOVER.md`
+            // §32.9 is the measurement behind the flag; exit 10 is how a
+            // wrapper tells "my window ran out" from "the network broke".
+            StoreError::RunDeadline { .. } => {
+                Self::new(ExitCode::DurationLimitExceeded, error.to_string())
+                    .with_hint(crate::constants::MAX_DURATION_HINT)
+            }
+
             // Fatal, and fatal is the point: every remaining file would be
             // written into the same wrong place, and the run that this replaced
             // reported all of them as stored. See `dctl_store::local::root`.
@@ -350,6 +361,7 @@ impl CliError {
                 ExitCode::TemporaryError
             }
             StoreError::RootChanged { .. } => ExitCode::FatalError,
+            StoreError::RunDeadline { .. } => ExitCode::DurationLimitExceeded,
             StoreError::Io(source) if dctl_store::durable::is_out_of_space(source) => {
                 ExitCode::FatalError
             }
@@ -419,6 +431,9 @@ mod tests {
                 backend: "sftp",
                 detail: "connection reset".into(),
             },
+            StoreError::RunDeadline {
+                limit: std::time::Duration::from_secs(30),
+            },
             // A retry record over a failure whose code is *not* the temporary
             // one, so a mapping that answered from the wrapper instead of from
             // what it wraps is caught rather than accidentally right.
@@ -429,6 +444,32 @@ mod tests {
                 ))),
             },
         ]
+    }
+
+    #[test]
+    fn a_run_that_ran_out_of_time_is_not_reported_as_a_network_problem() {
+        // Exit 10, not exit 5, and the distinction is what a scheduler branches
+        // on. `--max-duration` doing what it was told is not a temporary error,
+        // and telling a wrapper to back off and retry would turn a working flag
+        // into a job that runs twice.
+        let err = CliError::from(StoreError::RunDeadline {
+            limit: std::time::Duration::from_secs(30),
+        });
+        assert_eq!(err.code(), ExitCode::DurationLimitExceeded);
+        assert!(
+            err.message().contains("--max-duration"),
+            "{}",
+            err.message()
+        );
+        let hint = err.hint().unwrap_or_default();
+        assert!(
+            !hint.to_lowercase().contains("exhaust"),
+            "a deadline is not exhausted retries: {hint}"
+        );
+        assert!(
+            hint.contains("cleanup"),
+            "a hard cutoff leaves debris and must say how to reclaim it: {hint}"
+        );
     }
 
     #[test]

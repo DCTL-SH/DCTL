@@ -416,9 +416,11 @@ checked before anything is listed).
 | `--timeout` | `SECONDS` | `300` | — |
 | `--contimeout` | `SECONDS` | `60` | — |
 | `--max-transfer` | `SIZE` | unlimited | — |
+| `--max-duration` | `DURATION` | unlimited | — |
 
-Every flag in this group used to parse and do nothing. Five now act
-(`--bwlimit`, `--retries`, `--max-transfer`, `--timeout`, `--contimeout`), two
+Every flag in this group used to parse and do nothing. Six now act
+(`--bwlimit`, `--retries`, `--max-transfer`, `--max-duration`, `--timeout`,
+`--contimeout`), two
 accept only the value that is true of this build (`--transfers 1`,
 `--checkers 1`), and one is **refused** with the reason — exit **7**, before
 anything is read or written, the way [`--key-file`](#--key-file-path) is. There
@@ -535,12 +537,22 @@ flag (`fs/config.go:122`: *"IO idle timeout"*) and the reason its default is
 generous: a deadline that fires on a transfer which is succeeding destroys work,
 where one that fires late only costs you the difference.
 
-It bounds **one attempt**. A run that meets a genuinely dead network spends this
-long per attempt across the request-level schedule
-([`--low-level-retries`](#--low-level-retries-n) describes it), so the bound on
-the whole run is the product — roughly six times this number plus the backoff.
-An operator sizing a backup window needs the product, so it is stated here rather
-than left to be discovered.
+**It bounds one attempt, and it does not bound the run.** That sentence used to
+read *"the bound on the whole run is the product — roughly six times this number
+plus the backoff"*, and that was wrong twice over. It was wrong as arithmetic:
+the schedule runs once per **distinct request**, and one copy makes several —
+so a 160 MiB upload runs it for `b2_upload_part`, again for
+`b2_cancel_large_file` and again for `b2_list_buckets` — and `--retries`
+multiplies all of it. And it was wrong as a promise, because the number it
+offered was not a bound at all. Measured against live B2 with the route
+black-holed and `--retries 1`, `--timeout 30` reported its first failure at
+**30 s**, to the second, and the run had **not ended 943.6 s after the cut**.
+An `sftp:` copy under the same flags had not ended after **601 s**.
+
+If you need the run to be over by a certain time, use
+[`--max-duration`](#--max-duration-duration). It is the only flag that bounds a
+run, and this one cannot be made to: an inactivity deadline that behaved like a
+stopwatch would kill every large transfer it is there to protect.
 
 Where it reaches, and how closely:
 
@@ -576,9 +588,17 @@ backoff and nothing else — which is why this is an order of magnitude more
 impatient than the deadline on a transfer already carrying data.
 
 On `b2`, `s3` and `r2` it bounds the TCP connect **and** the TLS handshake. On
-`sftp` it becomes `ssh -o ConnectTimeout`, so it bounds the whole chain — a
-`ProxyCommand` building a tunnel, the TLS session inside it, and the SSH
-handshake — rather than only the part DCTL could see for itself.
+`sftp` it is applied twice over: it becomes `ssh -o ConnectTimeout`, so the whole
+chain a `ProxyCommand` builds is bounded from the inside, **and** it bounds the
+dial itself from the outside. The second one is not belt-and-braces —
+`ConnectTimeout` covers the TCP connect and stops watching after it, so a route
+black-holed once the connection is up, a host that never offers the `sftp`
+subsystem, and a tunnel that authenticates and then goes quiet are all past its
+reach. That gap is what left a black-holed `sftp:` run alive **601 s** after a
+30 s deadline had fired: the session was discarded correctly, a replacement was
+dialled, and the replacement hung.
+
+Like `--timeout`, it bounds **one attempt** and not the run.
 
 ### `--max-transfer SIZE`
 
@@ -602,6 +622,58 @@ What counts against the budget is bytes *measured leaving*, including every
 attempt of a retried file — because every attempt used the link and is on the
 invoice. Everything already transferred is committed and verified, so re-running
 the same command continues from where it stopped.
+
+### `--max-duration DURATION`
+
+Stop the whole run after this long (`30s`, `90m`, `4h`, `7d`, `off`; a bare
+number is seconds). **The flag that bounds a backup window, and the only one that
+does.** `--timeout` and `--contimeout` each bound one attempt; this bounds the
+invocation, from the moment it starts to the moment it must be over. A run that
+stops for this reason exits **10** (`duration_limit_exceeded`), so a scheduler
+can tell "my window ran out" from "the network broke" (exit 5) and from "some
+files failed" (exit 6).
+
+**It is a hard cutoff.** When the window closes the request in flight is
+cancelled, the retry loop is not re-entered, no further file is started, and the
+process exits with the counters showing what really completed. That is rclone's
+default for the same flag — `--cutoff-mode hard`, implemented by giving the
+transfer context a deadline (`fs/sync/sync.go:203-205`) — and it is what "be
+finished by 06:00" means. It is deliberately *not* the cautious behaviour
+`--max-transfer` uses, because there is no honest way to predict how long a file
+will take, and a flag that only stopped between files would not stop a run whose
+last object is a terabyte.
+
+**Nothing is left half-written by the cut.** A verified write commits only when
+the stored bytes match, so an abandoned object was never an object. What a cut
+transfer does leave is reclaimable debris — a staging file on `local:` and
+`sftp:`, an unfinished large file on B2 — and the message on the way out names
+`dctl cleanup`, which removes both. Re-running the same command continues from
+what landed, because the transfer verbs compare on size and modification time.
+
+It is enforced at three depths, because no one of them can promise the wall clock
+on its own:
+
+| Depth | What it stops | Why the one below it is not enough |
+|---|---|---|
+| the request | the read that will never return | a request that never answers is never *observed* to be late by anything above it |
+| the retry loop | the next attempt, and the backoff before it | a cancelled request classifies as transient, and six attempts of that is the arithmetic above |
+| the process | everything, including work no future owns | a blocking read, a `spawn_blocking`, an `ssh` child |
+
+**Where the between-files check applies, and where only the bound does.** The
+transfer family — `copy`, `move`, `sync`, `copyto`, `moveto` — declines to
+*start* a file once the window has closed, so the last line names the file it
+stopped at. `restore`, `cat`, `replicate`, `scrub`, `verify` and `check` do not
+pass through that pipeline and get no such line; they are still bounded, by the
+request-level and process-level enforcement above, and they still exit 10. That
+asymmetry is the same one [`--max-transfer`](#--max-transfer-size) has and it is
+named here for the same reason: it is a gap rather than a decision, and the
+honest fix is for those paths to share the pipeline rather than for six more
+call sites to grow their own check and drift.
+
+The duration dialect is the one [`--min-age`](#--min-age-age---max-age-age)
+uses. rclone accepts a compound Go duration here (`1h30m`) and DCTL does not —
+write `90m`. A value it cannot read is refused at the command line rather than
+silently leaving the run unbounded.
 
 ---
 

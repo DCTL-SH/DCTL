@@ -61,6 +61,7 @@
 use std::future::Future;
 use std::time::Duration;
 
+use crate::deadline::RunDeadline;
 use crate::error::{Result, StoreError};
 
 use super::constants::{
@@ -85,16 +86,23 @@ pub(super) struct Observed {
     pub code: Option<String>,
     /// The server's `Retry-After`, already parsed, when it sent one.
     pub retry_after: Option<Duration>,
-    /// The request succeeded and its answer is what is wrong.
+    /// Nothing another attempt can change, whatever the status says.
     ///
-    /// The row the status table cannot express, because there is no failing
-    /// status to key it on. B2 verifies an upload's body against the
+    /// Two things set it, and both are rows the status table cannot express
+    /// because there is no failing status to key them on.
+    ///
+    /// The first is an answer that *is* the finding. B2 verifies an upload's body against the
     /// `X-Bz-Content-Sha1` header it was sent and rejects a mismatch with `400`;
     /// so a `200` whose `contentSha1` is a *different* digest is B2 saying it
     /// accepted the bytes and holds something else. That is a settled fact about
     /// the object, not a pod that was busy, and re-sending the part cannot
     /// change it — it only spends the whole upload again, six times, before
     /// reporting the same thing.
+    ///
+    /// The second is the run's own `--max-duration` having closed while the
+    /// request was in flight. A window that has shut does not re-open, and
+    /// treating that as a transport failure is exactly what §32.9 measured:
+    /// the deadline fires on time and the schedule spends itself anyway.
     pub settled: bool,
 }
 
@@ -150,6 +158,21 @@ impl Attempt {
     /// A failure the answer itself established, which no further attempt can
     /// change. See [`Observed::settled`].
     pub(super) const fn settled(error: StoreError) -> Self {
+        Self {
+            observed: Observed::settled(),
+            error,
+        }
+    }
+
+    /// A failure the run's own deadline established.
+    ///
+    /// Classified as settled rather than as transport, which is what makes the
+    /// difference visible in the one place it decides anything: `verdict`
+    /// refuses to retry it. The loop also refuses on its own, before the next
+    /// request; both are here because a classification that said "worth another
+    /// attempt" about a closed window would be a trap for the next caller who
+    /// reads it.
+    pub(super) const fn run_deadline(error: StoreError) -> Self {
         Self {
             observed: Observed::settled(),
             error,
@@ -231,19 +254,46 @@ fn backoff(attempt: u32) -> Duration {
 }
 
 /// Run `attempt` until it succeeds, until [`verdict`] says another try cannot
-/// help, or until the attempt budget is spent — whichever comes first.
+/// help, until the attempt budget is spent, or until the run's own window
+/// closes — whichever comes first.
 ///
 /// `attempt` is handed the 1-based attempt number so a caller that must do
 /// something different on a retry (fetch a fresh upload URL, re-authorize) can
 /// see that it is one. `op` names the operation in the log line each retry
 /// emits, which is what makes a slow run explicable afterwards.
-pub(super) async fn run<T, A, F>(op: &'static str, mut attempt: A) -> Result<T>
+///
+/// # Why `deadline` is here as well as in [`crate::retry::driver`]
+///
+/// Because this loop is a *second* multiplier and §32.9 caught it being one.
+/// The 160 MiB upload that had not ended 943.6 s after the route was cut spent
+/// that time in `b2_upload_part`, `b2_cancel_large_file` and `b2_list_buckets`
+/// — three distinct requests, each running this schedule in full, underneath
+/// the operation-level loop that was running its own. A run-level bound
+/// enforced only at the layer above would have been a bound this layer could
+/// outlast.
+pub(super) async fn run<T, A, F>(
+    op: &'static str,
+    deadline: RunDeadline,
+    mut attempt: A,
+) -> Result<T>
 where
     A: FnMut(u32) -> F,
     F: Future<Output = std::result::Result<T, Attempt>>,
 {
     let mut number = 1u32;
     loop {
+        // Before the request, not merely before the retry: a run whose window
+        // has closed must not open another connection to B2, on the first
+        // attempt or the sixth.
+        if let Some(exceeded) = deadline.exceeded() {
+            tracing::debug!(
+                op,
+                attempts = number.saturating_sub(1),
+                "the run's deadline passed; no further b2 request was made"
+            );
+            return Err(exceeded.into_store_error());
+        }
+
         match attempt(number).await {
             Ok(value) => {
                 if number > 1 {
@@ -262,6 +312,10 @@ where
                     return Err(record(failed.error, number));
                 }
                 Verdict::After(delay) => {
+                    // Never longer than what is left of the run: a wait that
+                    // outlives the window it is inside is time spent on a run
+                    // that was supposed to be over.
+                    let delay = deadline.shorten(Some(delay)).unwrap_or(delay);
                     // WARN, not DEBUG. A retried request is the difference
                     // between a backup that took twenty minutes and one that took
                     // two hours, and an operator diagnosing the second one must
@@ -454,7 +508,7 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let calls = AtomicU32::new(0);
-        let value = run("test", |number| {
+        let value = run("test", RunDeadline::unbounded(), |number| {
             let seen = calls.fetch_add(1, Ordering::SeqCst) + 1;
             async move {
                 if seen < 3 {
@@ -486,7 +540,7 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let calls = AtomicU32::new(0);
-        let error = run("test", |_| {
+        let error = run("test", RunDeadline::unbounded(), |_| {
             calls.fetch_add(1, Ordering::SeqCst);
             async {
                 Err::<(), _>(Attempt {
@@ -521,7 +575,7 @@ mod tests {
         // The half the hint depends on. Without this the operation-level layer
         // above would spend a second budget on the same failure, and the
         // operator would be told a number that is the product of two schedules.
-        let error = run("test", |_| async {
+        let error = run("test", RunDeadline::unbounded(), |_| async {
             Err::<(), _>(Attempt {
                 observed: Observed {
                     status: Some(503),
@@ -537,5 +591,75 @@ mod tests {
 
         assert_eq!(error.attempts(), Some(RETRY_MAX_ATTEMPTS));
         assert!(error.to_string().contains("busy"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn no_b2_request_is_made_once_the_runs_window_has_closed() {
+        // §32.9's 160 MiB row spent its 943.6 s in three distinct B2 requests,
+        // each running this schedule in full. A run-level bound the layer above
+        // enforced alone would have been a bound this loop could outlast.
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let calls = AtomicU32::new(0);
+        let error = run(
+            "test",
+            RunDeadline::starting_at(
+                std::time::Instant::now() - Duration::from_secs(60),
+                Some(Duration::from_secs(30)),
+            ),
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Ok::<(), Attempt>(()) }
+            },
+        )
+        .await
+        .expect_err("the window is gone");
+
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert!(matches!(error, StoreError::RunDeadline { .. }), "{error}");
+    }
+
+    #[test]
+    fn a_request_the_runs_deadline_ended_is_never_retried() {
+        // The classification, asserted where it decides something. A closed
+        // window handed to `verdict` as a transport failure would be retried
+        // five more times into a run that is already over.
+        let ended = Attempt::run_deadline(StoreError::RunDeadline {
+            limit: Duration::from_secs(30),
+        });
+        assert_eq!(verdict(&ended.observed, 1), Verdict::Never);
+    }
+
+    #[tokio::test]
+    async fn a_run_with_time_left_is_retried_exactly_as_before() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let calls = AtomicU32::new(0);
+        let value = run(
+            "test",
+            RunDeadline::starting_now(Some(Duration::from_secs(600))),
+            |number| {
+                let seen = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if seen < 3 {
+                        Err(Attempt {
+                            observed: Observed {
+                                status: Some(503),
+                                code: None,
+                                retry_after: Some(Duration::ZERO),
+                                settled: false,
+                            },
+                            error: StoreError::Backend("busy".into()),
+                        })
+                    } else {
+                        Ok(number)
+                    }
+                }
+            },
+        )
+        .await
+        .expect("the third attempt succeeds");
+        assert_eq!(value, 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
     }
 }

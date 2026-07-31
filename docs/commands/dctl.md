@@ -491,9 +491,10 @@ never prompt for a password.
 | `--bwlimit <RATE>` | | Bandwidth limit, e.g. `10M`. `off` for unlimited. |
 | `--retries <N>` | `3` | Retries of a whole failed file. |
 | `--low-level-retries <N>` | **refused** | Request-level retries exist on every backend, but on a per-provider schedule of four numbers one `N` cannot set. |
-| `--timeout <SECONDS>` | `300` | Inactivity timeout on a transfer. |
-| `--contimeout <SECONDS>` | `60` | Connection timeout. |
+| `--timeout <SECONDS>` | `300` | Inactivity timeout on **one attempt**. Does not bound the run — see `--max-duration`. |
+| `--contimeout <SECONDS>` | `60` | Connection timeout on **one attempt**. Does not bound the run. |
 | `--max-transfer <SIZE>` | | Stop after transferring this much, e.g. `100G`. Exits **8**. |
+| `--max-duration <DURATION>` | | Stop the whole run after this long, e.g. `4h`. A hard cutoff. Exits **10**. |
 
 ### Filtering
 
@@ -578,7 +579,7 @@ Codes 0–10 mirror rclone's taxonomy so existing automation ports across. Codes
 | 7 | `fatal_error` | Fatal error; cannot continue. |
 | 8 | `transfer_limit_exceeded` | `--max-transfer` limit reached. |
 | 9 | `no_files_transferred` | Succeeded, but the run did no work. `dctl scrub` and `dctl verify` return it when the run read no object at all, and `dctl restore` when it wrote no file. No transfer verb returns it. |
-| 10 | `duration_limit_exceeded` | Reserved. `--max-duration` is not a flag in this build, so nothing produces this code yet — see [../EXIT_CODES.md](../EXIT_CODES.md). |
+| 10 | `duration_limit_exceeded` | `--max-duration` limit reached. A hard cutoff: work in flight is abandoned, the counters report what completed, and `dctl cleanup` reclaims what the cut transfer left. |
 | 20 | `checksum_mismatch` | Verified write refused: checksum mismatch. Nothing was committed. |
 | 21 | `integrity_failure` | AEAD authentication failed on read. The data was **not** served. |
 | 22 | `vault_locked` | Vault locked: wrong password or corrupt envelope. |

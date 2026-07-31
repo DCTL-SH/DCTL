@@ -472,7 +472,10 @@ async fn a_severed_session_is_re_dialled_and_the_write_lands() {
     // wraps it in production. Without it this call returns the transport error
     // and the operator does the re-dialling by hand, which is the state this
     // test exists to leave behind.
-    let retrying = dctl_store::Retrying::wrap(std::sync::Arc::new(sftp) as _);
+    let retrying = dctl_store::Retrying::wrap(
+        std::sync::Arc::new(sftp) as _,
+        dctl_store::RunDeadline::unbounded(),
+    );
     retrying
         .put(
             &ObjectKey::new("second.bin"),
@@ -617,7 +620,10 @@ async fn the_base_decision_survives_a_re_dial() {
     std::fs::remove_dir_all(mock.root().join("srv/store")).expect("the base is removed");
     mock.sever();
 
-    let retrying = dctl_store::Retrying::wrap(std::sync::Arc::new(sftp) as _);
+    let retrying = dctl_store::Retrying::wrap(
+        std::sync::Arc::new(sftp) as _,
+        dctl_store::RunDeadline::unbounded(),
+    );
     let _ = retrying
         .put(
             &ObjectKey::new("orphan.bin"),
@@ -1220,5 +1226,164 @@ async fn a_producer_that_stops_mid_object_leaves_no_staging_file_behind() {
     assert!(
         leftovers.is_empty(),
         "the short write left staging debris on the server: {leftovers:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The dial, bounded — `HANDOVER.md` §32.9's `sftp:` row
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// The measurement that opened this: a copy of thirty objects with
+// `--timeout 30 --retries 1`, loopback port 22 dropped six seconds in. The
+// deadline fired at **30 s**, to the second, and named itself. The session was
+// discarded correctly. A replacement was dialled — and hung on the same black
+// hole, with the run still alive when the harness killed it at **601 s**.
+// Twenty times the flag, and still going.
+//
+// Everything above the dial was working. The dial was the only step in the
+// cycle with nothing bounding it, and the two tests below are its two bounds.
+
+/// A deadline pair short enough for a test and long enough that a loaded
+/// scheduler is not what decides the outcome.
+///
+/// The connect half is deliberately the shorter of the two: a dial that ended on
+/// `--timeout` rather than on `--contimeout` would pass an assertion about
+/// *ending* while proving the wrong flag did it.
+///
+/// The idle half is three seconds rather than something generous, and the
+/// reason is a measurement. The **first** attempt after the wire dies does not
+/// reach the dial at all: `openssh_sftp_client` does not surface a severed
+/// session to a request already waiting for a reply — the note above
+/// [`REDIAL_DEADLINES`] records that — so that attempt costs the whole
+/// `--timeout` before the re-dial is even asked for. At thirty seconds this
+/// arithmetic put 30 s of `--timeout` in front of six 1 s dials and the test
+/// read 40 s, which was a true measurement of the wrong thing.
+const HANGING_DIAL_DEADLINES: Deadlines = Deadlines::from_seconds(1, 3);
+
+/// The network schedule with the waiting taken out.
+///
+/// Both tests below are about how long **one dial** may take, and the shipped
+/// schedule would bury that under 15.5 s of backoff across six attempts — so a
+/// generous assertion would pass whether or not the dial were bounded at all,
+/// and a tight one would be measuring `NETWORK_FIRST_BACKOFF`. The schedule
+/// itself is asserted exactly in `retry::backoff`'s own tests.
+fn impatient() -> dctl_store::retry::RetryPolicy {
+    dctl_store::retry::RetryPolicy {
+        first_backoff: std::time::Duration::ZERO,
+        max_backoff: std::time::Duration::ZERO,
+        ..dctl_store::retry::RetryPolicy::network()
+    }
+}
+
+/// A server, and the real backend in front of it with the retry layer installed
+/// exactly as `remote::registry::build` installs it in production.
+///
+/// The retry layer is not optional scenery here: it is what asks for a second
+/// connection after the first is discarded, and the re-dial is the step §32.9
+/// found unbounded. Without it these tests would measure one dead session.
+async fn redialing(deadlines: Deadlines) -> (RedialableSftp, std::sync::Arc<dyn Backend>) {
+    let mock = RedialableSftp::start();
+    std::fs::create_dir_all(mock.root().join("srv/store")).expect("the fixture directory");
+    let backend =
+        SftpBackend::over_dialer(mock.dialer(), "/srv/store", LinkPolicy::Skip, deadlines)
+            .await
+            .expect("the first conversation opens");
+    let retrying = dctl_store::Retrying::with_policy(
+        std::sync::Arc::new(backend) as _,
+        impatient(),
+        deadlines.run,
+    );
+    (mock, retrying)
+}
+
+async fn write_after_the_fault(backend: &std::sync::Arc<dyn Backend>) -> dctl_store::StoreError {
+    backend
+        .put(
+            &ObjectKey::new("after.bin"),
+            Bytes::from_static(b"after"),
+            &blake3(b"after"),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("there is nothing on the other end to write to")
+}
+
+#[tokio::test]
+async fn a_re_dial_into_a_black_hole_ends_at_contimeout_rather_than_hanging() {
+    let (mock, backend) = redialing(HANGING_DIAL_DEADLINES).await;
+
+    // The wire dies, and the far end stops answering new conversations too —
+    // which is what a black-holed route looks like from here, and what the
+    // §32.9 arm hit: the replacement `ssh` had nothing to talk to either.
+    mock.hang_on_dial();
+    mock.sever();
+
+    let started = std::time::Instant::now();
+    let error = write_after_the_fault(&backend).await;
+    let took = started.elapsed();
+
+    // One `--timeout` for the attempt that never reaches the dial, then five
+    // one-second dials with the backoff removed: about eight seconds. Thirty is
+    // generous against that and is nothing at all against a hang, which is the
+    // only other outcome available — an unbounded dial does not take longer,
+    // it never returns.
+    assert!(
+        took < std::time::Duration::from_secs(30),
+        "the dial hung: {took:?} for a --contimeout of 1s"
+    );
+    assert!(
+        error.to_string().contains("--contimeout"),
+        "the failure must name the flag that ended it, or an operator cannot \
+         tell a hung dial from a refused one: {error}"
+    );
+    assert!(
+        mock.dials() >= 2,
+        "a re-dial has to have been attempted, or this test proves only that \
+         nothing tried: {}",
+        mock.dials()
+    );
+    // Transient, because a host that is briefly unreachable really is worth
+    // another attempt. The bound is on how long each attempt may take, not on
+    // whether one is made.
+    assert!(
+        dctl_store::retry::Observed::of(&error).transient,
+        "a dial that timed out is worth trying again: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_run_out_of_time_stops_dialling_rather_than_starting_another_connection() {
+    // The other bound, and the one that ends a *run* rather than an attempt.
+    // `--contimeout 0` here on purpose: an operator who says "wait as long as it
+    // takes to reach the host" must still be able to say "but be finished by
+    // six", and before `--max-duration` those two sentences could not both be
+    // said. Without the run's deadline this call never returns.
+    let window = std::time::Duration::from_millis(400);
+    let (mock, backend) = redialing(
+        Deadlines::from_seconds(0, 0).within(dctl_store::RunDeadline::starting_now(Some(window))),
+    )
+    .await;
+
+    mock.hang_on_dial();
+    mock.sever();
+
+    let started = std::time::Instant::now();
+    let error = write_after_the_fault(&backend).await;
+    let took = started.elapsed();
+
+    assert!(
+        took < window * 20,
+        "the run outlived its own --max-duration: {took:?} for a {window:?} window"
+    );
+    assert!(
+        matches!(error.cause(), dctl_store::StoreError::RunDeadline { .. }),
+        "the run ended because its window closed and must say so, not report a \
+         network fault: {error:?}"
+    );
+    // And terminal, or the layer above spends its whole schedule re-dialling
+    // into a run that is already over — which is §32.9 with a new error type.
+    assert!(
+        !dctl_store::retry::Observed::of(&error).transient,
+        "a closed window is not worth another attempt: {error:?}"
     );
 }

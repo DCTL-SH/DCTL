@@ -3521,6 +3521,194 @@ fn max_transfer_smaller_than_the_first_file_moves_nothing() {
 }
 
 #[test]
+fn max_duration_stops_the_run_and_reaches_exit_10() {
+    // Exit code 10 was reserved and unreachable in every build, because
+    // `--max-duration` did not exist — and its absence was the defect
+    // `HANDOVER.md` §11.3 item 2 names: `--timeout` bounds one attempt, so a run
+    // that met a dead network had no flag that bounded it at all, and one
+    // measured against live B2 under `--timeout 30 --retries 1` was still going
+    // **943.6 s** after the cut. This is the test that makes the published
+    // contract real, against the real binary.
+    //
+    // The window is deliberately far too short rather than merely tight, so the
+    // assertion is about the *stop* and not about a race with the machine's
+    // load. A run that cannot start a file inside 1 ms is what "the window has
+    // closed" looks like from the pipeline, and it is the same code path a
+    // four-hour window reaches four hours in.
+    let sandbox = Sandbox::new();
+    for name in ["a.bin", "b.bin", "c.bin"] {
+        sandbox.write(&format!("src/{name}"), &vec![b'm'; 64 * 1024]);
+    }
+
+    let stopped = sandbox
+        .dctl()
+        .args(["--max-duration", "1ms", "copy", "src", "dst"])
+        // 10 = duration_limit_exceeded (docs/EXIT_CODES.md).
+        .assert()
+        .code(10);
+    let stderr = String::from_utf8_lossy(&stopped.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("--max-duration"),
+        "the stop must name the flag that caused it:\n{stderr}"
+    );
+    assert!(
+        stderr.contains("cleanup"),
+        "a hard cutoff leaves reclaimable debris and the hint must say so:\n{stderr}"
+    );
+    // Whatever landed, landed whole: a verified write commits nothing unless the
+    // stored bytes match, so a cut run must never leave a short object.
+    for file in all_files(&sandbox.path("dst")) {
+        assert_eq!(
+            std::fs::metadata(&file).expect("the file exists").len(),
+            64 * 1024,
+            "a run stopped at its deadline left a partial object: {file:?}"
+        );
+    }
+}
+
+#[test]
+fn max_duration_ends_the_process_rather_than_merely_reporting_the_deadline() {
+    // The half §32.9 is actually about. The deadline firing was never in doubt —
+    // it fired at exactly 30 s, to the second — and the run carried on for
+    // another fifteen minutes. So what is measured here is **wall time of the
+    // whole process**, against a run that would otherwise take far longer than
+    // its window: 2 MiB at 32 KiB/s is a minute of transfer, given two seconds.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/big.bin", &vec![b'x'; 2 * 1024 * 1024]);
+
+    let started = std::time::Instant::now();
+    sandbox
+        .dctl()
+        .args([
+            "--max-duration",
+            "2s",
+            "--bwlimit",
+            "32k",
+            "copy",
+            "src",
+            "dst",
+        ])
+        .assert()
+        .code(10);
+    let took = started.elapsed();
+
+    assert!(
+        took < std::time::Duration::from_secs(30),
+        "the run outlived its own --max-duration by more than an order of \
+         magnitude, which is the defect this flag exists to close: {took:?}"
+    );
+}
+
+#[test]
+fn max_duration_ends_the_process_even_when_the_work_it_stopped_cannot_be_cancelled() {
+    // The last place `--max-duration` could have failed to be a bound, and it
+    // did — found by the live proof and not by any test that existed at the
+    // time, which is why this one is here.
+    //
+    // A configured `local:` remote copies inside `spawn_blocking` and paces
+    // there with a real `std::thread::sleep`. `spawn_blocking` work cannot be
+    // cancelled: dropping the command future detaches it, and dropping the
+    // runtime then waits for the blocking pool to drain. Measured against the
+    // release binary, `--max-duration 3s` on 8 MiB at `--bwlimit 64k` printed
+    // its deadline on time and the process exited **126 seconds** later — the
+    // whole of the pacing, for bytes nobody would ever look at. The report was
+    // right and the run was still there, which is `HANDOVER.md` §32.9's
+    // complaint with a new cause.
+    //
+    // The **bare-path** form of the same copy exits on time and always did, so
+    // a test written against `copy src dst` — which is what the first spelling
+    // of this suite's deadline tests used — passes while the defect is present.
+    // The destination has to be a configured remote for the paced blocking path
+    // to be the one under test.
+    const WINDOW_SECS: u64 = 2;
+    // Four mebibytes at 32 KiB/s is 128 seconds of pacing: two orders of
+    // magnitude more than the window, so a process that waits for it cannot be
+    // mistaken for one that was merely slow.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/big.bin", &vec![b'p'; 4 * 1024 * 1024]);
+    let root = sandbox.dir("store");
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", root.display()))
+        .assert()
+        .success();
+
+    let started = std::time::Instant::now();
+    sandbox
+        .dctl()
+        .args([
+            "--no-ask-password",
+            "--bwlimit",
+            "32k",
+            "--max-duration",
+            "2s",
+            "copy",
+            "src",
+            &format!("{PLAIN_REMOTE}:"),
+        ])
+        // 10 = duration_limit_exceeded (docs/EXIT_CODES.md).
+        .assert()
+        .code(10);
+    let took = started.elapsed();
+
+    assert!(
+        took < std::time::Duration::from_secs(30),
+        "the run reported its deadline at {WINDOW_SECS}s and the process took \
+         {took:?} to go away — a deadline the operator cannot observe is not a \
+         bound"
+    );
+}
+
+#[test]
+fn max_duration_off_and_a_window_the_run_fits_inside_change_nothing() {
+    // The direction that matters more, and the one this flag could have broken:
+    // a deadline a run is comfortably inside must not touch it. An inactivity
+    // deadline that behaved like a stopwatch would kill healthy large transfers,
+    // which is worse than having no whole-run bound at all.
+    let sandbox = Sandbox::new();
+    for name in ["a.bin", "b.bin", "c.bin"] {
+        sandbox.write(&format!("src/{name}"), &vec![b'm'; 64 * 1024]);
+    }
+    sandbox
+        .dctl()
+        .args(["--max-duration", "off", "copy", "src", "dst"])
+        .assert()
+        .success();
+    assert_eq!(all_files(&sandbox.path("dst")).len(), 3);
+
+    let generous = Sandbox::new();
+    for name in ["a.bin", "b.bin", "c.bin"] {
+        generous.write(&format!("src/{name}"), &vec![b'm'; 64 * 1024]);
+    }
+    generous
+        .dctl()
+        .args(["--max-duration", "1h", "copy", "src", "dst"])
+        .assert()
+        .success();
+    assert_eq!(all_files(&generous.path("dst")).len(), 3);
+}
+
+#[test]
+fn a_malformed_run_window_is_a_usage_error_not_an_unbounded_run() {
+    // The same failure `--bwlimit 10Q` has: a value that does not parse,
+    // accepted, and the bound silently absent. A backup window removed without
+    // anybody being told is the one thing this flag may not do.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", b"data");
+    sandbox
+        .dctl()
+        .args(["--max-duration", "4hrs", "copy", "src", "dst"])
+        // 1 = usage (docs/EXIT_CODES.md).
+        .assert()
+        .code(1);
+    assert!(
+        !sandbox.exists("dst/a.txt"),
+        "a refused command line must transfer nothing"
+    );
+}
+
+#[test]
 fn max_transfer_off_transfers_everything() {
     let sandbox = Sandbox::new();
     for name in ["a.bin", "b.bin", "c.bin"] {

@@ -182,6 +182,19 @@ pub struct State {
     /// Settable so a test can age an upload without sleeping through a
     /// `--min-age`. Defaults to the clock, which is what a real server does.
     start_time_millis: i64,
+    /// Accept the connection, read the request, and never answer.
+    ///
+    /// The **black hole**, and it is the fault `HANDOVER.md` §32.9 measured
+    /// against live B2 with `iptables`. Not a refusal and not a reset: a
+    /// refusal is an answer and a reset is an error, and both are noticed by
+    /// any layer at all. This is a route that swallows packets — the socket is
+    /// open, the request is on the wire, and nothing ever comes back — which is
+    /// the only fault under which "the deadline fired and the run carried on
+    /// for 943.6 s" is possible.
+    ///
+    /// Armed after authorization in the tests that use it, because the
+    /// interesting request is the one carrying data.
+    black_hole: bool,
 }
 
 impl State {
@@ -318,6 +331,17 @@ impl MockB2 {
             .bucket_id = Some(bucket_id.to_string());
     }
 
+    /// Stop answering. Every later request is read in full and left waiting.
+    ///
+    /// See [`State::black_hole`]. There is no way back from it, deliberately: a
+    /// black hole that healed would let a test pass because the fault ended
+    /// rather than because a deadline did.
+    pub fn go_dark(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.black_hole = true;
+        }
+    }
+
     /// Answer the next request whose path ends with `path_suffix` with `status`
     /// and `body` instead of doing the real thing, once.
     pub fn fail_next(&self, path_suffix: &str, status: u16, code: &str) {
@@ -425,9 +449,25 @@ async fn serve(
         body: keep.then_some(kept),
     };
 
-    let (status, body) = {
+    // Recorded, and the lock released, before anything is awaited. A test
+    // asserting that the request *arrived* and was never answered needs both
+    // halves — and the guard must not be alive across the wait, or every later
+    // connection would block on this one rather than on the wire.
+    let dark = {
         let mut guard = state.lock().expect("the mock state is not poisoned");
         guard.requests.push(seen.clone());
+        guard.black_hole
+    };
+    if dark {
+        // The socket stays open and nothing is written to it, for as long as
+        // anybody is willing to wait. The connection dies when this task is
+        // dropped, which is what the client dropping its future does.
+        std::future::pending::<()>().await;
+        return Ok(());
+    }
+
+    let (status, body) = {
+        let mut guard = state.lock().expect("the mock state is not poisoned");
         if let Some(index) = guard
             .scripted
             .iter()

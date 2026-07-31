@@ -250,6 +250,24 @@ pub struct Faults {
     ///
     /// [`usize::MAX`] means unlimited, and is what [`Faults::new`] sets.
     pub accept_at_most: Arc<AtomicUsize>,
+    /// Never complete a dial: the connection is opened and the server never
+    /// speaks, so the client's protocol handshake waits forever.
+    ///
+    /// The **black hole**, at the one place `HANDOVER.md` §32.9 found nothing
+    /// bounding it. Its `sftp:` arm dropped port 22 with `iptables`, watched the
+    /// deadline fire at exactly 30 s, watched the dead session be discarded
+    /// correctly — and then watched the *replacement* `ssh` hang on the same
+    /// black hole, with the run still alive 601 s later. Every layer above the
+    /// dial was working; the dial was the only step in the cycle with no
+    /// deadline on it.
+    ///
+    /// Reproduces a real server, which is the bar for everything in this
+    /// structure: a route black-holed after the TCP connect succeeds, a host
+    /// that accepts the connection and never offers the subsystem, a
+    /// `ProxyCommand` that builds its tunnel and then goes quiet. All three are
+    /// past the point `ssh -o ConnectTimeout` stops watching, which is why the
+    /// fault has to be at the dial rather than at the connect.
+    pub hang_on_dial: Arc<AtomicBool>,
 }
 
 impl Faults {
@@ -486,6 +504,16 @@ impl RedialableSftp {
         self.faults.serve_at_most.store(bytes, Ordering::SeqCst);
     }
 
+    /// Accept every later dial and answer nothing on it, forever.
+    ///
+    /// See [`Faults::hang_on_dial`]. Armed **after** the first conversation in
+    /// the tests that use it, because the interesting case is the replacement
+    /// dial: a first connection that hangs is a run that never starts, and a
+    /// re-dial that hangs is a run that never ends.
+    pub fn hang_on_dial(&self) {
+        self.faults.hang_on_dial.store(true, Ordering::SeqCst);
+    }
+
     /// Kill the live conversation, as a dropped `ssh` session does.
     ///
     /// Aborting the task drops both pipe ends, so the client's next read reaches
@@ -532,6 +560,15 @@ pub struct RedialDialer {
 #[async_trait::async_trait]
 impl SftpDial for RedialDialer {
     async fn dial(&self) -> dctl_store::Result<Link> {
+        if self.faults.hang_on_dial.load(Ordering::SeqCst) {
+            // Counted first: a test asserting that the dial was *attempted* and
+            // never completed needs both halves, and a dial that returned
+            // without being counted would look like one that never happened.
+            self.dials.fetch_add(1, Ordering::SeqCst);
+            // The black hole. Not a slow answer and not an error — nothing, for
+            // as long as anybody is willing to wait.
+            std::future::pending::<()>().await;
+        }
         let (server_reads, client_writes) = tokio::io::simplex(PIPE_CAPACITY);
         let (client_reads, server_writes) = tokio::io::simplex(PIPE_CAPACITY);
 

@@ -63,7 +63,7 @@ pub(super) async fn get_to_path(b2: &B2Backend, key: &ObjectKey, dest: &Path) ->
 /// than silently restarted — restarting a stream without rewinding the hash is
 /// how a truncated object gets committed as a whole one.
 async fn send_download(b2: &B2Backend, key: &ObjectKey, range: Option<String>) -> Result<Answered> {
-    retry::run(constants::OP_DOWNLOAD, |_| async {
+    retry::run(constants::OP_DOWNLOAD, b2.deadlines.run, |_| async {
         let auth = b2.auth().await.map_err(Attempt::transport)?;
         let url = format!(
             "{}/{}/{}/{}",

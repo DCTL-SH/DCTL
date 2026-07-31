@@ -316,7 +316,10 @@ mod tests {
         // The complement, and the reason the touch is inside `poll_frame` rather
         // than at construction: a body that was built and never taken from is a
         // stalled upload, and must read as one.
-        let watch = IdleWatch::new(Some(Duration::from_millis(150)));
+        let watch = IdleWatch::new(
+            Some(Duration::from_millis(150)),
+            crate::deadline::RunDeadline::unbounded(),
+        );
         let _body = watch.body(vec![0u8; UPLOAD_FRAME_LEN * 4].into());
         let out = watch.guard(std::future::pending::<()>()).await;
         assert!(out.is_err(), "an untouched body is not progress");

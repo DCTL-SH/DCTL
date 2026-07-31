@@ -130,9 +130,17 @@ impl Observed {
                 ..Self::of(source)
             },
 
+            // The one failure that is terminal because of the *clock* rather
+            // than because of the request. It is the flag saying the run is
+            // over, so another attempt is not merely useless — it is the
+            // §32.9 defect: `--timeout` fired at exactly 30 s and the run
+            // carried on for 943.6 s, because everything above it read the
+            // deadline as something worth trying again.
+            StoreError::RunDeadline { .. }
+
             // Everything below is a statement about the request, the key or the
             // data, and every one of them will be exactly as true next time.
-            StoreError::NotFound(_)
+            | StoreError::NotFound(_)
             | StoreError::ChecksumMismatch { .. }
             | StoreError::ShortWrite { .. }
             | StoreError::InvalidKey(_)

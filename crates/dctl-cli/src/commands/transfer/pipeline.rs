@@ -226,7 +226,8 @@ pub trait Reaper {
 /// counter, and only after the commit returns.
 ///
 /// [`ExitCode::TransferLimitExceeded`] when `--max-transfer` cannot afford this
-/// file. That one is raised *before* anything is attempted and returns without
+/// file, and [`ExitCode::DurationLimitExceeded`] when `--max-duration` has
+/// passed. Both are raised *before* anything is attempted and return without
 /// appending a record, because nothing happened: a log entry for a file the run
 /// declined to start would be a statement about work that does not exist.
 pub async fn transfer_file<D: StageDriver>(
@@ -235,6 +236,11 @@ pub async fn transfer_file<D: StageDriver>(
     driver: &D,
     entry: &PlanEntry,
 ) -> Result<()> {
+    // Both cost controls, asked in the same place and before anything is
+    // attempted: one about the bill and one about the clock. Neither appends an
+    // audit record, because nothing happened — a log entry for a file the run
+    // declined to start would be a statement about work that does not exist.
+    ctx.within_deadline(&entry.dest)?;
     afford(ctx, entry)?;
     let walked = walk(ctx, driver, entry).await;
     let moved = walked.as_ref().copied().unwrap_or_default();
@@ -536,6 +542,16 @@ pub fn record_failure(ctx: &Ctx, path: &str, error: &CliError) {
 /// remaining file, fail every one of them at the same ceiling, and turn a
 /// deliberate stop into a wall of errors and exit 6 — instead of the one line
 /// and exit 8 the flag exists to produce.
+///
+/// [`ExitCode::DurationLimitExceeded`] is on it for **both** reasons at once,
+/// which is what makes it the most important entry here. The operator said the
+/// run must be over, and it also cannot continue: once the window has closed
+/// every backend call refuses instantly (`dctl_store::retry::driver`), so
+/// carrying on would try every remaining file, fail every one of them in
+/// microseconds, and produce a wall of errors and exit 6 — a ten-million-file
+/// plan turning a deliberate stop into a ten-million-line log. `HANDOVER.md`
+/// §32.9 is about a run that would not end; a stop that ground through the rest
+/// of the plan would be the same complaint with a smaller number.
 #[must_use]
 pub const fn is_fatal(error: &CliError) -> bool {
     matches!(
@@ -547,6 +563,7 @@ pub const fn is_fatal(error: &CliError) -> bool {
             | ExitCode::Usage
             | ExitCode::AuditChainBroken
             | ExitCode::TransferLimitExceeded
+            | ExitCode::DurationLimitExceeded
     )
 }
 
@@ -1181,6 +1198,66 @@ mod tests {
         // A log that cannot be extended stays unextendable for every file
         // behind this one, and each of them would move unrecorded.
         assert!(is_fatal(&CliError::new(ExitCode::AuditChainBroken, "")));
+
+        // A deliberate stop. Both of these mean the operator said the run must
+        // not go on, and grinding through the plan to fail every remaining file
+        // at the same limit turns one line into ten million.
+        assert!(is_fatal(&CliError::new(
+            ExitCode::TransferLimitExceeded,
+            ""
+        )));
+        assert!(is_fatal(&CliError::new(
+            ExitCode::DurationLimitExceeded,
+            ""
+        )));
+    }
+
+    #[tokio::test]
+    async fn no_file_is_started_after_the_runs_deadline_and_none_is_recorded() {
+        // §11.3 item 2, at the layer that decides whether to begin work. The
+        // deadline is already in the past when this run starts, which is the
+        // state a long run reaches on its own; the assertion is that the file is
+        // refused, at exit 10, with no audit record — because nothing happened,
+        // and a record would be a claim that something did.
+        let ctx = ctx(&["--max-duration", "1s"]);
+        // Placed rather than waited for: a test must not spend a second of wall
+        // clock proving something the clock has already decided.
+        let ctx = Ctx {
+            deadlines: ctx.deadlines.within(dctl_store::RunDeadline::starting_at(
+                std::time::Instant::now() - std::time::Duration::from_secs(60),
+                Some(std::time::Duration::from_secs(1)),
+            )),
+            ..ctx
+        };
+
+        let error = transfer_file(&ctx, TEST_OP, &Recording::default(), &entry("a.txt", 100))
+            .await
+            .expect_err("the window is gone");
+
+        assert_eq!(error.code(), ExitCode::DurationLimitExceeded);
+        assert!(error.message().contains("a.txt"), "{}", error.message());
+        assert!(
+            error.message().contains("--max-duration"),
+            "the stop must name the flag that caused it: {}",
+            error.message()
+        );
+        assert!(error.hint().is_some(), "a stop must say how to resume");
+        assert!(is_fatal(&error), "the rest of the plan must not be tried");
+        assert!(
+            recorded(&ctx).is_empty(),
+            "a file that was never started must leave no record"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_inside_its_window_transfers_exactly_as_before() {
+        // The direction that matters more: a deadline the run is comfortably
+        // inside must change nothing at all.
+        let ctx = ctx(&["--max-duration", "1h"]);
+        transfer_file(&ctx, TEST_OP, &Recording::default(), &entry("a.txt", 100))
+            .await
+            .expect("an hour is enough for one file");
+        assert_eq!(recorded(&ctx).len(), 1);
     }
 
     /// The records this run appended, parsed the way the reader parses them.

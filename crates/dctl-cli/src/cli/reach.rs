@@ -197,6 +197,7 @@ pub const FLAGS: &[Flag] = &[
     Flag::honoured("--timeout", "timeout"),
     Flag::honoured("--contimeout", "contimeout"),
     Flag::honoured("--max-transfer", "max_transfer"),
+    Flag::honoured("--max-duration", "max_duration"),
     // ── Filtering ────────────────────────────────────────────────────────
     Flag::honoured("--include", "include"),
     Flag::honoured("--exclude", "exclude"),

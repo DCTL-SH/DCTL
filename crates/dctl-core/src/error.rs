@@ -155,6 +155,13 @@ fn store_kind(e: &dctl_store::StoreError) -> ErrorKind {
         | S::RootChanged { .. }
         | S::Provider { .. }
         | S::Transport { .. } => ErrorKind::Transient,
+        // The run's own `--max-duration`. **Permanent**, and deliberately not
+        // `Transient`: an FFI consumer branching on this must not re-drive an
+        // operation inside a run whose window has already closed, which is
+        // exactly the multiplication `HANDOVER.md` §32.9 measured. What is
+        // transient about it is the *next invocation*, which is the caller's
+        // decision and not this classification's.
+        S::RunDeadline { .. } => ErrorKind::Permanent,
         // A retry record says how often something was attempted, never what went
         // wrong, so the classification is the wrapped failure's. An FFI consumer
         // branching on this must see the same kind whether or not the operation

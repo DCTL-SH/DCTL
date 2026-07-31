@@ -719,7 +719,11 @@ async fn a_slow_down_is_retried_until_the_write_succeeds() {
     // wrapper that swallowed the failure and reported success without sending a
     // second `PUT` would satisfy the return value and nothing else.
     let mock = MockS3::start().await;
-    let s3 = Retrying::with_policy(Arc::new(backend(&mock)), impatient());
+    let s3 = Retrying::with_policy(
+        Arc::new(backend(&mock)),
+        impatient(),
+        dctl_store::RunDeadline::unbounded(),
+    );
     mock.script(503, "<Error><Code>SlowDown</Code></Error>");
     mock.script(503, "<Error><Code>SlowDown</Code></Error>");
 
@@ -755,7 +759,11 @@ async fn an_exhausted_budget_reports_the_attempts_it_really_made() {
     // made exactly one.
     let mock = MockS3::start().await;
     let policy = impatient();
-    let s3 = Retrying::with_policy(Arc::new(backend(&mock)), policy);
+    let s3 = Retrying::with_policy(
+        Arc::new(backend(&mock)),
+        policy,
+        dctl_store::RunDeadline::unbounded(),
+    );
     for _ in 0..policy.max_attempts {
         mock.script(503, "<Error><Code>SlowDown</Code></Error>");
     }
@@ -784,7 +792,11 @@ async fn a_wrong_key_is_refused_once_and_never_retried() {
     // again — forever.
     let mock = MockS3::start().await;
     let policy = impatient();
-    let s3 = Retrying::with_policy(Arc::new(backend(&mock)), policy);
+    let s3 = Retrying::with_policy(
+        Arc::new(backend(&mock)),
+        policy,
+        dctl_store::RunDeadline::unbounded(),
+    );
     mock.script(403, "<Error><Code>InvalidAccessKeyId</Code></Error>");
 
     let data = Bytes::from_static(b"x");
@@ -812,7 +824,11 @@ async fn a_read_is_retried_as_well_as_a_write() {
     // A wrapper that covered `put` and forwarded the rest would pass every
     // assertion above. The read path is the one a restore depends on.
     let mock = MockS3::start().await;
-    let s3 = Retrying::with_policy(Arc::new(backend(&mock)), impatient());
+    let s3 = Retrying::with_policy(
+        Arc::new(backend(&mock)),
+        impatient(),
+        dctl_store::RunDeadline::unbounded(),
+    );
     mock.seed("k", b"restored");
     mock.script(500, "<Error><Code>InternalError</Code></Error>");
 
@@ -830,7 +846,11 @@ async fn a_server_that_names_a_wait_is_obeyed_and_not_argued_with() {
     // throttling server asked for is how being rate-limited becomes being
     // blocked. One second, because the assertion is that the wait *happened*.
     let mock = MockS3::start().await;
-    let s3 = Retrying::with_policy(Arc::new(backend(&mock)), impatient());
+    let s3 = Retrying::with_policy(
+        Arc::new(backend(&mock)),
+        impatient(),
+        dctl_store::RunDeadline::unbounded(),
+    );
     mock.script_with_headers(
         503,
         "<Error><Code>SlowDown</Code></Error>",
@@ -1793,6 +1813,7 @@ async fn a_completion_refused_once_succeeds_on_the_retry_and_commits_exactly_one
     let s3 = Retrying::with_policy(
         Arc::new(multipart_backend(&mock)) as Arc<dyn Backend>,
         impatient(),
+        dctl_store::RunDeadline::unbounded(),
     );
     let data = vec![b'g'; PART as usize * 2];
 

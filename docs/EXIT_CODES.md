@@ -536,9 +536,20 @@ A file is now not *started* when moving it would take the run past the ceiling,
 so the limit is never exceeded and exit 8 is what a script sees when it is met.
 See [Global flags → `--max-transfer`](GLOBAL_FLAGS.md#--max-transfer-size).
 
-Code 10 (`duration_limit_exceeded`) remains defined and reserved but not
-produced: `--max-duration` is not a flag in this build. It is listed here because
-the number is already committed to and will not be reused for anything else.
+Code 10 (`duration_limit_exceeded`) **is** produced today, by any run that
+reaches its `--max-duration`. It was reserved and unreachable in every earlier
+build, because the flag did not exist — and its absence was a real gap rather
+than a missing convenience: `--timeout` bounds one attempt, so a run that met a
+dead network had **no** flag that bounded it, and one measured against live B2
+was still going 943.6 s after a 30 s deadline had fired. The cutoff is hard: the
+request in flight is cancelled, no further file is started, and the counters
+report what really completed. See
+[Global flags → `--max-duration`](GLOBAL_FLAGS.md#--max-duration-duration).
+
+A run that stops this way is not a failure and is not a completed sync. Nothing
+half-written is left behind — a verified write commits only when the stored bytes
+match — but a transfer that was in flight leaves reclaimable debris, and the
+message names `dctl cleanup`, which removes it.
 
 Code 9 (`no_files_transferred`) **is** produced today, by the three commands
 whose entire product is a claim that data is there:

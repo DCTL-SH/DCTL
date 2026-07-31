@@ -33,6 +33,7 @@
 
 pub mod bandwidth;
 pub mod budget;
+pub mod duration;
 pub mod quantity;
 
 use std::sync::Arc;
@@ -41,6 +42,7 @@ use crate::cli::GlobalArgs;
 
 pub use bandwidth::Bandwidth;
 pub use budget::Budget;
+pub use duration::TimeLimit;
 pub use quantity::ByteLimit;
 
 /// The cost controls in force for one run.

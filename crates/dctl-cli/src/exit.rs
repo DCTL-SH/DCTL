@@ -11,13 +11,25 @@
 //! ## Why this module allows dead code
 //!
 //! The enum is an *inventory of the contract*, not an inventory of what this
-//! build happens to emit. One code — 10 — belongs to `--max-duration`, which is
-//! rclone's and which DCTL has no flag for. (9 was on that list until a scrub
-//! that covered nothing needed a non-zero status to say so, and it is now
-//! produced by [`crate::commands::scrub`]. 8 was on it too, for longer than it
-//! should have been: `--max-transfer` parsed and was never enforced, so a run
-//! capped at 1 MiB moved 10 MiB and exited 0. [`crate::limits::budget`] produces
-//! it now, and `tests/cli.rs` asserts a process really exits with it.)
+//! build happens to emit — and **every code in it is now produced by something**,
+//! which has not been true before. Three took a while to get there, and the
+//! history is worth keeping because each was a published number that meant
+//! nothing:
+//!
+//! * **10** belonged to `--max-duration`, which DCTL had no flag for at all.
+//!   That was not a missing convenience: `--timeout` bounds one attempt, so a
+//!   run that met a dead network had nothing bounding it, and one measured
+//!   against live B2 was still going 943.6 s after a 30 s deadline had fired
+//!   (`HANDOVER.md` §32.9). The flag exists now and
+//!   [`crate::ctx::Ctx::within_deadline`], `main`'s own deadline and
+//!   `dctl_store::StoreError::RunDeadline` all produce this code; `tests/cli.rs`
+//!   asserts a process really exits with it.
+//! * **9** was on the list until a scrub that covered nothing needed a non-zero
+//!   status to say so, and it is now produced by [`crate::commands::scrub`].
+//! * **8** was on it too, for longer than it should have been: `--max-transfer`
+//!   parsed and was never enforced, so a run capped at 1 MiB moved 10 MiB and
+//!   exited 0. [`crate::limits::budget`] produces it now, and `tests/cli.rs`
+//!   asserts a process really exits with it.
 //!
 //! [`ExitCode::all`] and [`ExitCode::describe`] have no caller outside this
 //! file's own tests. They exist so the contract can be enumerated rather than

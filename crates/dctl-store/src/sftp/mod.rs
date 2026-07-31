@@ -356,14 +356,30 @@ impl SftpBackend {
         deadlines: Deadlines,
     ) -> Result<Self> {
         let base = normalize_base(base);
-        let link = Arc::new(dialer.dial().await?);
+        // The first dial is bounded exactly as every later one is. A run that
+        // could not be ended while it was *opening* its first connection would
+        // be a run `--max-duration` did not cover, and the case is not
+        // hypothetical: §32.9's `sftp:` arm hung on a replacement `ssh`, and
+        // nothing about the first `ssh` makes it different from the second.
+        let link = Arc::new(dial_within(dialer.as_ref(), deadlines).await?);
         // One `stat`, on the first connection only. A base that is absent now
         // may be created by the first write; one that is present may never be
         // re-created by any write in this run — and neither answer is re-asked
         // on a later connection. See [`SftpBackend::may_create_base`].
+        //
+        // Under the run's deadlines like every other request: a probe on a
+        // session that has gone quiet is as unbounded as any other, and it is
+        // the very first thing this backend does.
         let may_create_base = {
             let probe = if base.is_empty() { "." } else { &base };
-            link.sftp.fs().metadata(probe).await.is_err()
+            let watch = deadlines.watch();
+            match watch.guard(link.sftp.fs().metadata(probe)).await {
+                Ok(probed) => probed.is_err(),
+                // A probe the deadline ended answers nothing, and answering it
+                // "absent" would let a later write re-create a base that is
+                // there — the defect `may_create_base` exists to prevent.
+                Err(expired) => return Err(expired.into_store_error(SFTP_BACKEND_NAME)),
+            }
         };
         Ok(Self {
             dialer,
@@ -427,7 +443,7 @@ impl SftpBackend {
             destination = self.dialer.destination(),
             "re-dialling the sftp session"
         );
-        let fresh = Arc::new(self.dialer.dial().await?);
+        let fresh = Arc::new(dial_within(self.dialer.as_ref(), self.deadlines).await?);
         *cell = Some(Arc::clone(&fresh));
         Ok(fresh)
     }
@@ -926,6 +942,69 @@ impl Backend for SftpBackend {
     }
     // `prepare_upload` keeps the trait default: SFTP has no presigned/delegated
     // upload, so it returns a clear "unsupported" error.
+}
+
+/// One dial, bounded by `--contimeout` and by the run's own deadline.
+///
+/// **The hole §32.9 measured on this backend.** Its `sftp:` arm reported the
+/// deadline firing at exactly 30 s and the run *not terminated after 600 s*: the
+/// session was discarded correctly, the retry layer asked for another, and the
+/// replacement `ssh` hung on the same black hole. Everything above this function
+/// was working; the dial was the only thing in the cycle with no bound on it.
+///
+/// It is bounded here rather than only by `ssh -o ConnectTimeout` because that
+/// option covers the **TCP connect** and nothing after it. A route black-holed
+/// once the connection is established, a host that completes the handshake and
+/// never offers the `sftp` subsystem, and a `ProxyCommand` that authenticates
+/// and then goes quiet are all past the point `ConnectTimeout` stops watching.
+/// The number is still handed to `ssh` as well ([`dial::SshDialer`]) so the
+/// whole `ProxyCommand` chain is bounded from the inside too, exactly as rclone
+/// does (`backend/sftp/sftp.go:946`,
+/// `ssh.ClientConfig.Timeout = ci.ConnectTimeout`). The two are complementary,
+/// not duplicates: one bounds what `ssh` can see and one bounds `ssh` itself.
+///
+/// A free function rather than a method because the **first** dial happens
+/// before there is a backend to call a method on, and a first connection that
+/// could hang while every later one could not would be the same defect with a
+/// smaller window.
+///
+/// # Errors
+/// Whatever the dial reported; a [`StoreError::Transport`] naming
+/// `--contimeout` when nothing came back inside it; or
+/// [`StoreError::RunDeadline`] when the run's window closed first.
+async fn dial_within(dialer: &dyn SftpDial, deadlines: Deadlines) -> Result<Link> {
+    let dial = async {
+        match deadlines.connect {
+            // `--contimeout 0`: wait as long as it takes to reach the host,
+            // which is a supported answer and not a degenerate one. See
+            // `crate::deadline::constants::DISABLED_SECONDS`.
+            None => dialer.dial().await,
+            Some(connect) => match tokio::time::timeout(connect, dialer.dial()).await {
+                Ok(dialled) => dialled,
+                // `Transport`, matching every other "nothing answered" on this
+                // backend, so the retry layer classifies a host that is briefly
+                // unreachable as worth another attempt — which it is.
+                Err(_) => Err(StoreError::Transport {
+                    backend: SFTP_BACKEND_NAME,
+                    detail: format!(
+                        "no sftp session on {} within {}s (--contimeout {}s)",
+                        dialer.destination(),
+                        connect.as_secs(),
+                        connect.as_secs()
+                    ),
+                }),
+            },
+        }
+    };
+
+    // Outside the connect timeout rather than inside it: the run's window is the
+    // shorter answer whenever it is shorter, and a dial that would have been
+    // allowed sixty seconds must not take them from a run with ten left.
+    deadlines
+        .run
+        .guard(dial)
+        .await
+        .unwrap_or_else(|exceeded| Err(exceeded.into_store_error()))
 }
 
 /// Map an [`openssh_sftp_client`] error to a [`StoreError`], classified so that

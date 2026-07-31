@@ -13,6 +13,7 @@ use std::sync::Arc;
 
 use crate::audit::sink::Sink;
 use crate::cli::globals::{GlobalArgs, VerifyMode};
+use crate::constants::{MAX_DURATION_HINT, MAX_DURATION_REACHED};
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
 use dctl_store::Deadlines;
@@ -53,13 +54,21 @@ pub struct Ctx {
     pub limits: Limits,
 
     /// How long this run waits — `--contimeout` to reach a host, `--timeout` for
-    /// one that has gone quiet.
+    /// one that has gone quiet, and `--max-duration` for the run itself.
     ///
     /// On the context for the same reason [`Ctx::limits`] is: patience is a
     /// property of the *invocation*, not of each destination, and an operator
     /// who said "my backup window is thirty seconds" means it about the run. A
     /// command that had to construct its own is a command that could forget to,
     /// which is the failure that put eleven flags on `cli::reach`'s list.
+    ///
+    /// The third of the three is read from the clock **here**, once, when the
+    /// context is built. That is what makes it a bound on the run rather than a
+    /// bound on each thing the run does: a deadline computed wherever it was
+    /// needed would give every file, every request and every retry the whole
+    /// window over again — which is precisely the arithmetic `HANDOVER.md`
+    /// §32.9 measured, in which `--timeout 30` fired exactly on time and the run
+    /// carried on for 943.6 s.
     pub deadlines: Deadlines,
 
     /// The tamper-evident log every data-changing operation appends to
@@ -80,7 +89,9 @@ impl Ctx {
     pub fn new(globals: GlobalArgs) -> Self {
         let audit = Sink::new(&globals);
         let limits = Limits::resolve(&globals);
-        let deadlines = Deadlines::from_seconds(globals.contimeout, globals.timeout);
+        let deadlines = Deadlines::from_seconds(globals.contimeout, globals.timeout).within(
+            dctl_store::RunDeadline::starting_now(globals.max_duration.unwrap_or_default().get()),
+        );
         let out = Out::new(
             globals.effective_format(),
             globals.color,
@@ -119,6 +130,36 @@ impl Ctx {
     #[must_use]
     pub const fn is_dry_run(&self) -> bool {
         self.globals.dry_run
+    }
+
+    /// Refuse to start more work when the run's `--max-duration` has passed.
+    ///
+    /// The counterpart of [`crate::limits::Budget::afford`], and asked in the
+    /// same place for the same reason: a ceiling that is only noticed *after*
+    /// the work is a ceiling that has already been exceeded. `subject` names the
+    /// file that would have been started, so the last line of a run that ran out
+    /// of time says where it stopped rather than merely that it did.
+    ///
+    /// This is the *tidy* half of the bound. The hard half is in `main`, which
+    /// races the whole command against the same instant — because a file that is
+    /// already in flight cannot be stopped by a check between files, and a run
+    /// that has one enormous object left has to end too. Both are needed; see
+    /// `dctl_store::deadline::run` for the three depths and what each covers.
+    ///
+    /// # Errors
+    /// [`ExitCode::DurationLimitExceeded`] — exit 10 — naming the window the
+    /// operator set and the file the run declined to start. The message says
+    /// what *did* happen, because a run stopped at its deadline is a success up
+    /// to that point and the operator's next question is where to resume.
+    pub fn within_deadline(&self, subject: &str) -> Result<()> {
+        let Some(exceeded) = self.deadlines.run.exceeded() else {
+            return Ok(());
+        };
+        Err(CliError::new(
+            ExitCode::DurationLimitExceeded,
+            format!("{MAX_DURATION_REACHED}: '{subject}' was not started ({exceeded})"),
+        )
+        .with_hint(MAX_DURATION_HINT))
     }
 
     /// The verification strength a run addressed to `spec` applies.

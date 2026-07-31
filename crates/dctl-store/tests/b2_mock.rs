@@ -843,3 +843,143 @@ async fn the_upload_listing_is_scoped_by_prefix_and_paged_by_id() {
         "the pager repeated a page: {seen:?}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// The two deadlines, against a route that swallows packets
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `HANDOVER.md` §32.9's worst row was measured here, against live B2 with the
+// provider's own /22 black-holed by `iptables`: a 160 MiB upload under
+// `--timeout 30 --retries 1` reported its first failure at **30 s**, to the
+// second — and **had not ended 943.6 s after the cut**. Both halves of that
+// sentence are asserted below, because either alone is misleading. The deadline
+// firing was never the problem; the run not ending was.
+//
+// `MockB2::go_dark` is the same fault without the `iptables` rule: the socket is
+// accepted, the request is read in full, and nothing is ever written back.
+
+/// The run's window in these tests. Short enough that the suite spends no real
+/// time, and — deliberately — far shorter than [`PATIENT_IDLE`], so a run that
+/// ended on `--timeout` could not be mistaken for one that ended on
+/// `--max-duration`.
+const RUN_WINDOW: std::time::Duration = std::time::Duration::from_millis(600);
+
+/// A `--timeout` long enough that it cannot be what ends the run.
+const PATIENT_IDLE: u64 = 120;
+
+#[tokio::test]
+async fn a_black_holed_request_ends_at_the_idle_timeout_and_names_it() {
+    // The half that already worked, pinned so the fix to the other half cannot
+    // quietly cost it. This is what `--timeout` is *for*.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = B2Backend::new(
+        B2Credentials::new(KEY_ID, APP_KEY),
+        BUCKET,
+        Deadlines::from_seconds(60, 1),
+    )
+    .expect("the backend builds")
+    .with_authorize_url(mock.authorize_url());
+
+    mock.go_dark();
+    let started = std::time::Instant::now();
+    let error = b2
+        .head(&ObjectKey::new("anything.bin"))
+        .await
+        .expect_err("nothing will ever answer");
+    let took = started.elapsed();
+
+    assert!(
+        error.to_string().contains("--timeout"),
+        "the failure must quote the operator's own flag: {error}"
+    );
+    assert!(
+        took < std::time::Duration::from_secs(90),
+        "an inactivity deadline of 1s took {took:?}"
+    );
+    assert!(
+        !mock.state().requests.is_empty(),
+        "the request has to have reached the server, or this measures nothing"
+    );
+}
+
+#[tokio::test]
+async fn a_black_holed_run_ends_at_its_own_deadline_rather_than_at_the_schedule() {
+    // §32.9's 160 MiB row, in miniature and in-process. `--timeout` is set far
+    // longer than the run's window on purpose: the only thing that can end this
+    // is `--max-duration`, so the assertion cannot be satisfied by the flag that
+    // was already working.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = B2Backend::new(
+        B2Credentials::new(KEY_ID, APP_KEY),
+        BUCKET,
+        Deadlines::from_seconds(60, PATIENT_IDLE)
+            .within(dctl_store::RunDeadline::starting_now(Some(RUN_WINDOW))),
+    )
+    .expect("the backend builds")
+    .with_authorize_url(mock.authorize_url());
+
+    mock.go_dark();
+    let started = std::time::Instant::now();
+    let error = b2
+        .head(&ObjectKey::new("anything.bin"))
+        .await
+        .expect_err("nothing will ever answer");
+    let took = started.elapsed();
+
+    assert!(
+        matches!(error, dctl_store::StoreError::RunDeadline { .. }),
+        "the run ended because its window closed and has to say so, not report \
+         a network fault a scheduler would retry: {error:?}"
+    );
+    assert!(
+        took < RUN_WINDOW * 8,
+        "the run outlived its own --max-duration: {took:?} for a {RUN_WINDOW:?} \
+         window. This is the §32.9 measurement, and the number that made it a \
+         defect was 943.6 s against a 30 s deadline."
+    );
+    // And terminal, so nothing above spends a second schedule on it — which is
+    // what turned six attempts into fifteen minutes.
+    assert!(
+        !dctl_store::retry::Observed::of(&error).transient,
+        "a closed window must not be classified as worth another attempt: {error:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_healthy_request_is_untouched_by_a_window_it_fits_inside() {
+    // The direction that matters more. A `--max-duration` that killed work it
+    // had time for would be worse than no flag at all.
+    let mock = MockB2::start(ADVERTISED).await;
+    let b2 = B2Backend::new(
+        B2Credentials::new(KEY_ID, APP_KEY),
+        BUCKET,
+        Deadlines::default().within(dctl_store::RunDeadline::starting_now(Some(
+            std::time::Duration::from_secs(600),
+        ))),
+    )
+    .expect("the backend builds")
+    .with_authorize_url(mock.authorize_url());
+
+    let dir = TempDir::new().expect("a temporary directory");
+    let (path, bytes, hash) = source(&dir, "fits.bin", 4096);
+    b2.put_from_path(
+        &ObjectKey::new("o/fits"),
+        &path,
+        &hash,
+        SourceModified::unknown(),
+    )
+    .await
+    .expect("ten minutes is enough for four kilobytes");
+
+    // Asked of the provider's own record rather than of a read-back, which is
+    // the stronger question and the one the rest of this file asks: what did
+    // the server say it received?
+    let state = mock.state();
+    assert_eq!(
+        state.singles.len(),
+        1,
+        "one upload, whole: {:?}",
+        state.singles
+    );
+    assert_eq!(state.singles[0].len, bytes.len());
+}

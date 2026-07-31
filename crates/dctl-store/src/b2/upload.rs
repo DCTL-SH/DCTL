@@ -169,7 +169,7 @@ async fn upload_single(
     // attempt: a header set rebuilt per attempt is a header set that can differ
     // between them.
     let headers = upload_headers(key, &sha1_hex, data.len(), modified);
-    retry::run(constants::OP_UPLOAD_FILE, |_| async {
+    retry::run(constants::OP_UPLOAD_FILE, b2.deadlines.run, |_| async {
         let upload: GetUploadUrlResponse = b2
             .post_json_once(
                 auth,
@@ -469,7 +469,7 @@ async fn upload_one_part(
     part_sha1s: &mut Vec<String>,
 ) -> Result<()> {
     let sha1_hex = ContentHash::sha1(&chunk).hex();
-    retry::run(constants::OP_UPLOAD_PART, |_| async {
+    retry::run(constants::OP_UPLOAD_PART, b2.deadlines.run, |_| async {
         let part_url: GetUploadPartUrlResponse = b2
             .post_json_once(
                 auth,

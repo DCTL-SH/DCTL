@@ -215,15 +215,18 @@ impl Target {
 /// line. Only the two backends that walk a real filesystem can use it; passing
 /// it to the object stores would be offering a dial that does nothing, which is
 /// the class of defect `HANDOVER.md` §11.3 item 10 already tracks.
-/// `deadlines` is the run's `--timeout` and `--contimeout`. It is a parameter
-/// for the same reason `links` and `meter` are: it belongs to the invocation
-/// rather than to the place, and a backend that read it for itself would be a
-/// backend that could disagree with the rest of the run about how long to wait.
+/// `deadlines` is the run's `--timeout`, `--contimeout` and `--max-duration`. It
+/// is a parameter for the same reason `links` and `meter` are: it belongs to the
+/// invocation rather than to the place, and a backend that read it for itself
+/// would be a backend that could disagree with the rest of the run about how
+/// long to wait.
 ///
-/// It reaches every provider that has something to wait for, and `local:` is the
-/// one arm that takes none — see `dctl_store::deadline`, which says why a
-/// user-space deadline cannot help a wedged filesystem and would only be a
-/// report rather than a remedy.
+/// The first two reach every provider that has something to wait for, and
+/// `local:` is the one arm that takes neither — see `dctl_store::deadline`,
+/// which says why a user-space deadline cannot help a wedged filesystem and
+/// would only be a report rather than a remedy. The third reaches **every** arm
+/// including `local:`, because it is installed on the retry layer below, which
+/// every provider shares.
 pub fn build(
     resolved: &Resolved,
     links: LinkPolicy,
@@ -322,7 +325,11 @@ pub fn build(
     // order gets both: the probe travels through the retrying backend
     // underneath, and `StoreError::RootChanged` is classified permanent
     // (`dctl_store::retry::observed`) so nothing above tries again.
-    let backend = dctl_store::Retrying::wrap(built.metered(meter));
+    // The run's own deadline goes to the retry layer as well as to the
+    // backends, because this is where `--timeout` is multiplied: six attempts
+    // per request, several distinct requests per copy. A retry layer that did
+    // not know when the run had to be over is the whole of `HANDOVER.md` §32.9.
+    let backend = dctl_store::Retrying::wrap(built.metered(meter), deadlines.run);
     Ok(dctl_store::Guarded::wrap(backend, target.container()))
 }
 

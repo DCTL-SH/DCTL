@@ -14,7 +14,7 @@ use clap::builder::TypedValueParser as _;
 use dctl_store::{LINK_POLICY_CHOICES, LinkPolicy};
 
 use crate::constants;
-use crate::limits::ByteLimit;
+use crate::limits::{ByteLimit, TimeLimit};
 use crate::logging::{LogFormat, LogLevel};
 use crate::output::{ColorChoice, Format, Units};
 
@@ -318,21 +318,41 @@ pub struct GlobalArgs {
     #[arg(long, global = true, value_name = "N", help_heading = "Transfer")]
     pub low_level_retries: Option<u32>,
 
-    /// Give up on a transfer that has moved no data for this long, in seconds.
+    /// Give up on ONE attempt that has moved no data for this long, in seconds.
     /// 0 waits forever.
     ///
-    /// An **inactivity** deadline, which is rclone's meaning of the same flag
-    /// (`fs/config.go:122`, `Help: "IO idle timeout"`) and not a deadline on the
-    /// operation. A 4 GiB restore over a slow link takes hours and never
-    /// approaches this, because every frame that moves resets it. Getting that
-    /// backwards would destroy exactly the transfers worth protecting, which is
-    /// why `dctl_store::deadline::watch` is built around the distinction.
+    /// An INACTIVITY deadline, not a deadline on the operation: every frame that
+    /// moves resets it, so a 4 GiB restore over a slow link runs for hours and
+    /// never approaches it. That is rclone's meaning of the same flag.
     ///
-    /// It bounds **one attempt**, as rclone's does. A run that meets a dead
-    /// network spends this much per attempt across the request-level schedule in
-    /// `dctl_store::retry`, so the whole-run bound is the product — which is
-    /// stated here because an operator sizing a backup window needs the product
-    /// and not the factor.
+    /// It bounds one ATTEMPT, and it does NOT bound the run. A copy makes
+    /// several distinct requests, each request is retried on a schedule, and
+    /// --retries repeats the file over all of it — so the time a dead network
+    /// can cost is a product this flag does not know. Use --max-duration to
+    /// bound the run.
+    // ── the history, which is not the operator's business ────────────────
+    //
+    // Everything above is help text: clap renders this doc comment into
+    // `dctl --help`, and `HANDOVER.md` §32.9 is a finding about what it used to
+    // say there. It ended with *"the whole-run bound is the product — which is
+    // stated here because an operator sizing a backup window needs the product
+    // and not the factor"* and then stated no product: no number, and no
+    // mention that the schedule runs once per distinct request. A claim to have
+    // said something, in the place an operator reads, which is the same class
+    // of false report as a transfer that did not happen.
+    //
+    // The measurement behind the correction, against live B2 with the route
+    // black-holed and `--retries 1`: the first failure at **30 s**, to the
+    // second, and the run **not ended 943.6 s after the cut**. On `sftp:`, not
+    // ended after 601 s. The product is not stated now because it is not a
+    // number this flag knows — and `--max-duration`, which is the honest
+    // answer, is named instead.
+    //
+    // The semantics are deliberately unchanged. rclone's `--timeout` is
+    // `Help: "IO idle timeout"` with a five-minute default (`fs/config.go:122`)
+    // and DCTL matches it. An inactivity deadline made to behave like a
+    // stopwatch would destroy exactly the transfers it exists to protect, which
+    // would be a worse defect than the one being fixed.
     #[arg(
         long,
         global = true,
@@ -342,11 +362,26 @@ pub struct GlobalArgs {
     )]
     pub timeout: u64,
 
-    /// Give up on reaching a host after this long, in seconds. 0 waits forever.
+    /// Give up on ONE attempt to reach a host after this long, in seconds.
+    /// 0 waits forever.
     ///
-    /// Separate from `--timeout` because nothing is at risk while a connection
-    /// is being established: giving up costs one round of backoff and nothing
-    /// else, so this can be — and is — far more impatient.
+    /// Separate from --timeout because the two bound different failures.
+    /// Nothing is at risk while a connection is being established, so giving up
+    /// on one costs a round of backoff and nothing else — which is why this is
+    /// far more impatient than the deadline on a transfer already carrying data.
+    ///
+    /// Like --timeout it bounds one ATTEMPT and does NOT bound the run.
+    // On `sftp:` it is applied twice over: handed to `ssh` as
+    // `-o ConnectTimeout`, so the whole `ProxyCommand` chain is bounded from
+    // the inside — which is where rclone puts the same number
+    // (`backend/sftp/sftp.go:946`) — and applied again around the dial, because
+    // `ConnectTimeout` covers the TCP connect and stops watching after it.
+    //
+    // The second one closes a measured hole. §32.9's `sftp:` arm dropped port 22
+    // six seconds into a copy: the deadline fired at exactly 30 s, the dead
+    // session was discarded correctly, a replacement was dialled — and the
+    // replacement hung, with the run still alive when the harness killed it at
+    // 601 s. Everything above the dial was working.
     #[arg(
         long,
         global = true,
@@ -360,6 +395,43 @@ pub struct GlobalArgs {
     /// without starting a file that would exceed it.
     #[arg(long, global = true, value_name = "SIZE", help_heading = "Transfer")]
     pub max_transfer: Option<ByteLimit>,
+
+    /// Stop the whole run after this long, e.g. 4h. Exits 10. 'off' for no
+    /// limit, which is the default.
+    ///
+    /// The flag that bounds a backup window, and the only one that does:
+    /// --timeout and --contimeout each bound one attempt, while this bounds the
+    /// invocation from the moment it starts.
+    ///
+    /// A HARD cutoff. When the window closes the request in flight is
+    /// cancelled, the retry loop is not re-entered, no further file is started,
+    /// and the counters report what really completed.
+    ///
+    /// Nothing is left half-written by it: a verified write commits only when
+    /// the stored bytes match, so an abandoned object was never an object. What
+    /// a cut transfer does leave is a staging file or an unfinished upload, and
+    /// 'dctl cleanup' reclaims both. Re-running the same command continues from
+    /// what landed.
+    ///
+    /// Written as 30s, 90m, 4h or 7d; a bare number is seconds. rclone accepts
+    /// a compound duration here (1h30m) and this does not — write 90m.
+    // Hard rather than cautious, and the choice is not the one `--max-transfer`
+    // made. There is no honest way to predict how long a file will take, so
+    // "do not start what will not fit" has no meaning here; and a flag that only
+    // stopped *between* files would not stop a run whose last object is a
+    // terabyte. rclone's default for the same flag is `--cutoff-mode hard`,
+    // implemented by giving the transfer context a deadline
+    // (`fs/sync/sync.go:203-205`), and this is the same act in the Rust idiom.
+    //
+    // `HANDOVER.md` §11.3 item 2 is the entry it closes and §32.9 is the
+    // measurement that opened it.
+    #[arg(
+        long,
+        global = true,
+        value_name = "DURATION",
+        help_heading = "Transfer"
+    )]
+    pub max_duration: Option<TimeLimit>,
 
     // ── Filtering ────────────────────────────────────────────────────────
     /// Include only paths matching this glob. Repeatable.
@@ -785,6 +857,99 @@ mod tests {
             dctl_store::Deadlines::from_seconds(g.contimeout, g.timeout),
             dctl_store::Deadlines::none()
         );
+    }
+
+    #[test]
+    fn the_run_has_no_deadline_unless_one_is_asked_for() {
+        // The default rclone ships for the same flag (`fs/config.go:361`,
+        // `max_duration`, `Default: time.Duration(0)`). A window invented here
+        // would end somebody's first ten-terabyte sync at whatever number this
+        // file happened to pick.
+        assert_eq!(parse(&[]).max_duration, None);
+        assert_eq!(
+            parse(&["--max-duration", "off"]).max_duration,
+            Some(TimeLimit::none())
+        );
+        assert_eq!(
+            parse(&["--max-duration", "0"]).max_duration,
+            Some(TimeLimit::none())
+        );
+    }
+
+    #[test]
+    fn the_window_is_read_in_the_dialect_the_help_text_names() {
+        assert_eq!(
+            parse(&["--max-duration", "4h"]).max_duration,
+            Some(TimeLimit::of(std::time::Duration::from_secs(4 * 3600)))
+        );
+        assert_eq!(
+            parse(&["--max-duration", "90m"]).max_duration,
+            Some(TimeLimit::of(std::time::Duration::from_secs(90 * 60)))
+        );
+        // Refused at the parser rather than silently leaving the run unbounded.
+        // A `--max-duration` that is accepted and then ignored is a backup
+        // window removed without anybody being told.
+        assert!(Harness::try_parse_from(["dctl", "--max-duration", "4hrs"]).is_err());
+    }
+
+    #[test]
+    fn the_help_no_longer_claims_a_bound_it_does_not_deliver() {
+        // §32.9's finding about `--help` itself. It said the whole-run bound
+        // "is the product — which is stated here because an operator sizing a
+        // backup window needs the product and not the factor", and then stated
+        // no product: no number, and no mention that the schedule runs once per
+        // distinct request. A claim to have said something, in the place an
+        // operator reads.
+        //
+        // Asserted against the whole rendered page rather than against a
+        // paragraph sliced out of it, and that is not laziness: the first
+        // spelling of this test cut each entry at the next blank line, which
+        // silently reduced it to the two lines clap puts first — so it passed
+        // and failed on where a sentence happened to wrap rather than on
+        // whether the sentence was there.
+        let help = help_text();
+
+        assert!(
+            !help.contains("is the product"),
+            "the sentence that promised a product and gave none is back:\n{help}"
+        );
+        // Both attempt-scoped deadlines have to disclaim the run, or the
+        // correction is half-made and the half that is missing is the one an
+        // operator reads first.
+        assert_eq!(
+            help.matches("does NOT bound the run").count(),
+            2,
+            "--timeout and --contimeout must each say what they do not bound:\n{help}"
+        );
+        // …and the flag that does bound a run has to be on the same page, or
+        // the correction sends the reader nowhere.
+        assert!(help.contains("--max-duration"), "{help}");
+        assert!(
+            help.contains("Stop the whole run after this long"),
+            "the run-level flag must say so in its own first line:\n{help}"
+        );
+    }
+
+    /// `dctl --help` as a user sees it, with every run of whitespace collapsed
+    /// to one space.
+    ///
+    /// Long help, because that is what `--help` renders and what §32.9 quoted:
+    /// clap puts the first line of a doc comment in `-h` and the whole of it in
+    /// `--help`, so every paragraph written above a flag is user-facing text.
+    ///
+    /// Collapsed because clap re-wraps that text to the terminal width, so any
+    /// sentence an assertion names can be split across two lines by a change to
+    /// a flag's *name*. A test that broke for that reason would be a test
+    /// nobody trusts, and one that was written to avoid it by matching only
+    /// single words would assert nothing.
+    fn help_text() -> String {
+        use clap::CommandFactory as _;
+        Harness::command()
+            .render_long_help()
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 
     #[test]

@@ -107,6 +107,25 @@ pub enum StoreError {
         detail: String,
     },
 
+    /// The run reached the deadline the operator gave it with `--max-duration`.
+    ///
+    /// **Not** a [`StoreError::Transport`], and the distinction is the whole
+    /// point of the variant. A transport failure means *nothing answered*, which
+    /// is the case another attempt exists for; this means *the window you gave
+    /// me is over*, which no number of attempts can undo. `HANDOVER.md` §32.9
+    /// measured what happens when a deadline is reported as something retryable:
+    /// the flag fires at exactly its number and the run continues for another
+    /// 943.6 s, because every layer above reads "worth another attempt" and
+    /// spends its whole schedule.
+    ///
+    /// It is a *store* error rather than a CLI one because the layer that
+    /// notices is the one holding the request. The CLI maps it to exit **10**.
+    #[error("the run reached its own deadline (--max-duration {}s)", limit.as_secs())]
+    RunDeadline {
+        /// The window the operator asked for, so the report quotes their number.
+        limit: std::time::Duration,
+    },
+
     /// A failure a retry layer already tried again, and how many times.
     ///
     /// Wraps rather than replaces, so the exit code, the message and the type an
@@ -144,6 +163,7 @@ impl StoreError {
             StoreError::RootChanged { .. } => 2008,
             StoreError::Provider { .. } => 2009,
             StoreError::Transport { .. } => 2010,
+            StoreError::RunDeadline { .. } => 2011,
             // Delegated, never its own number. A retry record describes how
             // often something was attempted, not what went wrong, and a script
             // branching on the exit code must see the same number whether or not
@@ -207,6 +227,13 @@ mod tests {
             2002
         );
         assert_eq!(StoreError::Backend(String::new()).code(), 2006);
+        assert_eq!(
+            StoreError::RunDeadline {
+                limit: std::time::Duration::from_secs(30)
+            }
+            .code(),
+            2011
+        );
         assert_eq!(
             StoreError::ShortWrite {
                 expected: 0,
@@ -313,6 +340,10 @@ mod tests {
             StoreError::Transport {
                 backend: "s3",
                 detail: String::new(),
+            }
+            .code(),
+            StoreError::RunDeadline {
+                limit: std::time::Duration::from_secs(1),
             }
             .code(),
         ];

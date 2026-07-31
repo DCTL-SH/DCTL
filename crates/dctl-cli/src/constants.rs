@@ -1052,6 +1052,33 @@ pub const MAX_TRANSFER_LIMIT_HINT: &str = "Everything already transferred is com
      the whole of it fits within the limit. Re-run the same command to continue \
      — it will move only what has not landed yet — or raise --max-transfer.";
 
+/// Opening words of the `--max-duration` stop.
+///
+/// A *stop*, like [`MAX_TRANSFER_LIMIT_REACHED`], and worded as one: everything
+/// before the deadline transferred and committed normally. Exit 10 is the
+/// machine-readable half of the same statement.
+pub const MAX_DURATION_REACHED: &str = "stopped at the --max-duration limit";
+
+/// What to do about a run that stopped at its deadline.
+///
+/// Three questions, in the order an operator asks them. *Did I lose anything?*
+/// No — a verified write commits only when the stored bytes match, so nothing
+/// half-written was left. *What about the transfer that was in flight?* It was
+/// abandoned, and the debris it left is reclaimable by name. *How do I finish
+/// the job?* Run the same command again; the transfer verbs compare on size and
+/// modification time, so it moves only what did not land.
+///
+/// The middle answer is the one nothing else would tell them, and it is why this
+/// hint names a command: a hard cutoff mid-object leaves a staging file on
+/// `local:` and `sftp:`, or an unfinished large file on B2, and an operator who
+/// does not know that pays for it monthly.
+pub const MAX_DURATION_HINT: &str = "Everything already transferred is committed and verified: a verified \
+     write commits nothing unless the stored bytes match, so no partial object \
+     was left behind. A transfer that was in flight when the deadline passed was \
+     abandoned; run 'dctl cleanup' to reclaim the staging file or unfinished \
+     upload it left. Re-run the same command to continue — it will move only \
+     what has not landed yet — or raise --max-duration.";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Vault initialisation (`dctl init`)
 // ─────────────────────────────────────────────────────────────────────────────

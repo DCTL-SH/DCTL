@@ -183,7 +183,8 @@ fn parse_one(value: Option<&str>, flag: &'static str) -> Result<Option<i64>, Age
     }
 }
 
-/// Turn `30s`, `90m`, `7d`, `1y` or a bare number of seconds into seconds.
+/// Turn `30s`, `90m`, `7d`, `1y` or a bare number of seconds into **whole
+/// seconds**, for the flags whose grain is a second.
 ///
 /// rclone's suffix table and its default unit ([`AGE_SUFFIX_SECONDS`]), so a
 /// script that moved across keeps selecting the same files. `off` and an
@@ -191,9 +192,35 @@ fn parse_one(value: Option<&str>, flag: &'static str) -> Result<Option<i64>, Age
 /// `Some(0)`, which would be an age bound of zero seconds and, as `--min-age`,
 /// would admit only files modified in the future.
 ///
+/// **A span shorter than a second truncates to `Some(0)` here**, which is what
+/// it has always done and is right for what this feeds: `--min-age` and
+/// `--max-age` compare against a modification time recorded in whole seconds,
+/// so `--min-age 500ms` cannot select anything a second boundary does not
+/// already select. A caller that needs the finer answer asks [`parse_span`]
+/// instead — `--max-duration 500ms` is a real half-second, and truncating
+/// *that* one would leave the run unbounded, which is the opposite of what was
+/// asked for.
+///
 /// # Errors
 /// A message naming the input and the accepted spellings.
 pub fn parse_age(input: &str) -> Result<Option<i64>, String> {
+    // Derived from `parse_span` rather than parsing again, so the two can never
+    // disagree about what `6M` is worth. One dialect, two grains.
+    Ok(parse_span(input)?.map(|span| i64::try_from(span.as_secs()).unwrap_or(i64::MAX)))
+}
+
+/// The same dialect, at full precision.
+///
+/// [`parse_age`] is this with the sub-second part discarded, because the flags
+/// it feeds compare against whole-second timestamps. Everything that is a real
+/// length of time — `--max-duration` — reads it here, because `500ms`
+/// truncated to zero seconds would mean *unbounded*, and a run silently left
+/// unbounded by a value the parser accepted is the exact class of failure this
+/// project keeps finding (`HANDOVER.md` §13).
+///
+/// # Errors
+/// A message naming the input and the accepted spellings.
+pub fn parse_span(input: &str) -> Result<Option<std::time::Duration>, String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(format!("an age is required (try {AGE_PARSE_EXAMPLES})"));
@@ -233,7 +260,11 @@ pub fn parse_age(input: &str) -> Result<Option<i64>, String> {
     if !seconds.is_finite() || seconds >= i64::MAX as f64 {
         return Ok(None);
     }
-    Ok(Some(seconds as i64))
+    // `try_from_secs_f64` refuses a negative, a NaN and an overflow; the first
+    // two are already refused above and the third is what the guard on the line
+    // before covers, so a failure here is a value nobody can act on and "no
+    // limit" is the same answer the guard gives.
+    Ok(std::time::Duration::try_from_secs_f64(seconds).ok())
 }
 
 #[cfg(test)]

@@ -86,7 +86,7 @@
 // needed is a diagnostic nobody reviewed.
 #![allow(dead_code)]
 
-mod age;
+pub(crate) mod age;
 mod depth;
 mod glob;
 mod parse;

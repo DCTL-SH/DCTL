@@ -42,7 +42,7 @@ mod tls;
 
 pub use backend::{Backend, UploadTicket};
 pub use checksum::{ContentHash, HashAlgo, Hasher};
-pub use deadline::{Deadlines, Expired, IdleWatch};
+pub use deadline::{Deadlines, Exceeded, Expired, IdleWatch, Left, RunDeadline};
 pub use error::{Result, StoreError};
 pub use guard::{Guarded, StoreIdentity};
 pub use incoming::{ObjectStream, ObjectWriter, object_stream};

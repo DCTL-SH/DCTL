@@ -217,21 +217,22 @@ impl B2Backend {
     }
 
     async fn authorize(&self) -> Result<AuthState> {
-        let parsed: AuthorizeResponse = retry::run(constants::EP_AUTHORIZE, |_| async {
-            let watch = self.deadlines.watch();
-            let response = watch
-                .guard(
-                    self.client
-                        .get(&self.authorize_url)
-                        .basic_auth(&self.creds.key_id, Some(&self.creds.app_key))
-                        .send(),
-                )
-                .await
-                .map_err(stalled_attempt)?
-                .map_err(transport_attempt)?;
-            read_json(Answered { watch, response }).await
-        })
-        .await?;
+        let parsed: AuthorizeResponse =
+            retry::run(constants::EP_AUTHORIZE, self.deadlines.run, |_| async {
+                let watch = self.deadlines.watch();
+                let response = watch
+                    .guard(
+                        self.client
+                            .get(&self.authorize_url)
+                            .basic_auth(&self.creds.key_id, Some(&self.creds.app_key))
+                            .send(),
+                    )
+                    .await
+                    .map_err(stalled_attempt)?
+                    .map_err(transport_attempt)?;
+                read_json(Answered { watch, response }).await
+            })
+            .await?;
         // `recommendedPartSize` is read and reported and is deliberately not what
         // parts are cut at — `constants::DEFAULT_PART_SIZE` says why a figure that
         // *is* the process's peak memory must not arrive from the network. Both
@@ -276,25 +277,26 @@ impl B2Backend {
             constants::API_PREFIX,
             constants::EP_LIST_BUCKETS
         );
-        let listed: ListBucketsResponse = retry::run(constants::EP_LIST_BUCKETS, |_| async {
-            let watch = self.deadlines.watch();
-            let response = watch
-                .guard(
-                    self.client
-                        .post(&url)
-                        .header(constants::H_AUTHORIZATION, token)
-                        .json(&serde_json::json!({
-                            "accountId": account_id,
-                            "bucketName": self.bucket_name,
-                        }))
-                        .send(),
-                )
-                .await
-                .map_err(stalled_attempt)?
-                .map_err(transport_attempt)?;
-            read_json(Answered { watch, response }).await
-        })
-        .await?;
+        let listed: ListBucketsResponse =
+            retry::run(constants::EP_LIST_BUCKETS, self.deadlines.run, |_| async {
+                let watch = self.deadlines.watch();
+                let response = watch
+                    .guard(
+                        self.client
+                            .post(&url)
+                            .header(constants::H_AUTHORIZATION, token)
+                            .json(&serde_json::json!({
+                                "accountId": account_id,
+                                "bucketName": self.bucket_name,
+                            }))
+                            .send(),
+                    )
+                    .await
+                    .map_err(stalled_attempt)?
+                    .map_err(transport_attempt)?;
+                read_json(Answered { watch, response }).await
+            })
+            .await?;
         listed
             .buckets
             .into_iter()
@@ -321,7 +323,7 @@ impl B2Backend {
         endpoint: &'static str,
         body: serde_json::Value,
     ) -> Result<T> {
-        retry::run(endpoint, |_| async {
+        retry::run(endpoint, self.deadlines.run, |_| async {
             let auth = self.auth().await.map_err(Attempt::transport)?;
             self.post_json_once(&auth, endpoint, body.clone()).await
         })
@@ -397,8 +399,20 @@ fn transport_attempt(e: reqwest::Error) -> Attempt {
 /// doing. `StoreError::Transport` rather than `Backend` so the *outer* retry
 /// layer agrees, since `crate::retry::observed` reads that variant as transient
 /// and reads `Backend` as permanent.
+///
+/// **Unless it was the run's own window that closed**, and the split is the
+/// point. `--timeout` and `--max-duration` both arrive here as an [`Expired`]
+/// and they mean opposite things: one is a link that went quiet, which another
+/// connection may fix, and one is the operator's deadline, which nothing fixes.
+/// Sending the second down the transient path is what turns an exact 30 s
+/// deadline into a run still going 943.6 s later (§32.9).
 fn stalled_attempt(expired: Expired) -> Attempt {
-    Attempt::transport(expired.into_store_error(B2_BACKEND_NAME))
+    let error = expired.into_store_error(B2_BACKEND_NAME);
+    if expired.is_run_deadline() {
+        Attempt::run_deadline(error)
+    } else {
+        Attempt::transport(error)
+    }
 }
 
 /// Read a response, erroring on non-2xx status, then deserialize the body as `T`.

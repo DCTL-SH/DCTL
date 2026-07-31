@@ -106,7 +106,49 @@ fn run(cli: Cli) -> ExitCode {
         }
     };
 
-    runtime.block_on(execute(cli))
+    let (code, ending) = runtime.block_on(execute(cli));
+
+    // A run that was **stopped** does not then wait for the work it stopped.
+    //
+    // This is the last place `--max-duration` could have failed to be a bound,
+    // and it did: measured live, a `--max-duration 3s` copy of 8 MiB at
+    // `--bwlimit 64k` into a configured `local:` remote printed its deadline on
+    // time and exited **126 s** later. The report was right and the process was
+    // still there, which is §32.9's complaint with a new cause.
+    //
+    // The cause is that `spawn_blocking` work cannot be cancelled. `local:`
+    // copies inside one and paces there with a real `std::thread::sleep`
+    // (`dctl_store::meter::charge_blocking`, which is correct for what it is);
+    // dropping the command future detaches that task rather than ending it, and
+    // `Runtime::drop` then waits for the blocking pool to drain — all 128
+    // seconds of pacing for bytes nobody will ever look at.
+    //
+    // `shutdown_background` is the documented way to say "do not wait", and it
+    // is applied **only** to the endings that abandoned something. A run that
+    // finished normally has awaited everything it spawned, so there is nothing
+    // to abandon and today's behaviour is kept: the difference matters because
+    // the durability contract is that what was *reported* as stored is durable,
+    // and nothing here may weaken it. On the abandoned path nothing was
+    // reported as stored — the file in flight is not counted — so there is no
+    // claim to protect.
+    if ending == Ending::Abandoned {
+        runtime.shutdown_background();
+    }
+    code
+}
+
+/// What the process must do about work that outlived the run.
+///
+/// Two states rather than a bool so the call sites read as what happened rather
+/// than as a flag whose polarity has to be remembered — the same reason
+/// [`ctx::Ran`] has two.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Ending {
+    /// The command returned. Anything it spawned, it also awaited.
+    Completed,
+    /// The command was stopped where it stood — `--max-duration` or a signal —
+    /// and whatever it had in flight was left running.
+    Abandoned,
 }
 
 /// Told to the user when a flag this build cannot honour is refused before a
@@ -121,10 +163,23 @@ const NOTHING_ATTEMPTED: &str = "No command was run and nothing was read or writ
 enum Outcome {
     Finished(error::Result<()>),
     Cancelled,
+    /// The run reached the deadline `--max-duration` gave it.
+    ///
+    /// A third state rather than a `Finished(Err(...))`, because it is not
+    /// something the command *returned*: the command future was dropped where
+    /// it stood. Folding it into either of the other two would lose the one
+    /// fact a wrapper script needs — that the window closed, rather than that
+    /// the work failed or that somebody pressed Ctrl-C.
+    OutOfTime(std::time::Duration),
 }
 
-/// Run the command, racing it against an interrupt.
-async fn execute(cli: Cli) -> ExitCode {
+/// Run the command, racing it against an interrupt and against the run's own
+/// deadline.
+///
+/// Returns the exit status **and** whether anything was left running, because
+/// the caller owns the runtime and is the only place that can decide not to
+/// wait for it. See [`run`].
+async fn execute(cli: Cli) -> (ExitCode, Ending) {
     let show_summary = cli.command.is_transfer();
     // Resolved before the globals are moved into the context, and resolved once:
     // `--progress` shortens the cadence and `--stats 0` turns it off, and a
@@ -169,7 +224,7 @@ async fn execute(cli: Cli) -> ExitCode {
         NOTHING_ATTEMPTED,
     ) {
         report(&context, &error);
-        return error.code();
+        return (error.code(), Ending::Completed);
     }
 
     // An interrupted run must never be reported as success: in-flight work is
@@ -193,10 +248,48 @@ async fn execute(cli: Cli) -> ExitCode {
         tokio::select! {
             result = dispatch::dispatch(&context, &cli.command) => Outcome::Finished(result),
             _ = tokio::signal::ctrl_c() => Outcome::Cancelled,
+            // The run's own deadline, and the reason it is *here* as well as in
+            // every layer below. The layers below make the ending orderly — the
+            // request is cancelled by name, the retry loop is not re-entered, no
+            // further file is started — and none of them can promise the wall
+            // clock, because none of them owns the work that no future owns: a
+            // blocking read inside `spawn_blocking`, an `ssh` child, a
+            // filesystem call in uninterruptible sleep. Dropping the command
+            // future is what makes `--max-duration` a bound rather than a
+            // request, and it is exactly what rclone's default `--cutoff-mode
+            // hard` does with a cancelled context (`fs/sync/sync.go:203-205`).
+            //
+            // Nothing is left half-written by it. A verified write commits only
+            // when the stored bytes match, so an abandoned object was never an
+            // object; the debris is a staging file or an unfinished multipart
+            // upload, and the hint on the way out names the command that
+            // reclaims them.
+            limit = out_of_time(&context) => Outcome::OutOfTime(limit),
         }
     };
 
     match outcome {
+        Outcome::OutOfTime(limit) => {
+            // The summary is shown, not suppressed. A run stopped at its
+            // deadline is a success up to that point, and the counters are the
+            // only record of how far it got — which is the first thing an
+            // operator sizing tomorrow's window needs to know.
+            context.finish(show_summary);
+            let error = CliError::new(
+                ExitCode::DurationLimitExceeded,
+                format!(
+                    "{}: the run was stopped after {}s with work still in flight",
+                    constants::MAX_DURATION_REACHED,
+                    limit.as_secs()
+                ),
+            )
+            .with_hint(constants::MAX_DURATION_HINT);
+            report(&context, &error);
+            // Abandoned by construction: the command future was dropped where
+            // it stood, so whatever it had spawned is still running.
+            (ExitCode::DurationLimitExceeded, Ending::Abandoned)
+        }
+
         Outcome::Cancelled => {
             context.finish(false);
             context
@@ -206,7 +299,11 @@ async fn execute(cli: Cli) -> ExitCode {
                 { fields::ERROR_CODE } = ExitCode::Cancelled.slug(),
                 "cancelled"
             );
-            ExitCode::Cancelled
+            // The same shape as the deadline: dropped where it stood. This
+            // ending had the identical defect and had it before
+            // `--max-duration` existed — a Ctrl-C on a paced `local:` copy sat
+            // there for the rest of the pacing.
+            (ExitCode::Cancelled, Ending::Abandoned)
         }
 
         Outcome::Finished(Ok(())) => {
@@ -220,7 +317,7 @@ async fn execute(cli: Cli) -> ExitCode {
                     "completed with errors"
                 );
             }
-            code
+            (code, Ending::Completed)
         }
 
         Outcome::Finished(Err(error)) => {
@@ -231,9 +328,31 @@ async fn execute(cli: Cli) -> ExitCode {
             // the line it introduced.
             context.finish_with(show_summary, ctx::Ran::Failed);
             report(&context, &error);
-            error.code()
+            (error.code(), Ending::Completed)
         }
     }
+}
+
+/// Resolve when this run's `--max-duration` has passed, and never otherwise.
+///
+/// Written as a future rather than as a `tokio::time::timeout` around the
+/// dispatch so the `select!` above reads as the three things that can end a run,
+/// side by side. An unbounded run gets [`std::future::pending`]: no timer, no
+/// wakeups, and no arithmetic that could one day overflow into one — the same
+/// rule `dctl_store::deadline` follows for the other two deadlines.
+async fn out_of_time(context: &Ctx) -> std::time::Duration {
+    let Some(limit) = context.deadlines.run.limit() else {
+        return std::future::pending().await;
+    };
+    match context.deadlines.run.left() {
+        dctl_store::Left::Unbounded => std::future::pending().await,
+        dctl_store::Left::Remaining(left) => tokio::time::sleep(left).await,
+        // Already gone before the command started, which a `--max-duration`
+        // shorter than the vault unlock can produce. Nothing is awaited: the
+        // run is over, and sleeping for zero to say so would only add a wakeup.
+        dctl_store::Left::Spent => {}
+    }
+    limit
 }
 
 /// Report a failure to both sinks.
