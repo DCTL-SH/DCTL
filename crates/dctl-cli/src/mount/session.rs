@@ -454,7 +454,6 @@ impl Mounted {
         if self.detached {
             return Detachment::AlreadyDone;
         }
-        self.detached = true;
         if let Err(error) = self.unmounter.unmount() {
             // A failed unmount is not the same thing as a mountpoint still
             // carrying a filesystem, and only the second is worth alarming
@@ -467,6 +466,7 @@ impl Mounted {
             // way. So the mountpoint is looked at before the warning is written,
             // by the same predicate that decides the word "unmounted".
             if super::detached::is_detached(&self.mountpoint, self.bare_device) {
+                self.detached = true;
                 tracing::debug!(
                     mountpoint = %self.mountpoint.display(),
                     "the mountpoint was already free when the detach was attempted: {error}"
@@ -476,16 +476,24 @@ impl Mounted {
             // Reported rather than swallowed: a mountpoint that is still attached
             // after the process exits is the failure worth being loud about, and
             // this is the only place that knows it happened.
+            //
+            // **Not latched**, which is the point of the missing `self.detached`
+            // assignment on this branch: a failure here is usually a transient
+            // `EBUSY` from a reader that has not quite let go, and the callers
+            // ask again. Setting the flag on a failed attempt made the first
+            // answer the only answer there was ever going to be.
             tracing::warn!(
                 mountpoint = %self.mountpoint.display(),
                 "could not detach the filesystem: {error}"
             );
             return Detachment::Failed;
         }
+        self.detached = true;
         Detachment::Requested
     }
 
-    /// Wait, briefly, for the mountpoint to actually come free.
+    /// Wait, briefly, for the mountpoint to actually come free — asking again
+    /// each time it has not.
     ///
     /// Bounded by [`MOUNT_DETACH_GRACE`]. Returns whether it did — the answer
     /// every message below is conditioned on, so that "unmounted" is a thing this
@@ -493,7 +501,22 @@ impl Mounted {
     ///
     /// Called after [`Mounted::settle`], so that a mountpoint still answering
     /// with the filesystem's device is one nothing is going to come and free.
-    async fn confirm_detached(&self) -> bool {
+    ///
+    /// ## Why the grace period is spent asking rather than watching
+    ///
+    /// It used to only watch, and that was the difference between a mountpoint
+    /// that comes free and one that does not. `unmount(2)` answers `EBUSY` while
+    /// any process still holds a file open on the mount — and [`Mounted::detach`]
+    /// runs the instant the signal arrives, which is exactly when a reader is
+    /// most likely to still be there. Measured on macOS 27: Ctrl-C a mount with a
+    /// `cat` running through it and the single attempt fails, the reader notices
+    /// its next read failing microseconds later and lets go, and nothing ever
+    /// asks again. The mountpoint stays attached with no server behind it.
+    ///
+    /// So each round of the wait is another attempt. Its error is deliberately
+    /// discarded: [`Mounted::detach`] already reported the first one, and a
+    /// hundred more copies of a transient `EBUSY` would bury it.
+    async fn confirm_detached(&mut self) -> bool {
         let deadline = Instant::now().checked_add(MOUNT_DETACH_GRACE);
         loop {
             if super::detached::is_detached(&self.mountpoint, self.bare_device) {
@@ -505,6 +528,38 @@ impl Mounted {
                 return false;
             }
             tokio::time::sleep(MOUNT_SHUTDOWN_POLL).await;
+            // Ask again. See the docs above: the answer that got us here is
+            // usually `EBUSY` from a reader that has since let go.
+            let _ = self.unmounter.unmount();
+        }
+    }
+
+    /// Take the mount down and wait for the mountpoint to come free, for a caller
+    /// that cannot await.
+    ///
+    /// The blocking twin of [`Mounted::detach`] followed by
+    /// [`Mounted::confirm_detached`], and it exists for [`Drop`] — which on macOS
+    /// is not the unusual path but the **Ctrl-C** path, and Ctrl-C is how most
+    /// mounts end. `main` races every command against `ctrl_c`, so when the signal
+    /// wins the command future is dropped rather than run to completion, and
+    /// [`Mounted::run`] — its retry, its confirmation and its message — does not
+    /// happen at all.
+    ///
+    /// Returns whether the mountpoint came free, because `Drop` has nowhere to
+    /// return an error and a decision that is only a `tracing` call cannot be
+    /// asserted. The same reasoning as [`Detacher`]'s own documentation.
+    fn free_mountpoint(&mut self) -> bool {
+        let _ = self.detach();
+        let deadline = Instant::now().checked_add(MOUNT_DETACH_GRACE);
+        loop {
+            if super::detached::is_detached(&self.mountpoint, self.bare_device) {
+                return true;
+            }
+            if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
+                return false;
+            }
+            std::thread::sleep(MOUNT_SHUTDOWN_POLL);
+            let _ = self.unmounter.unmount();
         }
     }
 
@@ -557,14 +612,29 @@ impl Mounted {
 }
 
 impl Drop for Mounted {
-    /// The last line of defence.
+    /// The last line of defence, and on macOS the ordinary one.
     ///
     /// Reached when the caller's future is cancelled rather than run to
     /// completion — which is exactly what happens when `main`'s own Ctrl-C race
-    /// resolves in favour of the signal. Without this, that path would leave the
-    /// mountpoint attached with the process exiting.
+    /// resolves in favour of the signal. Ctrl-C is how most mounts end, so this is
+    /// not a corner: [`Mounted::run`]'s whole shutdown, including its retry and
+    /// its message, is skipped on that path and this is all there is.
+    ///
+    /// It therefore does the same two things `run` does, as far as a `Drop` can:
+    /// it keeps asking for the detach until the mountpoint comes free, and if it
+    /// does not, it **says so**. It cannot return an error, and a mount left
+    /// attached with no server is not a thing to leave an operator to discover
+    /// from a hanging `ls`.
     fn drop(&mut self) {
-        let _ = self.detach();
+        if self.free_mountpoint() {
+            return;
+        }
+        tracing::warn!(
+            { fields::OP } = "mount",
+            mountpoint = %self.mountpoint.display(),
+            hint = MOUNT_STALE_HINT,
+            "the mountpoint is still attached after the mount ended"
+        );
     }
 }
 
@@ -1022,6 +1092,156 @@ mod tests {
         fn unmount(&mut self) -> io::Result<()> {
             Err(io::Error::from(self.0))
         }
+    }
+
+    /// A detacher that always fails and counts how often it was asked.
+    ///
+    /// The count is the whole point: `unmount(2)` answers `EBUSY` while any
+    /// process still holds a file open on the mount, and that condition lasts
+    /// microseconds. Whether the grace period is spent *asking again* or merely
+    /// *watching* is the difference between a mountpoint that comes free and one
+    /// that does not, and it is invisible in every other observable.
+    #[derive(Clone)]
+    struct CountingDetach {
+        attempts: Arc<std::sync::atomic::AtomicUsize>,
+        kind: io::ErrorKind,
+    }
+
+    impl CountingDetach {
+        fn new(kind: io::ErrorKind) -> Self {
+            Self {
+                attempts: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                kind,
+            }
+        }
+
+        fn attempts(&self) -> usize {
+            self.attempts.load(std::sync::atomic::Ordering::Relaxed)
+        }
+    }
+
+    impl Detacher for CountingDetach {
+        fn unmount(&mut self) -> io::Result<()> {
+            self.attempts
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Err(io::Error::from(self.kind))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mountpoint_that_is_busy_is_asked_again_rather_than_given_up_on() {
+        // Measured on macOS 27 / macFUSE 5.3.3, and it is the worst failure this
+        // module has: Ctrl-C a mount while anything is reading through it and the
+        // mountpoint is left attached with no server behind it. `mount(8)` still
+        // lists it, every access to the directory fails, and only a hand-run
+        // `umount` recovers it.
+        //
+        // The cause is one attempt at exactly the wrong moment. `unmount(2)`
+        // answers EBUSY while a process still holds a file open on the mount —
+        // `detach` is called the instant the signal arrives, which is precisely
+        // when a reader is most likely to still be there — and nothing ever asked
+        // again. The reader notices its next read failing microseconds later and
+        // lets go, and by then the only attempt there was ever going to be had
+        // already happened.
+        //
+        // So the grace period is spent re-asking, and this asks
+        // [`Mounted::confirm_detached`] directly rather than going through
+        // [`Mounted::run`].
+        //
+        // ## Why not through `run`, which is how it is really reached
+        //
+        // Because through `run` this assertion cannot fail, whatever the code
+        // does. `run` takes `self` by value, so the `Drop` impl fires before the
+        // test resumes — and `Drop` runs [`Mounted::free_mountpoint`], which has
+        // a re-asking loop of its own. Written that way and with the retry
+        // deleted outright, the count was still in the hundreds and the test
+        // stayed green: it was measuring the drop path while claiming to measure
+        // this one. Both wordings were tried against a build with the retry
+        // removed, and only this one goes red.
+        //
+        // What `run` owes is pinned by the assertion below it — that a
+        // mountpoint which never comes free is *reported*, not passed over — and
+        // by the drop-path test that follows.
+        let dir = tempfile::tempdir().unwrap();
+        let real = super::super::detached::device_of(dir.path()).unwrap();
+
+        let detacher = CountingDetach::new(io::ErrorKind::ResourceBusy);
+        let mut mounted = unattached(dir.path(), Some(real.wrapping_add(1)));
+        mounted.unmounter = Box::new(detacher.clone());
+
+        assert!(
+            !mounted.confirm_detached().await,
+            "a mountpoint on somebody else's device has not come free"
+        );
+
+        // The threshold separates *asking throughout the grace period* from
+        // *asking once*. The loop polls every [`MOUNT_SHUTDOWN_POLL`] for up to
+        // [`MOUNT_DETACH_GRACE`] — two hundred attempts as those constants
+        // stand — while an implementation that only watches makes none at all.
+        // Ten sits far above the second and far below the first, so it tells
+        // them apart without pinning the ratio between two constants either is
+        // free to change.
+        assert!(
+            detacher.attempts() > 10,
+            "the mountpoint was asked to detach {} time(s) and then watched for \
+             {:?}; a transient EBUSY needs asking again, not watching",
+            detacher.attempts(),
+            MOUNT_DETACH_GRACE
+        );
+
+        // And the other half, so that what `run` does with the answer is still
+        // covered: a mountpoint that never comes free is reported rather than
+        // quietly accepted.
+        let stubborn = CountingDetach::new(io::ErrorKind::ResourceBusy);
+        let mut reported = unattached(dir.path(), Some(real.wrapping_add(1)));
+        reported.unmounter = Box::new(stubborn);
+        let error = reported.run().await.expect_err("it never came free");
+        assert!(error.message().contains("still attached"));
+    }
+
+    #[test]
+    fn the_drop_path_asks_again_too_and_says_so_when_the_mountpoint_stays_attached() {
+        // `Drop` is not the unusual path — on macOS it is the **Ctrl-C** path, and
+        // Ctrl-C is how most mounts end. `main` races every command against
+        // `ctrl_c`, so when the signal wins the command future is dropped rather
+        // than run to completion and `Mounted::run` — its retry, its confirmation
+        // and its message — never happens at all. Measured: SIGTERM produced
+        // "stopped on request, but the mountpoint is still attached" while SIGINT
+        // in the same state produced only "cancelled", and left the operator with
+        // an unusable directory and nothing pointing at it.
+        //
+        // So the drop path owes the same two things: ask again, and say so when
+        // asking did not work. `Drop` has nowhere to return an error, which is why
+        // the decision is a value here rather than only a `tracing` call — the
+        // same reasoning as [`Detacher`]'s own documentation.
+        let dir = tempfile::tempdir().unwrap();
+        let real = super::super::detached::device_of(dir.path()).unwrap();
+
+        let detacher = CountingDetach::new(io::ErrorKind::ResourceBusy);
+        let mut mounted = unattached(dir.path(), Some(real.wrapping_add(1)));
+        mounted.unmounter = Box::new(detacher.clone());
+
+        assert!(
+            !mounted.free_mountpoint(),
+            "a mountpoint on somebody else's device has not come free"
+        );
+        assert!(
+            detacher.attempts() > 1,
+            "the drop path asked {} time(s)",
+            detacher.attempts()
+        );
+
+        // And the other half, so the rule is not "retry for ever": a mountpoint
+        // back on its own device is free at the first look and costs no waiting.
+        let free = CountingDetach::new(io::ErrorKind::ResourceBusy);
+        let mut ok = unattached(dir.path(), Some(real));
+        ok.unmounter = Box::new(free.clone());
+        let started = Instant::now();
+        assert!(ok.free_mountpoint());
+        assert!(
+            started.elapsed() < MOUNT_DETACH_GRACE,
+            "a free mountpoint must not be waited on"
+        );
     }
 
     /// A `Mounted` over a real directory, with no filesystem attached, that

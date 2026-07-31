@@ -102,6 +102,14 @@ pub struct MountArgs {
     pub allow_other: bool,
 
     /// Let root access the mount, without opening it to everyone.
+    ///
+    /// On macOS this is also what lets the vault be opened in Finder. At the
+    /// default — the mounting user alone — a shell reads the mount perfectly
+    /// while `open` fails with error -36 and Finder never gets past the root
+    /// directory, because opening a volume goes through LaunchServices and
+    /// LaunchServices reaches it as root. Measured on macOS 27 / macFUSE 5.3.3:
+    /// five runs, the flag the only thing changed, and it decided the outcome
+    /// every time.
     #[arg(long)]
     pub allow_root: bool,
 
@@ -422,6 +430,43 @@ mod tests {
         assert!(!args.daemon);
         assert!(!args.no_modtime);
         assert_eq!(args.volname, None);
+    }
+
+    #[test]
+    fn allow_root_says_that_finder_needs_it_on_macos() {
+        // Measured on macOS 27 / macFUSE 5.3.3, and it is the one thing about
+        // this mount a user cannot work out for themselves. At the default ACL —
+        // the mounting user alone — every shell operation works: `ls`, `cat`,
+        // `cmp` over a 64 MiB file, the seek test, all of it. Then `open` on the
+        // mountpoint fails with `error -36`, Finder never gets past the root
+        // directory, and nothing anywhere says why. Five runs alternating the
+        // flag, with nothing else changed, decided it every time.
+        //
+        // The reason is not DCTL's to fix: opening a volume goes through
+        // LaunchServices, LaunchServices reaches the mount as root, and macFUSE
+        // refuses root unless asked. Making the *default* let root in would
+        // widen who can read an unlocked vault, which is exactly the trade the
+        // ACL exists to refuse. So what is owed is that the flag says so, in the
+        // one place somebody with a Finder window that will not open is going to
+        // look.
+        //
+        // Pinned as a test because a sentence in a doc comment is deletable
+        // without anything noticing, and this one costs an afternoon to
+        // rediscover.
+        use clap::CommandFactory as _;
+        let help = Harness::command().render_long_help().to_string();
+        let allow_root = help
+            .split("--allow-root")
+            .nth(1)
+            .expect("--allow-root is on the mount flag surface");
+        for expected in ["Finder", "macOS", "-36"] {
+            assert!(
+                allow_root.contains(expected),
+                "--allow-root must name {expected}: a macOS user whose vault will \
+                 not open in Finder has no other way to learn that this is the \
+                 flag.\n{allow_root}"
+            );
+        }
     }
 
     #[test]

@@ -87,9 +87,43 @@ pub struct Channel {
 /// handover protocol 2 expects and because a stream gives end-of-file — the
 /// signal that tells a lost descriptor apart from a helper that refused.
 ///
+/// ## Close-on-exec, and why the flag is the whole point
+///
+/// `socketpair(2)` leaves both halves inheritable unless it is asked otherwise,
+/// and asking was missed. The cost was measured rather than reasoned about: seven
+/// `mount_macfuse` processes were found still running eighty minutes after the
+/// runs that started them, each pinning one of the sixty-four `/dev/macfuseN`
+/// nodes, and each holding *this process's* half of the channel alongside its
+/// own. A stream reaches end-of-file when the last descriptor for its peer
+/// closes, so a helper carrying a copy of [`Channel::ours`] can never observe
+/// DCTL going away — not on a clean exit, not on a crash, not on `SIGKILL`. The
+/// signal this module is built around simply never arrives.
+///
+/// It is also a descriptor handed to a **setuid-root** program that has no use
+/// for it, which is worth avoiding on its own terms.
+///
+/// The half that is *meant* to reach the helper still does: it becomes the
+/// child's standard input through `Stdio::from`, which `dup2`s it onto descriptor
+/// zero — and `dup2` produces a descriptor without the flag whatever the original
+/// carried. So close-on-exec costs the helper nothing it needs, and takes away
+/// everything it should not have.
+///
+/// ## Why the flag is set afterwards rather than asked for
+///
+/// `SOCK_CLOEXEC` is a Linux extension. Darwin's `socketpair(2)` has no flags
+/// argument at all — `rustix` reflects this exactly, gating
+/// `SocketFlags::CLOEXEC` off Apple platforms — so there is no atomic form of
+/// this call to reach for, and `fcntl` is not a shortcut past one. What that
+/// costs is a window between the pair existing and the flag being set, in which
+/// a *concurrent* `exec` in another thread would still inherit both halves. It
+/// is named rather than left implicit because it is the one thing this cannot
+/// fix: the mount path runs on one thread and spawns nothing in that window, and
+/// the alternative — omitting the flag because it cannot be perfect — is how the
+/// seven stuck helpers came to exist.
+///
 /// # Errors
-/// Whatever `socketpair(2)` reported. There is no ordinary cause; a failure here
-/// means the process is out of descriptors.
+/// Whatever `socketpair(2)` or `fcntl(2)` reported. There is no ordinary cause;
+/// a failure here means the process is out of descriptors.
 pub fn channel() -> io::Result<Channel> {
     let (ours, helper) = socketpair(
         AddressFamily::UNIX,
@@ -97,6 +131,12 @@ pub fn channel() -> io::Result<Channel> {
         SocketFlags::empty(),
         None,
     )?;
+    // Both halves, and a failure on either is fatal to the mount rather than a
+    // warning: an inheritable half is precisely the state that leaves a helper
+    // running for ever, and a mount is not worth starting with it.
+    for half in [&ours, &helper] {
+        rustix::io::fcntl_setfd(half, rustix::io::FdFlags::CLOEXEC)?;
+    }
     Ok(Channel { ours, helper })
 }
 
@@ -154,6 +194,86 @@ mod tests {
         // the one that becomes a child's standard input.
         let channel = channel().expect("a socketpair on a healthy process");
         assert_ne!(channel.ours.as_raw_fd(), channel.helper.as_raw_fd());
+    }
+
+    #[test]
+    fn neither_half_of_the_channel_survives_into_a_child_process() {
+        // Measured on this machine, and the reason this test exists: seven
+        // `mount_macfuse` processes were found still running eighty minutes
+        // after the runs that started them, each pinning a `/dev/macfuseN` node
+        // that nothing could reclaim. Every one of them held **three** sockets —
+        // its own half twice, and *the parent's half*:
+        //
+        //   0u unix 0x97d2…f9bf ->0xb09a…8f40   the half it was given
+        //   3u unix 0xb09a…8f40 ->0x97d2…f9bf   OURS, inherited
+        //   4u unix 0x97d2…f9bf ->0xb09a…8f40   its own, dup'd by macFUSE
+        //
+        // `socketpair(2)` does not set close-on-exec unless it is asked to, and
+        // it was not, so both halves reached every child this process spawned —
+        // including a setuid-root program that has no business holding either.
+        //
+        // The consequence is the one that matters: a stream reaches end-of-file
+        // when the *last* descriptor for its peer closes, so a helper holding a
+        // copy of `ours` can never see DCTL go away, however DCTL goes. The
+        // module docs above call end-of-file "the signal that tells a lost
+        // descriptor apart from a helper that refused" — a signal that cannot
+        // arrive.
+        //
+        // Written as the symptom rather than as a flag test: `cat` stands in for
+        // the helper, reading the half it was handed until end-of-file. With the
+        // parent's half closed there is nothing left to keep the stream open, so
+        // it must exit. Leaked, it waits for ever — which is exactly what those
+        // seven processes were doing.
+        let channel = channel().expect("a socketpair on a healthy process");
+        let mut child = std::process::Command::new("/bin/cat")
+            .stdin(std::process::Stdio::from(channel.helper))
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("cat is on every macOS");
+
+        // The only copy of this half left in this process. Dropping it is the
+        // whole experiment: after this, nothing *should* be holding the peer.
+        drop(channel.ours);
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let exited = loop {
+            match child.try_wait().expect("a spawned child can be waited on") {
+                Some(_) => break true,
+                None if std::time::Instant::now() >= deadline => break false,
+                None => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        };
+        if !exited {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        assert!(
+            exited,
+            "the child never reached end-of-file: it inherited this process's \
+             half of the channel, so closing ours cannot close the stream. A \
+             macFUSE helper in that state outlives DCTL and keeps its \
+             /dev/macfuseN node until the machine reboots."
+        );
+    }
+
+    #[test]
+    fn both_halves_of_the_channel_are_close_on_exec() {
+        // The mechanism behind the test above, pinned directly so a regression
+        // names its own cause rather than presenting as a hung child. Both
+        // halves, not just the one kept: the half handed to the helper becomes
+        // its standard input through `Stdio::from`, which dups it onto
+        // descriptor zero — and a dup does not carry the flag, so asking for
+        // close-on-exec here costs the child nothing it needs.
+        let channel = channel().expect("a socketpair on a healthy process");
+        for (name, half) in [("ours", &channel.ours), ("helper", &channel.helper)] {
+            let flags = rustix::io::fcntl_getfd(half).expect("a live descriptor has flags");
+            assert!(
+                flags.contains(rustix::io::FdFlags::CLOEXEC),
+                "the {name} half is inheritable: every child this process spawns \
+                 gets a copy, including a setuid-root mount helper"
+            );
+        }
     }
 
     #[test]

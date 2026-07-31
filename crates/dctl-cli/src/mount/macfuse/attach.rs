@@ -67,10 +67,15 @@ pub fn attach(mountpoint: &Path, config: &Config, idle_seconds: u64) -> Result<A
     })?;
 
     let invocation = helper::invocation(mountpoint, &options, &helper::daemon_path());
-    let helper = helper::Helper::start(&invocation, channel.helper)
+    // The whole channel, not half of it: the helper writes back over this socket
+    // once its `mount(2)` returns, so this process's end has to stay open until
+    // the helper has exited. It used to be dropped here, at the end of this
+    // function, and every mount survived only because the helper had inherited a
+    // copy of it. See [`helper::Helper::start`].
+    let helper = helper::Helper::start(&invocation, channel)
         .map_err(|error| helper_failed(mountpoint, &error))?;
 
-    match handover::receive(&channel.ours).map_err(|error| {
+    match handover::receive(helper.channel()).map_err(|error| {
         CliError::new(
             ExitCode::FatalError,
             format!(

@@ -83,14 +83,29 @@ attached on a shared or unattended machine.
 | macOS | macFUSE, via the `fuser` crate | **Works.** macFUSE must be installed, and its system extension allowed in *System Settings → General → Login Items & Extensions* the first time it loads. |
 | Windows | WinFSP | **Not built.** WinFSP is not a FUSE binding and cannot be reached through `fuser`; the command refuses by name with exit **7**. |
 
-`PLAN.md` §15 prefers **FSKit** on macOS — Apple-sanctioned, needs no kernel
-extension, and therefore the 20-year-safe option — with **fuse-t** (NFS loopback,
-also kext-free) as the fallback and macFUSE last. Neither FSKit nor fuse-t has a
-Rust binding, so this build attaches through macFUSE, which *is* a kernel
-extension. The command says so on the `backend:` line rather than reporting the
-preference as though it were the implementation: the whole difference between
-those three options is whether a kext is involved, and a user deciding what to
-install needs the true answer.
+`PLAN.md` §15 ranks **macFUSE** first on macOS *because it is the one that
+works*, not because a kernel extension is the preferred shape. **FSKit** —
+Apple-sanctioned, kext-free, the 20-year-safe option — and **fuse-t** (NFS
+loopback, also kext-free) are both better in the abstract and neither has a Rust
+binding: FSKit needs a Swift extension in an app bundle, and fuse-t speaks NFS
+rather than the FUSE protocol `fuser` implements. So this build attaches through
+macFUSE, which *is* a kernel extension, and the command says so on the
+`backend:` line rather than reporting a preference as though it were the
+implementation. A user deciding what to install needs the true answer.
+
+Verified live against macFUSE 5.3.3 on macOS 27 (arm64): reads are
+byte-identical, a 1 MiB read at offset 32 MiB of a 64 MiB object costs 1.031 MiB
+of store traffic, every mutating operation is refused, and the mountpoint comes
+free under `SIGINT`, `SIGTERM`, `umount` and `diskutil unmount` — including with
+a read in flight. See `HANDOVER.md` §33.
+
+**Finder needs `--allow-root` on macOS.** At the default — the mounting user
+alone — the shell reads the mount perfectly while `open` fails with `error -36`
+and Finder never gets past the root directory, because opening a volume goes
+through LaunchServices and LaunchServices reaches the mount as root. The default
+is deliberately not widened: letting root into an unlocked vault is the trade
+the session ACL exists to refuse. Note also that Finder leaves a `.DS_Store`
+behind in the mountpoint, which the next mount will refuse as non-empty.
 
 ## Ending a mount
 
@@ -298,7 +313,9 @@ $ echo $?
 ```
       --read-only                  Serve the filesystem read-only
       --allow-other                Let other users access the mount
-      --allow-root                 Let root access the mount, without opening it to everyone
+      --allow-root                 Let root access the mount, without opening it to
+                                   everyone. On macOS this is also what lets the vault
+                                   be opened in Finder
       --daemon                     Detach and run in the background
       --volname <NAME>             Name shown for the volume in the desktop file manager
       --dir-cache-time <DURATION>  How long a directory listing is cached before it is re-read [default: 5m]

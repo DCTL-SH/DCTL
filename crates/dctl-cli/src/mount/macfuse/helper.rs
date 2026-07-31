@@ -136,10 +136,15 @@ mod running {
     /// not yet confirmed.
     pub struct Helper {
         child: Child,
+        /// This process's end of the comm socket, held for exactly as long as the
+        /// helper is running. See [`Helper::start`] — closing it early kills the
+        /// helper with `SIGPIPE` and the mount with it.
+        channel: OwnedFd,
     }
 
     impl Helper {
-        /// Start the helper, giving it `socket` as its standard input.
+        /// Start the helper, giving it one half of `channel` as its standard
+        /// input and keeping the other.
         ///
         /// The socket goes on descriptor zero because putting a descriptor
         /// anywhere else in a child requires `pre_exec`, which is `unsafe`, and
@@ -148,30 +153,63 @@ mod running {
         /// never reads standard input for anything else, and standard output and
         /// error stay free to carry its diagnostics.
         ///
+        /// ## Why the whole channel, and not just the half being given away
+        ///
+        /// Because the helper writes back over it **after** the descriptor has
+        /// been handed across, and there has to be a reader when it does.
+        /// Measured on macFUSE 5.3.3: with this process's end closed as soon as
+        /// the device arrived, the helper reached its `mount(2)`, the filesystem
+        /// answered, and the helper then died of **signal 13** — every mount
+        /// failing with "refused the mount without saying why", which is what an
+        /// unhandled `SIGPIPE` and two empty pipes look like from outside.
+        ///
+        /// It had never been noticed because a second defect was hiding it: the
+        /// socketpair was created without close-on-exec, so the helper had
+        /// inherited a copy of this process's half and its write always had a
+        /// reader — itself. The leak was load-bearing. Closing it exposed this,
+        /// and taking ownership here is the answer to both: the channel belongs
+        /// to the helper, [`Helper::confirm`] is what ends it, and no caller is
+        /// in a position to close it early.
+        ///
         /// # Errors
         /// Whatever `std::process::Command` reported. On macOS the usual answer
         /// is that macFUSE is not installed, which [`preflight`] has already
         /// checked for by name.
         ///
         /// [`preflight`]: crate::mount::preflight
-        pub fn start(invocation: &Invocation, socket: OwnedFd) -> io::Result<Self> {
+        pub fn start(
+            invocation: &Invocation,
+            channel: super::super::handover::Channel,
+        ) -> io::Result<Self> {
             let mut command = Command::new(&invocation.program);
             command
                 .args(&invocation.arguments)
-                .stdin(Stdio::from(socket))
+                .stdin(Stdio::from(channel.helper))
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped());
             for (name, value) in &invocation.environment {
                 command.env(name, value);
             }
             // The `Command` is dropped at the end of this function, which closes
-            // this process's copy of the socket. That matters: with a copy left
-            // open, a helper that exits without sending a descriptor would never
-            // reach end-of-file on the other half, and the wait for it would hang
-            // instead of reporting the refusal.
+            // this process's copy of the *helper's* half. That matters: with a
+            // copy left open, a helper that exits without sending a descriptor
+            // would never reach end-of-file on the other half, and the wait for
+            // it would hang instead of reporting the refusal. Our own half is
+            // kept, which is the opposite requirement and the paragraph above.
             Ok(Self {
                 child: command.spawn()?,
+                channel: channel.ours,
             })
+        }
+
+        /// The end of the comm socket the device descriptor arrives on.
+        ///
+        /// Borrowed rather than handed over, because the helper owns it: a caller
+        /// given the descriptor could drop it, and dropping it is precisely the
+        /// failure [`Helper::start`] documents.
+        #[must_use]
+        pub fn channel(&self) -> &OwnedFd {
+            &self.channel
         }
 
         /// Wait for the helper to report the outcome of the mount.
@@ -189,8 +227,8 @@ mod running {
             loop {
                 match self.child.try_wait()? {
                     Some(status) if status.success() => return Ok(()),
-                    Some(_) => {
-                        return Err(io::Error::other(self.complaint()));
+                    Some(status) => {
+                        return Err(io::Error::other(self.complaint(status)));
                     }
                     // `checked_add` returning `None` means the clock cannot
                     // represent the deadline, which is not a reason to wait for
@@ -209,7 +247,8 @@ mod running {
             }
         }
 
-        /// What the helper said when it refused.
+        /// What the helper said when it refused, or what killed it if it did not
+        /// get the chance to say anything.
         ///
         /// Quoted rather than summarised: macFUSE's messages name the actual
         /// objection — a mountpoint that is not a directory, a type name that is
@@ -219,7 +258,19 @@ mod running {
         /// Both pipes, error first, because macFUSE writes its refusals to
         /// standard error and its occasional notes to standard output, and a
         /// message that quoted only one of them would sometimes quote nothing.
-        fn complaint(&mut self) -> String {
+        ///
+        /// ## A signal is not a refusal
+        ///
+        /// The last branch used to say "refused the mount without saying why"
+        /// for *every* unsuccessful exit, and that sentence was wrong twice over
+        /// on the one case that mattered: a helper killed by `SIGPIPE` after a
+        /// successful `mount(2)` had refused nothing, and had said exactly why —
+        /// in the wait status nobody read. Diagnosing it took a bisect. The
+        /// signal is named here because which one it was *is* the diagnosis: 13
+        /// says the comm socket lost its reader, 9 says something killed the
+        /// helper, 11 says macFUSE crashed, and those want three different
+        /// answers from whoever reads the message.
+        fn complaint(&mut self, status: std::process::ExitStatus) -> String {
             let said = [
                 drain(self.child.stderr.take()),
                 drain(self.child.stdout.take()),
@@ -228,12 +279,25 @@ mod running {
             .filter(|text| !text.is_empty())
             .collect::<Vec<_>>()
             .join("; ");
-            if said.is_empty() {
-                // A helper that fails without a word is rare and must still
-                // produce something an operator can act on.
-                "macFUSE's mount helper refused the mount without saying why".to_string()
-            } else {
-                said
+            if !said.is_empty() {
+                return said;
+            }
+            // A helper that fails without a word must still produce something an
+            // operator can act on, and the wait status always carries one of the
+            // two facts below.
+            match std::os::unix::process::ExitStatusExt::signal(&status) {
+                Some(signal) => format!(
+                    "macFUSE's mount helper was killed by signal {signal} \
+                     without reporting anything"
+                ),
+                None => match status.code() {
+                    Some(code) => {
+                        format!("macFUSE's mount helper exited {code} without saying why")
+                    }
+                    None => {
+                        "macFUSE's mount helper refused the mount without saying why".to_string()
+                    }
+                },
             }
         }
     }
@@ -379,5 +443,98 @@ mod tests {
         // with a volume they cannot trace back to a program.
         let daemon = daemon_path();
         assert!(!daemon.as_os_str().is_empty());
+    }
+
+    /// A stand-in for macFUSE's helper, reduced to the one behaviour that
+    /// decides whether a mount succeeds: it writes to the comm socket **after**
+    /// it has handed the descriptor over.
+    ///
+    /// Not a guess. Measured on macFUSE 5.3.3, with DCTL's end of the channel
+    /// closed as soon as the descriptor arrived: the helper reached its
+    /// `mount(2)`, the filesystem answered, and then the helper died of
+    /// **signal 13, SIGPIPE** — a write to a socket with no reader left. The
+    /// mount failed with "macFUSE's mount helper refused the mount without
+    /// saying why", which is what an unhandled signal and two empty pipes look
+    /// like from the outside.
+    #[cfg(target_os = "macos")]
+    fn writes_back_after_handover() -> Invocation {
+        Invocation {
+            program: PathBuf::from("/bin/sh"),
+            arguments: vec![
+                OsString::from("-c"),
+                // The pause is what makes the test meaningful: a helper that
+                // wrote instantly might beat the close and pass by luck.
+                OsString::from("sleep 0.5; printf x >&0"),
+            ],
+            environment: Vec::new(),
+        }
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_channel_outlives_the_helper_that_reports_over_it() {
+        // The bug this pins was invisible for as long as a *second* bug hid it.
+        //
+        // `attach` opened the channel, gave one half to the helper, took the
+        // device off the other half and returned — at which point its `Channel`
+        // dropped and this process's end closed. That should have killed every
+        // mount, and did not, because `socketpair(2)` had been called without
+        // close-on-exec and the helper had **inherited a copy of this process's
+        // half**. Its own write therefore always had a reader: itself. Fixing the
+        // descriptor leak took that reader away and every mount began failing
+        // with SIGPIPE — the leak was load-bearing.
+        //
+        // So the two are one fix, and this is the half that says what the
+        // ownership must be: the channel belongs to the helper, and it is
+        // `confirm` — the helper having reported — that ends it. Nothing earlier
+        // may close it.
+        let channel = super::super::handover::channel().expect("a socketpair");
+        let helper = Helper::start(&writes_back_after_handover(), channel)
+            .expect("/bin/sh starts on every macOS");
+        helper
+            .confirm()
+            .expect("a helper writing back to the channel it was given must not be cut off");
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn a_helper_killed_by_a_signal_is_reported_as_killed_and_not_as_silent() {
+        // What the bug above actually looked like while it was being hunted:
+        //
+        //   error: cannot mount at '…': macFUSE's mount helper refused the
+        //          mount without saying why
+        //
+        // The helper had not refused anything. It had been killed by SIGPIPE
+        // after a successful `mount(2)`, and every word of that message was
+        // wrong — "refused" names a decision that was never made, and "without
+        // saying why" describes a silence that was really a signal nobody
+        // looked at. It cost an afternoon and a bisect to find out, which is the
+        // measure of a bad diagnostic.
+        //
+        // A signal is not a refusal and must not be dressed as one.
+        let channel = super::super::handover::channel().expect("a socketpair");
+        let suicide = Invocation {
+            program: PathBuf::from("/bin/sh"),
+            arguments: vec![OsString::from("-c"), OsString::from("kill -PIPE $$")],
+            environment: Vec::new(),
+        };
+        let error = Helper::start(&suicide, channel)
+            .expect("/bin/sh starts on every macOS")
+            .confirm()
+            .expect_err("a helper that died is not a mount");
+        let said = error.to_string();
+        assert!(
+            said.contains("signal"),
+            "a killed helper must be reported as killed: {said}"
+        );
+        assert!(
+            said.contains("13"),
+            "and the signal must be named, because which one it was is the \
+             whole diagnosis: {said}"
+        );
+        assert!(
+            !said.contains("without saying why"),
+            "a process that died of a signal did say why: {said}"
+        );
     }
 }
