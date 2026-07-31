@@ -90,6 +90,7 @@ pub mod report;
 use clap::Args;
 
 use crate::cli::VerifyMode;
+use crate::commands::integrity::assurance::{self, AssuranceArgs};
 use crate::commands::integrity::{Target, command_name, mode};
 use crate::commands::listing::Filter;
 use crate::ctx::Ctx;
@@ -117,6 +118,11 @@ pub struct VerifyArgs {
     /// much* is damaged, and stopping at the first bad object hides that.
     #[arg(long)]
     pub fail_fast: bool,
+
+    /// What this run will accept as proof. See
+    /// [`assurance`](crate::commands::integrity::assurance).
+    #[command(flatten)]
+    pub assurance: AssuranceArgs,
 }
 
 /// Verify stored objects against their recorded hashes.
@@ -163,9 +169,15 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
             mode::slug(requested)
         ));
     }
+    // Before anything is read, so a remote that cannot be certified costs
+    // nothing to find out about rather than an hour of egress and a caveat. This
+    // was a `warn` and the run went on to print `ok` for every object and exit
+    // 0 — over a store holding a flipped byte and a truncated object.
+    assurance::require(&command, &target.to_string(), assurance, &args.assurance)?;
     if !assurance.detects_corruption() {
-        // Otherwise "verified" would be read as a statement about the bytes, and
-        // this remote cannot make one.
+        // Reached only when the operator asked for this with `--allow-read-back`.
+        // Still said out loud, because "verified" would otherwise be read as a
+        // statement about the bytes and this remote cannot make one.
         ctx.out.warn(format!(
             "'{target}' records no hash of its own — {}",
             assurance.describe()
@@ -320,11 +332,81 @@ mod tests {
 
     #[tokio::test]
     async fn an_intact_remote_verifies_and_exits_zero() {
+        // `local:` records no digest, so the run has to say which check it is
+        // asking for. With that said, an intact store passes it.
         let (_dir, config) = plain_remote(&[("a.txt", b"1"), ("sub/b.txt", b"22")]);
-        let (ctx, args) = parse(&["verify", "store:", "--config", &config]);
+        let (ctx, args) = parse(&["verify", "store:", "--config", &config, "--allow-read-back"]);
         run(&ctx, &args)
             .await
             .expect("an intact remote must not fail the run");
+    }
+
+    #[tokio::test]
+    async fn a_plain_remote_is_refused_rather_than_reported_ok() {
+        // The defect, at the level an operator meets it. A nightly
+        // `dctl verify store:` over a plain `local:` remote read every byte,
+        // printed `ok` for every object and exited **0** — over a store that
+        // could be holding a flipped byte and a truncated object, because a
+        // filesystem records no digest a re-read could disagree with.
+        //
+        // Exit 27 and not 0, and not 21: nothing here has been shown to be
+        // damaged. What is being reported is that the question was not answered.
+        let (_dir, config) = plain_remote(&[("a.txt", b"1"), ("sub/b.txt", b"22")]);
+        let (ctx, args) = parse(&["verify", "store:", "--config", &config]);
+
+        let error = run(&ctx, &args)
+            .await
+            .expect_err("a remote that cannot detect rot must not report a clean bill of health");
+        assert_eq!(error.code(), ExitCode::VerificationNotPossible);
+        assert_eq!(error.code().as_i32(), 27);
+        assert_ne!(error.code(), ExitCode::IntegrityFailure);
+        assert!(
+            error.hint().is_some(),
+            "an operator refused a check needs the next action: {}",
+            error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn the_refusal_lands_before_the_walk_rather_than_after_it() {
+        // A refusal that arrived after an hour of egress would be a caveat
+        // rather than a gate, and the difference is observable without timing
+        // anything: this target selects **no objects**, which is its own error
+        // (exit 9, and the assertion of
+        // `a_target_holding_nothing_does_not_report_a_clean_bill_of_health`).
+        //
+        // Exit 9 can only be reached by walking the remote and finding nothing.
+        // So 27 here proves the gate closed first, and 9 would prove it did not
+        // — with no permission bits, which is worth stating because these tests
+        // run as root, where mode 000 stops nothing.
+        let (_dir, config) = plain_remote(&[("kept.txt", b"payload")]);
+        let (ctx, args) = parse(&["verify", "store:nowhere", "--config", &config]);
+
+        let error = run(&ctx, &args).await.expect_err("refused");
+        assert_eq!(
+            error.code(),
+            ExitCode::VerificationNotPossible,
+            "the gate must close before the walk starts, not after it: {}",
+            error.message()
+        );
+
+        // The control, and the reason the assertion above means anything: with
+        // the weaker check asked for, the same target reaches the walk and
+        // reports what the walk found.
+        let (ctx, args) = parse(&[
+            "verify",
+            "store:nowhere",
+            "--config",
+            &config,
+            "--allow-read-back",
+        ]);
+        assert_eq!(
+            run(&ctx, &args)
+                .await
+                .expect_err("nothing verified is still not a pass")
+                .code(),
+            ExitCode::NoFilesTransferred,
+        );
     }
 
     #[tokio::test]
@@ -335,7 +417,13 @@ mod tests {
         let (_dir, config) = plain_remote(&[("a.txt", b"1")]);
         for strength in ["checksum", "sample", "strict"] {
             let (ctx, args) = parse(&[
-                "verify", "store:", "--config", &config, "--verify", strength,
+                "verify",
+                "store:",
+                "--config",
+                &config,
+                "--verify",
+                strength,
+                "--allow-read-back",
             ]);
             run(&ctx, &args)
                 .await
@@ -348,7 +436,14 @@ mod tests {
         // --dry-run suppresses mutations; verify has none, and it must never be
         // read as permission to skip the work and report success.
         let (_dir, config) = plain_remote(&[("a.txt", b"1")]);
-        let (ctx, args) = parse(&["verify", "store:", "--config", &config, "--dry-run"]);
+        let (ctx, args) = parse(&[
+            "verify",
+            "store:",
+            "--config",
+            &config,
+            "--dry-run",
+            "--allow-read-back",
+        ]);
         assert!(ctx.is_dry_run());
         run(&ctx, &args).await.expect("a dry run still verifies");
     }
@@ -357,7 +452,13 @@ mod tests {
     async fn every_output_format_is_accepted() {
         let (_dir, config) = plain_remote(&[("a.txt", b"1")]);
         for format in [&["--json"][..], &["--format", "json-lines"][..], &[][..]] {
-            let mut argv = vec!["verify", "store:", "--config", config.as_str()];
+            let mut argv = vec![
+                "verify",
+                "store:",
+                "--config",
+                config.as_str(),
+                "--allow-read-back",
+            ];
             argv.extend_from_slice(format);
             let (ctx, args) = parse(&argv);
             run(&ctx, &args)
@@ -376,7 +477,13 @@ mod tests {
         // already exits 9 for exactly this; the two integrity verbs must not
         // disagree about what "nothing was read" means.
         let (_dir, config) = plain_remote(&[("kept.txt", b"payload")]);
-        let (ctx, args) = parse(&["verify", "store:nowhere", "--config", &config]);
+        let (ctx, args) = parse(&[
+            "verify",
+            "store:nowhere",
+            "--config",
+            &config,
+            "--allow-read-back",
+        ]);
 
         let error = run(&ctx, &args)
             .await
@@ -403,6 +510,7 @@ mod tests {
             &config,
             "--include",
             "*.nothing",
+            "--allow-read-back",
         ]);
 
         let error = run(&ctx, &args)

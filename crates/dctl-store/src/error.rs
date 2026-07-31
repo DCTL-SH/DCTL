@@ -107,6 +107,36 @@ pub enum StoreError {
         detail: String,
     },
 
+    /// The server answered, refused the request, and named no cause.
+    ///
+    /// Its own variant rather than a formatted [`StoreError::Backend`] for the
+    /// same reason [`StoreError::Provider`] has one: a later layer has to be
+    /// able to act on **what happened**, and a rule spelled
+    /// `message.contains("Failure")` stops firing the moment somebody rewords
+    /// the sentence.
+    ///
+    /// What acts on it is [`crate::sftp`]'s write path, which asks the far end
+    /// how much room is left and upgrades this to a named
+    /// [`std::io::ErrorKind::StorageFull`] when the filesystem turns out to be
+    /// full. That decision cannot be made from the status code: SFTP version 3
+    /// answers `ENOSPC`, `EDQUOT`, `EROFS` and a non-empty `rmdir` with one
+    /// catch-all carrying no errno, which is the measurement in
+    /// `crate::sftp::status`.
+    ///
+    /// Distinct from [`StoreError::Transport`], which means *nothing answered*.
+    /// Something answered here, and said no.
+    #[error("{backend} refused '{path}': {detail}")]
+    Refused {
+        /// The backend whose server refused, as [`crate::Backend::name`] spells
+        /// it.
+        backend: &'static str,
+        /// What was being written or removed when the refusal arrived.
+        path: String,
+        /// The reason, where the server gave one, and otherwise the sentence
+        /// saying the protocol carries none.
+        detail: String,
+    },
+
     /// The run reached the deadline the operator gave it with `--max-duration`.
     ///
     /// **Not** a [`StoreError::Transport`], and the distinction is the whole
@@ -164,6 +194,7 @@ impl StoreError {
             StoreError::Provider { .. } => 2009,
             StoreError::Transport { .. } => 2010,
             StoreError::RunDeadline { .. } => 2011,
+            StoreError::Refused { .. } => 2012,
             // Delegated, never its own number. A retry record describes how
             // often something was attempted, not what went wrong, and a script
             // branching on the exit code must see the same number whether or not

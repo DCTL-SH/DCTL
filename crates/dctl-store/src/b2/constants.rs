@@ -53,6 +53,48 @@ pub(super) const H_RANGE: &str = "Range";
 ///
 /// See <https://www.backblaze.com/apidocs/b2-upload-file>.
 pub(super) const FILE_INFO_SRC_MODIFIED: &str = "src_last_modified_millis";
+
+/// The `fileInfo` key a client uses to record the SHA-1 of a **whole large
+/// file**, which B2 itself never computes.
+///
+/// B2 verifies a large upload part by part and never sees the whole body, so
+/// `contentSha1` on a large file is the literal [`SHA1_NONE`]. This key is
+/// where the uploader may put the digest of the whole thing instead. B2 stores
+/// it and does not check it — measured: a large file finished with a
+/// deliberately wrong value here is accepted and reported back verbatim, which
+/// is what makes it possible to induce, on a live provider, the exact state rot
+/// produces.
+///
+/// The name is not DCTL's: it is the one rclone writes
+/// (`backend/b2/b2.go:51`, `sha1Key = "large_file_sha1"`), so a large object
+/// uploaded by rclone is verifiable here.
+pub(super) const FILE_INFO_LARGE_FILE_SHA1: &str = "large_file_sha1";
+
+/// What B2 puts in `contentSha1` when it has no single digest for the object.
+///
+/// Every large file carries this, because B2 checks a large upload one part at
+/// a time. It is a string and not an absence, so a client that treated the
+/// field as a hex digest would compare against the four characters `none`.
+pub(super) const SHA1_NONE: &str = "none";
+
+/// The prefix B2 puts on a `contentSha1` the **client** declined to declare.
+///
+/// An upload sent with `X-Bz-Content-Sha1: do_not_verify` is stored with
+/// `contentSha1: "unverified:<sha1>"`, where the digest is B2's own, computed
+/// over the bytes it received — measured against the live API. The prefix
+/// records that no client-supplied value was checked against it, not that the
+/// digest is doubtful, so it is stripped and the digest used: it is still a
+/// statement about the bytes B2 stored, which is exactly what a rot check
+/// compares a re-read with.
+pub(super) const SHA1_UNVERIFIED_PREFIX: &str = "unverified:";
+
+/// Length of a SHA-1 digest in hex characters.
+///
+/// Checked rather than assumed, because everything on this path arrives as a
+/// JSON string: a field holding `"none"`, an empty string or a truncated digest
+/// must become "there is nothing recorded here" and never a comparison against
+/// a value that is not a digest.
+pub(super) const SHA1_HEX_LEN: usize = 40;
 /// [`FILE_INFO_SRC_MODIFIED`] as an upload header: B2 carries `fileInfo` on
 /// `b2_upload_file` as `X-Bz-Info-<key>`.
 pub(super) const H_SRC_MODIFIED: &str = "X-Bz-Info-src_last_modified_millis";

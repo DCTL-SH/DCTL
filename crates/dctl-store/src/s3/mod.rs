@@ -117,6 +117,20 @@ impl Backend for S3Backend {
     async fn head(&self, key: &ObjectKey) -> Result<ObjectMeta> {
         self.client.head(key).await
     }
+
+    /// Nothing comparable, and the reason is DCTL's write path rather than the
+    /// protocol: see [`crate::recorded::NO_COMPARABLE_CHECKSUM_S3`].
+    fn checksum_support(&self) -> crate::recorded::ChecksumSupport {
+        crate::recorded::ChecksumSupport::None(crate::recorded::NO_COMPARABLE_CHECKSUM_S3)
+    }
+
+    /// Absent for every key, without a request: see
+    /// [`checksum_support`](Backend::checksum_support).
+    async fn stored_checksum(&self, _key: &ObjectKey) -> Result<crate::recorded::StoredChecksum> {
+        Ok(crate::recorded::StoredChecksum::Absent(
+            crate::recorded::NO_COMPARABLE_CHECKSUM_S3.to_string(),
+        ))
+    }
     async fn exists(&self, key: &ObjectKey) -> Result<bool> {
         self.client.exists(key).await
     }

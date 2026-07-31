@@ -10,6 +10,7 @@ use crate::incoming::ObjectStream;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
 use crate::multipart::{IncompleteUpload, IncompleteUploads};
+use crate::recorded::{ChecksumSupport, StoredChecksum};
 use crate::staging::StagingListing;
 
 /// A delegated (presigned) authorization to upload exactly ONE object key.
@@ -195,6 +196,46 @@ pub trait Backend: Send + Sync {
 
     /// Object metadata without transferring the body.
     async fn head(&self, key: &ObjectKey) -> Result<ObjectMeta>;
+
+    /// What digest, if any, this backend recorded for every object it stores.
+    ///
+    /// Synchronous and infallible, because it is a property of the **provider**
+    /// rather than of any object: a report has to be able to say what a run can
+    /// prove before the run spends an hour proving it, and a question that cost
+    /// a round trip would be asked after the first line was already printed.
+    /// The per-object answer is [`stored_checksum`](Backend::stored_checksum).
+    ///
+    /// Deliberately **not** a provided method, for the reason
+    /// [`store_identity`](Backend::store_identity) has none, and this time with
+    /// the defect already measured. A default of "none" would give every
+    /// backend added later a `verify` that cannot detect rot and does not say
+    /// so; a default of "recorded" would make it claim a comparison it never
+    /// makes. Both are silent, and one of them loses data. See
+    /// [`crate::recorded`] for what was measured on the shipped binary.
+    fn checksum_support(&self) -> ChecksumSupport;
+
+    /// The digest the provider recorded for **this** object when it was
+    /// written.
+    ///
+    /// The value `dctl verify` compares a full re-read against on a plain
+    /// remote, and the only thing on that side capable of noticing a flipped
+    /// byte: the bytes and the recorded digest live in different places, so rot
+    /// moves one and not the other.
+    ///
+    /// Callers are expected to have established that the object exists — with
+    /// [`head`](Backend::head), which a read-back needs for the size anyway.
+    /// [`StoredChecksum::Absent`] therefore means *the object is there and
+    /// there is no digest for it*, never *there is no object*.
+    ///
+    /// A backend whose [`checksum_support`](Backend::checksum_support) is
+    /// [`ChecksumSupport::None`] answers [`StoredChecksum::Absent`] here for
+    /// every key, and must not make a request to do it.
+    ///
+    /// # Errors
+    /// Whatever asking the provider reported, and
+    /// [`StoreError::NotFound`](crate::error::StoreError::NotFound) where the
+    /// provider answers the question and the object turns out not to be there.
+    async fn stored_checksum(&self, key: &ObjectKey) -> Result<StoredChecksum>;
 
     /// Whether the object exists.
     async fn exists(&self, key: &ObjectKey) -> Result<bool>;

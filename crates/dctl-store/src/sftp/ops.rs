@@ -188,6 +188,23 @@ fn note(watch: &IdleWatch, link: &Arc<Link>, outcome: &Result<()>) {
     }
 }
 
+/// Give a refusal a cause, where the far end will supply one.
+///
+/// A thin wrapper over [`super::space::diagnose`] so the write path reads as one
+/// line per step, and so the `Ok` case never touches the module at all: a
+/// healthy transfer must not pay a round trip per chunk for a diagnosis it does
+/// not need.
+///
+/// Applied to the **write** operations only. A refused `read` or `stat` cannot
+/// be a full disk, and asking `df` about one would spend a round trip to print a
+/// sentence about free space beside a failure that has nothing to do with it.
+async fn diagnosed(link: &Arc<Link>, remote: &str, outcome: Result<()>) -> Result<()> {
+    match outcome {
+        Ok(()) => Ok(()),
+        Err(error) => Err(super::space::diagnose(link, remote, error).await),
+    }
+}
+
 #[async_trait]
 impl StagedFile for SftpStagedFile {
     async fn write_all(&mut self, data: &[u8]) -> Result<()> {
@@ -203,6 +220,10 @@ impl StagedFile for SftpStagedFile {
             Ok(result) => result.map_err(|e| map_sftp_err(remote, e)),
             Err(expired) => Err(expired.into_store_error(super::SFTP_BACKEND_NAME)),
         };
+        // The refused write, which is where a full disk actually lands: the
+        // filesystem fills part-way through an object, not at the `open`. The
+        // status code cannot say so (`super::status`), so the far end is asked.
+        let outcome = diagnosed(link, remote, outcome).await;
         note(watch, link, &outcome);
         outcome
     }
@@ -241,6 +262,10 @@ impl StagedFile for SftpStagedFile {
             Ok(Err(e)) => Err(map_sftp_err(remote, e)),
             Err(expired) => Err(expired.into_store_error(super::SFTP_BACKEND_NAME)),
         };
+        // A filesystem that filled between the last write and the flush refuses
+        // here instead, and it is the last step before the rename that would
+        // publish the object.
+        let outcome = diagnosed(link, remote, outcome).await;
         note(watch, link, &outcome);
         outcome
     }
@@ -250,6 +275,7 @@ impl StagedFile for SftpStagedFile {
             Ok(result) => result.map_err(|e| map_sftp_err(&self.remote, e)),
             Err(expired) => Err(expired.into_store_error(super::SFTP_BACKEND_NAME)),
         };
+        let outcome = diagnosed(&self.link, &self.remote, outcome).await;
         note(&self.watch, &self.link, &outcome);
         outcome
     }
@@ -289,7 +315,7 @@ impl RemoteFs for SftpBackend {
         // re-dial underneath an open handle would leave the writer addressing a
         // file on a session nobody is listening to any more.
         let link = self.link().await?;
-        let file = self
+        let opened = self
             .on_link(|link| async move {
                 link.sftp
                     .options()
@@ -300,7 +326,14 @@ impl RemoteFs for SftpBackend {
                     .await
                     .map_err(|e| map_sftp_err(remote, e))
             })
-            .await?;
+            .await;
+        // A filesystem with no room for another inode refuses here, before a
+        // single byte is offered — the other half of the full-disk case, and the
+        // one that leaves nothing behind to look at.
+        let file = match opened {
+            Ok(file) => file,
+            Err(error) => return Err(super::space::diagnose(&link, remote, error).await),
+        };
         Ok(SftpStagedFile {
             file,
             remote: remote.to_string(),
@@ -337,14 +370,25 @@ impl RemoteFs for SftpBackend {
     }
 
     async fn rename(&self, from: &str, to: &str) -> Result<()> {
-        self.on_link(|link| async move {
-            link.sftp
-                .fs()
-                .rename(from, to)
-                .await
-                .map_err(|e| map_sftp_err(to, e))
-        })
-        .await
+        let outcome = self
+            .on_link(|link| async move {
+                link.sftp
+                    .fs()
+                    .rename(from, to)
+                    .await
+                    .map_err(|e| map_sftp_err(to, e))
+            })
+            .await;
+        // The commit. A directory that cannot take another entry refuses here,
+        // with every byte of the object already staged and correct — which is
+        // the most confusing place to be told only `Failure`.
+        match outcome {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let link = self.link().await?;
+                Err(super::space::diagnose(&link, to, error).await)
+            }
+        }
     }
 
     async fn remove_quiet(&self, remote: &str) {

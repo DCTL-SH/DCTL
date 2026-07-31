@@ -208,6 +208,21 @@ impl Backend for Retrying {
         .await
     }
 
+    /// Forwarded unchanged: a capability is not something a retry can alter.
+    fn checksum_support(&self) -> crate::recorded::ChecksumSupport {
+        self.inner.checksum_support()
+    }
+
+    async fn stored_checksum(&self, key: &ObjectKey) -> Result<crate::recorded::StoredChecksum> {
+        run(
+            "stored_checksum",
+            self.policy,
+            self.deadline,
+            |_| async move { self.inner.stored_checksum(key).await },
+        )
+        .await
+    }
+
     async fn exists(&self, key: &ObjectKey) -> Result<bool> {
         run("exists", self.policy, self.deadline, |_| async move {
             self.inner.exists(key).await

@@ -59,8 +59,8 @@ use crate::error::{Result, StoreError};
 /// runs over a plain byte-stream pair, where there is no ssh session behind it
 /// at all — which is a legitimate answer and not a missing one.
 pub struct Link {
-    /// Kept alive alongside the SFTP channel; nothing reads it.
-    #[allow(dead_code)]
+    /// Kept alive alongside the SFTP channel, and read by
+    /// [`super::space`] when a write is refused without a reason.
     session: Option<Arc<Session>>,
     /// The channel every request goes down.
     pub(crate) sftp: Sftp,
@@ -88,6 +88,18 @@ impl Link {
             sftp,
             dead: AtomicBool::new(false),
         }
+    }
+
+    /// The ssh session this conversation runs over, where there is one.
+    ///
+    /// [`None`] for a conversation over a plain byte-stream pair, which is a
+    /// legitimate answer and not a missing one — it is what every in-process
+    /// test server produces. A caller that needs to ask the far end a question
+    /// the SFTP channel cannot carry ([`super::space`]) has to be able to find
+    /// out that there is nobody to ask.
+    #[must_use]
+    pub(crate) fn session(&self) -> Option<&Session> {
+        self.session.as_deref()
     }
 
     /// Record that this conversation is over.

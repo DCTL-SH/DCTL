@@ -75,6 +75,19 @@ impl Backend for ShortServing {
         self.inner.store_identity().await
     }
 
+    /// Forwarded: this double changes what is *served*, not what the store
+    /// behind it recorded.
+    fn checksum_support(&self) -> dctl_store::ChecksumSupport {
+        self.inner.checksum_support()
+    }
+
+    async fn stored_checksum(
+        &self,
+        key: &ObjectKey,
+    ) -> dctl_store::Result<dctl_store::StoredChecksum> {
+        self.inner.stored_checksum(key).await
+    }
+
     async fn put(
         &self,
         key: &ObjectKey,

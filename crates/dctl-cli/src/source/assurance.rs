@@ -24,13 +24,23 @@
 //! assurance says *what the reading could prove*. A full read of a store with no
 //! recorded hashes is still only a retrievability check.
 
-use crate::constants::{ASSURANCE_AUTHENTICATED, ASSURANCE_READ_BACK};
+use crate::constants::{ASSURANCE_AUTHENTICATED, ASSURANCE_PROVIDER_CHECKSUM, ASSURANCE_READ_BACK};
 
 /// The strongest claim a source can make about bytes it read back.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Assurance {
-    /// Checked against a hash recorded when the object was written.
+    /// Checked against a hash recorded when the object was written, under a key
+    /// only the vault holds.
     Authenticated,
+    /// Checked against the digest the **provider** recorded when the object was
+    /// written.
+    ///
+    /// Between the other two, and it is the level that makes `dctl verify` mean
+    /// something on a plain remote. The digest is not DCTL's and is not keyed,
+    /// so it is not the vault's claim; but it was written down at write time and
+    /// it lives in the provider's metadata rather than in the object, so a
+    /// changed byte disagrees with it. That is precisely what a rot check needs.
+    ProviderChecksum,
     /// Read back in full, with nothing to check the bytes against.
     ReadBack,
 }
@@ -41,6 +51,7 @@ impl Assurance {
     pub const fn slug(self) -> &'static str {
         match self {
             Self::Authenticated => ASSURANCE_AUTHENTICATED,
+            Self::ProviderChecksum => ASSURANCE_PROVIDER_CHECKSUM,
             Self::ReadBack => ASSURANCE_READ_BACK,
         }
     }
@@ -54,6 +65,10 @@ impl Assurance {
                 "every byte was re-read and authenticated against the hash recorded when \
                  it was written"
             }
+            Self::ProviderChecksum => {
+                "every byte was re-read and compared against the digest the provider \
+                 recorded when the object was written"
+            }
             Self::ReadBack => {
                 "every byte was re-read, but this remote records no hash of its own, so a \
                  pass proves the object is retrievable and not that it is unchanged"
@@ -66,7 +81,19 @@ impl Assurance {
     /// The question a report has to answer before it prints "healthy".
     #[must_use]
     pub const fn detects_corruption(self) -> bool {
-        matches!(self, Self::Authenticated)
+        matches!(self, Self::Authenticated | Self::ProviderChecksum)
+    }
+
+    /// Every level, strongest first — the single list the tests below share, so
+    /// a level added later cannot be forgotten by one of them.
+    ///
+    /// Test-only, and said so rather than carried into the binary behind an
+    /// `allow(dead_code)`: nothing shipped enumerates the levels, because every
+    /// caller has one in hand and asks it a question.
+    #[cfg(test)]
+    #[must_use]
+    pub const fn all() -> &'static [Self] {
+        &[Self::Authenticated, Self::ProviderChecksum, Self::ReadBack]
     }
 }
 
@@ -75,19 +102,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_an_authenticated_read_can_detect_corruption() {
-        // The distinction the type exists for. A plain store returning altered
-        // bytes reads back perfectly; nothing on that side can tell.
+    fn only_a_read_with_something_to_compare_against_can_detect_corruption() {
+        // The distinction the type exists for. A plain store that records
+        // nothing returns altered bytes and reads back perfectly; nothing on
+        // that side can tell. One that recorded a digest at write time can.
         assert!(Assurance::Authenticated.detects_corruption());
+        assert!(Assurance::ProviderChecksum.detects_corruption());
         assert!(!Assurance::ReadBack.detects_corruption());
     }
 
     #[test]
+    fn a_providers_digest_is_not_the_vaults_claim() {
+        // Both detect rot and they are not the same statement: one is DCTL's
+        // own hash under a key, the other is metadata the provider keeps beside
+        // the bytes. A report that printed one word for both would let a plain
+        // b2 remote read as a vault.
+        assert_ne!(
+            Assurance::ProviderChecksum.slug(),
+            Assurance::Authenticated.slug()
+        );
+        assert_ne!(
+            Assurance::ProviderChecksum.describe(),
+            Assurance::Authenticated.describe()
+        );
+    }
+
+    #[test]
     fn each_level_has_a_distinct_slug_and_explains_itself() {
-        assert_ne!(Assurance::Authenticated.slug(), Assurance::ReadBack.slug());
-        for level in [Assurance::Authenticated, Assurance::ReadBack] {
+        let levels = Assurance::all();
+        for (index, level) in levels.iter().enumerate() {
             assert!(!level.slug().is_empty());
             assert!(!level.describe().is_empty());
+            for other in &levels[index + 1..] {
+                assert_ne!(level.slug(), other.slug());
+                assert_ne!(level.describe(), other.describe());
+            }
         }
     }
 }

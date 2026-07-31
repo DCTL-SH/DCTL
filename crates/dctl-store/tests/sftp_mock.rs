@@ -47,7 +47,7 @@ use bytes::Bytes;
 use dctl_store::guard::Strength;
 use dctl_store::sftp::SftpBackend;
 use dctl_store::{
-    Backend, ContentHash, Deadlines, HashAlgo, LinkPolicy, ObjectKey, SourceModified,
+    Backend, ContentHash, Deadlines, HashAlgo, LinkPolicy, ObjectKey, SourceModified, StoreError,
 };
 use support::mock_sftp::{MockSftp, RedialableSftp, Seen};
 
@@ -798,8 +798,15 @@ async fn a_permission_denial_is_terminal_and_does_not_cost_the_session() {
         .await
         .expect_err("a write the server refuses must not report success");
 
+    // The variant moved with the sweep (§34): a denial used to be a
+    // `StoreError::Backend` string that nothing above could act on, and is now
+    // the same `io::ErrorKind` `local:` raises for the same condition -- which
+    // is what the `transient` assertion below actually reads.
     assert!(
-        matches!(&error, dctl_store::StoreError::Backend(detail) if detail.contains("PermDenied")),
+        matches!(
+            &error,
+            dctl_store::StoreError::Io(io) if io.kind() == std::io::ErrorKind::PermissionDenied
+        ),
         "the server answered, so this is about the request and not the link: {error:?}"
     );
     assert!(
@@ -1385,5 +1392,95 @@ async fn a_run_out_of_time_stops_dialling_rather_than_starting_another_connectio
     assert!(
         !dctl_store::retry::Observed::of(&error).transient,
         "a closed window is not worth another attempt: {error:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The protocol's status codes, as the layers above have to read them (§34).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_refused_write_arrives_as_a_refusal_rather_than_an_undiagnosable_string() {
+    // The defect, at the seam it lived in. Every status the server can answer
+    // with — a denial, a full filesystem, an unimplemented operation — was
+    // turned into one `StoreError::Backend` string:
+    //
+    //     backend error: sftp server reported Failure: Err Message: Failure, Language Tag:
+    //
+    // That variant reaches none of the layers that act on a failure.
+    // `retry::observed` classifies from the `io::ErrorKind`, and the CLI's exit
+    // mapping routes a full disk to exit 7 with a `df -h` hint by asking
+    // `durable::is_out_of_space` — both of which read a `StoreError::Io` and
+    // neither of which can read a sentence.
+    //
+    // This asserts the *variant*, not the wording, because wording is what the
+    // old code already had and it was worth nothing.
+    let (mock, sftp) = backend("/srv/store", &["/srv/store"]).await;
+    let data: Vec<u8> = (0..200_000u32).map(|n| (n % 251) as u8).collect();
+
+    // A filesystem with room for part of the object and not for the rest — the
+    // shape a real full disk has, and the one OpenSSH answers `SSH_FX_FAILURE`
+    // to with the literal word "Failure" and no errno.
+    mock.accept_at_most(64 * 1024);
+
+    let error = sftp
+        .put(
+            &ObjectKey::new("o/thing.bin"),
+            Bytes::from(data.clone()),
+            &blake3(&data),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("a write the server refused must not report success");
+
+    assert!(
+        !matches!(error, StoreError::Backend(_)),
+        "the refusal is still collapsed into the undiagnosable variant: {error:?}"
+    );
+    assert!(
+        matches!(error, StoreError::Refused { .. }),
+        "a server that answered and said no must arrive as a refusal: {error:?}"
+    );
+    // There is no ssh session behind an in-process pipe, so the free-space probe
+    // has nobody to ask — and it must say so rather than either inventing a
+    // diagnosis or staying silent. The live arm is what proves the other branch.
+    let rendered = format!("{error}");
+    assert!(
+        rendered.contains("/srv/store/o/"),
+        "the refusal must name where it happened; a write stages to a sibling, \
+         so the staging name rather than the object's is what it carries: {rendered}"
+    );
+    assert!(
+        rendered.contains("no ssh session"),
+        "a probe that could not be run must say so: {rendered}"
+    );
+}
+
+#[tokio::test]
+async fn a_denial_arrives_as_a_permission_error_the_retry_layer_can_read() {
+    // The other half of the sweep, and it needs its own test because it takes a
+    // different arm: a denial is terminal and already diagnosable, so it must
+    // *not* be turned into a reasonless refusal, and it must not cost a
+    // free-space probe either.
+    let (mock, sftp) = backend("/srv/store", &["/srv/store"]).await;
+    mock.deny("o/secret.bin");
+
+    let error = sftp
+        .put(
+            &ObjectKey::new("o/secret.bin"),
+            Bytes::from_static(b"payload"),
+            &blake3(b"payload"),
+            SourceModified::unknown(),
+        )
+        .await
+        .expect_err("a write the server denied must not report success");
+
+    let StoreError::Io(io) = &error else {
+        panic!("a denial must arrive as an io error, not as {error:?}");
+    };
+    assert_eq!(io.kind(), std::io::ErrorKind::PermissionDenied);
+    assert!(
+        format!("{error}").to_lowercase().contains("denied"),
+        "the operator has to be able to read what happened: {error}"
     );
 }

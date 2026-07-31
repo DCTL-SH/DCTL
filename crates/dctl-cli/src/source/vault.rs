@@ -507,6 +507,19 @@ mod tests {
         async fn store_identity(&self) -> dctl_store::Result<Option<dctl_store::StoreIdentity>> {
             self.inner.store_identity().await
         }
+
+        /// Forwarded: this double measures traffic, and traffic is not what a
+        /// provider records about an object.
+        fn checksum_support(&self) -> dctl_store::ChecksumSupport {
+            self.inner.checksum_support()
+        }
+
+        async fn stored_checksum(
+            &self,
+            key: &ObjectKey,
+        ) -> dctl_store::Result<dctl_store::StoredChecksum> {
+            self.inner.stored_checksum(key).await
+        }
         async fn put(
             &self,
             key: &ObjectKey,

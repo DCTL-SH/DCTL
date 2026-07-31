@@ -93,6 +93,7 @@ pub mod report;
 use clap::Args;
 
 use crate::cli::VerifyMode;
+use crate::commands::integrity::assurance::{self, AssuranceArgs};
 use crate::commands::integrity::{Target, command_name, mode};
 use crate::commands::listing::Filter;
 use crate::constants::{
@@ -144,6 +145,11 @@ pub struct ScrubArgs {
     /// widespread* the damage is, and stopping early hides it.
     #[arg(long, value_name = "N", default_value_t = SCRUB_MAX_ERRORS_UNLIMITED)]
     pub max_errors: u64,
+
+    /// What this run will accept as proof. See
+    /// [`assurance`](crate::commands::integrity::assurance).
+    #[command(flatten)]
+    pub assurance: AssuranceArgs,
 }
 
 /// Re-read and verify a dataset, reporting its health.
@@ -212,7 +218,12 @@ pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
             mode::slug(requested)
         ));
     }
+    // Before a byte is read, and for the reason `verify` refuses in the same
+    // place: a scheduled scrub that grades a plain remote `healthy` is telling
+    // an operator nothing while they believe they are being told everything.
+    assurance::require(&command, &target.to_string(), assurance, &args.assurance)?;
     if !assurance.detects_corruption() {
+        // Reached only when the operator asked for this with `--allow-read-back`.
         // The grade would otherwise be read as a statement about the bytes, and
         // this remote cannot make one.
         ctx.out.warn(format!(
@@ -390,17 +401,43 @@ mod tests {
 
     #[tokio::test]
     async fn a_clean_remote_scrubs_to_healthy_and_exits_zero() {
+        // `local:` records no digest, so the run has to say which check it is
+        // asking for. With that said, an intact store passes it.
         let (_dir, config) = plain_remote(&[("a.txt", b"1"), ("sub/b.txt", b"22")]);
-        let (ctx, args) = parse(&["scrub", "store:", "--config", &config]);
+        let (ctx, args) = parse(&["scrub", "store:", "--config", &config, "--allow-read-back"]);
         run(&ctx, &args)
             .await
             .expect("an intact remote must not fail the run");
     }
 
     #[tokio::test]
+    async fn a_plain_remote_is_refused_rather_than_graded_healthy() {
+        // `scrub`'s half of the defect, and it needs its own test because the
+        // two commands reach the gate down different paths — `verify` from a
+        // listing walk, `scrub` from the index — and a claim only one of them
+        // enforced is a claim nobody can rely on. That is the exact history of
+        // the `assurance` field itself (`HANDOVER.md` §31.4).
+        let (_dir, config) = plain_remote(&[("a.txt", b"1"), ("sub/b.txt", b"22")]);
+        let (ctx, args) = parse(&["scrub", "store:", "--config", &config]);
+
+        let error = run(&ctx, &args)
+            .await
+            .expect_err("a remote that cannot detect rot must not be graded healthy");
+        assert_eq!(error.code(), ExitCode::VerificationNotPossible);
+        assert_eq!(error.code().as_i32(), 27);
+        assert_ne!(error.code(), ExitCode::IntegrityFailure);
+    }
+
+    #[tokio::test]
     async fn a_prefix_scrubs_only_what_is_under_it() {
         let (_dir, config) = plain_remote(&[("photos/a.jpg", b"1"), ("other/b.jpg", b"2")]);
-        let (ctx, args) = parse(&["scrub", "store:photos", "--config", &config]);
+        let (ctx, args) = parse(&[
+            "scrub",
+            "store:photos",
+            "--config",
+            &config,
+            "--allow-read-back",
+        ]);
         run(&ctx, &args).await.expect("the prefix reads back clean");
     }
 
@@ -408,7 +445,13 @@ mod tests {
     async fn every_output_format_is_accepted() {
         let (_dir, config) = plain_remote(&[("a.txt", b"1")]);
         for format in [&["--json"][..], &["--format", "json-lines"][..], &[][..]] {
-            let mut argv = vec!["scrub", "store:", "--config", config.as_str()];
+            let mut argv = vec![
+                "scrub",
+                "store:",
+                "--config",
+                config.as_str(),
+                "--allow-read-back",
+            ];
             argv.extend_from_slice(format);
             let (ctx, args) = parse(&argv);
             run(&ctx, &args)

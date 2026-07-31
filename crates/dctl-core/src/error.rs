@@ -162,6 +162,18 @@ fn store_kind(e: &dctl_store::StoreError) -> ErrorKind {
         // transient about it is the *next invocation*, which is the caller's
         // decision and not this classification's.
         S::RunDeadline { .. } => ErrorKind::Permanent,
+        // The server received the request and refused it without naming a
+        // cause. **Permanent**, following this module's own rule for anything
+        // nobody has classified: guessing `Transient` would have an FFI consumer
+        // re-drive a write that a read-only mount or an exhausted quota will
+        // refuse identically every time.
+        //
+        // A full disk does not arrive here. The SFTP write path establishes that
+        // case by asking the far end for its free space and raises
+        // `ErrorKind::StorageFull` instead, which reaches `S::Io(_)` above and is
+        // classified `Transient` - because for that one, freeing space really
+        // does make it work.
+        S::Refused { .. } => ErrorKind::Permanent,
         // A retry record says how often something was attempted, never what went
         // wrong, so the classification is the wrapped failure's. An FFI consumer
         // branching on this must see the same kind whether or not the operation

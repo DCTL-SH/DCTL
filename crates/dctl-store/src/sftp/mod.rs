@@ -65,6 +65,8 @@ pub mod base;
 pub mod dial;
 mod ops;
 mod path;
+mod space;
+mod status;
 mod tree;
 mod write;
 
@@ -74,7 +76,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
 use openssh_sftp_client::Error as SftpError;
-use openssh_sftp_client::error::SftpErrorKind;
 use tokio::io::{AsyncSeekExt, AsyncWriteExt};
 use tokio::sync::RwLock;
 
@@ -789,6 +790,26 @@ impl Backend for SftpBackend {
         Ok(bytes)
     }
 
+    /// Nothing — the same answer [`crate::local::LocalFs`] gives, and for the
+    /// same reason: the far end of this protocol is a filesystem.
+    ///
+    /// SFTP version 3 has no request that returns a digest of a file, and the
+    /// two extensions OpenSSH does advertise (`fsync@openssh.com`,
+    /// `statvfs@openssh.com`) are about durability and free space. A server
+    /// that could hash a file on request would still be hashing whatever the
+    /// file says today, which is not what a rot check needs.
+    fn checksum_support(&self) -> crate::recorded::ChecksumSupport {
+        crate::recorded::ChecksumSupport::None(crate::recorded::NO_RECORDED_CHECKSUM_FILESYSTEM)
+    }
+
+    /// Absent for every key, without a request: see
+    /// [`checksum_support`](Backend::checksum_support).
+    async fn stored_checksum(&self, _key: &ObjectKey) -> Result<crate::recorded::StoredChecksum> {
+        Ok(crate::recorded::StoredChecksum::Absent(
+            crate::recorded::NO_RECORDED_CHECKSUM_FILESYSTEM.to_string(),
+        ))
+    }
+
     async fn head(&self, key: &ObjectKey) -> Result<ObjectMeta> {
         let remote = remote_path(&self.base, key)?;
         let md = self
@@ -1037,13 +1058,19 @@ async fn dial_within(dialer: &dyn SftpDial, deadlines: Deadlines) -> Result<Link
 /// The protocol's other server-side codes — `PermDenied`, `Failure`,
 /// `BadMessage`, `OpUnsupported` — are statements about the request and are
 /// equally true next time, so they stay terminal.
+///
+/// What each of them *means* is [`status::classify`]'s job, and used to be
+/// nobody's: all four rendered as one `StoreError::Backend` string, so a full
+/// disk over SFTP read as `sftp server reported Failure: Err Message: Failure,
+/// Language Tag:` and reached none of the layers that act on an
+/// [`std::io::ErrorKind`].
 fn map_sftp_err(key: &str, e: SftpError) -> StoreError {
     match e {
-        SftpError::SftpError(SftpErrorKind::NoSuchFile, _) => StoreError::NotFound(key.to_string()),
         // The server answered. Whatever it said, the conversation carried it,
-        // so the conversation is not what is wrong.
+        // so the conversation is not what is wrong — only the request is.
         SftpError::SftpError(kind, message) => {
-            StoreError::Backend(format!("sftp server reported {kind:?}: {message}"))
+            let (text, _language) = message.get();
+            status::classify(key, kind, text)
         }
         SftpError::IOError(io) => {
             if io.kind() == std::io::ErrorKind::NotFound {

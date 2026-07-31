@@ -106,6 +106,20 @@ pub(crate) struct ListFileNamesResponse {
 pub(crate) struct FileItem {
     pub file_name: String,
     pub content_length: u64,
+    /// The SHA-1 B2 computed over the bytes it accepted, as it reports it back.
+    ///
+    /// Kept as the provider's own string rather than a parsed digest, because
+    /// three of its values are not digests: `"none"` on every large file, an
+    /// `unverified:` prefix on an upload sent with `do_not_verify`, and — on an
+    /// object written by some other tool through some other API — whatever that
+    /// tool left. [`super::listing::stored_checksum`] is the one place that
+    /// decides which of those is a value a re-read can be compared against.
+    ///
+    /// Optional and defaulted for the reason `file_info` is: an object whose
+    /// listing omits the field is ordinary, not malformed, and refusing to
+    /// parse the page it arrived in would make a whole bucket unlistable.
+    #[serde(default)]
+    pub content_sha1: Option<String>,
     pub upload_timestamp: i64,
     pub action: String,
     /// The `fileInfo` map B2 stores alongside the object.

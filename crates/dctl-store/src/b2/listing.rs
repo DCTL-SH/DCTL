@@ -1,7 +1,9 @@
 //! B2 listing, metadata, existence, and version-aware delete.
 
+use crate::checksum::{ContentHash, HashAlgo};
 use crate::error::{Result, StoreError};
 use crate::model::{ObjectKey, ObjectMeta, Page};
+use crate::recorded::StoredChecksum;
 
 use super::api::{DeleteFileVersionResponse, ListFileNamesResponse, ListFileVersionsResponse};
 use super::{B2Backend, constants};
@@ -60,6 +62,111 @@ pub(super) async fn head(b2: &B2Backend, key: &ObjectKey) -> Result<ObjectMeta> 
         .find(|f| f.file_name == key.as_str() && f.action == constants::ACTION_UPLOAD)
         .map(to_meta)
         .ok_or_else(|| StoreError::NotFound(key.to_string()))
+}
+
+/// The digest B2 recorded for `key`, or why it has none for this object.
+///
+/// **Two places to look, because B2 keeps the answer in two.**
+///
+/// * `contentSha1` — the SHA-1 B2 computed over an object uploaded in one
+///   request. B2 refuses a body that does not match the digest the client
+///   declared, so on that path the recorded value is a digest B2 and the writer
+///   agreed on.
+/// * `fileInfo["large_file_sha1"]` — where the client records the whole file's
+///   SHA-1 when it *starts* a large upload, because B2 checks a large upload
+///   part by part and never sees the whole body. B2 stores this one without
+///   checking it.
+///
+/// Both are statements about the bytes that were written, made at write time
+/// and kept somewhere the bytes are not, which is the entire mechanism a rot
+/// check depends on. Recomputing a digest from the object as it stands today
+/// and comparing it with itself is the check that cannot fail.
+///
+/// Anything that is not a 40-character hex digest — `"none"`, an empty field, a
+/// value some other tool left — becomes [`StoredChecksum::Absent`] with the
+/// reason, never a comparison against a string that is not a digest.
+pub(super) async fn stored_checksum(b2: &B2Backend, key: &ObjectKey) -> Result<StoredChecksum> {
+    let auth = b2.auth().await?;
+    let resp: ListFileNamesResponse = b2
+        .post_json(
+            constants::EP_LIST_FILE_NAMES,
+            serde_json::json!({
+                "bucketId": auth.bucket_id,
+                "prefix": key.as_str(),
+                "startFileName": key.as_str(),
+                "maxFileCount": SINGLE,
+            }),
+        )
+        .await?;
+
+    let item = resp
+        .files
+        .into_iter()
+        .find(|f| f.file_name == key.as_str() && f.action == constants::ACTION_UPLOAD)
+        .ok_or_else(|| StoreError::NotFound(key.to_string()))?;
+
+    Ok(recorded_sha1(&item))
+}
+
+/// Which of the two fields on a listed file carries a digest, if either does.
+///
+/// Split from the request so the decision is testable without a provider: every
+/// shape B2 has been observed to report is a case below, and each one is a row
+/// in this module's tests.
+fn recorded_sha1(item: &super::api::FileItem) -> StoredChecksum {
+    // The whole-file digest first: it is the only one a large file can have, and
+    // on a small object the two agree.
+    if let Some(digest) = item
+        .file_info
+        .get(constants::FILE_INFO_LARGE_FILE_SHA1)
+        .and_then(|value| as_sha1(value))
+    {
+        return StoredChecksum::Recorded(digest);
+    }
+
+    match item.content_sha1.as_deref() {
+        Some(value) => match as_sha1(value) {
+            Some(digest) => StoredChecksum::Recorded(digest),
+            // `"none"` is what every large file carries, and it is worth its own
+            // sentence: the remedy is not "check the bytes" but "this object was
+            // uploaded in parts by something that recorded no whole-file digest".
+            None if value == constants::SHA1_NONE => StoredChecksum::Absent(format!(
+                "b2 records no whole-object SHA-1 for '{}': it was uploaded in parts, and \
+                 the uploader recorded no '{}' in the file's own metadata",
+                item.file_name,
+                constants::FILE_INFO_LARGE_FILE_SHA1,
+            )),
+            None => StoredChecksum::Absent(format!(
+                "b2 reports a contentSha1 for '{}' that is not a SHA-1 digest",
+                item.file_name,
+            )),
+        },
+        None => StoredChecksum::Absent(format!(
+            "b2 reported no contentSha1 field at all for '{}'",
+            item.file_name,
+        )),
+    }
+}
+
+/// A B2 SHA-1 field as a digest, or [`None`] when the field holds something that
+/// is not one.
+///
+/// The `unverified:` prefix is stripped rather than rejected: it records that no
+/// client-supplied digest was checked against B2's own, and B2's own is still a
+/// measurement of the bytes it stored. See
+/// [`constants::SHA1_UNVERIFIED_PREFIX`].
+fn as_sha1(value: &str) -> Option<ContentHash> {
+    let hex_digits = value
+        .strip_prefix(constants::SHA1_UNVERIFIED_PREFIX)
+        .unwrap_or(value);
+    if hex_digits.len() != constants::SHA1_HEX_LEN {
+        return None;
+    }
+    let bytes = hex::decode(hex_digits).ok()?;
+    Some(ContentHash {
+        algo: HashAlgo::Sha1,
+        bytes,
+    })
 }
 
 pub(super) async fn exists(b2: &B2Backend, key: &ObjectKey) -> Result<bool> {

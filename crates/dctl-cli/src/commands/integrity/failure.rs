@@ -27,7 +27,7 @@
 
 use crate::constants::{
     INTEGRITY_FAILURE_HINT, INTEGRITY_NOT_SERVED_NOTICE, INTEGRITY_NOTHING_VERIFIED,
-    VERDICT_CORRUPT, VERDICT_MISSING, VERDICT_OK, VERDICT_UNREADABLE,
+    VERDICT_CORRUPT, VERDICT_MISSING, VERDICT_OK, VERDICT_UNREADABLE, VERDICT_UNVERIFIABLE,
 };
 use crate::error::CliError;
 use crate::exit::ExitCode;
@@ -61,6 +61,20 @@ pub enum Verdict {
     /// The provider could not serve the object at all — an outage, a permission
     /// change, or a network path that stayed broken past the retry budget.
     Unreadable,
+    /// Every byte came back and nothing recorded anywhere could say whether they
+    /// are the bytes that were written.
+    ///
+    /// The fifth verdict, and the one this vocabulary was missing. It is a fact
+    /// about **this object**, which is why it belongs here beside the others and
+    /// not in [`Assurance`](crate::source::Assurance): a backend that records
+    /// digests can still hold an object it has none for — a B2 large file
+    /// carries `contentSha1: "none"` and only the uploader can have recorded a
+    /// whole-file digest beside it — and the run has to say which objects those
+    /// were rather than averaging them into a source-level sentence.
+    ///
+    /// Reported as `ok` before this existed. That is the defect: `ok` is the
+    /// word an operator reads as *checked*.
+    Unverifiable,
 }
 
 impl Verdict {
@@ -72,6 +86,7 @@ impl Verdict {
             Self::Corrupt => VERDICT_CORRUPT,
             Self::Missing => VERDICT_MISSING,
             Self::Unreadable => VERDICT_UNREADABLE,
+            Self::Unverifiable => VERDICT_UNVERIFIABLE,
         }
     }
 
@@ -101,9 +116,13 @@ impl Verdict {
     pub const fn severity(self) -> u8 {
         match self {
             Self::Ok => 0,
-            Self::Unreadable => 1,
-            Self::Missing => 2,
-            Self::Corrupt => 3,
+            // Lowest of the four failures: nothing here is evidence that
+            // anything is wrong with the data, only that the question was not
+            // answered. Any verdict that *did* look at the bytes outranks it.
+            Self::Unverifiable => 1,
+            Self::Unreadable => 2,
+            Self::Missing => 3,
+            Self::Corrupt => 4,
         }
     }
 
@@ -126,6 +145,7 @@ impl Verdict {
             Self::Corrupt => ExitCode::IntegrityFailure,
             Self::Missing => ExitCode::FileNotFound,
             Self::Unreadable => ExitCode::TemporaryError,
+            Self::Unverifiable => ExitCode::VerificationNotPossible,
         }
     }
 }
@@ -164,6 +184,10 @@ pub fn failure(worst: Verdict, failed: u64, examined: u64) -> Option<CliError> {
             format!("{scope} objects are recorded in the index but absent from the remote")
         }
         Verdict::Unreadable => format!("{scope} objects could not be read from the remote"),
+        Verdict::Unverifiable => format!(
+            "{scope} objects came back whole and could not be checked — nothing recorded \
+             anywhere says whether their bytes are the bytes that were written"
+        ),
     };
 
     Some(CliError::new(worst.exit_code(), message).with_hint(hint_for(worst)))
@@ -209,6 +233,10 @@ pub fn object_failure(path: &str, verdict: Verdict) -> CliError {
         }
         Verdict::Missing => format!("'{path}' is in the index but absent from the remote"),
         Verdict::Unreadable => format!("'{path}' could not be read from the remote"),
+        Verdict::Unverifiable => format!(
+            "'{path}' came back whole and could not be checked — nothing recorded anywhere \
+             says whether its bytes are the bytes that were written"
+        ),
     };
     CliError::new(verdict.exit_code(), message).with_hint(hint_for(verdict))
 }
@@ -233,6 +261,9 @@ pub fn classify(error: &CliError) -> Verdict {
         // the only verdict that means data is gone rather than out of reach.
         ExitCode::IntegrityFailure | ExitCode::ChecksumMismatch => Verdict::Corrupt,
         ExitCode::FileNotFound => Verdict::Missing,
+        // The read succeeded and the question went unanswered. Kept apart from
+        // `Unreadable` because a retry fixes that one and cannot fix this one.
+        ExitCode::VerificationNotPossible => Verdict::Unverifiable,
         // Everything else — an outage, a permission change, a network path that
         // stayed broken past the retry budget — is an availability problem.
         _ => Verdict::Unreadable,
@@ -251,6 +282,11 @@ fn hint_for(verdict: Verdict) -> &'static str {
             "Retries were exhausted. Check connectivity and provider status, then \
              run the command again — nothing about the stored data has changed."
         }
+        Verdict::Unverifiable => {
+            "Nothing is known to be wrong with these objects and nothing is known to be \
+             right. Store them in a vault (`dctl init`), or re-upload them through a \
+             path that records a whole-object digest, if they have to be provable."
+        }
     }
 }
 
@@ -265,6 +301,7 @@ mod tests {
             Verdict::Corrupt,
             Verdict::Missing,
             Verdict::Unreadable,
+            Verdict::Unverifiable,
         ];
         for (index, verdict) in verdicts.iter().enumerate() {
             assert!(!verdict.slug().is_empty());
@@ -282,6 +319,61 @@ mod tests {
         assert_eq!(Verdict::Missing.exit_code(), ExitCode::FileNotFound);
         assert_eq!(Verdict::Unreadable.exit_code(), ExitCode::TemporaryError);
         assert_eq!(Verdict::Ok.exit_code(), ExitCode::Success);
+        assert_eq!(
+            Verdict::Unverifiable.exit_code(),
+            ExitCode::VerificationNotPossible
+        );
+        assert_eq!(Verdict::Unverifiable.exit_code().as_i32(), 27);
+    }
+
+    #[test]
+    fn an_object_that_could_not_be_checked_is_a_failure_and_is_not_corruption() {
+        // Both halves matter. `ok` is what it used to be, and `corrupt` is the
+        // over-correction: one claims a check that never happened, the other
+        // claims damage that has not been shown.
+        assert!(Verdict::Unverifiable.is_failure());
+        assert!(!Verdict::Unverifiable.is_corruption());
+        assert_ne!(Verdict::Unverifiable.exit_code(), ExitCode::Success);
+        assert_ne!(
+            Verdict::Unverifiable.exit_code(),
+            ExitCode::IntegrityFailure
+        );
+    }
+
+    #[test]
+    fn anything_that_looked_at_the_bytes_outranks_a_check_that_could_not_be_made() {
+        // A run holding one corrupt object and nine unverifiable ones exits on
+        // the corruption; the reverse would bury the only finding that means
+        // data is gone.
+        assert_eq!(
+            Verdict::Unverifiable.worse(Verdict::Corrupt),
+            Verdict::Corrupt
+        );
+        assert_eq!(
+            Verdict::Unverifiable.worse(Verdict::Missing),
+            Verdict::Missing
+        );
+        assert_eq!(
+            Verdict::Unverifiable.worse(Verdict::Unreadable),
+            Verdict::Unreadable
+        );
+        assert_eq!(
+            Verdict::Ok.worse(Verdict::Unverifiable),
+            Verdict::Unverifiable
+        );
+    }
+
+    #[test]
+    fn a_run_of_unverifiable_objects_does_not_claim_they_are_damaged() {
+        let error = failure(Verdict::Unverifiable, 4, 4).expect("a failure is produced");
+        assert_eq!(error.code(), ExitCode::VerificationNotPossible);
+        assert!(error.message().contains("4 of 4"));
+        assert!(
+            !error.message().contains("NOT served"),
+            "nothing was withheld and nothing was found bad: {}",
+            error.message()
+        );
+        assert!(error.hint().is_some());
     }
 
     #[test]

@@ -5119,6 +5119,11 @@ fn a_verify_over_a_plain_remote_publishes_what_its_ok_actually_proved() {
             .dctl()
             .arg("--no-ask-password")
             .args(["--format", "json", "verify"])
+            // The retrievability check has to be asked for by name now, because
+            // a remote that records no digest cannot detect rot and `verify`
+            // refuses by default. This test is about what the document says once
+            // the operator has accepted that.
+            .arg("--allow-read-back")
             .arg(format!("{PLAIN_REMOTE}:"))
             .assert()
             .success()
@@ -5198,12 +5203,119 @@ fn a_verify_says_what_it_covered_and_what_that_proved_without_being_asked() {
         .dctl()
         .arg("--no-ask-password")
         .arg("verify")
+        // See the sibling test: the weaker check is opt-in now.
+        .arg("--allow-read-back")
         .arg(format!("{PLAIN_REMOTE}:"))
         .assert()
         .success()
         // How much was covered, and what covering it proved.
         .stderr(predicates::str::contains("1 object examined"))
         .stderr(predicates::str::contains("read-back"));
+}
+
+/// A plain `local:` remote holding one object, and the object's path on disk so
+/// a test can reach past DCTL and damage what the provider is holding.
+fn a_plain_remote_holding_one_object(payload: &[u8]) -> (Sandbox, std::path::PathBuf) {
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", payload);
+    let root = sandbox.dir("store");
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", root.display()))
+        .assert()
+        .success();
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success();
+    let stored = root.join("a.txt");
+    (sandbox, stored)
+}
+
+#[test]
+fn a_verify_of_a_remote_that_cannot_detect_rot_refuses_rather_than_reporting_ok() {
+    // The defect, measured on the shipped binary before this existed: one byte
+    // flipped in place on a plain `local:` remote produced `ok` in the table,
+    // `"failed": 0` in the JSON and **exit 0**. An operator running this nightly
+    // was being told nothing while believing they were being told everything.
+    //
+    // The refusal is what closes it, and it must come with the flag that accepts
+    // the weaker check — otherwise the operator's only route back to a green
+    // cron job is `|| true`.
+    let (sandbox, stored) = a_plain_remote_holding_one_object(b"bytes that will be changed");
+
+    let mut bytes = std::fs::read(&stored).expect("the stored object is readable");
+    bytes[3] ^= 0xFF;
+    std::fs::write(&stored, &bytes).expect("the stored object is rewritten");
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("verify")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .code(27)
+        .stderr(predicates::str::contains(PLAIN_REMOTE))
+        .stderr(predicates::str::contains("--allow-read-back"));
+}
+
+#[test]
+fn a_scrub_of_a_remote_that_cannot_detect_rot_refuses_rather_than_grading_it_healthy() {
+    // The same defect one command over. `scrub` and `verify` share their
+    // verdicts, their exit codes and their wording, and a claim only one of them
+    // enforced would be a claim nobody could rely on.
+    let (sandbox, _stored) = a_plain_remote_holding_one_object(b"bytes nothing here records");
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("scrub")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .code(27)
+        .stderr(predicates::str::contains("--allow-read-back"));
+}
+
+#[test]
+fn the_refusal_is_reached_before_anything_is_read() {
+    // A remote that cannot be certified must cost nothing to find out about,
+    // rather than an hour of egress followed by a caveat. The object is removed
+    // from under the store first: if the run reached the walk it would report a
+    // missing object (exit 4) instead of the refusal.
+    let (sandbox, stored) = a_plain_remote_holding_one_object(b"about to disappear");
+    std::fs::remove_file(&stored).expect("the object is removed");
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("verify")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .code(27);
+}
+
+#[test]
+fn accepting_the_weaker_check_still_says_what_it_did_and_did_not_prove() {
+    // The flag is a concession, not an off switch: the run goes green and the
+    // report still carries the claim it can support, so an `ok` here can never
+    // be read as an `ok` over a vault.
+    let (sandbox, _stored) = a_plain_remote_holding_one_object(b"retrievable, and that is all");
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("verify")
+        .arg("--allow-read-back")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("read-back"))
+        .stderr(predicates::str::contains("not that it is unchanged"));
 }
 
 #[test]

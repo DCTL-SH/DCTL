@@ -209,6 +209,24 @@ impl Backend for LocalFs {
         walk::head(self, key).await
     }
 
+    /// Nothing. A filesystem holds bytes and a length, and neither survives a
+    /// change to the other in a way anything could compare against later.
+    ///
+    /// This is the answer that makes `dctl verify` refuse rather than print
+    /// `ok` over a store where a flipped byte reads back perfectly — which it
+    /// did, measured, at exit 0. See [`crate::recorded`].
+    fn checksum_support(&self) -> crate::recorded::ChecksumSupport {
+        crate::recorded::ChecksumSupport::None(crate::recorded::NO_RECORDED_CHECKSUM_FILESYSTEM)
+    }
+
+    /// Absent for every key, without a request: see
+    /// [`checksum_support`](Backend::checksum_support).
+    async fn stored_checksum(&self, _key: &ObjectKey) -> Result<crate::recorded::StoredChecksum> {
+        Ok(crate::recorded::StoredChecksum::Absent(
+            crate::recorded::NO_RECORDED_CHECKSUM_FILESYSTEM.to_string(),
+        ))
+    }
+
     async fn exists(&self, key: &ObjectKey) -> Result<bool> {
         walk::exists(self, key).await
     }

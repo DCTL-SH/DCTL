@@ -1812,6 +1812,16 @@ pub const VERDICT_CORRUPT: &str = "corrupt";
 pub const VERDICT_MISSING: &str = "missing";
 /// See [`VERDICT_OK`]. The provider could not serve the object at all.
 pub const VERDICT_UNREADABLE: &str = "unreadable";
+/// See [`VERDICT_OK`]. The object came back whole and there was nothing
+/// recorded anywhere that could say whether the bytes are the ones that were
+/// written.
+///
+/// Its own word rather than `ok`, because the difference between the two is the
+/// difference between a check that was made and one that could not be — and
+/// `ok` is the word an operator reads as "checked". Not `corrupt` either:
+/// nothing here is evidence of damage, and sending someone hunting for rot that
+/// has not been shown is the mirror image of the defect.
+pub const VERDICT_UNVERIFIABLE: &str = "unverifiable";
 
 /// `check` verdict slugs, one per way two sides can disagree.
 ///
@@ -2018,6 +2028,37 @@ pub const SCRUB_NOTHING_VERIFIED_HINT: &str = "Check the prefix with `dctl ls RE
 pub const ASSURANCE_AUTHENTICATED: &str = "authenticated";
 /// See [`ASSURANCE_AUTHENTICATED`]. Retrievability only: nothing to check
 /// the returned bytes against.
+/// See [`ASSURANCE_AUTHENTICATED`]. Every byte re-read and compared against the
+/// digest the **provider** recorded when the object was written.
+///
+/// Weaker than `authenticated` and much stronger than `read-back`, so it is its
+/// own word rather than being folded into either. It is not the vault's claim:
+/// the digest is the provider's, DCTL neither chose it nor holds a key over it,
+/// and an attacker who can rewrite an object can rewrite its metadata too. It
+/// is exactly the claim a *rot* check needs, because rot changes the bytes and
+/// leaves the metadata alone.
+pub const ASSURANCE_PROVIDER_CHECKSUM: &str = "provider-checksum";
+
+/// What a run says when it refuses a remote it could not certify.
+///
+/// The sentence is the finding: an operator whose nightly `verify` has gone red
+/// has to be able to tell, from this line alone, that nothing is wrong with
+/// their data and that nothing has been proved right about it either.
+pub const ASSURANCE_REFUSED_NOTICE: &str = "records no digest a re-read could be compared against";
+
+/// What to do about a remote that cannot be certified.
+///
+/// Three real options, in the order a customer meets them: seal it, point the
+/// check at a provider that records digests, or say out loud that the weaker
+/// check is the one you want. The flag is named in full because it is the one
+/// action that makes a nightly job green again, and an operator who cannot find
+/// it will reach for `|| true` instead.
+pub const ASSURANCE_REFUSED_HINT: &str = "A plain filesystem remote stores bytes and a length and no digest of either, \
+     so nothing there can notice a byte that changed. Store the data in a vault \
+     (`dctl init`), or verify a remote whose provider records a per-object \
+     checksum, or pass `--allow-read-back` to run the retrievability check this \
+     remote does support — every object re-read in full, which is how a replica \
+     quietly losing objects is caught.";
 pub const ASSURANCE_READ_BACK: &str = "read-back";
 
 /// Window size, in bytes, for reading an object back without buffering it.
@@ -5623,6 +5664,7 @@ mod tests {
             VERDICT_CORRUPT,
             VERDICT_MISSING,
             VERDICT_UNREADABLE,
+            VERDICT_UNVERIFIABLE,
             DIFFERENCE_MATCH,
             DIFFERENCE_DIFFER,
             DIFFERENCE_MISSING_ON_SRC,

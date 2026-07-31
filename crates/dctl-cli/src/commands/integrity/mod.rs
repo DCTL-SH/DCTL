@@ -11,11 +11,14 @@
 //!   constructor that guarantees a corrupt object always exits 21 with a message
 //!   saying the data was **not** served.
 //! * [`mode`] — how the global `--verify` strength is reported and what it costs.
+//! * [`assurance`] — the claim a run must be able to make before it starts, and
+//!   the refusal when it cannot.
 //!
 //! It is deliberately not a `util` module. Everything here is integrity domain
 //! vocabulary; a helper that has nothing to do with proving data intact does not
 //! belong in it.
 
+pub mod assurance;
 pub mod failure;
 pub mod mode;
 pub mod target;

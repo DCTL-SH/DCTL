@@ -40,12 +40,13 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use dctl_store::Deadlines;
 use dctl_store::{
-    Backend, ByteRange, LinkPolicy, LinkReport, ObjectKey, ObjectMeta, SpecialReport, StoreError,
+    Backend, ByteRange, ChecksumSupport, Hasher, LinkPolicy, LinkReport, ObjectKey, ObjectMeta,
+    SpecialReport, StoreError, StoredChecksum,
 };
 use zeroize::Zeroizing;
 
 use crate::config::Config;
-use crate::constants::READ_BACK_WINDOW_BYTES;
+use crate::constants::{INTEGRITY_FAILURE_HINT, READ_BACK_WINDOW_BYTES};
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
 use crate::platform::path;
@@ -262,12 +263,40 @@ impl Source for PlainSource {
         Ok(Some(hasher.finalize().as_bytes().to_vec()))
     }
 
+    /// Read every byte back and, where the provider recorded a digest, compare
+    /// what came back against it.
+    ///
+    /// **Both halves are needed and neither substitutes for the other.** The
+    /// read-back is what notices a replica quietly losing objects and a store
+    /// that stops serving part-way. The comparison is the only thing here
+    /// capable of noticing that the bytes *changed*, because the digest was
+    /// written down at write time and kept in the provider's metadata rather
+    /// than in the object: rot moves one and leaves the other.
+    ///
+    /// A read-back on its own was the whole of this method, and it is the defect
+    /// [`dctl_store::recorded`] records. Measured on the shipped binary: a byte
+    /// flipped in place, and a 4 KiB object truncated to 100 bytes, on a plain
+    /// `local:` and a plain `sftp:` remote — `ok` in the table and **exit 0** on
+    /// all four. A truncation is invisible to a read-back by construction:
+    /// shortening a file moves its length too, so `head` and the bytes agree and
+    /// every byte the object claims does come back.
+    ///
+    /// The order is read-then-ask rather than ask-then-read, so that an object
+    /// the provider has no digest for is still *proved retrievable* before it is
+    /// reported unverifiable. The finding is then additional information rather
+    /// than a substitute for the check that could be made.
     async fn verify(&self, path: &str) -> Result<()> {
         let key = ObjectKey::new(path);
         // `head` first, so an object that is simply gone is reported as
         // *missing* rather than as a failed read — those are different findings
         // and they send an operator to different places.
         let meta = self.backend.head(&key).await?;
+
+        // Decided before a byte moves. A caller that folded a digest only when
+        // it turned out to have something to compare it with would have to
+        // either read twice or buffer the object, and the second is the memory
+        // ceiling this whole method is windowed to avoid.
+        let mut folding = self.backend.checksum_support().algo().map(Hasher::new);
 
         // Ranged reads rather than one `get`, because the point of a read-back
         // is to touch every byte and a `get` would buffer them all to do it.
@@ -301,17 +330,69 @@ impl Source for PlainSource {
                      Restore this object from another copy.",
                 ));
             }
+            if let Some(hasher) = folding.as_mut() {
+                hasher.update(&bytes);
+            }
             offset += bytes.len() as u64;
         }
-        Ok(())
+
+        let Some(hasher) = folding else {
+            // Nothing was recorded here, so the read-back is the whole of the
+            // claim and it has been made. What that is worth is published by
+            // [`Source::assurance`] and refused at the door by
+            // `commands::integrity::assurance`, rather than being decided per
+            // object in a place the operator's flag is not in scope.
+            return Ok(());
+        };
+
+        match self.backend.stored_checksum(&key).await? {
+            StoredChecksum::Recorded(recorded) => {
+                let read = hasher.finalize();
+                if read.matches(&recorded) {
+                    return Ok(());
+                }
+                Err(CliError::new(
+                    ExitCode::IntegrityFailure,
+                    format!(
+                        "'{path}' does not match the digest recorded when it was written: \
+                         the remote recorded {} and the {} bytes it served now hash to {}",
+                        recorded.hex(),
+                        meta.size,
+                        read.hex(),
+                    ),
+                )
+                .with_hint(INTEGRITY_FAILURE_HINT))
+            }
+            // The object is there, every byte of it came back, and there is
+            // nothing recorded anywhere that could say whether those are the
+            // bytes that were written. That is not `ok`: `ok` is the word an
+            // operator reads as *checked*.
+            StoredChecksum::Absent(reason) => Err(CliError::new(
+                ExitCode::VerificationNotPossible,
+                format!("'{path}' came back whole and could not be checked — {reason}"),
+            )),
+        }
     }
 
+    /// What a clean [`Source::verify`] here proves, read off the backend rather
+    /// than asserted.
+    ///
+    /// It was the flat constant [`Assurance::ReadBack`], which was true of
+    /// `local:` and `sftp:` and false of B2 — and a report cannot state a claim
+    /// its source will not make. The backend answers, because what a provider
+    /// records is the provider's property and not this layer's.
     fn assurance(&self) -> Assurance {
-        // Nothing here recorded a hash of what was written, so nothing here can
-        // compare against one. A clean read-back proves the object is still
-        // retrievable in full; it does not prove the bytes are unchanged, and
-        // reporting otherwise would be inventing a guarantee.
-        Assurance::ReadBack
+        match self.backend.checksum_support() {
+            // The digest is the provider's rather than DCTL's, and it is not
+            // keyed — so this is not a vault's claim and does not borrow its
+            // word. It is exactly the claim a rot check needs.
+            ChecksumSupport::Recorded(_) => Assurance::ProviderChecksum,
+            // Nothing here recorded a hash of what was written, so nothing here
+            // can compare against one. A clean read-back proves the object is
+            // still retrievable in full; it does not prove the bytes are
+            // unchanged, and reporting otherwise would be inventing a guarantee.
+            ChecksumSupport::None(_) => Assurance::ReadBack,
+        }
     }
 }
 
@@ -455,6 +536,22 @@ mod tests {
             Ok(Some(dctl_store::StoreIdentity::distinguishing("short")))
         }
 
+        /// Nothing recorded, which is the case this fake is used to drive: the
+        /// disagreement it induces is between `head` and what is served, and it
+        /// must be caught without a digest to compare against.
+        fn checksum_support(&self) -> dctl_store::ChecksumSupport {
+            dctl_store::ChecksumSupport::None("this fake records no digests")
+        }
+
+        async fn stored_checksum(
+            &self,
+            _key: &ObjectKey,
+        ) -> dctl_store::Result<dctl_store::StoredChecksum> {
+            Ok(dctl_store::StoredChecksum::Absent(
+                "this fake records no digests".to_string(),
+            ))
+        }
+
         async fn put(
             &self,
             _key: &ObjectKey,
@@ -547,6 +644,277 @@ mod tests {
     /// A source over a store that declares `declared` bytes and holds `served`.
     fn short_serving(declared: u64, served: u64) -> PlainSource {
         PlainSource::new(Arc::new(ShortServing { declared, served }))
+    }
+
+    /// A backend shaped like B2: it writes the bytes to a real directory and
+    /// keeps a digest of them **somewhere else**.
+    ///
+    /// That separation is the whole mechanism under test and the reason a fake
+    /// is the right instrument here rather than a wrapper over `LocalFs` alone:
+    /// rot moves the bytes and leaves the recorded digest where it was, so a
+    /// test has to be able to move one without the other. Damaging the file on
+    /// disk is exactly what the live proof does to a B2 object it uploaded.
+    struct Recording {
+        inner: LocalFs,
+        /// Key to the digest recorded when the object was written — the
+        /// provider's metadata, kept out of the bytes.
+        recorded: std::sync::Mutex<std::collections::HashMap<String, dctl_store::ContentHash>>,
+    }
+
+    impl Recording {
+        fn over(root: &Path) -> Self {
+            Self {
+                inner: LocalFs::new(root),
+                recorded: std::sync::Mutex::new(std::collections::HashMap::new()),
+            }
+        }
+
+        /// Record `bytes` under `key` the way a provider does on a verified
+        /// write: the object, and beside it the digest of what was accepted.
+        fn accept(&self, key: &str, bytes: &[u8]) {
+            self.recorded
+                .lock()
+                .expect("the fixture's map is not poisoned")
+                .insert(key.to_string(), dctl_store::ContentHash::sha1(bytes));
+        }
+
+        /// Forget the digest for `key`, leaving the object — a B2 large file,
+        /// whose `contentSha1` is the literal string `none`.
+        fn forget(&self, key: &str) {
+            self.recorded
+                .lock()
+                .expect("the fixture's map is not poisoned")
+                .remove(key);
+        }
+    }
+
+    #[async_trait]
+    impl Backend for Recording {
+        fn name(&self) -> &'static str {
+            "recording"
+        }
+
+        fn checksum_support(&self) -> dctl_store::ChecksumSupport {
+            dctl_store::ChecksumSupport::Recorded(dctl_store::HashAlgo::Sha1)
+        }
+
+        async fn stored_checksum(
+            &self,
+            key: &ObjectKey,
+        ) -> dctl_store::Result<dctl_store::StoredChecksum> {
+            Ok(
+                match self
+                    .recorded
+                    .lock()
+                    .expect("the fixture's map is not poisoned")
+                    .get(key.as_str())
+                {
+                    Some(digest) => dctl_store::StoredChecksum::Recorded(digest.clone()),
+                    None => dctl_store::StoredChecksum::Absent(format!(
+                        "nothing was recorded for '{}'",
+                        key.as_str()
+                    )),
+                },
+            )
+        }
+
+        async fn store_identity(&self) -> dctl_store::Result<Option<dctl_store::StoreIdentity>> {
+            self.inner.store_identity().await
+        }
+        async fn put(
+            &self,
+            key: &ObjectKey,
+            data: bytes::Bytes,
+            expected: &dctl_store::ContentHash,
+            modified: dctl_store::SourceModified,
+        ) -> dctl_store::Result<dctl_store::PutOutcome> {
+            self.accept(key.as_str(), &data);
+            self.inner.put(key, data, expected, modified).await
+        }
+        async fn put_stream(
+            &self,
+            key: &ObjectKey,
+            source: dctl_store::ObjectStream,
+            modified: dctl_store::SourceModified,
+        ) -> dctl_store::Result<dctl_store::PutOutcome> {
+            self.inner.put_stream(key, source, modified).await
+        }
+        async fn get(&self, key: &ObjectKey) -> dctl_store::Result<bytes::Bytes> {
+            self.inner.get(key).await
+        }
+        async fn get_range(
+            &self,
+            key: &ObjectKey,
+            range: ByteRange,
+        ) -> dctl_store::Result<bytes::Bytes> {
+            self.inner.get_range(key, range).await
+        }
+        async fn head(&self, key: &ObjectKey) -> dctl_store::Result<ObjectMeta> {
+            self.inner.head(key).await
+        }
+        async fn exists(&self, key: &ObjectKey) -> dctl_store::Result<bool> {
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &ObjectKey) -> dctl_store::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_page(
+            &self,
+            prefix: &str,
+            cursor: Option<String>,
+        ) -> dctl_store::Result<dctl_store::Page> {
+            self.inner.list_page(prefix, cursor).await
+        }
+        async fn list_staging(
+            &self,
+            prefix: &str,
+            cursor: Option<String>,
+        ) -> dctl_store::Result<dctl_store::StagingListing> {
+            self.inner.list_staging(prefix, cursor).await
+        }
+        async fn list_incomplete_uploads(
+            &self,
+            prefix: &str,
+            cursor: Option<String>,
+        ) -> dctl_store::Result<dctl_store::IncompleteUploads> {
+            self.inner.list_incomplete_uploads(prefix, cursor).await
+        }
+        async fn abort_incomplete_upload(
+            &self,
+            upload: &dctl_store::IncompleteUpload,
+        ) -> dctl_store::Result<()> {
+            self.inner.abort_incomplete_upload(upload).await
+        }
+    }
+
+    /// A real file on disk with a real digest recorded beside it, and a handle
+    /// on both so a test can move one without the other.
+    struct Recorded {
+        _root: TempDir,
+        path: std::path::PathBuf,
+        backend: Arc<Recording>,
+        source: PlainSource,
+    }
+
+    fn recorded_object(name: &str, bytes: &[u8]) -> Recorded {
+        let root = TempDir::new().expect("a temporary directory");
+        let path = root.path().join(name);
+        std::fs::write(&path, bytes).expect("the fixture file is written");
+        let backend = Arc::new(Recording::over(root.path()));
+        backend.accept(name, bytes);
+        let source = PlainSource::new(Arc::clone(&backend) as Arc<dyn Backend>);
+        Recorded {
+            _root: root,
+            path,
+            backend,
+            source,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_flipped_byte_is_caught_where_the_provider_recorded_a_digest() {
+        // The defect this whole capability exists to close, measured on the
+        // shipped binary before it did: one byte flipped in place on a plain
+        // remote produced `ok` and exit 0.
+        let fixture = recorded_object(
+            "a.bin",
+            &(0..4096).map(|n| (n % 251) as u8).collect::<Vec<_>>(),
+        );
+        fixture.source.verify("a.bin").await.expect("intact first");
+
+        let mut bytes = std::fs::read(&fixture.path).expect("readable");
+        bytes[1000] ^= 0xFF;
+        std::fs::write(&fixture.path, &bytes).expect("rewritten");
+
+        let error = fixture
+            .source
+            .verify("a.bin")
+            .await
+            .expect_err("a changed byte must be caught");
+        assert_eq!(error.code(), ExitCode::IntegrityFailure);
+        assert!(
+            error.message().contains("a.bin"),
+            "the object must be named: {}",
+            error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_truncation_is_caught_where_the_provider_recorded_a_digest() {
+        // The other half, and the one a read-back can never see on a filesystem:
+        // truncating a file moves its length too, so `head` and the bytes agree
+        // and every byte the object claims comes back.
+        let fixture = recorded_object(
+            "b.bin",
+            &(0..4096).map(|n| (n % 251) as u8).collect::<Vec<_>>(),
+        );
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&fixture.path)
+            .expect("the object opens for writing");
+        file.set_len(100).expect("the object is truncated");
+        drop(file);
+        assert_eq!(
+            std::fs::metadata(&fixture.path).expect("stat").len(),
+            100,
+            "the fixture must really be shorter"
+        );
+
+        let error = fixture
+            .source
+            .verify("b.bin")
+            .await
+            .expect_err("a truncation must be caught");
+        assert_eq!(error.code(), ExitCode::IntegrityFailure);
+    }
+
+    #[tokio::test]
+    async fn an_intact_object_still_passes_where_the_provider_recorded_a_digest() {
+        // The control that makes the two above mean anything: a comparison that
+        // failed on everything would be a check nobody could use.
+        let fixture = recorded_object("c.bin", b"unchanged bytes");
+        fixture
+            .source
+            .verify("c.bin")
+            .await
+            .expect("an untouched object verifies");
+        assert_eq!(fixture.source.assurance(), Assurance::ProviderChecksum);
+    }
+
+    #[tokio::test]
+    async fn an_object_the_provider_has_no_digest_for_is_not_reported_ok() {
+        // A B2 large file carries `contentSha1: "none"`. The object is fine, the
+        // read is fine, and there is nothing to compare — which is a different
+        // answer from `ok` and must not be spelled the same way.
+        let fixture = recorded_object("d.bin", b"perfectly readable");
+        fixture.backend.forget("d.bin");
+
+        let error = fixture
+            .source
+            .verify("d.bin")
+            .await
+            .expect_err("an object with nothing recorded must not pass");
+        assert_eq!(error.code(), ExitCode::VerificationNotPossible);
+        assert_eq!(
+            crate::commands::integrity::failure::classify(&error),
+            crate::commands::integrity::failure::Verdict::Unverifiable,
+            "and it must not be classified as damage"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_remote_that_records_nothing_cannot_certify_and_says_so() {
+        // `local:` and `sftp:` are this case. The read-back still happens — it
+        // is how a replica quietly losing objects is caught — and the claim it
+        // supports is the weaker one, published rather than assumed.
+        let fixture = tree_with(&[("a.txt", b"one")]);
+        assert_eq!(fixture.source.assurance(), Assurance::ReadBack);
+        assert!(!fixture.source.assurance().detects_corruption());
+        fixture
+            .source
+            .verify("a.txt")
+            .await
+            .expect("the retrievability check still runs");
     }
 
     /// A real directory tree behind a real `LocalFs`, with `files` written into

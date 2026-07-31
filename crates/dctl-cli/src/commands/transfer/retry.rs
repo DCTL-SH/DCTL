@@ -77,7 +77,12 @@ pub const fn is_worth_repeating(error: &CliError) -> bool {
         // look either, and this code is produced by `dctl audit verify` rather
         // than by any transfer — repeating a file on the strength of it would be
         // retrying somebody else's finding.
-        | ExitCode::AuditHeadMismatch => false,
+        | ExitCode::AuditHeadMismatch
+        // A remote that records no digest a re-read could be compared against
+        // will record none on the next attempt either. This code is produced by
+        // `verify` and `scrub` rather than by any transfer, so repeating a file
+        // on the strength of it would be retrying somebody else's finding.
+        | ExitCode::VerificationNotPossible => false,
 
         // The run was stopped deliberately. Repeating either of these would be
         // working around the operator rather than for them.

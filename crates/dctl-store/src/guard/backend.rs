@@ -281,6 +281,17 @@ impl Backend for Guarded {
         self.inner.head(key).await
     }
 
+    /// Forwarded unchanged: what a provider records is not a property of the
+    /// container this guard is watching.
+    fn checksum_support(&self) -> crate::recorded::ChecksumSupport {
+        self.inner.checksum_support()
+    }
+
+    async fn stored_checksum(&self, key: &ObjectKey) -> Result<crate::recorded::StoredChecksum> {
+        self.opened_as().await?;
+        self.inner.stored_checksum(key).await
+    }
+
     async fn exists(&self, key: &ObjectKey) -> Result<bool> {
         self.opened_as().await?;
         self.inner.exists(key).await

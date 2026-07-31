@@ -194,6 +194,20 @@ impl Backend for CountingBackend {
         })
     }
 
+    /// Records nothing, so a caller counting requests is not given one to
+    /// count. The failure schedule this double exists for is about transport,
+    /// not about what a provider remembers.
+    fn checksum_support(&self) -> crate::recorded::ChecksumSupport {
+        crate::recorded::ChecksumSupport::None("this counting double records no digests")
+    }
+
+    async fn stored_checksum(&self, _key: &ObjectKey) -> Result<crate::recorded::StoredChecksum> {
+        self.attempt("stored_checksum")?;
+        Ok(crate::recorded::StoredChecksum::Absent(
+            "this counting double records no digests".to_string(),
+        ))
+    }
+
     async fn exists(&self, _key: &ObjectKey) -> Result<bool> {
         self.attempt("exists")?;
         Ok(true)
@@ -401,6 +415,18 @@ impl Backend for IdentifiedBackend {
             size: 7,
             modified_unix: None,
         })
+    }
+
+    /// Records nothing: this double exists to answer identity probes.
+    fn checksum_support(&self) -> crate::recorded::ChecksumSupport {
+        crate::recorded::ChecksumSupport::None("this identity double records no digests")
+    }
+
+    async fn stored_checksum(&self, _key: &ObjectKey) -> Result<crate::recorded::StoredChecksum> {
+        self.record("stored_checksum");
+        Ok(crate::recorded::StoredChecksum::Absent(
+            "this identity double records no digests".to_string(),
+        ))
     }
 
     async fn exists(&self, _key: &ObjectKey) -> Result<bool> {

@@ -162,6 +162,22 @@ impl From<StoreError> for CliError {
                     .with_hint(retry_hint(attempts))
             }
 
+            // A server that answered and said no. **Not** `TemporaryError`: the
+            // request was received and refused, so "try again shortly" is
+            // advice that spends a backup window to arrive at the same answer.
+            // The message already carries whatever could be established about
+            // the cause — including, where the far end could be asked, that the
+            // filesystem is *not* out of space, which is the fact that sends an
+            // operator to the quota instead of to `df`.
+            StoreError::Refused { .. } => Self::new(ExitCode::FatalError, error.to_string())
+                .with_hint(
+                    "The server received the request and refused it. SFTP's status \
+                     packet carries no errno, so where the cause is not named above \
+                     it could not be established from the protocol alone. Check the \
+                     destination for a quota, a read-only mount, and the permissions \
+                     on the directory itself.",
+                ),
+
             // The run's own `--max-duration`, and its own exit code. Reporting
             // it as a temporary error — which is what `Transport` would have
             // made it — would tell a scheduler to back off and try again, about
@@ -360,6 +376,7 @@ impl CliError {
             StoreError::Backend(_) | StoreError::Provider { .. } | StoreError::Transport { .. } => {
                 ExitCode::TemporaryError
             }
+            StoreError::Refused { .. } => ExitCode::FatalError,
             StoreError::RootChanged { .. } => ExitCode::FatalError,
             StoreError::RunDeadline { .. } => ExitCode::DurationLimitExceeded,
             StoreError::Io(source) if dctl_store::durable::is_out_of_space(source) => {

@@ -131,6 +131,21 @@ pub enum ExitCode {
     /// event, which is how a loud code gets ignored. This module's own rule is
     /// that a new condition gets a new number.
     AuditHeadMismatch = 26,
+    /// The check that was asked for could not be made, so no claim is offered
+    /// about the data either way.
+    ///
+    /// Raised by `verify` and `scrub` when the remote records no digest a
+    /// re-read could be compared against — and by either of them for an
+    /// individual object the provider has no digest for. Nothing here says the
+    /// data is damaged; it says the question was not answered.
+    ///
+    /// **Deliberately not 0, and deliberately not 21.** Zero is what this
+    /// condition used to produce, and it is the defect the code exists to close:
+    /// a nightly `dctl verify` over a plain remote printed `ok` for every object
+    /// and exited 0 while a flipped byte and a truncation both sat in the store.
+    /// Twenty-one means the bytes were checked and failed, which would send an
+    /// operator hunting for damage that has not been shown.
+    VerificationNotPossible = 27,
 }
 
 impl ExitCode {
@@ -163,6 +178,7 @@ impl ExitCode {
             Self::AuditChainBroken => "audit_chain_broken",
             Self::Cancelled => "cancelled",
             Self::AuditHeadMismatch => "audit_head_mismatch",
+            Self::VerificationNotPossible => "verification_not_possible",
         }
     }
 
@@ -191,6 +207,9 @@ impl ExitCode {
             Self::AuditChainBroken => "Audit log hash chain verification failed",
             Self::Cancelled => "Operation cancelled",
             Self::AuditHeadMismatch => "Audit log head does not match the expected anchor",
+            Self::VerificationNotPossible => {
+                "The integrity check asked for could not be made on this remote"
+            }
         }
     }
 
@@ -216,6 +235,7 @@ impl ExitCode {
             Self::AuditChainBroken,
             Self::Cancelled,
             Self::AuditHeadMismatch,
+            Self::VerificationNotPossible,
         ]
     }
 }
@@ -236,6 +256,23 @@ mod tests {
         assert_eq!(ExitCode::VaultLocked.as_i32(), 22);
         assert_eq!(ExitCode::AuditChainBroken.as_i32(), 24);
         assert_eq!(ExitCode::AuditHeadMismatch.as_i32(), 26);
+        assert_eq!(ExitCode::VerificationNotPossible.as_i32(), 27);
+    }
+
+    #[test]
+    fn a_check_that_could_not_be_made_is_neither_success_nor_corruption() {
+        // The defect this code exists to close produced 0, and the obvious
+        // over-correction produces 21. Both are wrong in opposite directions:
+        // one claims the data was checked, the other claims it was found bad.
+        assert_ne!(ExitCode::VerificationNotPossible.as_i32(), 0);
+        assert_ne!(
+            ExitCode::VerificationNotPossible.as_i32(),
+            ExitCode::IntegrityFailure.as_i32()
+        );
+        assert_ne!(
+            ExitCode::VerificationNotPossible.slug(),
+            ExitCode::IntegrityFailure.slug()
+        );
     }
 
     #[test]

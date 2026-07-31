@@ -151,7 +151,12 @@ impl Observed {
             // turns a clear failure into a slow one, and the remedy is to
             // classify it at the site that raised it — which is why the two
             // structured variants above exist.
-            | StoreError::Backend(_) => Self::terminal(),
+            | StoreError::Backend(_)
+            // The server received the request and refused it, so the refusal is
+            // equally true on the next attempt. A full disk stays full for the
+            // whole schedule, and spending six attempts on it turns a clear
+            // failure into a slow one.
+            | StoreError::Refused { .. } => Self::terminal(),
         }
     }
 }

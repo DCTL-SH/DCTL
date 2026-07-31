@@ -576,6 +576,21 @@ impl Backend for B2Backend {
         listing::head(self, key).await
     }
 
+    /// SHA-1: B2 computes one over every object it accepts and keeps it in the
+    /// file's own metadata, where `b2_list_file_names` reports it back.
+    ///
+    /// The algorithm is B2's choice, not DCTL's — the upload path already sends
+    /// `X-Bz-Content-Sha1` and B2 refuses a body that does not match it — so a
+    /// re-read is folded through SHA-1 to be comparable with what B2 is holding.
+    fn checksum_support(&self) -> crate::recorded::ChecksumSupport {
+        crate::recorded::ChecksumSupport::Recorded(crate::checksum::HashAlgo::Sha1)
+    }
+
+    /// What B2 recorded for this object, or why it has nothing for this one.
+    async fn stored_checksum(&self, key: &ObjectKey) -> Result<crate::recorded::StoredChecksum> {
+        listing::stored_checksum(self, key).await
+    }
+
     async fn exists(&self, key: &ObjectKey) -> Result<bool> {
         listing::exists(self, key).await
     }

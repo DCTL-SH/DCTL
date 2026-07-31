@@ -145,6 +145,17 @@ async fn a_store_that_cannot_be_read_is_reported_as_that_rather_than_as_a_bad_pa
             // about.
             Ok(Some(dctl_store::StoreIdentity::existence_only()))
         }
+        /// Nothing: a store nobody can read has nothing to report about what it
+        /// recorded either.
+        fn checksum_support(&self) -> dctl_store::ChecksumSupport {
+            dctl_store::ChecksumSupport::None("this store cannot be read at all")
+        }
+        async fn stored_checksum(
+            &self,
+            _: &ObjectKey,
+        ) -> Result<dctl_store::StoredChecksum, StoreError> {
+            Err(StoreError::Backend("permission denied".into()))
+        }
         async fn put(
             &self,
             _: &ObjectKey,
@@ -1160,6 +1171,19 @@ impl Backend for FaultyGrantGet {
 
     async fn store_identity(&self) -> dctl_store::Result<Option<dctl_store::StoreIdentity>> {
         self.inner.store_identity().await
+    }
+
+    /// Forwarded: this double changes what is *served*, not what the store
+    /// behind it recorded.
+    fn checksum_support(&self) -> dctl_store::ChecksumSupport {
+        self.inner.checksum_support()
+    }
+
+    async fn stored_checksum(
+        &self,
+        key: &ObjectKey,
+    ) -> dctl_store::Result<dctl_store::StoredChecksum> {
+        self.inner.stored_checksum(key).await
     }
 
     async fn put(
