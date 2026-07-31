@@ -363,6 +363,47 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_checksum_question_is_answered_by_the_backend_and_never_by_this_wrapper() {
+        // **A wrapper that answers for the layer underneath.** Every backend in
+        // this build is wrapped by both decorators before a command sees it, so
+        // a `checksum_support` that stopped being forwarded would be the answer
+        // for *every* remote — and §34's whole capability is a per-backend
+        // question. Both directions matter and both are asserted:
+        //
+        //   * a wrapper reporting `None` over a provider that does record makes
+        //     `dctl verify b2:BUCKET` refuse at exit 27 on a remote that can
+        //     detect rot — loud, but it removes the one backend that can;
+        //   * a wrapper reporting `Recorded` over a filesystem makes
+        //     `dctl verify local:` print `ok` for every object while comparing a
+        //     re-read against nothing, which is §31.4's defect returning.
+        //
+        // Every double in `crate::testing` says `None`, so before
+        // `CountingBackend::recording` existed the two were indistinguishable
+        // and deleting the delegation left the whole gate green.
+        let recording = std::sync::Arc::new(
+            CountingBackend::failing("none", 0, busy()).recording(crate::HashAlgo::Sha1),
+        );
+        let wrapped = Retrying::wrap(recording, crate::deadline::RunDeadline::unbounded());
+        assert_eq!(
+            wrapped.checksum_support(),
+            crate::recorded::ChecksumSupport::Recorded(crate::HashAlgo::Sha1),
+            "the wrapper answered for the provider underneath"
+        );
+        assert_eq!(
+            wrapped.checksum_support().algo(),
+            Some(crate::HashAlgo::Sha1),
+            "and the algorithm a re-read has to be folded through came with it"
+        );
+
+        let silent = std::sync::Arc::new(CountingBackend::failing("none", 0, busy()));
+        let wrapped = Retrying::wrap(silent, crate::deadline::RunDeadline::unbounded());
+        assert!(
+            !wrapped.checksum_support().detects_corruption(),
+            "a wrapper must not certify a backend that records nothing"
+        );
+    }
+
+    #[tokio::test]
     async fn every_operation_is_retried_and_not_merely_the_convenient_ones() {
         // The assertion that would have caught a wrapper implementing three
         // methods and forwarding the rest: each operation is failed twice and

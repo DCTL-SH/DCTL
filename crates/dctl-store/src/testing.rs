@@ -31,6 +31,9 @@ use crate::modified::SourceModified;
 /// A backend that counts calls and fails the first `failures` calls to one
 /// named operation.
 pub struct CountingBackend {
+    /// What this double claims its provider records. See
+    /// [`Backend::checksum_support`](crate::Backend::checksum_support).
+    support: crate::recorded::ChecksumSupport,
     /// Which operation fails, by the name this module records it under.
     failing: &'static str,
     /// How many more times that operation must fail before it succeeds.
@@ -50,11 +53,25 @@ impl CountingBackend {
     #[must_use]
     pub fn failing(failing: &'static str, failures: u32, error: StoreError) -> Self {
         Self {
+            support: crate::recorded::ChecksumSupport::None(
+                "this counting double records no digests",
+            ),
             failing,
             remaining: AtomicU32::new(failures),
             error: Mutex::new(error),
             calls: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// The same double, claiming its provider records a digest in `algo`.
+    ///
+    /// The only way to tell a decorator that *forwards* the question from one
+    /// that answers it: both look identical while the backend underneath says
+    /// `None`, which every other double in this module does.
+    #[must_use]
+    pub fn recording(mut self, algo: HashAlgo) -> Self {
+        self.support = crate::recorded::ChecksumSupport::Recorded(algo);
+        self
     }
 
     /// How many times `operation` has been called.
@@ -194,11 +211,14 @@ impl Backend for CountingBackend {
         })
     }
 
-    /// Records nothing, so a caller counting requests is not given one to
-    /// count. The failure schedule this double exists for is about transport,
-    /// not about what a provider remembers.
+    /// Whatever this double was told to say. Configurable, because the
+    /// decorators above it — `Retrying` and `Guarded` — must report the answer
+    /// of the backend underneath and not one of their own, and a double that
+    /// could only ever say `None` cannot tell a delegation from a hard-coded
+    /// refusal. Deleting the delegation from either wrapper left
+    /// `cargo test --workspace` entirely green (`HANDOVER.md` §35.5).
     fn checksum_support(&self) -> crate::recorded::ChecksumSupport {
-        crate::recorded::ChecksumSupport::None("this counting double records no digests")
+        self.support
     }
 
     async fn stored_checksum(&self, _key: &ObjectKey) -> Result<crate::recorded::StoredChecksum> {

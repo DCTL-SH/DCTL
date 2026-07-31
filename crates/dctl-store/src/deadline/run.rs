@@ -175,9 +175,24 @@ impl RunDeadline {
     /// How much of the window is left, read from the clock now.
     #[must_use]
     pub fn left(&self) -> Left {
+        self.left_at(Instant::now())
+    }
+
+    /// The same, at an explicit reading of the clock.
+    ///
+    /// For the same reason [`starting_at`](Self::starting_at) exists, and for
+    /// one more. The `remaining.is_zero()` arm below is reachable **only** when
+    /// two reads of a monotonic clock return the identical instant, which on a
+    /// nanosecond-resolution clock is a coincidence no test can arrange — so
+    /// deleting that arm left `cargo test --workspace` entirely green, which is
+    /// how it was found (`HANDOVER.md` §35.5). An argument that the arm cannot
+    /// fire would have been wrong: it can, on a coarse clock, and this is the
+    /// half of the run's deadline that decides whether an attempt is made.
+    #[must_use]
+    pub fn left_at(&self, now: Instant) -> Left {
         match self.0 {
             None => Left::Unbounded,
-            Some(bound) => match bound.ends_at.checked_duration_since(Instant::now()) {
+            Some(bound) => match bound.ends_at.checked_duration_since(now) {
                 // `checked_duration_since` is `None` once the instant is behind
                 // us, and zero is reported as `Spent` rather than as
                 // `Remaining(0)`: a caller handed a wait of zero would arm a
@@ -187,6 +202,18 @@ impl RunDeadline {
                 Some(remaining) if remaining.is_zero() => Left::Spent,
                 Some(remaining) => Left::Remaining(remaining),
             },
+        }
+    }
+
+    /// The instant this run's window closes, when it has one.
+    ///
+    /// Only [`left_at`](Self::left_at)'s tests need it: it is the one reading of
+    /// the clock at which the zero arm fires.
+    #[cfg(test)]
+    const fn ends_at(&self) -> Option<Instant> {
+        match self.0 {
+            Some(bound) => Some(bound.ends_at),
+            None => None,
         }
     }
 
@@ -331,6 +358,28 @@ mod tests {
         assert_eq!(deadline.left(), Left::Spent);
         assert!(deadline.is_spent());
         assert_eq!(deadline.exceeded(), Some(Exceeded { limit: WINDOW }));
+    }
+
+    #[test]
+    fn a_window_with_nothing_left_is_spent_rather_than_open_with_zero() {
+        // The arm two reads of a monotonic clock will not produce on this
+        // machine, and the one that decides whether the next attempt is made.
+        // `Left::Remaining(0)` reads as *open* to every caller: `is_spent` is
+        // false, `exceeded` yields nothing, and `retry::driver` makes another
+        // request for a run whose window has closed — which is §32.9's shape,
+        // the run that continued 943.6 s past the cut.
+        //
+        // `shorten` is the other half and would go the same way: a backoff
+        // shortened to `Some(0)` under `Spent` becomes `Some(wait.min(0))`, the
+        // same number, only by accident rather than by rule.
+        let deadline = RunDeadline::starting_now(Some(WINDOW));
+        let ends_at = deadline.ends_at().expect("a bounded run has an end");
+        assert_eq!(deadline.left_at(ends_at), Left::Spent);
+        assert_eq!(
+            deadline.left_at(ends_at - Duration::from_nanos(1)),
+            Left::Remaining(Duration::from_nanos(1))
+        );
+        assert_eq!(deadline.left_at(ends_at + WINDOW), Left::Spent);
     }
 
     #[test]

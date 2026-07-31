@@ -376,6 +376,58 @@ mod tests {
         ObjectKey::new("a/b.bin")
     }
 
+    fn busy() -> StoreError {
+        StoreError::Provider {
+            backend: "test",
+            status: 503,
+            code: "SlowDown".to_string(),
+            retry_after_secs: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_checksum_question_is_answered_by_the_backend_and_never_by_this_wrapper() {
+        // **A wrapper that answers for the layer underneath.** Every backend in
+        // this build is wrapped by both decorators before a command sees it, so
+        // a `checksum_support` that stopped being forwarded would be the answer
+        // for *every* remote — and §34's whole capability is a per-backend
+        // question. Both directions matter and both are asserted:
+        //
+        //   * a wrapper reporting `None` over a provider that does record makes
+        //     `dctl verify b2:BUCKET` refuse at exit 27 on a remote that can
+        //     detect rot — loud, but it removes the one backend that can;
+        //   * a wrapper reporting `Recorded` over a filesystem makes
+        //     `dctl verify local:` print `ok` for every object while comparing a
+        //     re-read against nothing, which is §31.4's defect returning.
+        //
+        // Every double in `crate::testing` says `None`, so before
+        // `crate::testing::CountingBackend::recording` existed the two were indistinguishable
+        // and deleting the delegation left the whole gate green.
+        let recording = std::sync::Arc::new(
+            crate::testing::CountingBackend::failing("none", 0, busy())
+                .recording(crate::HashAlgo::Sha1),
+        );
+        let wrapped = checked(recording, "container");
+        assert_eq!(
+            wrapped.checksum_support(),
+            crate::recorded::ChecksumSupport::Recorded(crate::HashAlgo::Sha1),
+            "the wrapper answered for the provider underneath"
+        );
+        assert_eq!(
+            wrapped.checksum_support().algo(),
+            Some(crate::HashAlgo::Sha1),
+            "and the algorithm a re-read has to be folded through came with it"
+        );
+
+        let silent =
+            std::sync::Arc::new(crate::testing::CountingBackend::failing("none", 0, busy()));
+        let wrapped = checked(silent, "container");
+        assert!(
+            !wrapped.checksum_support().detects_corruption(),
+            "a wrapper must not certify a backend that records nothing"
+        );
+    }
+
     /// A guard that checks before every write.
     ///
     /// The shipped interval is a cost decision about billed provider round

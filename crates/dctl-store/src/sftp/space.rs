@@ -269,6 +269,35 @@ mod tests {
     }
 
     #[test]
+    fn a_line_that_is_not_the_layout_that_was_asked_for_is_not_read_as_one() {
+        // `df -P` is specified to print six columns, and the field count is the
+        // only thing that says a line *is* one of them. Relaxing it left the
+        // whole gate green (`HANDOVER.md` §35.5), because every case above has
+        // six fields and every case below has one.
+        //
+        // The line that makes the difference is a **wrapped device name**: GNU
+        // `df` puts a long `/dev/mapper/...` on a line of its own and the six
+        // numbers on the next, so the continuation has five fields and its
+        // fourth is `Use%` rather than `Available`. Reading it would report a
+        // percentage as a byte count.
+        let wrapped = "Filesystem 1024-blocks Used Available Capacity Mounted on\n\
+                       /dev/mapper/vg--very--long--name-lv--also--long\n\
+                       41922560 8388608 33533952 20% /\n";
+        assert_eq!(
+            parse_df(wrapped),
+            None,
+            "a wrapped line is not the row that was asked for, and \
+             `Unknown` is the honest answer to a layout this build cannot read"
+        );
+
+        // And the four-column shape a `df --output=` would produce: numeric in
+        // the fourth field, so nothing downstream could tell it was wrong.
+        let narrowed = "Filesystem 1024-blocks Used Available\n\
+                        /dev/sda1 41922560 8388608 33533952\n";
+        assert_eq!(parse_df(narrowed), None);
+    }
+
+    #[test]
     fn output_this_build_cannot_read_is_unknown_rather_than_zero() {
         // The failure that would matter: a layout that parsed as 0 free would
         // report a full disk on a healthy server, which is a false diagnosis in

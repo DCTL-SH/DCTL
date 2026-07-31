@@ -57,11 +57,38 @@ pub(super) async fn head(b2: &B2Backend, key: &ObjectKey) -> Result<ObjectMeta> 
         )
         .await?;
 
-    resp.files
-        .into_iter()
-        .find(|f| f.file_name == key.as_str() && f.action == constants::ACTION_UPLOAD)
+    exactly(resp.files, key)
         .map(to_meta)
         .ok_or_else(|| StoreError::NotFound(key.to_string()))
+}
+
+/// The listed file that **is** `key`, out of whatever the page came back with.
+///
+/// Both callers ask B2 for `prefix = key` with `maxFileCount = 1`, which is not
+/// the same question as "the object named `key`". A prefix listing answers with
+/// everything *under* that name in B2's own byte order, so a bucket holding
+/// `photos/2024.jpg` and no `photos` answers a listing for `photos` with
+/// `photos/2024.jpg` — a different object, of a different length, with a
+/// different digest.
+///
+/// Taking it would be wrong in both callers and wrong in different ways.
+/// [`head`] would report a directory-shaped prefix as an object and hand `sync`
+/// the neighbour's size to compare against; `stored_checksum` would hand
+/// `verify` the neighbour's SHA-1 to compare a re-read against, which reports
+/// **corruption on an object that is not damaged** — the loud direction, and the
+/// one that sends an operator hunting for damage that is not there.
+///
+/// `action` matters as much as the name: B2 keeps hide markers and old versions
+/// in the same listing, and a hide marker carries the name of a file that is no
+/// longer there.
+///
+/// A function of its own because it is the whole of the decision and neither
+/// caller can be driven to it without a provider — deleting the name comparison
+/// from both left `cargo test --workspace` entirely green (`HANDOVER.md` §35.5).
+fn exactly(files: Vec<super::api::FileItem>, key: &ObjectKey) -> Option<super::api::FileItem> {
+    files
+        .into_iter()
+        .find(|f| f.file_name == key.as_str() && f.action == constants::ACTION_UPLOAD)
 }
 
 /// The digest B2 recorded for `key`, or why it has none for this object.
@@ -99,11 +126,7 @@ pub(super) async fn stored_checksum(b2: &B2Backend, key: &ObjectKey) -> Result<S
         )
         .await?;
 
-    let item = resp
-        .files
-        .into_iter()
-        .find(|f| f.file_name == key.as_str() && f.action == constants::ACTION_UPLOAD)
-        .ok_or_else(|| StoreError::NotFound(key.to_string()))?;
+    let item = exactly(resp.files, key).ok_or_else(|| StoreError::NotFound(key.to_string()))?;
 
     Ok(recorded_sha1(&item))
 }
@@ -372,11 +395,62 @@ fn to_meta(f: super::api::FileItem) -> ObjectMeta {
 
 #[cfg(test)]
 mod meta_tests {
-    use super::to_meta;
+    use super::{exactly, to_meta};
     use crate::b2::api::FileItem;
+    use crate::model::ObjectKey;
 
     fn item(body: serde_json::Value) -> FileItem {
         serde_json::from_value(body).expect("a listed file parses")
+    }
+
+    /// A listed file with only the two fields `exactly` reads set to anything
+    /// meaningful. B2 returns hide markers and old versions in the same listing
+    /// as live objects, and `action` is what tells them apart.
+    fn listed(name: &str, action: &str) -> FileItem {
+        item(serde_json::json!({
+            "fileName": name,
+            "fileId": "f",
+            "contentLength": 1,
+            "uploadTimestamp": 0,
+            "action": action,
+        }))
+    }
+
+    #[test]
+    fn a_neighbour_under_the_same_prefix_is_never_mistaken_for_the_object_asked_for() {
+        // B2 is asked for `prefix = key`, and a prefix listing answers with
+        // everything under that name. Taking the first row would give `head` a
+        // neighbour's length and `stored_checksum` a neighbour's SHA-1 — and the
+        // second of those makes `verify` report corruption on an object that is
+        // perfectly intact, which is the answer that costs a night.
+        let key = ObjectKey::new("photos");
+        let up = super::constants::ACTION_UPLOAD;
+
+        assert!(
+            exactly(vec![listed("photos/2024.jpg", up)], &key).is_none(),
+            "a longer name that merely starts with the key is a different object"
+        );
+        assert_eq!(
+            exactly(
+                vec![listed("photos/2024.jpg", up), listed("photos", up)],
+                &key
+            )
+            .expect("the object itself is in the page")
+            .file_name,
+            "photos"
+        );
+
+        // And a hide marker is not the object either: it carries the name of a
+        // file that is no longer there, so reading it as one would report a
+        // deleted object as present.
+        assert!(
+            exactly(
+                vec![listed("photos", "hide"), listed("photos/2024.jpg", up)],
+                &key
+            )
+            .is_none(),
+            "a hide marker names a file that has been deleted"
+        );
     }
 
     #[test]
