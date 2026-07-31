@@ -25,7 +25,7 @@ use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
 use crate::output::size::count;
 use crate::output::{Align, Border, Column, Format, Out, Table, Units, size};
-use crate::source::Assurance;
+use crate::source::Claims;
 
 /// One object's verification result.
 #[derive(Clone, Debug, Serialize)]
@@ -127,6 +127,21 @@ pub struct Report {
     /// published it since it was written; this is the same field for the same
     /// reason.
     pub assurance: &'static str,
+    /// Where the list of objects this run examined came from: `recorded` or
+    /// `self-reported`.
+    ///
+    /// The other half of the claim, and the half that says whether `examined`
+    /// may be read as a statement about a *dataset*. `assurance` describes the
+    /// objects the run had names for; this says whether anything told the run
+    /// which names to expect.
+    ///
+    /// It was measured absent, in the same shape and worse. A plain `local:`
+    /// remote holding three objects had one deleted outright, and this document
+    /// reported `"status": "ok"`, `"examined": 2`, `"failed": 0` and exit 0 with
+    /// nothing in it to say a third object had ever existed. A consumer counting
+    /// objects across nightly runs is the one reader who could have noticed, and
+    /// the document gave them no field to notice with.
+    pub inventory: &'static str,
     /// Whether the run stopped at the first failure because `--fail-fast` asked
     /// it to.
     ///
@@ -153,23 +168,22 @@ pub struct Report {
 }
 
 impl Report {
-    /// An empty report for `target`, verified at `verify_mode`, proving
-    /// `assurance`.
+    /// An empty report for `target`, verified at `verify_mode`, publishing the
+    /// `claims` its source can support.
     ///
-    /// `assurance` is a constructor argument rather than a setter for the reason
+    /// [`Claims`] is a constructor argument rather than a setter for the reason
     /// [`Report::assurance`] gives: a report that does not know what its `ok`
-    /// proved is the report this field exists to retire, and a setter is
-    /// something a later caller can forget.
+    /// proved is the report these fields exist to retire, and a setter is
+    /// something a later caller can forget. It is one argument rather than two
+    /// so that the pair the gate refused on and the pair the document publishes
+    /// are provably the same pair.
     #[must_use]
-    pub fn new(
-        target: impl Into<String>,
-        verify_mode: impl Into<String>,
-        assurance: Assurance,
-    ) -> Self {
+    pub fn new(target: impl Into<String>, verify_mode: impl Into<String>, claims: Claims) -> Self {
         Self {
             target: target.into(),
             verify_mode: verify_mode.into(),
-            assurance: assurance.slug(),
+            assurance: claims.assurance.slug(),
+            inventory: claims.inventory.slug(),
             stopped_early: false,
             objects: Vec::new(),
             summary: Summary::default(),
@@ -306,11 +320,12 @@ impl Report {
     #[must_use]
     pub fn summary(&self, units: Units) -> String {
         let mut line = format!(
-            "{} {} examined, {} ({}) under '{}'",
+            "{} {} examined, {} ({} bytes, {} inventory) under '{}'",
             count(self.summary.examined),
             objects(self.summary.examined),
             size::bytes_or_unknown(self.summary.bytes, units),
             self.assurance,
+            self.inventory,
             self.target
         );
         if self.summary.failed > 0 {
@@ -469,13 +484,25 @@ fn encode<T: Serialize>(format: Format, value: &T) -> Result<String> {
 mod tests {
     use super::*;
     use crate::output::{ColorChoice, Units};
+    use crate::source::{Assurance, Inventory};
 
     fn json_out(format: Format) -> Out {
         Out::new(format, ColorChoice::Never, Units::Binary, false, 0)
     }
 
+    /// What a sealed vault can claim: the bytes are checked against a hash it
+    /// recorded, and the object list is an index row per object.
+    const fn sealed_claims() -> Claims {
+        Claims::new(Assurance::Authenticated, Inventory::Recorded)
+    }
+
+    /// What a plain filesystem remote can claim: neither.
+    const fn plain_claims() -> Claims {
+        Claims::new(Assurance::ReadBack, Inventory::SelfReported)
+    }
+
     fn sample() -> Report {
-        let mut report = Report::new("vault:photos", "strict", Assurance::Authenticated);
+        let mut report = Report::new("vault:photos", "strict", sealed_claims());
         report.push(Record::new("photos/a.jpg", Verdict::Ok, Some(2048)));
         report.push(
             Record::new("photos/b.jpg", Verdict::Corrupt, Some(4096))
@@ -497,14 +524,14 @@ mod tests {
         // deliberately: the two commands share `Verdict`, share their failure
         // wording and share their exit codes, and a claim only one of them
         // publishes is a claim an operator cannot rely on.
-        let mut plain = Report::new("store:", "strict", Assurance::ReadBack);
+        let mut plain = Report::new("store:", "strict", plain_claims());
         plain.push(Record::new("a", Verdict::Ok, Some(1)));
         let parsed: serde_json::Value =
             serde_json::from_str(&plain.render(&json_out(Format::Json)).unwrap()).unwrap();
         assert_eq!(parsed["assurance"], Assurance::ReadBack.slug());
         assert_ne!(parsed["assurance"], Assurance::Authenticated.slug());
 
-        let mut sealed = Report::new("vault:", "strict", Assurance::Authenticated);
+        let mut sealed = Report::new("vault:", "strict", sealed_claims());
         sealed.push(Record::new("a", Verdict::Ok, Some(1)));
         let parsed: serde_json::Value =
             serde_json::from_str(&sealed.render(&json_out(Format::Json)).unwrap()).unwrap();
@@ -512,15 +539,46 @@ mod tests {
     }
 
     #[test]
+    fn a_document_always_says_where_the_object_list_came_from() {
+        // The twin of the test above, on the other axis, and the one the JSON
+        // was missing entirely. `"examined": 2` over a store that used to hold
+        // three objects is a true count and a false impression, and the only
+        // reader who could have told the difference — a monitor totalling
+        // objects across nightly runs — had no field to tell it with.
+        let mut plain = Report::new("store:", "strict", plain_claims());
+        plain.push(Record::new("a", Verdict::Ok, Some(1)));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&plain.render(&json_out(Format::Json)).unwrap()).unwrap();
+        assert_eq!(parsed["inventory"], Inventory::SelfReported.slug());
+        assert_ne!(parsed["inventory"], Inventory::Recorded.slug());
+
+        let mut sealed = Report::new("vault:", "strict", sealed_claims());
+        sealed.push(Record::new("a", Verdict::Ok, Some(1)));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&sealed.render(&json_out(Format::Json)).unwrap()).unwrap();
+        assert_eq!(parsed["inventory"], Inventory::Recorded.slug());
+
+        // The two axes are separate fields and not one word: a document that
+        // folded them would make `authenticated` unreadable the moment a source
+        // appeared that could do one and not the other.
+        assert_ne!(parsed["assurance"], parsed["inventory"]);
+    }
+
+    #[test]
     fn the_summary_names_the_coverage_and_the_claim_together() {
         // Either half alone is misleading: a count with no assurance reads as a
         // statement about the bytes, and an assurance with no count says nothing
         // about how much of the target it applies to.
-        let mut report = Report::new("store:", "strict", Assurance::ReadBack);
+        let mut report = Report::new("store:", "strict", plain_claims());
         report.push(Record::new("a", Verdict::Ok, Some(1)));
         let line = report.summary(Units::Binary);
         assert!(line.contains("1 object examined"), "{line}");
         assert!(line.contains(Assurance::ReadBack.slug()), "{line}");
+        assert!(
+            line.contains(Inventory::SelfReported.slug()),
+            "the line pasted into a ticket must say where the object list came \
+             from, or `1 object examined` reads as `there is 1 object`: {line}"
+        );
         assert!(line.contains("store:"), "{line}");
 
         // ...and the plural agrees, because this sentence gets pasted into
@@ -552,7 +610,7 @@ mod tests {
     fn a_run_that_stopped_early_says_so_in_the_document() {
         // Without it, `"failed": 1` from a `--fail-fast` run reads as the full
         // extent of the damage rather than as the first of it.
-        let mut report = Report::new("vault:", "strict", Assurance::Authenticated);
+        let mut report = Report::new("vault:", "strict", sealed_claims());
         report.push(Record::new("a", Verdict::Corrupt, Some(1)));
         assert!(!report.stopped_early);
         report.stopped_early();
@@ -564,7 +622,7 @@ mod tests {
 
     #[test]
     fn a_clean_run_has_no_outcome_error() {
-        let mut report = Report::new("vault:", "checksum", Assurance::Authenticated);
+        let mut report = Report::new("vault:", "checksum", sealed_claims());
         report.push(Record::new("a", Verdict::Ok, Some(1)));
         assert!(report.outcome().is_none());
         assert_eq!(report.worst(), Verdict::Ok);
@@ -584,7 +642,7 @@ mod tests {
     #[test]
     fn corruption_outranks_an_unreadable_object() {
         // The worst verdict decides, whatever order the records arrived in.
-        let mut report = Report::new("vault:", "strict", Assurance::Authenticated);
+        let mut report = Report::new("vault:", "strict", sealed_claims());
         report.push(Record::new("a", Verdict::Unreadable, Some(0)));
         report.push(Record::new("b", Verdict::Corrupt, Some(0)));
         report.push(Record::new("c", Verdict::Missing, Some(0)));
@@ -645,7 +703,7 @@ mod tests {
     #[test]
     fn the_detail_column_appears_only_when_something_failed() {
         // A clean run should not pay for a column of dashes.
-        let mut clean = Report::new("vault:", "checksum", Assurance::Authenticated);
+        let mut clean = Report::new("vault:", "checksum", sealed_claims());
         clean.push(Record::new("a", Verdict::Ok, Some(1)));
         let rendered = clean.render(&Out::plain()).unwrap();
         assert!(!rendered.contains(INTEGRITY_COLUMN_DETAIL));
@@ -659,7 +717,7 @@ mod tests {
     fn an_empty_report_puts_nothing_on_stdout() {
         // Not even a header: a bare header row reads as output to a pipeline,
         // and to most humans.
-        let report = Report::new("vault:", "checksum", Assurance::Authenticated);
+        let report = Report::new("vault:", "checksum", sealed_claims());
         for format in [Format::Text, Format::JsonLines] {
             assert_eq!(report.render(&json_out(format)).unwrap(), "");
         }

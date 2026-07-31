@@ -135,7 +135,20 @@ mod tests {
     use crate::cli::GlobalArgs;
     use crate::exit::ExitCode;
     use crate::session::Session;
-    use crate::source::Assurance;
+    use crate::source::{Assurance, Claims, Inventory};
+
+    /// What a sealed vault can claim on both axes: a hash it recorded at write
+    /// time, and an index row per object. Written out rather than taken from a
+    /// convenient constant, because a report that names a stronger claim than
+    /// its source can make is the defect these fields exist to prevent.
+    const fn sealed_claims() -> Claims {
+        Claims::new(Assurance::Authenticated, Inventory::Recorded)
+    }
+
+    /// What a plain filesystem remote can claim: neither.
+    const fn plain_claims() -> Claims {
+        Claims::new(Assurance::ReadBack, Inventory::SelfReported)
+    }
     use crate::source::plain::PlainSource;
     use crate::source::vault::VaultSource;
     use clap::Parser;
@@ -160,7 +173,7 @@ mod tests {
     /// argument: a report that names a stronger claim than its source can make
     /// is the defect this field exists to prevent.
     fn report() -> Report {
-        Report::new("archive:", "strict", Assurance::Authenticated)
+        Report::new("archive:", "strict", sealed_claims())
     }
 
     /// A real directory behind a real backend.
@@ -384,12 +397,13 @@ mod tests {
 
     #[tokio::test]
     async fn a_plain_remote_verifies_by_reading_every_byte_back() {
-        // A weaker claim than a vault's, and the report says so through the
-        // source's assurance rather than through this count — but the walk still
-        // has to happen, because a replica quietly losing objects is exactly
-        // what it catches.
+        // A weaker claim than a vault's, on both axes, and the report says so
+        // through the source's `assurance` and `inventory` rather than through
+        // this count — the walk still has to happen, because an object whose key
+        // survives while its body does not is exactly what it catches, and an
+        // object that is gone is exactly what it does not.
         let (_root, source) = store(&[("a.txt", b"1"), ("sub/b.txt", b"22")]);
-        let mut report = Report::new("store:", "strict", Assurance::ReadBack);
+        let mut report = Report::new("store:", "strict", plain_claims());
         verify(
             &ctx(&[]),
             &opened(source, ""),
@@ -410,7 +424,7 @@ mod tests {
             ("photos-backup/b.jpg", b"b"),
             ("other/c.jpg", b"c"),
         ]);
-        let mut report = Report::new("store:photos", "strict", Assurance::ReadBack);
+        let mut report = Report::new("store:photos", "strict", plain_claims());
         verify(
             &ctx(&[]),
             &opened(source, "photos"),
@@ -428,7 +442,7 @@ mod tests {
         let (_root, source) = store(&[("a.jpg", b"1"), ("b.txt", b"22")]);
         let context = ctx(&["--include", "*.jpg"]);
         let filter = Filter::from_globals(&context.globals).expect("the pattern compiles");
-        let mut report = Report::new("store:", "strict", Assurance::ReadBack);
+        let mut report = Report::new("store:", "strict", plain_claims());
         verify(&context, &opened(source, ""), &filter, false, &mut report)
             .await
             .unwrap();

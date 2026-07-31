@@ -200,12 +200,66 @@ ERROR: dctl verify needs a remote path, but 'C:\Backups\photos' is local
   hint: Write the target as 'REMOTE:PATH', for example 'vault:photos'.
 ```
 
+## What a pass proves, and the two claims a plain remote cannot make
+
+`verify` publishes two things about every run, in the JSON document and on the
+last line of a text run, because the count on its own is read as a statement
+about a dataset and on a plain remote it is not one.
+
+| field | question | `vault:` | plain `local:`/`sftp:` | plain `b2:` |
+|-------|----------|----------|------------------------|-------------|
+| `assurance` | are these the bytes that were written? | `authenticated` | `read-back` — **no** | `provider-checksum` |
+| `inventory` | is everything that was written still here? | `recorded` | `self-reported` — **no** | `self-reported` — **no** |
+
+A **vault** answers both. Every object has an index row written at store time and
+kept outside the remote, so an object the backend has lost is reported `missing`
+and the run exits **4**; every byte is authenticated against a hash recorded
+under the vault's own key, so a changed byte exits **21**.
+
+A **plain remote** answers neither by default, and the run **refuses at exit 27**
+rather than reporting `ok`:
+
+* it records no digest of what was written, so a changed byte reads back exactly
+  like an unchanged one — unless the provider records one of its own, which B2
+  does and `local:`/`sftp:` do not;
+* it keeps no record of what it *should* hold, so `verify` enumerates the remote
+  and then re-reads the keys the remote just reported. Both sides of that
+  comparison are one source. An object deleted from it is not `missing`; it is
+  simply not listed, and a store that quietly lost half its objects would report
+  the other half.
+
+The second is true of **every** plain remote including B2, and it is why the
+refusal fires there too. There is no manifest to turn on: an expectation kept
+inside the remote is lost by whatever lost the object, a plain remote is a shared
+namespace DCTL takes no lock on, and a record of what should be there cannot be
+rebuilt from a listing without adopting whatever the listing has already lost.
+The record DCTL does ship is a vault.
+
+Each limit has its own flag, and the flag's name is the sentence being agreed to.
+Setting one does not accept the other.
+
 ## Options
 
 ```
-  -h, --help        help for verify
-      --fail-fast   Stop at the first object that fails instead of checking the rest
+  -h, --help                        help for verify
+      --fail-fast                   Stop at the first object that fails instead of checking the rest
+      --allow-read-back             Run against a remote that cannot detect a changed byte, and accept
+                                    that a rotted object will read back as `ok`
+      --allow-listing-as-inventory  Treat this remote's own listing as the record of what it should
+                                    hold, and accept that an object deleted from it will not be reported
 ```
+
+`--allow-read-back` buys the check that *can* be made on a remote with no
+recorded digests: every byte of every listed object re-read in full, which proves
+those objects are still retrievable. It proves nothing about whether they
+changed, and nothing at all about one that is gone.
+
+`--allow-listing-as-inventory` buys nothing — there is no weaker check of a set
+than reading the set itself. It exists so that an operator who wants the
+retrievability run on a plain remote can have it, having said in writing that a
+lost object will not be reported. If that is not acceptable, the two things that
+do detect a loss are a vault (`dctl init`) and `dctl check SOURCE REMOTE:`, which
+compares a replica against the tree it replicates.
 
 `REMOTE:PATH` is required. A bare `vault:` or a trailing separator
 (`vault:photos/`) names a *tree* and verifies everything under it; without the
@@ -234,6 +288,7 @@ for the full list.
 | 7 | `fatal_error` | An unresolvable remote, an unreadable configuration, or a vault that would not unlock. |
 | 21 | `integrity_failure` | At least one object failed authentication. **The data was NOT served.** |
 | 25 | `cancelled` | Ctrl-C or SIGTERM. Nothing in flight was reported as complete. |
+| 27 | `verification_not_possible` | The remote cannot make a claim this command publishes, and the run stopped **before reading anything**. Not damage and not loss: the message names each claim that cannot be made and the flag that accepts it. See the table above. |
 
 All of these are reachable.
 

@@ -51,10 +51,24 @@ every chunk's authentication tag and the object's own recorded content hash, so
 `healthy` there means *these are the bytes that were written*; the report carries
 `"assurance": "authenticated"`. A plain remote — including the object store a
 vault's ciphertext lives in — records no hash of its own, so the strongest honest
-claim is *the object was still there and every byte of it came back*, reported as
-`"assurance": "read-back"` and warned about on stderr. The weaker check is
-genuinely useful: it is how a replica quietly losing objects is caught. It is
-simply not the same statement, and one word must not carry both.
+claim about an object it served is *it was still there and every byte of it came
+back*, reported as `"assurance": "read-back"` and warned about on stderr. The
+weaker check is genuinely useful — it catches an object whose key survives while
+its body does not, and a sector that has stopped answering — and it is not the
+same statement, so one word must not carry both.
+
+**And the grade always says where the object list came from.** The report carries
+`"inventory": "recorded"` for a vault, whose objects each have an index row kept
+outside the remote, so an object the backend has lost is reported `missing` and
+the run exits 4. It carries `"inventory": "self-reported"` for **every** plain
+remote, including one whose provider records digests: a scrub of a plain remote
+walks that remote's own listing and then reads back the keys it just reported, so
+an object that is gone is not graded at all. `healthy: 2 objects read` over a
+store that used to hold three is a true sentence and a false impression. This
+documentation used to say the plain read-back "is how a replica quietly losing
+objects is caught"; measured on the shipped binary, it is the one damage it does
+not catch, and the run now refuses at exit 27 by default rather than grading a
+dataset it has no list of.
 
 **Cost is the thing to plan around.** A full scrub reads every byte in the
 vault, which on a cloud remote is a full egress bill. Every selected object is
@@ -213,16 +227,27 @@ ERROR: --repair has nothing to rebuild from in this build
 ```
 
 Scrub the object store a vault's ciphertext lives in. This proves every sealed
-object is still retrievable — which is what catches a replica quietly losing
-objects — and the report says plainly that it proves no more than that:
+object the store still lists is retrievable, and the report says plainly that it
+proves no more than that. Both limits have to be accepted by name, because a
+plain view of a vault's objects can neither detect a changed byte nor notice one
+that is gone:
 
 ```
-dctl scrub archive-store: --json
+dctl scrub archive-store: --allow-read-back --allow-listing-as-inventory --json
 warning: 'archive-store:' records no hash of its own — every byte was re-read,
          but this remote records no hash of its own, so a pass proves the object
          is retrievable and not that it is unchanged
-{ "target": "archive-store:", "health": "healthy", "assurance": "read-back", ... }
+warning: 'archive-store:' keeps no record of what it should hold — the object
+         list came from this remote's own listing, so a run covers what the
+         remote still reports and an object deleted from it is not missing, it
+         is simply not listed
+{ "target": "archive-store:", "health": "healthy", "assurance": "read-back",
+  "inventory": "self-reported", ... }
 ```
+
+Scrub the **vault** rather than its store to have both questions answered:
+`dctl scrub archive:` walks the index, so a lost object is `missing` at exit 4
+and a changed byte is `corrupt` at exit 21.
 
 Feed a scheduled scrub to a monitoring system, bounding the damage report so a
 catastrophically broken remote does not tie up the job for eight hours. The

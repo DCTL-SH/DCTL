@@ -577,7 +577,7 @@ pub struct Totals {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::source::{Assurance, Entries, Entry, Sizes};
+    use crate::source::{Assurance, Entries, Entry, Inventory, Sizes};
     use async_trait::async_trait;
     use fuser::SessionACL;
     use std::collections::VecDeque;
@@ -722,6 +722,14 @@ mod tests {
 
         fn assurance(&self) -> Assurance {
             Assurance::Authenticated
+        }
+
+        fn inventory(&self) -> Inventory {
+            // A mount is served out of a vault, and this fixture stands in for
+            // one: the file list is a record rather than the backend's own
+            // listing. Stated rather than defaulted, for the reason the trait
+            // gives no default.
+            Inventory::Recorded
         }
     }
 

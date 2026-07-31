@@ -11,7 +11,10 @@
 //! [`Source::read`] because a scrub must touch every byte of a fifty-gigabyte
 //! object without ever holding one. What a pass *means* differs between the two
 //! implementations, sharply and unavoidably, so the claim is a value the caller
-//! receives rather than an assumption it makes — see [`assurance`].
+//! receives rather than an assumption it makes — see [`assurance`] for what a
+//! clean read proves about the *bytes*, [`inventory`] for whether the run could
+//! have noticed an object that is *gone*, and [`claims`] for why the two travel
+//! as one value.
 //!
 //! ## Why one abstraction rather than a branch per command
 //!
@@ -92,14 +95,18 @@
 
 pub mod assurance;
 pub mod chunk_cache;
+pub mod claims;
 pub mod entry;
+pub mod inventory;
 pub mod open;
 pub mod plain;
 pub mod sizes;
 pub mod vault;
 
 pub use assurance::Assurance;
+pub use claims::Claims;
 pub use entry::Entry;
+pub use inventory::Inventory;
 // `Opened` is deliberately not re-exported: nothing names the type, because the
 // point of it is that a caller receives the source and its scope together and
 // asks the value for both. A name in this list would be an invitation to take
@@ -408,4 +415,23 @@ pub trait Source: Send + Sync {
     /// of any object in it, so a report can state what a run will prove before
     /// the run starts rather than after the bill arrives.
     fn assurance(&self) -> Assurance;
+
+    /// Where the list of objects a run over this source examines comes from —
+    /// and therefore whether an object that is **gone** can be noticed.
+    ///
+    /// Beside [`Source::assurance`] and deliberately not folded into it: the two
+    /// answer different questions and do not move together. A plain B2 remote
+    /// reports [`Assurance::ProviderChecksum`], because the provider recorded a
+    /// digest at write time, and [`Inventory::SelfReported`], because the only
+    /// list of what it holds is the list it just produced. A gate that read the
+    /// first and assumed the second let a **deleted** object exit 0 on every
+    /// plain remote there is (`HANDOVER.md` §36).
+    ///
+    /// **Deliberately not given a default implementation.** A default of
+    /// [`Inventory::Recorded`] would let a source added later claim to detect a
+    /// loss it cannot see, and a default of [`Inventory::SelfReported`] would
+    /// silently downgrade a source that does keep a record. Both are decisions
+    /// the implementation has to make out loud; see [`inventory`] for why the
+    /// weaker of the two is not repairable by writing a manifest.
+    fn inventory(&self) -> Inventory;
 }

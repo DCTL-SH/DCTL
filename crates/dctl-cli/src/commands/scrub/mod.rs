@@ -71,10 +71,21 @@
 //! recorded content hash, so `healthy` there means *these are the bytes that
 //! were written*. A plain remote — including the object store a vault's
 //! ciphertext lives in — records no hash of its own, so the strongest honest
-//! claim is *the object was still there and every byte of it came back*. That is
-//! genuinely useful (it is how a replica quietly losing objects is caught) and it
-//! is not the same statement, so the report carries which one it is. See
-//! [`crate::source::Assurance`].
+//! claim about an object it served is *it was still there and every byte of it
+//! came back*. Those are not the same statement, so the report carries which one
+//! it is. See [`crate::source::Assurance`].
+//!
+//! **And a grade covers the objects the run had names for, which on a plain
+//! remote is whatever that remote still lists.** A scrub of a vault walks an
+//! index row per object, so an object the backend has lost is *missing* and the
+//! run exits 4. A scrub of a plain remote walks the remote's own listing and
+//! then reads back the keys the remote just reported, so an object that is gone
+//! is not graded at all — `healthy: 2 objects read` over a store that used to
+//! hold three is a true sentence and a false impression. The documentation of
+//! this command used to say the plain read-back "is how a replica quietly losing
+//! objects is caught"; measured, it is the one damage it does not catch. The
+//! report carries that axis too, and the run refuses by default rather than
+//! grading a dataset it has no list of. See [`crate::source::Inventory`].
 //!
 //! ## The `--verify` dial
 //!
@@ -102,6 +113,7 @@ use crate::constants::{
 };
 use crate::ctx::Ctx;
 use crate::error::{CliError, Result};
+use crate::source::Claims;
 
 use plan::Plan;
 use report::Report;
@@ -194,7 +206,7 @@ pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
     let filter = Filter::from_globals(&ctx.globals)?;
 
     let opened = crate::source::open(ctx, &target.spec()).await?;
-    let assurance = opened.source().assurance();
+    let claims = Claims::of(opened.source());
 
     // Every object is read back in full, so the strength that ran is `strict`
     // whatever was asked for. Reporting the requested one instead would name a
@@ -221,14 +233,23 @@ pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
     // Before a byte is read, and for the reason `verify` refuses in the same
     // place: a scheduled scrub that grades a plain remote `healthy` is telling
     // an operator nothing while they believe they are being told everything.
-    assurance::require(&command, &target.to_string(), assurance, &args.assurance)?;
-    if !assurance.detects_corruption() {
+    assurance::require(&command, &target.to_string(), claims, &args.assurance)?;
+    if !claims.assurance.detects_corruption() {
         // Reached only when the operator asked for this with `--allow-read-back`.
-        // The grade would otherwise be read as a statement about the bytes, and
-        // this remote cannot make one.
         ctx.out.warn(format!(
             "'{target}' records no hash of its own — {}",
-            assurance.describe()
+            claims.assurance.describe()
+        ));
+    }
+    if !claims.inventory.detects_loss() {
+        // Reached only when the operator asked for this with
+        // `--allow-listing-as-inventory`. Said out loud beside the other one,
+        // because the count this run is about to print is a count of what the
+        // remote still admits to holding and will be read as a count of the
+        // dataset.
+        ctx.out.warn(format!(
+            "'{target}' keeps no record of what it should hold — {}",
+            claims.inventory.describe()
         ));
     }
 
@@ -255,7 +276,7 @@ pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
     let mut report = Report::new(
         target.to_string(),
         mode::slug(performed),
-        assurance,
+        claims,
         plan.sample_percent(),
         plan.seed(),
         plan.repairs(),
@@ -396,7 +417,14 @@ mod tests {
         // `local:` records no digest, so the run has to say which check it is
         // asking for. With that said, an intact store passes it.
         let (_dir, config) = plain_remote(&[("a.txt", b"1"), ("sub/b.txt", b"22")]);
-        let (ctx, args) = parse(&["scrub", "store:", "--config", &config, "--allow-read-back"]);
+        let (ctx, args) = parse(&[
+            "scrub",
+            "store:",
+            "--config",
+            &config,
+            "--allow-read-back",
+            "--allow-listing-as-inventory",
+        ]);
         run(&ctx, &args)
             .await
             .expect("an intact remote must not fail the run");
@@ -421,6 +449,50 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_scrub_of_a_store_that_lost_an_object_is_not_graded_healthy() {
+        // `scrub`'s half of the second axis, and it needs its own test for the
+        // reason the test above needs one: the two commands share a gate and a
+        // claim only one of them enforced is a claim nobody can rely on. A
+        // scheduled scrub is the command *bought* to notice a replica losing
+        // objects, and over a plain remote with the rot limit already accepted
+        // it graded the survivors `healthy` and exited 0.
+        let (dir, config) =
+            plain_remote(&[("a.bin", b"111"), ("b.bin", b"222"), ("c.bin", b"333")]);
+        let gone = dir.path().join("root").join("b.bin");
+        std::fs::remove_file(&gone).expect("the object is deleted from the store");
+        assert!(!gone.exists(), "the damage must have landed");
+
+        let (ctx, args) = parse(&["scrub", "store:", "--config", &config, "--allow-read-back"]);
+        let error = run(&ctx, &args)
+            .await
+            .expect_err("a store that has lost an object must not be graded healthy");
+        assert_eq!(error.code(), ExitCode::VerificationNotPossible);
+        assert_eq!(error.code().as_i32(), 27);
+        assert!(
+            error.message().contains("--allow-listing-as-inventory"),
+            "the refusal must name the limit and the flag that accepts it: {}",
+            error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undamaged_plain_remote_still_grades_healthy_once_both_limits_are_accepted() {
+        // The self-test the test above is worthless without.
+        let (_dir, config) = plain_remote(&[("a.bin", b"111"), ("b.bin", b"222")]);
+        let (ctx, args) = parse(&[
+            "scrub",
+            "store:",
+            "--config",
+            &config,
+            "--allow-read-back",
+            "--allow-listing-as-inventory",
+        ]);
+        run(&ctx, &args)
+            .await
+            .expect("an undamaged remote must pass once the operator has accepted the limits");
+    }
+
+    #[tokio::test]
     async fn a_prefix_scrubs_only_what_is_under_it() {
         let (_dir, config) = plain_remote(&[("photos/a.jpg", b"1"), ("other/b.jpg", b"2")]);
         let (ctx, args) = parse(&[
@@ -429,6 +501,7 @@ mod tests {
             "--config",
             &config,
             "--allow-read-back",
+            "--allow-listing-as-inventory",
         ]);
         run(&ctx, &args).await.expect("the prefix reads back clean");
     }
@@ -443,6 +516,7 @@ mod tests {
                 "--config",
                 config.as_str(),
                 "--allow-read-back",
+                "--allow-listing-as-inventory",
             ];
             argv.extend_from_slice(format);
             let (ctx, args) = parse(&argv);

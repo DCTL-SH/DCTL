@@ -2026,8 +2026,6 @@ pub const SCRUB_NOTHING_VERIFIED_HINT: &str = "Check the prefix with `dctl ls RE
 /// worth running on a schedule and they are not the same statement, so the
 /// report names which one it is rather than letting one word carry both.
 pub const ASSURANCE_AUTHENTICATED: &str = "authenticated";
-/// See [`ASSURANCE_AUTHENTICATED`]. Retrievability only: nothing to check
-/// the returned bytes against.
 /// See [`ASSURANCE_AUTHENTICATED`]. Every byte re-read and compared against the
 /// digest the **provider** recorded when the object was written.
 ///
@@ -2038,28 +2036,119 @@ pub const ASSURANCE_AUTHENTICATED: &str = "authenticated";
 /// is exactly the claim a *rot* check needs, because rot changes the bytes and
 /// leaves the metadata alone.
 pub const ASSURANCE_PROVIDER_CHECKSUM: &str = "provider-checksum";
+/// See [`ASSURANCE_AUTHENTICATED`]. Retrievability only: nothing to check the
+/// returned bytes against.
+///
+/// The doc comment for this constant used to sit above
+/// [`ASSURANCE_PROVIDER_CHECKSUM`], where the compiler merged it into that
+/// constant's documentation and left the weakest of the three levels as the one
+/// with no explanation at all.
+pub const ASSURANCE_READ_BACK: &str = "read-back";
 
-/// What a run says when it refuses a remote it could not certify.
+/// What a run says when it refuses a remote that cannot detect a changed byte.
 ///
 /// The sentence is the finding: an operator whose nightly `verify` has gone red
 /// has to be able to tell, from this line alone, that nothing is wrong with
 /// their data and that nothing has been proved right about it either.
 pub const ASSURANCE_REFUSED_NOTICE: &str = "records no digest a re-read could be compared against";
 
-/// What to do about a remote that cannot be certified.
+/// What follows from that, in the words of the damage the operator will not be
+/// told about.
+///
+/// Present tense and its own string rather than
+/// [`crate::source::Assurance::describe`], which is written for a *report* and
+/// says what a completed run proved. A pre-flight refusal that said "every byte
+/// was re-read" would describe work that has not happened, which is the
+/// misreport `PLAN.md` §6 forbids in miniature.
+pub const ASSURANCE_REFUSED_CONSEQUENCE: &str =
+    "a byte that changed here reads back exactly like one that did not";
+
+/// What to do about a remote that cannot detect a changed byte.
 ///
 /// Three real options, in the order a customer meets them: seal it, point the
 /// check at a provider that records digests, or say out loud that the weaker
 /// check is the one you want. The flag is named in full because it is the one
 /// action that makes a nightly job green again, and an operator who cannot find
 /// it will reach for `|| true` instead.
+///
+/// **The last clause used to read "which is how a replica quietly losing objects
+/// is caught".** That was false and it was the sentence a customer would have
+/// quoted back after losing an object: measured on the shipped binary, a plain
+/// `local:` store with one of three objects deleted reported `OK  2 objects
+/// examined` and exited 0 under exactly this flag. What a read-back proves is
+/// stated here instead, and the loss it cannot see has a refusal and a flag of
+/// its own — see [`INVENTORY_REFUSED_HINT`].
 pub const ASSURANCE_REFUSED_HINT: &str = "A plain filesystem remote stores bytes and a length and no digest of either, \
      so nothing there can notice a byte that changed. Store the data in a vault \
      (`dctl init`), or verify a remote whose provider records a per-object \
-     checksum, or pass `--allow-read-back` to run the retrievability check this \
-     remote does support — every object re-read in full, which is how a replica \
-     quietly losing objects is caught.";
-pub const ASSURANCE_READ_BACK: &str = "read-back";
+     checksum, or pass `--allow-read-back` to re-read every listed object in \
+     full — which proves those objects are still retrievable and proves nothing \
+     about whether they are unchanged.";
+
+/// Where the list of objects a run examined came from, reported beside the
+/// assurance.
+///
+/// Two axes, not one, because they move independently: live B2 records a digest
+/// per object, so it detects a changed byte, and its listing is still the only
+/// record of what it holds, so it detects nothing about one that is gone.
+pub const INVENTORY_RECORDED: &str = "recorded";
+/// See [`INVENTORY_RECORDED`]. The remote's own listing, and nothing else — so
+/// the run checked what the remote still reports and could not have noticed an
+/// object that is no longer in it.
+pub const INVENTORY_SELF_REPORTED: &str = "self-reported";
+
+/// What a run says when it refuses a remote that keeps no record of what it
+/// should hold.
+///
+/// Phrased as a fact about the remote rather than as a fact about DCTL, because
+/// the first question an operator asks a red nightly job is whether their data
+/// is gone. Nothing here says it is.
+pub const INVENTORY_REFUSED_NOTICE: &str =
+    "keeps no record of what it should hold — its own listing is the only list there is";
+
+/// What follows from that. See [`ASSURANCE_REFUSED_CONSEQUENCE`] for why the
+/// refusal writes its own sentence instead of borrowing the report's.
+pub const INVENTORY_REFUSED_CONSEQUENCE: &str = "an object deleted from it is not missing, it is simply not listed, and this run cannot \
+     tell a complete dataset from a diminished one";
+
+/// What to do about a remote that keeps no record of what it should hold.
+///
+/// Three options and they are ordered by strength, not by convenience. A vault
+/// is the record — an index row per object, kept outside the remote, rebuildable
+/// from the backend and survivable through the recovery phrase — and it is the
+/// only one of the three that makes a lost object *detectable*. `dctl check`
+/// against the tree the replica replicates is the second independent record a
+/// replica has, and the only one available for data that is already on a plain
+/// remote. The flag is last because it detects nothing; it is named in full for
+/// the reason [`ASSURANCE_REFUSED_HINT`] names its own.
+pub const INVENTORY_REFUSED_HINT: &str = "Nothing on a plain remote records what was written there, so an object that \
+     has gone leaves no trace for a check to compare against. Store the data in \
+     a vault (`dctl init`), where every object has an index row kept outside the \
+     remote and a lost one is reported missing at exit 4; or compare the remote \
+     against the tree it replicates (`dctl check SOURCE REMOTE:`), which is the \
+     only independent record a replica has; or pass \
+     `--allow-listing-as-inventory` to check the objects this remote still lists \
+     and accept that a lost one will not be reported.";
+
+/// How a refusal joins two unmet claims into one sentence.
+///
+/// One refusal naming both, rather than one per run: a gate that named the rot
+/// limit, took a flag for it and then named the loss limit on the next run would
+/// train an operator to add flags until the command went quiet.
+pub const INTEGRITY_REFUSED_JOIN: &str = "; and ";
+
+/// The flag that accepts a remote which cannot detect a changed byte.
+///
+/// Spelled once, here, and named by the refusal that offers it. `clap` derives
+/// the flag from the field name, so the two could drift — which is why
+/// `commands::integrity::assurance` asks the parser whether this string is a
+/// flag `dctl verify` actually accepts. A refusal naming a flag that does not
+/// exist spends the one instruction the operator will follow.
+pub const READ_BACK_FLAG: &str = "--allow-read-back";
+
+/// The flag that accepts a remote whose listing is the only record of what it
+/// holds. See [`READ_BACK_FLAG`].
+pub const INVENTORY_FLAG: &str = "--allow-listing-as-inventory";
 
 /// Window size, in bytes, for reading an object back without buffering it.
 ///

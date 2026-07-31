@@ -65,8 +65,20 @@
 //! object's own recorded content hash, so `ok` means *these are the bytes that
 //! were written*. A plain remote — including the object store a vault's
 //! ciphertext lives in — records no hash of its own, so the strongest honest
-//! claim is *the object was still there and every byte came back*. See
-//! [`Assurance`](crate::source::Assurance).
+//! claim about an object it served is *it was still there and every byte came
+//! back*. See [`Assurance`](crate::source::Assurance).
+//!
+//! **And there is a second axis, which is about the objects the run never had a
+//! name for.** A vault is verified by walking its index — a row per object, kept
+//! outside the remote — so an object the backend no longer has is reported
+//! missing and the run exits 4. A plain remote is verified by walking the
+//! remote's own listing and then re-reading the keys it just reported, so both
+//! sides of that comparison are one source: a deleted object is not missing
+//! there, it is simply not enumerated, and `OK  2 objects examined` over a store
+//! that used to hold three is exit 0. Measured, on the shipped binary, under the
+//! flag whose `--help` said this was exactly what it caught
+//! (`HANDOVER.md` §36). Both axes are refused by default now and both are
+//! published in the report. See [`Inventory`](crate::source::Inventory).
 //!
 //! **The report says which one it is**, and that is newer than it looks. The
 //! value was computed here and spent on a single stderr warning — one that fires
@@ -95,6 +107,7 @@ use crate::commands::integrity::{Target, command_name, mode};
 use crate::commands::listing::Filter;
 use crate::ctx::Ctx;
 use crate::error::Result;
+use crate::source::Claims;
 
 use report::Report;
 
@@ -146,7 +159,7 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     // a password is asked for.
     let filter = Filter::from_globals(&ctx.globals)?;
     let opened = crate::source::open(ctx, &target.spec()).await?;
-    let assurance = opened.source().assurance();
+    let claims = Claims::of(opened.source());
 
     // Every object is read back in full, so the strength that ran is `strict`
     // whatever was asked for. Reporting the requested one instead would name a
@@ -173,14 +186,23 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     // nothing to find out about rather than an hour of egress and a caveat. This
     // was a `warn` and the run went on to print `ok` for every object and exit
     // 0 — over a store holding a flipped byte and a truncated object.
-    assurance::require(&command, &target.to_string(), assurance, &args.assurance)?;
-    if !assurance.detects_corruption() {
+    assurance::require(&command, &target.to_string(), claims, &args.assurance)?;
+    if !claims.assurance.detects_corruption() {
         // Reached only when the operator asked for this with `--allow-read-back`.
-        // Still said out loud, because "verified" would otherwise be read as a
-        // statement about the bytes and this remote cannot make one.
         ctx.out.warn(format!(
             "'{target}' records no hash of its own — {}",
-            assurance.describe()
+            claims.assurance.describe()
+        ));
+    }
+    if !claims.inventory.detects_loss() {
+        // Reached only when the operator asked for this with
+        // `--allow-listing-as-inventory`. Said out loud beside the other one,
+        // because the count this run is about to print is a count of what the
+        // remote still admits to holding and will be read as a count of the
+        // dataset.
+        ctx.out.warn(format!(
+            "'{target}' keeps no record of what it should hold — {}",
+            claims.inventory.describe()
         ));
     }
     if mode::reads_object_bytes(performed) && target.is_tree() {
@@ -203,7 +225,7 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     // `verify` mutates nothing, so --dry-run has nothing to suppress. It must
     // still not be treated as permission to claim the work was done, which is
     // why there is no dry-run branch here at all: the command simply runs.
-    let mut report = Report::new(target.to_string(), mode::slug(performed), assurance);
+    let mut report = Report::new(target.to_string(), mode::slug(performed), claims);
     report.filters_restricted(filter.is_restricting());
     engine::verify(ctx, &opened, &filter, args.fail_fast, &mut report).await?;
 
@@ -327,7 +349,14 @@ mod tests {
         // `local:` records no digest, so the run has to say which check it is
         // asking for. With that said, an intact store passes it.
         let (_dir, config) = plain_remote(&[("a.txt", b"1"), ("sub/b.txt", b"22")]);
-        let (ctx, args) = parse(&["verify", "store:", "--config", &config, "--allow-read-back"]);
+        let (ctx, args) = parse(&[
+            "verify",
+            "store:",
+            "--config",
+            &config,
+            "--allow-read-back",
+            "--allow-listing-as-inventory",
+        ]);
         run(&ctx, &args)
             .await
             .expect("an intact remote must not fail the run");
@@ -357,6 +386,90 @@ mod tests {
             "an operator refused a check needs the next action: {}",
             error.message()
         );
+    }
+
+    #[tokio::test]
+    async fn a_deleted_object_is_not_reported_ok_on_a_plain_remote() {
+        // The measured defect, at the level an operator meets it, and with the
+        // flag whose `--help` said this was the damage it caught. Three objects
+        // are stored, one is deleted outright from the store, and the run
+        // reported `OK  2 objects examined` and exit **0** — because the only
+        // list of what should be there is the listing that no longer mentions
+        // it, so both sides of the comparison agreed.
+        //
+        // Not 0, and not 4: nothing here has been shown to be missing, because
+        // nothing here knows what to look for. What is reported is that the
+        // question cannot be answered — which is why the same deletion inside a
+        // vault *is* exit 4 and this is exit 27.
+        let (dir, config) =
+            plain_remote(&[("a.bin", b"111"), ("b.bin", b"222"), ("c.bin", b"333")]);
+        let gone = dir.path().join("root").join("b.bin");
+        std::fs::remove_file(&gone).expect("the object is deleted from the store");
+        assert!(!gone.exists(), "the damage must have landed");
+
+        let (ctx, args) = parse(&["verify", "store:", "--config", &config, "--allow-read-back"]);
+        let error = run(&ctx, &args)
+            .await
+            .expect_err("a store that has lost an object must not report a clean bill of health");
+        assert_eq!(error.code(), ExitCode::VerificationNotPossible);
+        assert_eq!(error.code().as_i32(), 27);
+        assert!(
+            error.message().contains("--allow-listing-as-inventory"),
+            "the refusal must name the limit and the flag that accepts it: {}",
+            error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_truncated_object_is_not_reported_ok_on_a_plain_remote() {
+        // The second measured damage. Truncation is invisible to a read-back by
+        // construction — shortening a file moves its length too, so `head` and
+        // the bytes agree and every byte the object claims does come back — and
+        // the run reported `ok  244.1 KiB  mid.bin` at exit 0 over an object
+        // that had been 488.3 KiB.
+        let (dir, config) = plain_remote(&[("a.bin", &[7u8; 4096]), ("b.bin", b"22")]);
+        let target = dir.path().join("root").join("a.bin");
+        let before = std::fs::metadata(&target).expect("the object exists").len();
+        std::fs::File::options()
+            .write(true)
+            .open(&target)
+            .expect("the object is writable")
+            .set_len(before / 2)
+            .expect("the object is truncated");
+        let after = std::fs::metadata(&target).expect("the object exists").len();
+        assert!(
+            after < before,
+            "the damage must have landed: {before} -> {after}"
+        );
+
+        let (ctx, args) = parse(&["verify", "store:", "--config", &config, "--allow-read-back"]);
+        assert_eq!(
+            run(&ctx, &args)
+                .await
+                .expect_err("a truncated object must not be reported ok")
+                .code(),
+            ExitCode::VerificationNotPossible,
+        );
+    }
+
+    #[tokio::test]
+    async fn an_undamaged_plain_remote_still_passes_once_both_limits_are_accepted() {
+        // The self-test without which the two above prove nothing: the same
+        // command over an *undamaged* store, with both limits accepted by name,
+        // has to succeed. A gate that refused everything would pass both tests
+        // above and would have made the command useless.
+        let (_dir, config) = plain_remote(&[("a.bin", b"111"), ("b.bin", b"222")]);
+        let (ctx, args) = parse(&[
+            "verify",
+            "store:",
+            "--config",
+            &config,
+            "--allow-read-back",
+            "--allow-listing-as-inventory",
+        ]);
+        run(&ctx, &args)
+            .await
+            .expect("an undamaged remote must pass once the operator has accepted the limits");
     }
 
     #[tokio::test]
@@ -391,6 +504,7 @@ mod tests {
             "--config",
             &config,
             "--allow-read-back",
+            "--allow-listing-as-inventory",
         ]);
         assert_eq!(
             run(&ctx, &args)
@@ -416,6 +530,7 @@ mod tests {
                 "--verify",
                 strength,
                 "--allow-read-back",
+                "--allow-listing-as-inventory",
             ]);
             run(&ctx, &args)
                 .await
@@ -435,6 +550,7 @@ mod tests {
             &config,
             "--dry-run",
             "--allow-read-back",
+            "--allow-listing-as-inventory",
         ]);
         assert!(ctx.is_dry_run());
         run(&ctx, &args).await.expect("a dry run still verifies");
@@ -450,6 +566,7 @@ mod tests {
                 "--config",
                 config.as_str(),
                 "--allow-read-back",
+                "--allow-listing-as-inventory",
             ];
             argv.extend_from_slice(format);
             let (ctx, args) = parse(&argv);
@@ -475,6 +592,7 @@ mod tests {
             "--config",
             &config,
             "--allow-read-back",
+            "--allow-listing-as-inventory",
         ]);
 
         let error = run(&ctx, &args)
@@ -503,6 +621,7 @@ mod tests {
             "--include",
             "*.nothing",
             "--allow-read-back",
+            "--allow-listing-as-inventory",
         ]);
 
         let error = run(&ctx, &args)

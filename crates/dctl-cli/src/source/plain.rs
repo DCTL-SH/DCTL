@@ -53,7 +53,7 @@ use crate::platform::path;
 use crate::remote::RemoteSpec;
 
 use super::entry::Entry;
-use super::{Assurance, Entries, Sizes, Source};
+use super::{Assurance, Entries, Inventory, Sizes, Source};
 
 /// An object store, read without interpretation.
 pub struct PlainSource {
@@ -267,11 +267,19 @@ impl Source for PlainSource {
     /// what came back against it.
     ///
     /// **Both halves are needed and neither substitutes for the other.** The
-    /// read-back is what notices a replica quietly losing objects and a store
-    /// that stops serving part-way. The comparison is the only thing here
-    /// capable of noticing that the bytes *changed*, because the digest was
-    /// written down at write time and kept in the provider's metadata rather
-    /// than in the object: rot moves one and leaves the other.
+    /// read-back is what notices a store that stops serving part-way, an object
+    /// whose key survives while its body does not, and a sector that has stopped
+    /// answering. The comparison is the only thing here capable of noticing that
+    /// the bytes *changed*, because the digest was written down at write time and
+    /// kept in the provider's metadata rather than in the object: rot moves one
+    /// and leaves the other.
+    ///
+    /// **Neither half notices an object that is gone**, and the docs here used to
+    /// say the first one did. This method is called once per key the enumeration
+    /// produced, and on a plain remote the enumeration is the remote's own
+    /// listing — so a deleted object is never passed to it at all. That is a
+    /// property of the *set* rather than of any object in it, and it is refused
+    /// one layer up; see [`super::Inventory`].
     ///
     /// A read-back on its own was the whole of this method, and it is the defect
     /// [`dctl_store::recorded`] records. Measured on the shipped binary: a byte
@@ -393,6 +401,23 @@ impl Source for PlainSource {
             // unchanged, and reporting otherwise would be inventing a guarantee.
             ChecksumSupport::None(_) => Assurance::ReadBack,
         }
+    }
+
+    /// A plain store's own listing is the only record of what it holds, on every
+    /// backend, whatever that backend records about the bytes of the objects it
+    /// still has.
+    ///
+    /// Flat rather than read off the backend, which is the opposite of
+    /// [`Self::assurance`] and is deliberate: a digest is a property of a
+    /// *provider*, and having one is why `local:` and B2 answer differently
+    /// above. Having a record of what *should* be there is a property of the
+    /// **plain view itself** — this source enumerates the backend and then
+    /// checks the keys the backend just reported, so both sides of the
+    /// comparison are one source and no provider could change that. A `match`
+    /// here would invite a later backend to claim otherwise on the strength of
+    /// something the provider happens to expose.
+    fn inventory(&self) -> Inventory {
+        Inventory::SelfReported
     }
 }
 
@@ -905,8 +930,8 @@ mod tests {
     #[tokio::test]
     async fn a_remote_that_records_nothing_cannot_certify_and_says_so() {
         // `local:` and `sftp:` are this case. The read-back still happens — it
-        // is how a replica quietly losing objects is caught — and the claim it
-        // supports is the weaker one, published rather than assumed.
+        // proves the object is retrievable — and the claim it supports is the
+        // weaker one, published rather than assumed.
         let fixture = tree_with(&[("a.txt", b"one")]);
         assert_eq!(fixture.source.assurance(), Assurance::ReadBack);
         assert!(!fixture.source.assurance().detects_corruption());
@@ -915,6 +940,27 @@ mod tests {
             .verify("a.txt")
             .await
             .expect("the retrievability check still runs");
+    }
+
+    #[tokio::test]
+    async fn a_plain_store_reports_that_its_listing_is_its_only_record() {
+        // On both backends, and the second is the one that matters: a provider
+        // that records a digest per object detects a changed byte and still has
+        // no record of what it *should* hold, so a deleted object is invisible
+        // there too. A gate reading only the assurance let exactly that remote
+        // through.
+        let plain = tree_with(&[("a.txt", b"one")]);
+        assert_eq!(plain.source.inventory(), Inventory::SelfReported);
+        assert!(!plain.source.inventory().detects_loss());
+
+        let recording = recorded_object("a.bin", b"one");
+        assert_eq!(recording.source.assurance(), Assurance::ProviderChecksum);
+        assert!(recording.source.assurance().detects_corruption());
+        assert_eq!(
+            recording.source.inventory(),
+            Inventory::SelfReported,
+            "a provider's digest is a claim about bytes, never about the set of objects"
+        );
     }
 
     /// A real directory tree behind a real `LocalFs`, with `files` written into

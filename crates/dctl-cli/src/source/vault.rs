@@ -94,7 +94,7 @@ use crate::session::{self, Session};
 
 use super::chunk_cache::ChunkCache;
 use super::entry::Entry;
-use super::{Assurance, Entries, Sizes, Source};
+use super::{Assurance, Entries, Inventory, Sizes, Source};
 
 /// A vault, unlocked, presented as a readable source.
 pub struct VaultSource {
@@ -330,6 +330,23 @@ impl Source for VaultSource {
         // is a statement about the bytes that were written, not merely about the
         // bytes that came back.
         Assurance::Authenticated
+    }
+
+    fn inventory(&self) -> Inventory {
+        // Every object written through the vault got an index row, and this
+        // source enumerates that index rather than the backend — so the two
+        // sides of a `verify` are a record and a remote, not one remote twice.
+        // An object the backend no longer has is a row with nothing behind it,
+        // which is why a deleted object here exits 4 and the same deletion on
+        // the plain view of the same bytes exits 0.
+        //
+        // The record survives the machine that holds it: `index rebuild`
+        // reconstructs it from the backend alone, because every sealed object
+        // carries an authenticated header naming the path inside it, and the
+        // recovery phrase reconstructs the key that reads those headers. That
+        // is the property a plain remote has no equivalent of and cannot be
+        // given one — see [`super::inventory`].
+        Inventory::Recorded
     }
 }
 

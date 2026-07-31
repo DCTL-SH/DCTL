@@ -138,7 +138,20 @@ mod tests {
     use super::*;
     use crate::cli::GlobalArgs;
     use crate::constants::{SCRUB_FULL_SAMPLE_PERCENT, SCRUB_MAX_ERRORS_UNLIMITED};
-    use crate::source::Assurance;
+    use crate::source::{Assurance, Claims, Inventory};
+
+    /// What a sealed vault can claim on both axes: a hash it recorded at write
+    /// time, and an index row per object. Written out rather than taken from a
+    /// convenient constant, because a report that names a stronger claim than
+    /// its source can make is the defect these fields exist to prevent.
+    const fn sealed_claims() -> Claims {
+        Claims::new(Assurance::Authenticated, Inventory::Recorded)
+    }
+
+    /// What a plain filesystem remote can claim: neither.
+    const fn plain_claims() -> Claims {
+        Claims::new(Assurance::ReadBack, Inventory::SelfReported)
+    }
     use crate::source::plain::PlainSource;
     use crate::source::vault::VaultSource;
     use clap::Parser;
@@ -171,7 +184,7 @@ mod tests {
     }
 
     fn report() -> Report {
-        Report::new("store:", "strict", Assurance::ReadBack, 100, 0, false)
+        Report::new("store:", "strict", plain_claims(), 100, 0, false)
     }
 
     fn full_plan() -> Plan {
@@ -323,14 +336,7 @@ mod tests {
         let (store, _index, source) = sealed(&[("a.txt", b"one"), ("b.txt", b"two")]).await;
         assert_eq!(damage_objects(store.path()), 2);
 
-        let mut report = Report::new(
-            "archive:",
-            "strict",
-            Assurance::Authenticated,
-            100,
-            0,
-            false,
-        );
+        let mut report = Report::new("archive:", "strict", sealed_claims(), 100, 0, false);
         scrub(
             &ctx(&[]),
             &opened(source, ""),
@@ -354,14 +360,7 @@ mod tests {
     #[tokio::test]
     async fn an_intact_vault_reads_back_clean() {
         let (_store, _index, source) = sealed(&[("a.txt", b"one"), ("sub/b.txt", b"two")]).await;
-        let mut report = Report::new(
-            "archive:",
-            "strict",
-            Assurance::Authenticated,
-            100,
-            0,
-            false,
-        );
+        let mut report = Report::new("archive:", "strict", sealed_claims(), 100, 0, false);
         scrub(
             &ctx(&[]),
             &opened(source, ""),
@@ -390,14 +389,7 @@ mod tests {
         let plan = Plan::new(SCRUB_FULL_SAMPLE_PERCENT, 1, false, 0).unwrap();
         assert!(plan.is_bounded());
 
-        let mut report = Report::new(
-            "archive:",
-            "strict",
-            Assurance::Authenticated,
-            100,
-            0,
-            false,
-        );
+        let mut report = Report::new("archive:", "strict", sealed_claims(), 100, 0, false);
         scrub(
             &ctx(&[]),
             &opened(source, ""),

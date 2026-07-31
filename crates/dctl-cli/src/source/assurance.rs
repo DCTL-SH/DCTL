@@ -12,17 +12,23 @@
 //!   came back*. A provider that silently returned different bytes would not be
 //!   caught, because there is nothing on that side to catch it with.
 //!
-//! Both are worth running on a schedule — the second is exactly the check that
-//! notices a replica quietly losing objects — and neither is a substitute for
-//! the other. So the claim travels with the result instead of being folded into
-//! one word: `PLAN.md` §6 forbids reporting a guarantee that was not checked,
-//! and "healthy" over a store that cannot detect corruption would be precisely
-//! that.
+//! Both are worth running on a schedule and neither is a substitute for the
+//! other. So the claim travels with the result instead of being folded into one
+//! word: `PLAN.md` §6 forbids reporting a guarantee that was not checked, and
+//! "healthy" over a store that cannot detect corruption would be precisely that.
 //!
 //! This is not the same axis as the `--verify` strength dial
 //! ([`crate::commands::integrity::mode`]). Strength says *how much was read*;
 //! assurance says *what the reading could prove*. A full read of a store with no
 //! recorded hashes is still only a retrievability check.
+//!
+//! **And it is not the same axis as [`Inventory`](super::Inventory) either.**
+//! This one is about the objects a run *examined*; that one is about the objects
+//! it should have examined and did not, because nothing told it they existed.
+//! The strongest assurance available says nothing about an object that is gone,
+//! and the two were conflated in the sentence this module's own documentation
+//! used to carry — "the second is exactly the check that notices a replica
+//! quietly losing objects", which was false of the only remotes it described.
 
 use crate::constants::{ASSURANCE_AUTHENTICATED, ASSURANCE_PROVIDER_CHECKSUM, ASSURANCE_READ_BACK};
 

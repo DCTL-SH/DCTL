@@ -28,7 +28,7 @@ use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
 use crate::output::size::count;
 use crate::output::{Align, Border, Column, Format, Out, Table, Units, size};
-use crate::source::Assurance;
+use crate::source::Claims;
 
 /// One damaged object, and what was done about it.
 #[derive(Clone, Debug, Serialize)]
@@ -152,6 +152,16 @@ pub struct Report {
     /// `healthy` over one of those must not be mistaken for `healthy` over a
     /// vault (`PLAN.md` §6).
     pub assurance: &'static str,
+    /// Where the list of objects this run read came from: `recorded` or
+    /// `self-reported`.
+    ///
+    /// The other half of the claim. `assurance` describes the objects the run
+    /// had names for; this says whether anything told the run which names to
+    /// expect. `healthy` over a self-reported list is a grade on the objects the
+    /// remote still admits to holding, and says nothing about one it has quietly
+    /// stopped listing — which is the failure a scheduled scrub is bought to
+    /// find. See [`crate::source::Inventory`].
+    pub inventory: &'static str,
     /// The share of the dataset this run read.
     pub sample_percent: u8,
     /// The sampling seed, in hex, so a sampled run can be replayed exactly.
@@ -175,7 +185,7 @@ impl Report {
     pub fn new(
         target: impl Into<String>,
         verify_mode: impl Into<String>,
-        assurance: Assurance,
+        claims: Claims,
         sample_percent: u8,
         seed: u64,
         repair_enabled: bool,
@@ -187,7 +197,8 @@ impl Report {
             // let a run that pushed nothing publish a clean grade.
             health: HEALTH_UNVERIFIED,
             verify_mode: verify_mode.into(),
-            assurance: assurance.slug(),
+            assurance: claims.assurance.slug(),
+            inventory: claims.inventory.slug(),
             sample_percent,
             seed: format!("{seed:016x}"),
             repair_enabled,
@@ -380,12 +391,13 @@ impl Report {
         }
 
         let mut line = format!(
-            "{}: {} {} read and checked, {} ({}) under '{}'",
+            "{}: {} {} read and checked, {} ({} bytes, {} inventory) under '{}'",
             self.health,
             count(self.coverage.scanned),
             objects(self.coverage.scanned),
             size::bytes_or_unknown(self.coverage.bytes, units),
             self.assurance,
+            self.inventory,
             self.target
         );
         if self.coverage.unmeasured > 0 {
@@ -520,6 +532,20 @@ fn encode<T: Serialize>(format: Format, value: &T) -> Result<String> {
 mod tests {
     use super::*;
     use crate::output::{ColorChoice, Units};
+    use crate::source::{Assurance, Inventory};
+
+    /// What a sealed vault can claim on both axes: a hash it recorded at write
+    /// time, and an index row per object. Written out rather than taken from a
+    /// convenient constant, because a report that names a stronger claim than
+    /// its source can make is the defect these fields exist to prevent.
+    const fn sealed_claims() -> Claims {
+        Claims::new(Assurance::Authenticated, Inventory::Recorded)
+    }
+
+    /// What a plain filesystem remote can claim: neither.
+    const fn plain_claims() -> Claims {
+        Claims::new(Assurance::ReadBack, Inventory::SelfReported)
+    }
 
     fn out(format: Format) -> Out {
         Out::new(format, ColorChoice::Never, Units::Binary, false, 0)
@@ -529,7 +555,7 @@ mod tests {
         let mut report = Report::new(
             "vault:",
             "strict",
-            Assurance::Authenticated,
+            sealed_claims(),
             100,
             0x0123_4567_89ab_cdef,
             false,
@@ -603,7 +629,7 @@ mod tests {
     #[test]
     fn skipped_objects_are_counted_so_coverage_cannot_be_overstated() {
         // "healthy" over a 10% sample is a claim about a tenth of the vault.
-        let mut report = Report::new("vault:", "sample", Assurance::Authenticated, 10, 7, false);
+        let mut report = Report::new("vault:", "sample", sealed_claims(), 10, 7, false);
         report.push(Record::new("a", Verdict::Ok, Some(1)));
         report.skip();
         report.skip();
@@ -617,7 +643,7 @@ mod tests {
         // `healthy` over a remote that records no hashes is a statement about
         // retrievability, not about the bytes. The report has to carry the
         // difference or the weaker claim reads as the stronger one.
-        let mut report = Report::new("store:", "strict", Assurance::ReadBack, 100, 0, false);
+        let mut report = Report::new("store:", "strict", plain_claims(), 100, 0, false);
         report.push(Record::new("a", Verdict::Ok, Some(1)));
         assert_eq!(report.health, HEALTH_HEALTHY);
 
@@ -625,6 +651,26 @@ mod tests {
             serde_json::from_str(&report.render(&out(Format::Json)).unwrap()).unwrap();
         assert_eq!(parsed["assurance"], Assurance::ReadBack.slug());
         assert_ne!(parsed["assurance"], Assurance::Authenticated.slug());
+    }
+
+    #[test]
+    fn a_grade_always_says_where_the_object_list_came_from() {
+        // The other axis, and the one a scheduled scrub is actually bought for.
+        // `healthy: 2 objects read` over a store that used to hold three is a
+        // true sentence about the two, and the grade is the word an operator
+        // reads as a statement about the dataset.
+        let mut report = Report::new("store:", "strict", plain_claims(), 100, 0, false);
+        report.push(Record::new("a", Verdict::Ok, Some(1)));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&report.render(&out(Format::Json)).unwrap()).unwrap();
+        assert_eq!(parsed["inventory"], Inventory::SelfReported.slug());
+
+        let mut sealed = Report::new("vault:", "strict", sealed_claims(), 100, 0, false);
+        sealed.push(Record::new("a", Verdict::Ok, Some(1)));
+        let parsed: serde_json::Value =
+            serde_json::from_str(&sealed.render(&out(Format::Json)).unwrap()).unwrap();
+        assert_eq!(parsed["inventory"], Inventory::Recorded.slug());
+        assert_ne!(parsed["assurance"], parsed["inventory"]);
     }
 
     #[test]
@@ -668,14 +714,7 @@ mod tests {
         // `dctl scrub archive:typo` over nothing were both a silent exit 0, so a
         // nightly cron could verify nothing for years and stay green. Health is
         // a claim about objects that were read; over none there is no claim.
-        let report = Report::new(
-            "vault:typo",
-            "strict",
-            Assurance::Authenticated,
-            100,
-            0,
-            false,
-        );
+        let report = Report::new("vault:typo", "strict", sealed_claims(), 100, 0, false);
         assert_eq!(report.coverage.scanned, 0);
         assert_eq!(report.health, HEALTH_UNVERIFIED);
         assert_ne!(report.health, HEALTH_HEALTHY);
@@ -699,7 +738,7 @@ mod tests {
     fn a_sample_that_selected_nothing_says_so_rather_than_blaming_the_prefix() {
         // Same exit code, different cause, different next action: the objects
         // are there and the sample passed over all of them.
-        let mut report = Report::new("vault:", "sample", Assurance::Authenticated, 10, 7, false);
+        let mut report = Report::new("vault:", "sample", sealed_claims(), 10, 7, false);
         report.skip();
         report.skip();
 
@@ -719,14 +758,7 @@ mod tests {
         // under `--quiet`. A tick beside it would read as a pass, and a second
         // copy of the same sentence trains the reader to skip the first.
         let out = Out::new(Format::Text, ColorChoice::Never, Units::Binary, false, 0);
-        let report = Report::new(
-            "vault:typo",
-            "strict",
-            Assurance::Authenticated,
-            100,
-            0,
-            false,
-        );
+        let report = Report::new("vault:typo", "strict", sealed_claims(), 100, 0, false);
         report.announce(&out);
         assert!(report.outcome().is_some(), "the error is what reports it");
     }
@@ -735,7 +767,7 @@ mod tests {
     fn a_summary_agrees_with_itself_about_one_object() {
         // The summary line is the sentence most likely to be pasted into a
         // ticket, and "1 objects read and checked" reads as an unfinished tool.
-        let mut report = Report::new("vault:", "strict", Assurance::Authenticated, 100, 0, false);
+        let mut report = Report::new("vault:", "strict", sealed_claims(), 100, 0, false);
         report.push(Record::new("a.jpg", Verdict::Ok, Some(1)));
         let one = report.summary(Units::Binary);
         assert!(one.contains("1 object read"), "got: {one}");
@@ -760,6 +792,13 @@ mod tests {
             summary.contains(Assurance::Authenticated.slug()),
             "got: {summary}"
         );
+        // ...and where the object list came from, because `healthy: 2 objects`
+        // over a self-reported list is a grade on two objects and not on a
+        // dataset.
+        assert!(
+            summary.contains(Inventory::Recorded.slug()),
+            "got: {summary}"
+        );
         assert!(summary.contains("vault:"), "got: {summary}");
     }
 
@@ -768,7 +807,7 @@ mod tests {
         // Defect D3 reaching the audit trail. A vault whose index was rebuilt
         // records no sizes, and totalling those absences as zeroes filed a full
         // scrub of a real dataset as having read nothing.
-        let mut report = Report::new("vault:", "strict", Assurance::Authenticated, 100, 0, false);
+        let mut report = Report::new("vault:", "strict", sealed_claims(), 100, 0, false);
         report.push(Record::new("a.jpg", Verdict::Ok, Some(10)));
         report.push(Record::new("b.jpg", Verdict::Ok, None));
 
@@ -795,7 +834,7 @@ mod tests {
         // The trap the fix must not fall into: an object that genuinely is zero
         // bytes long has a recorded size, and a run over only such objects has a
         // known total of zero rather than an unknown one.
-        let mut report = Report::new("vault:", "strict", Assurance::Authenticated, 100, 0, false);
+        let mut report = Report::new("vault:", "strict", sealed_claims(), 100, 0, false);
         report.push(Record::new("empty.txt", Verdict::Ok, Some(0)));
         assert_eq!(report.coverage.bytes, Some(0));
         assert_eq!(report.coverage.unmeasured, 0);

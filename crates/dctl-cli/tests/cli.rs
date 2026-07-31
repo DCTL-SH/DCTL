@@ -5138,11 +5138,13 @@ fn a_verify_over_a_plain_remote_publishes_what_its_ok_actually_proved() {
             .dctl()
             .arg("--no-ask-password")
             .args(["--format", "json", "verify"])
-            // The retrievability check has to be asked for by name now, because
-            // a remote that records no digest cannot detect rot and `verify`
-            // refuses by default. This test is about what the document says once
-            // the operator has accepted that.
+            // Both limits have to be asked for by name now, because a remote
+            // that records no digest cannot detect rot and one whose listing is
+            // its only record cannot detect a loss — and `verify` refuses both
+            // by default. This test is about what the document says once the
+            // operator has accepted them.
             .arg("--allow-read-back")
+            .arg("--allow-listing-as-inventory")
             .arg(format!("{PLAIN_REMOTE}:"))
             .assert()
             .success()
@@ -5155,6 +5157,12 @@ fn a_verify_over_a_plain_remote_publishes_what_its_ok_actually_proved() {
         report["assurance"], "read-back",
         "a verify of a plain remote must publish that its `ok` is a \
          retrievability claim, not a statement about the bytes; got: {report}"
+    );
+    assert_eq!(
+        report["inventory"], "self-reported",
+        "and that the object list is the remote's own, so `verified: 1` is a \
+         count of what the remote still admits to holding rather than of a \
+         dataset; got: {report}"
     );
 }
 
@@ -5222,14 +5230,17 @@ fn a_verify_says_what_it_covered_and_what_that_proved_without_being_asked() {
         .dctl()
         .arg("--no-ask-password")
         .arg("verify")
-        // See the sibling test: the weaker check is opt-in now.
+        // See the sibling test: both weaker claims are opt-in now.
         .arg("--allow-read-back")
+        .arg("--allow-listing-as-inventory")
         .arg(format!("{PLAIN_REMOTE}:"))
         .assert()
         .success()
-        // How much was covered, and what covering it proved.
+        // How much was covered, what covering it proved, and where the list of
+        // things to cover came from.
         .stderr(predicates::str::contains("1 object examined"))
-        .stderr(predicates::str::contains("read-back"));
+        .stderr(predicates::str::contains("read-back"))
+        .stderr(predicates::str::contains("self-reported"));
 }
 
 /// A plain `local:` remote holding one object, and the object's path on disk so
@@ -5300,6 +5311,136 @@ fn a_scrub_of_a_remote_that_cannot_detect_rot_refuses_rather_than_grading_it_hea
         .stderr(predicates::str::contains("--allow-read-back"));
 }
 
+/// A plain `local:` remote holding three named objects, and the store root so a
+/// test can reach past DCTL and take one away.
+///
+/// Three rather than one, deliberately: with one object a run that lost it
+/// examines nothing and already fails with exit 9, which would pass a test of
+/// this defect while proving nothing. The defect is a run that examines the
+/// **survivors**, reports them all `ok` and exits 0.
+fn a_plain_remote_holding_three_objects() -> (Sandbox, std::path::PathBuf) {
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.bin", b"the first object");
+    sandbox.write("src/b.bin", b"the second object, which will be taken away");
+    sandbox.write("src/c.bin", b"the third object");
+    let root = sandbox.dir("store");
+    sandbox
+        .dctl()
+        .args(["config", "create", PLAIN_REMOTE, "local"])
+        .arg(format!("path={}", root.display()))
+        .assert()
+        .success();
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success();
+    (sandbox, root)
+}
+
+#[test]
+fn a_verify_of_a_remote_that_lost_an_object_refuses_rather_than_reporting_ok() {
+    // The defect, measured on the shipped binary before this existed, under the
+    // flag whose own `--help` said this was exactly what it caught: three
+    // objects stored, one deleted outright from the store, and the run printed
+    // `OK  2 objects examined` and exited **0**.
+    //
+    // The cause is that both sides of the comparison were the same source. A
+    // plain remote records nothing about what it should hold, so `verify`
+    // enumerates the remote and then checks the keys the remote just reported —
+    // and a deleted object is not missing from that list, it is absent from it.
+    let (sandbox, root) = a_plain_remote_holding_three_objects();
+    let gone = root.join("b.bin");
+    std::fs::remove_file(&gone).expect("the object is removed from the store");
+    assert!(!gone.exists(), "the damage must have landed");
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("verify")
+        .arg("--allow-read-back")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .code(27)
+        .stderr(predicates::str::contains(PLAIN_REMOTE))
+        .stderr(predicates::str::contains("--allow-listing-as-inventory"));
+}
+
+#[test]
+fn a_scrub_of_a_remote_that_lost_an_object_refuses_rather_than_grading_it_healthy() {
+    // The same defect one command over, and the command an operator actually
+    // schedules to notice a replica losing objects. `scrub` and `verify` share
+    // one gate; a claim only one of them enforced would be a claim nobody could
+    // rely on.
+    let (sandbox, root) = a_plain_remote_holding_three_objects();
+    std::fs::remove_file(root.join("b.bin")).expect("the object is removed from the store");
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("scrub")
+        .arg("--allow-read-back")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .code(27)
+        .stderr(predicates::str::contains("--allow-listing-as-inventory"));
+}
+
+#[test]
+fn an_undamaged_plain_remote_still_passes_with_both_limits_accepted() {
+    // The self-test the two above are worthless without: the same command over
+    // an undamaged store, with both limits accepted by name, has to exit 0. A
+    // gate that refused everything would pass both of them and would have made
+    // the command useless.
+    let (sandbox, _root) = a_plain_remote_holding_three_objects();
+
+    sandbox
+        .dctl()
+        .arg("--no-ask-password")
+        .arg("verify")
+        .arg("--allow-read-back")
+        .arg("--allow-listing-as-inventory")
+        .arg(format!("{PLAIN_REMOTE}:"))
+        .assert()
+        .success()
+        .stderr(predicates::str::contains("3 objects examined"));
+}
+
+#[test]
+fn the_read_backs_help_no_longer_promises_to_catch_a_lost_object() {
+    // The defect in the place the operator meets it, asserted against the text
+    // the shipped binary actually prints rather than against a doc comment. The
+    // flag's help said the read-back "is how a replica quietly losing objects is
+    // caught"; measured, that is the one damage it does not catch.
+    let sandbox = Sandbox::new();
+    for command in ["verify", "scrub"] {
+        let help = String::from_utf8(
+            sandbox
+                .dctl()
+                .arg(command)
+                .arg("--help")
+                .assert()
+                .success()
+                .get_output()
+                .stdout
+                .clone(),
+        )
+        .expect("help is utf-8");
+        assert!(
+            !help.contains("losing objects is caught"),
+            "`dctl {command} --help` still claims the read-back catches a lost \
+             object:\n{help}"
+        );
+        assert!(
+            help.contains("--allow-listing-as-inventory"),
+            "`dctl {command} --help` must offer the flag its refusal names:\n{help}"
+        );
+    }
+}
+
 #[test]
 fn the_refusal_is_reached_before_anything_is_read() {
     // A remote that cannot be certified must cost nothing to find out about,
@@ -5330,11 +5471,20 @@ fn accepting_the_weaker_check_still_says_what_it_did_and_did_not_prove() {
         .arg("--no-ask-password")
         .arg("verify")
         .arg("--allow-read-back")
+        .arg("--allow-listing-as-inventory")
         .arg(format!("{PLAIN_REMOTE}:"))
         .assert()
         .success()
         .stderr(predicates::str::contains("read-back"))
-        .stderr(predicates::str::contains("not that it is unchanged"));
+        .stderr(predicates::str::contains("not that it is unchanged"))
+        // And the second concession says its own sentence rather than being
+        // folded into the first: they are different limits with different
+        // remedies, and an operator who set one flag has not agreed to the
+        // other.
+        .stderr(predicates::str::contains(
+            "keeps no record of what it should hold",
+        ))
+        .stderr(predicates::str::contains("is simply not listed"));
 }
 
 #[test]
