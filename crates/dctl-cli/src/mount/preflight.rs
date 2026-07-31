@@ -30,21 +30,33 @@
 //!
 //! ## The macOS situation, stated plainly
 //!
-//! `fuser` — the only maintained Rust FUSE binding, at its latest release —
-//! probes for macFUSE with `pkg-config … probe("fuse") // for macFUSE 4.x` and
-//! mounts through libfuse's `fuse_mount_compat25`. Against **macFUSE 5.x** that
-//! call fails even for a filesystem with no options at all: a minimal `fuser`
-//! program that mounts an empty struct fails identically, with no DCTL code
-//! involved. rclone mounts on the same machine because it links no libfuse at
-//! all and drives macFUSE through its own bindings.
+//! This module used to refuse macOS outright, and the reason it gave was true of
+//! the configuration it was written against: `fuser`'s build script excludes
+//! macOS from its pure-Rust mount path by a hardcoded list of operating systems,
+//! and what macOS fell through to was a `pkg-config` probe commented
+//! `// for macFUSE 4.x` and a `fuse_mount_compat25` call that fails against
+//! **macFUSE 5**. What the refusal *implied* — that mounting on macOS was not
+//! possible — was never true. rclone mounts on the same machines, and the
+//! dependency's configuration was ours to change.
 //!
-//! So macOS is refused, by name, with the real reason. `PLAN.md` §15 already
-//! ranks **fuse-t** (NFS loopback, no kernel extension) and **FSKit** above
-//! macFUSE for macOS, and this is the concrete argument for finishing that work
-//! rather than chasing a binding that cannot reach the installed macFUSE.
+//! It has been changed. `fuser` is now built here with its `macos-no-mount`
+//! feature, and [`macfuse`](super::macfuse) performs the mount itself through
+//! macFUSE's own setuid helper. So the macOS question this module answers is no
+//! longer "can this binding mount at all" but the same question it asks on Linux:
+//! **is the kernel side present on this machine.** For macFUSE that is one
+//! observation — a `/dev/macfuseN` device node, whose existence is proof the
+//! kernel extension is loaded and approved — and one file, the helper that
+//! performs the mount.
+//!
+//! `PLAN.md` §15 still ranks **fuse-t** (NFS loopback) and **FSKit** above
+//! macFUSE, because both need no kernel extension and Apple keeps narrowing what
+//! a kernel extension may do. That ordering is unchanged and is reported by
+//! [`backend::shortfall`](crate::commands::mount::backend::shortfall); what has
+//! changed is that macFUSE now works rather than being a dead end.
 
 use std::path::{Path, PathBuf};
 
+use crate::constants::MOUNT_MACFUSE_HELPER;
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
 
@@ -162,26 +174,23 @@ fn which(program: &str) -> Option<PathBuf> {
     })
 }
 
-// ── macOS: refused, with the real reason ───────────────────────────────────
+// ── macOS: the same question, asked of macFUSE ─────────────────────────────
 
-/// First macFUSE device node. Its presence proves the kernel extension loaded,
-/// which is exactly the thing the old hint told people to go and arrange.
+/// First macFUSE device node. Its presence proves the kernel extension is loaded
+/// and approved, which is exactly the thing the old hint told people to go and
+/// arrange while it was already true.
 const MACFUSE_DEVICE: &str = "/dev/macfuse0";
 
 /// Where macFUSE reports its version.
 const MACFUSE_BUNDLE: &str = "/Library/Filesystems/macfuse.fs";
 
-/// The macFUSE generation `fuser`'s mount path targets.
-///
-/// Its build script probes with the comment `// for macFUSE 4.x`, and its
-/// `fuse_mount_compat25` call fails against 5.x.
-const FUSER_SUPPORTED_MACFUSE_MAJOR: u32 = 4;
-
 /// What the macOS decision needs to know about a machine.
 ///
-/// `installed` and `loaded` are deliberately separate. "Not installed" and
-/// "installed but unreachable" call for completely different actions, and
-/// conflating them is precisely how the message this module replaced misled.
+/// The three fields are deliberately separate, and each of them names a
+/// different remedy. "Not installed" is an install; "installed but no device
+/// node" is a kernel extension waiting for approval; "installed, loaded, no
+/// helper" is a broken installation. Conflating any two of them is precisely how
+/// the message this module replaced misled.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Macfuse {
     /// Whether the macFUSE bundle is present on disk.
@@ -189,6 +198,13 @@ pub struct Macfuse {
     /// Whether a macFUSE device node exists — proof the kernel extension is
     /// loaded and approved.
     pub loaded: bool,
+    /// Whether the setuid mount helper this build drives is present.
+    ///
+    /// The macOS counterpart of `fusermount3`: [`macfuse`](super::macfuse) runs
+    /// it to perform the mount, because `mount(2)` on macOS is root-only. An
+    /// installation without it cannot mount, and the reason is worth stating
+    /// before a mount is attempted rather than after it fails.
+    pub helper: bool,
     /// The version macFUSE reports, when it can be read.
     pub version: Option<String>,
 }
@@ -197,8 +213,8 @@ impl Macfuse {
     /// Look at the machine this process is running on.
     ///
     /// Compiled on every platform, not only macOS: anywhere else the paths do
-    /// not exist and it describes an uninstalled machine, which costs two `stat`
-    /// calls nothing outside a test ever makes. The gain is that
+    /// not exist and it describes an uninstalled machine, which costs three
+    /// `stat` calls nothing outside a test ever makes. The gain is that
     /// [`decide_macos`] and the plist scan below are ordinary code the Linux
     /// gates compile, lint and run.
     #[must_use]
@@ -206,6 +222,7 @@ impl Macfuse {
         Self {
             installed: Path::new(MACFUSE_BUNDLE).exists(),
             loaded: Path::new(MACFUSE_DEVICE).exists(),
+            helper: Path::new(MOUNT_MACFUSE_HELPER).exists(),
             version: installed_version(),
         }
     }
@@ -213,70 +230,75 @@ impl Macfuse {
 
 /// Decide what a described macOS machine can do. Pure; no I/O.
 ///
-/// Never returns [`Readiness::Ready`], and that is the point rather than an
-/// oversight: no macOS configuration this build can reach is mountable. The
-/// property is asserted directly, over every machine state — including the ones
-/// the machine running the tests does not have.
+/// It **can** now return [`Readiness::Ready`], which it never used to, and the
+/// change is the whole of this commit's macOS half: the refusal it replaced was
+/// about a binding configuration, not about the machine. What it must never do is
+/// blame something the observation shows is fine — see
+/// [`a_loaded_extension_is_never_blamed`](tests::a_loaded_extension_is_never_blamed),
+/// which is the regression the module was written for and is unchanged.
 #[must_use]
 pub fn decide_macos(macfuse: &Macfuse) -> Readiness {
-    // Reported separately from the incompatibility below, because "not
-    // installed" and "installed but unreachable" call for completely different
-    // actions, and conflating them is how the previous message misled.
+    // Checked first, because its absence makes everything below irrelevant, and
+    // reported on its own because "not installed" and "installed but not loaded"
+    // call for completely different actions.
     if !macfuse.installed {
         return Readiness::Unavailable {
             reason: "macFUSE is not installed, and this build has no other macOS \
                      filesystem backend"
                 .to_string(),
-            remedy: MACOS_UNSUPPORTED_REMEDY.to_string(),
+            remedy: MACOS_MISSING_REMEDY.to_string(),
         };
     }
 
-    let major = macfuse
-        .version
-        .as_deref()
-        .and_then(|v| v.split('.').next())
-        .and_then(|major| major.parse::<u32>().ok());
-
-    // Everything below is a refusal. It is stated as one rather than attempted,
-    // because attempting it produces an errno that cannot be told apart from a
-    // genuine misconfiguration — which is the trap this module exists to close.
-    Readiness::Unavailable {
-        reason: match (&macfuse.version, major) {
-            (Some(v), Some(major)) if major > FUSER_SUPPORTED_MACFUSE_MAJOR => format!(
-                "mounting on macOS is not supported by this build: macFUSE {v} is \
-                 installed, and the Rust FUSE binding this build uses mounts only \
-                 against macFUSE {FUSER_SUPPORTED_MACFUSE_MAJOR}.x"
+    // The device node is the kernel side. Its absence is the one macOS case where
+    // System Settings really is the answer — and saying so is only safe because
+    // this branch is reached *only* when no device node exists.
+    if !macfuse.loaded {
+        return Readiness::Unavailable {
+            reason: format!(
+                "macFUSE is installed{} but its kernel extension is not loaded, so \
+                 there is no device to mount through",
+                macfuse
+                    .version
+                    .as_deref()
+                    .map_or(String::new(), |version| format!(" ({version})"))
             ),
-            (Some(v), _) => format!(
-                "mounting on macOS is not supported by this build (macFUSE {v} \
-                 installed{})",
-                if macfuse.loaded {
-                    ", kernel extension loaded"
-                } else {
-                    ", kernel extension not loaded"
-                }
-            ),
-            _ => "mounting on macOS is not supported by this build".to_string(),
-        },
-        remedy: format!(
-            "{}{MACOS_UNSUPPORTED_REMEDY}",
-            if macfuse.loaded {
-                "The macFUSE kernel extension IS loaded and approved — that is not the \
-                 problem, and no amount of re-approving it will help. The binding \
-                 cannot drive this macFUSE generation: a filesystem with no options \
-                 at all fails the same way. "
-            } else {
-                ""
-            }
-        ),
+            remedy: "A macFUSE system extension has to be allowed once, in System \
+                     Settings > General > Login Items & Extensions, and the machine \
+                     restarted before it loads. Once it has, /dev/macfuse0 exists and \
+                     this check passes."
+                .to_string(),
+        };
     }
+
+    // Installed and loaded, but the program that performs the mount is missing.
+    // A partial installation, and the only remedy is to put it back.
+    if !macfuse.helper {
+        return Readiness::Unavailable {
+            reason: format!(
+                "macFUSE's mount helper is missing from {MOUNT_MACFUSE_HELPER}, so \
+                 nothing can attach a filesystem"
+            ),
+            remedy: "The kernel extension IS loaded — that half is fine — but the \
+                     setuid helper that performs the mount is not where macFUSE \
+                     installs it. Reinstall macFUSE to restore it. mount(2) is \
+                     root-only on macOS, so there is no way around that program."
+                .to_string(),
+        };
+    }
+
+    Readiness::Ready
 }
 
-/// What a macOS user should actually do. Named because it is repeated.
-const MACOS_UNSUPPORTED_REMEDY: &str = "Mount on Linux, where the FUSE path this build uses works natively and needs \
-     no kernel extension. macOS support is tracked as `PLAN.md` §15's kext-free \
-     backends — fuse-t (NFS loopback) and FSKit — which are the right target \
-     precisely because Apple keeps narrowing what a kernel extension may do.";
+/// What a macOS user with no macFUSE should do.
+///
+/// Names the kext-free backends `PLAN.md` §15 prefers as well as macFUSE, because
+/// somebody deciding whether to install a kernel extension deserves to know that
+/// it is this build's only option today and not its preferred one.
+const MACOS_MISSING_REMEDY: &str = "Install macFUSE (https://macfuse.io) and allow its system extension when \
+     macOS asks. It is a kernel extension, which is why `PLAN.md` §15 prefers \
+     FSKit and fuse-t — neither has a Rust binding yet, so macFUSE is what this \
+     build can attach through today.";
 
 /// macFUSE's installed version, if it can be read.
 fn installed_version() -> Option<String> {
@@ -304,12 +326,18 @@ mod tests {
     use super::*;
 
     /// A described macFUSE installation, so each test states only what it varies.
-    fn macfuse(installed: bool, loaded: bool, version: Option<&str>) -> Macfuse {
+    fn macfuse(installed: bool, loaded: bool, helper: bool, version: Option<&str>) -> Macfuse {
         Macfuse {
             installed,
             loaded,
+            helper,
             version: version.map(str::to_string),
         }
+    }
+
+    /// A complete, working macFUSE — the machine this build now mounts on.
+    fn working() -> Macfuse {
+        macfuse(true, true, true, Some("5.3.3"))
     }
 
     /// The two halves of a refusal, or a failure naming the unexpected `Ready`.
@@ -392,44 +420,73 @@ mod tests {
         }
     }
 
+    #[test]
+    fn the_macos_observation_agrees_with_the_filesystem_it_looked_at() {
+        // The same rule for the macFUSE half: report what is there. On Linux
+        // none of the three paths exists, which is a state worth exercising —
+        // it is the one a container has, and it must describe an uninstalled
+        // machine rather than fail.
+        let observed = Macfuse::observe();
+        assert_eq!(observed.installed, Path::new(MACFUSE_BUNDLE).exists());
+        assert_eq!(observed.loaded, Path::new(MACFUSE_DEVICE).exists());
+        assert_eq!(observed.helper, Path::new(MOUNT_MACFUSE_HELPER).exists());
+        if cfg!(target_os = "macos") {
+            assert_eq!(check(), decide_macos(&observed));
+        }
+    }
+
     // ── The macOS decision, on every platform ───────────────────────────────
 
     #[test]
-    fn macos_never_claims_to_be_ready() {
-        // Stated as a test rather than a comment because the day this changes —
-        // a fuse-t backend, or a fuser release that reaches macFUSE 5 — the
-        // change must be deliberate, and this test is what makes it so.
+    fn a_working_macfuse_is_ready_and_the_change_from_never_is_deliberate() {
+        // This test replaces `macos_never_claims_to_be_ready`, which existed so
+        // that the day macOS became mountable the change would have to be made
+        // on purpose. This is that change, made on purpose: `fuser` is built
+        // with `macos-no-mount` and `super::macfuse` performs the mount through
+        // macFUSE's own setuid helper, so a machine with the extension loaded
+        // and the helper present really can mount.
         //
-        // It used to be `#[cfg(target_os = "macos")]`, so it never ran where the
-        // gates run. Every machine state is enumerated here instead, which is
-        // strictly more than the single state a macOS runner could have offered.
+        // Whole machine states are enumerated rather than the one this host
+        // happens to be, which is strictly more than a macOS runner could offer.
+        assert_eq!(decide_macos(&working()), Readiness::Ready);
+        // Ready is earned by all three, and by nothing less. Any missing piece
+        // is a refusal, whatever the other two say.
         for installed in [false, true] {
             for loaded in [false, true] {
-                for version in [None, Some("4.5.0"), Some("5.0.3"), Some("not-a-version")] {
-                    let described = macfuse(installed, loaded, version);
-                    assert_ne!(
-                        decide_macos(&described),
-                        Readiness::Ready,
-                        "macOS must not report Ready for {described:?}"
+                for helper in [false, true] {
+                    let described = macfuse(installed, loaded, helper, Some("5.3.3"));
+                    assert_eq!(
+                        decide_macos(&described) == Readiness::Ready,
+                        installed && loaded && helper,
+                        "the verdict does not match the machine: {described:?}"
                     );
                 }
             }
+        }
+        // The version is a label on a message, never a gate. A macFUSE that does
+        // not say what it is still mounts, and refusing over an unreadable plist
+        // would be inventing a problem out of a missing string.
+        for version in [None, Some("4.5.0"), Some("not-a-version")] {
+            let mut described = working();
+            described.version = version.map(str::to_string);
+            assert_eq!(decide_macos(&described), Readiness::Ready, "{described:?}");
         }
     }
 
     #[test]
     fn a_loaded_extension_is_never_blamed() {
-        // The regression this module was written for. When the kernel extension
-        // is loaded, the message must say so and must not send the reader to
-        // System Settings — that advice cost an operator two reboots and a
-        // boot-security downgrade for a problem it could not have fixed.
+        // The regression this module was written for, and it survives the macOS
+        // backend becoming real. When the kernel extension is loaded, no message
+        // may send the reader to System Settings — that advice cost an operator
+        // two reboots and a boot-security downgrade for a problem it could not
+        // have fixed.
         //
-        // This test used to be `#[cfg(target_os = "macos")]` *and* to return
-        // early when `/dev/macfuse0` was absent, so on the one platform where it
-        // compiled it could still pass having asserted nothing. The loaded
-        // machine is now described rather than required.
-        for version in [None, Some("4.5.0"), Some("5.0.3")] {
-            let (_, remedy) = unavailable(decide_macos(&macfuse(true, true, version)));
+        // The machine that is loaded *and still cannot mount* is now the one
+        // whose helper is missing, so that is the state described here. It is
+        // also asserted across every remaining refusal, so the rule cannot be
+        // reintroduced through a branch added later.
+        for version in [None, Some("4.5.0"), Some("5.3.3")] {
+            let (_, remedy) = unavailable(decide_macos(&macfuse(true, true, false, version)));
             assert!(
                 remedy.contains("IS loaded"),
                 "a loaded extension must be acknowledged: {remedy}"
@@ -439,44 +496,60 @@ mod tests {
                 "must not send the reader to approve something already approved: {remedy}"
             );
         }
+
+        for installed in [false, true] {
+            for helper in [false, true] {
+                let described = macfuse(installed, true, helper, Some("5.3.3"));
+                if let Readiness::Unavailable { remedy, .. } = decide_macos(&described) {
+                    assert!(
+                        !remedy.contains("System Settings"),
+                        "a loaded extension was blamed for {described:?}: {remedy}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
     fn an_unloaded_extension_is_not_told_that_it_is_loaded() {
-        // The inverse, which the old test could not reach at all: where the
-        // extension is genuinely not loaded, the remedy must not open by
-        // insisting that it is.
-        let (reason, remedy) = unavailable(decide_macos(&macfuse(true, false, Some("5.0.3"))));
+        // The inverse: where the extension genuinely is not loaded, the remedy
+        // must not open by insisting that it is — and this is the one macOS case
+        // where System Settings really is the answer, which is only safe to say
+        // because the branch is reached solely when no device node exists.
+        let (reason, remedy) =
+            unavailable(decide_macos(&macfuse(true, false, true, Some("5.3.3"))));
         assert!(!remedy.contains("IS loaded"), "{remedy}");
-        assert!(reason.contains("5.0.3"), "{reason}");
-    }
-
-    #[test]
-    fn an_absent_macfuse_is_reported_as_absent_rather_than_as_incompatible() {
-        // The two states call for different actions — install it, versus stop
-        // trying on this platform — and the message that conflated them is what
-        // sent an operator to re-approve a kernel extension they did not have.
-        let (reason, _) = unavailable(decide_macos(&macfuse(false, false, None)));
-        assert!(reason.contains("not installed"), "{reason}");
-        assert!(!reason.contains("binding"), "{reason}");
-    }
-
-    #[test]
-    fn a_macfuse_the_binding_cannot_drive_says_which_generation_it_can() {
-        // A 5.x install is refused by *version*, and the supported major is
-        // named so the reader can tell what would work.
-        let (reason, _) = unavailable(decide_macos(&macfuse(true, true, Some("5.0.3"))));
-        assert!(reason.contains("macFUSE 5.0.3"), "{reason}");
+        assert!(reason.contains("5.3.3"), "{reason}");
         assert!(
-            reason.contains(&FUSER_SUPPORTED_MACFUSE_MAJOR.to_string()),
-            "{reason}"
+            remedy.contains("System Settings"),
+            "an extension that really is unapproved needs the one step that helps: {remedy}"
         );
+    }
 
-        // A version this build cannot parse must not be presented as though the
-        // major had been compared: it falls back to the general refusal.
-        let (reason, _) = unavailable(decide_macos(&macfuse(true, false, Some("weird"))));
-        assert!(reason.contains("macFUSE weird"), "{reason}");
-        assert!(!reason.contains("mounts only"), "{reason}");
+    #[test]
+    fn an_absent_macfuse_is_reported_as_absent_rather_than_as_unapproved() {
+        // The two states call for different actions — install it, versus approve
+        // what is installed — and the message that conflated them is what sent
+        // an operator to re-approve a kernel extension they did not have.
+        let (reason, remedy) = unavailable(decide_macos(&macfuse(false, false, false, None)));
+        assert!(reason.contains("not installed"), "{reason}");
+        assert!(
+            !remedy.contains("System Settings"),
+            "nothing to approve on a machine with no macFUSE: {remedy}"
+        );
+        assert!(remedy.contains("macfuse.io"), "{remedy}");
+    }
+
+    #[test]
+    fn a_missing_mount_helper_is_named_rather_than_left_to_an_errno() {
+        // The macOS counterpart of the missing `fusermount3` case. mount(2) is
+        // root-only here, so the setuid helper is not an optimisation — without
+        // it nothing can attach, and finding that out from a spawn failure would
+        // be the guess-afterwards this module exists to stop.
+        let (reason, remedy) =
+            unavailable(decide_macos(&macfuse(true, true, false, Some("5.3.3"))));
+        assert!(reason.contains(MOUNT_MACFUSE_HELPER), "{reason}");
+        assert!(remedy.contains("Reinstall macFUSE"), "{remedy}");
     }
 
     // ── The plist scan, which is just string work ───────────────────────────

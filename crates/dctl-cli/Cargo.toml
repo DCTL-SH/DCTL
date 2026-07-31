@@ -72,8 +72,48 @@ unicode-normalization = "0.1"
 # into a state where `crate::mount` is compiled without a kernel interface behind
 # it; the target gate makes "this platform has no mount" a fact of the build, and
 # `commands::mount` answers it with a refusal naming WinFSP (`PLAN.md` §15).
-[target.'cfg(any(target_os = "linux", target_os = "macos"))'.dependencies]
+#
+# Linux takes fuser's pure-Rust mount path: no C library at build time, only
+# `fusermount3` at run time. See the workspace table for the reasoning.
+[target.'cfg(target_os = "linux")'.dependencies]
 fuser = { workspace = true }
+
+# macOS takes the same crate with its mount implementation switched *off*.
+#
+# `macos-no-mount` compiles fuser's protocol and session layers with no mount at
+# all, so nothing links libfuse and `fuser::Session::from_fd` takes a descriptor
+# the caller mounted. That is what `crate::mount::macfuse` supplies, and it is the
+# only configuration that reaches macFUSE 5: fuser's default macOS path
+# pkg-config-probes for macFUSE 4 and calls `fuse_mount_compat25`, which fails
+# against 5.x. Verify the selection from the build rather than from this file —
+# `target/debug/build/fuser-*/output` must contain
+# `fuser_mount_impl="macos-no-mount"` and no `rustc-link-lib=fuse`.
+#
+# `macfuse-4-compat` comes with it because it is the ABI the installed macFUSE
+# speaks: it adds the `flags` and `padding` fields macFUSE 4 and later carry in
+# `fuse_rename_in`. fuser's own build script sets this cfg on every other macOS
+# path, so leaving it off would make `macos-no-mount` the one configuration that
+# parses a rename request with the wrong layout. The mount refuses every rename
+# with `EROFS`, but it has to *parse* one first in order to refuse it.
+[target.'cfg(target_os = "macos")'.dependencies]
+fuser = { workspace = true, features = ["macos-no-mount", "macfuse-4-compat"] }
+# Two syscall crates for three calls, and the split is `#![forbid(unsafe_code)]`
+# deciding it rather than taste.
+#
+# `rustix` carries the descriptor handover — `socketpair` and `recvmsg` with an
+# `SCM_RIGHTS` control message — because its ancillary API hands a received
+# descriptor back as an **`OwnedFd`**. `nix` hands the same thing back as a bare
+# integer, and turning that into something owned needs `OwnedFd::from_raw_fd`,
+# which is `unsafe`. Saving a dependency is not worth an `unsafe` block around
+# the one descriptor whose ownership decides whether a macFUSE mount instance
+# outlives its server.
+#
+# `nix` carries `unmount(2)`, because `rustix`'s mount module is Linux-only and
+# BSD `unmount` is not in it. Both crates are already in the graph — `rustix`
+# through `tempfile`, `nix` as `fuser`'s own, at the same version — so neither is
+# a new compilation unit.
+rustix = { workspace = true }
+nix = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

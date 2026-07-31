@@ -4080,6 +4080,199 @@ pub const MOUNT_FS_NAME: &str = "dctl";
 /// it is a vault, and it is read-only.
 pub const MOUNT_FS_SUBTYPE: &str = "dctl-vault-ro";
 
+// ─── macOS: the macFUSE mount handshake ─────────────────────────────────────
+//
+// Everything below is measured against **macFUSE 5.3.3** on this machine rather
+// than taken from documentation, because macFUSE has no published mount ABI and
+// its helper *silently ignores an option it does not know* — `subtype=…`,
+// `auto_unmount` and a deliberately invented `no_such_option` were all accepted
+// and did nothing. An option that is wrong therefore produces a working mount
+// that is missing a property somebody thinks it has, which is `PLAN.md` §6's
+// misreport with a filesystem's authority behind it. That is why the translation
+// in [`mount::macfuse::options`](crate::mount::macfuse::options) is exhaustive
+// and refuses rather than passing strings through, and why each value here is
+// stated with what was observed.
+//
+// Several of these carry `#[allow(dead_code)]`,
+// and the attribute is the *point* rather than a concession. The modules that
+// consume them — the option translation and the helper invocation — are compiled
+// on every platform on purpose, because they are decisions about strings and the
+// gates run on Linux; a table that could only be tested on one developer's laptop
+// would protect nothing (`mount::preflight`'s docs make the same argument at
+// length). Off macOS those modules have tests but no production caller, which is
+// precisely what dead-code analysis reports. The alternative — hiding them behind
+// a target gate — is the version this project has already been burned by.
+
+/// macFUSE's setuid mount helper — the only way an unprivileged process can
+/// attach a FUSE filesystem on macOS.
+///
+/// `mount(2)` on macOS is root-only and its macFUSE argument struct is private,
+/// so *every* macOS FUSE binding goes through this program: macFUSE's own
+/// libfuse, `hanwen/go-fuse`, and the `cgofuse` layer that rclone is built with
+/// on this platform. The helper is `-rwsr-xr-x root:wheel`; it prints "This
+/// program is not meant to be called directly. The macFUSE library calls it",
+/// which is precisely the role DCTL takes here.
+pub const MOUNT_MACFUSE_HELPER: &str =
+    "/Library/Filesystems/macfuse.fs/Contents/Resources/mount_macfuse";
+
+/// Marks the invocation as coming from a FUSE library rather than a shell.
+///
+/// The helper refuses to do anything useful without it. Its *value* is unused
+/// and libfuse sets it empty; the variable's presence is the signal.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MOUNT_MACFUSE_ENV_CALL_BY_LIB: &str = "_FUSE_CALL_BY_LIB";
+
+/// The path of the process that will serve the filesystem.
+///
+/// macFUSE records it against the mount and uses it for the volume icon and for
+/// its own diagnostics, so a mount whose daemon path is missing is one an
+/// operator cannot trace back to a program.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MOUNT_MACFUSE_ENV_DAEMON_PATH: &str = "_FUSE_DAEMON_PATH";
+
+/// The descriptor number the helper sends `/dev/macfuseN` back over.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MOUNT_MACFUSE_ENV_COMMFD: &str = "_FUSE_COMMFD";
+
+/// The version of that handover protocol.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MOUNT_MACFUSE_ENV_COMMVERS: &str = "_FUSE_COMMVERS";
+
+/// Handover protocol 2: the descriptor arrives as an `SCM_RIGHTS` control
+/// message on a `SOCK_STREAM` socket, alongside one byte of payload.
+///
+/// The only version any current binding uses, and the one measured working here.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MOUNT_MACFUSE_COMMVERS: &str = "2";
+
+/// Which descriptor of the child the socket is placed on.
+///
+/// **Zero — the child's stdin — and that is a deliberate choice with a reason.**
+/// The conventional number is 3, but putting an arbitrary descriptor at 3 in a
+/// child requires `pre_exec`, which is `unsafe`, and this crate is
+/// `#![forbid(unsafe_code)]`. `Stdio::from(OwnedFd)` is safe, stable, and puts
+/// the socket at 0 — and the helper reads the number out of
+/// [`MOUNT_MACFUSE_ENV_COMMFD`] rather than assuming it, so 0 is as good as 3.
+/// The helper never reads stdin for anything else, and stdout and stderr stay
+/// free to carry its diagnostics.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MOUNT_MACFUSE_COMMFD: &str = "0";
+
+/// Largest single I/O the kernel may ask the filesystem for, in bytes.
+///
+/// macFUSE ignores the `max_write` negotiated in `FUSE_INIT` and uses this
+/// instead, so leaving it out would take macFUSE's own default rather than a
+/// value chosen against the session's receive buffer. One mebibyte: the value
+/// both maintained Go bindings pass to this helper, and comfortably inside the
+/// 16 MiB buffer `fuser`'s session loop reads into — so the kernel can never
+/// present a request the loop is unable to read in one call.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MOUNT_MACFUSE_IOSIZE: u32 = 1024 * 1024;
+
+/// How long macFUSE waits for the filesystem to answer one call before it
+/// declares the volume dead, in seconds.
+///
+/// macFUSE's own default is a minute, which is **shorter than DCTL's idle
+/// deadline** ([`DEFAULT_TIMEOUT_SECS`], five minutes): a read waiting on a slow
+/// provider would be killed by macFUSE first, and the operator would be left
+/// with a wedged mountpoint instead of the diagnosed `EIO` DCTL's own deadline
+/// produces. So the watchdog is set to twice whatever DCTL is willing to wait,
+/// which keeps DCTL's timeout the one that fires and leaves macFUSE's as what it
+/// should be — the last resort against a daemon that has stopped answering at
+/// all.
+///
+/// Not a constant but a function of the resolved `--timeout`, because a user who
+/// raises that has raised exactly the number this must stay ahead of.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[must_use]
+pub const fn mount_macfuse_daemon_timeout(idle_seconds: u64) -> u64 {
+    match idle_seconds {
+        // `--timeout 0` disables DCTL's own deadline. macFUSE has no such
+        // setting — the watchdog always runs — so the honest translation is the
+        // longest value it accepts rather than a pretence that it is off.
+        DEADLINE_DISABLED => MOUNT_MACFUSE_DAEMON_TIMEOUT_MAX,
+        seconds => match seconds.checked_mul(2) {
+            Some(doubled) if doubled < MOUNT_MACFUSE_DAEMON_TIMEOUT_MAX => doubled,
+            _ => MOUNT_MACFUSE_DAEMON_TIMEOUT_MAX,
+        },
+    }
+}
+
+/// The `--timeout` value that means "no idle deadline".
+///
+/// Named here rather than written as `0` at the comparison, because the whole
+/// meaning of the branch above rests on it. Mirrors
+/// `dctl_store::deadline::constants::DISABLED_SECONDS`, and the equality is
+/// asserted in this module's tests rather than trusted.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const DEADLINE_DISABLED: u64 = 0;
+
+/// Longest `daemon_timeout` this build will ask macFUSE for, in seconds.
+///
+/// Ten minutes. macFUSE accepts larger numbers **without complaint** — 3600 was
+/// taken here — and there is no way to read back what it settled on, so a value
+/// beyond what the kernel honours would be a setting that looks applied and is
+/// not. Ten minutes is twice the longest deadline DCTL applies by default and is
+/// the ceiling macFUSE's own documentation gives for this option.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MOUNT_MACFUSE_DAEMON_TIMEOUT_MAX: u64 = 600;
+
+/// Longest filesystem type name macFUSE will accept, in characters.
+///
+/// Six, and it is a hard refusal rather than a truncation: `fstypename=dctlro7`
+/// produced `mount_macfuse: fstypename can be at most 6 characters` and the
+/// mount never happened. It is why macOS cannot use [`MOUNT_FS_SUBTYPE`].
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MOUNT_MACFUSE_TYPE_NAME_MAX: usize = 6;
+
+/// Filesystem subtype reported in the mount table on macOS.
+///
+/// [`MOUNT_FS_SUBTYPE`] is thirteen characters and macFUSE allows six
+/// ([`MOUNT_MACFUSE_TYPE_NAME_MAX`]), so the long name cannot be used and a
+/// silently dropped one would leave the mount showing as a bare `macfuse` volume
+/// indistinguishable from any other. This is the same statement inside the
+/// budget: `mount` prints `macfuse_dctlro`, which still says whose it is and
+/// that it is read-only.
+pub const MOUNT_MACFUSE_TYPE_NAME: &str = "dctlro";
+
+/// How long to wait for macFUSE's helper to report the outcome of the mount.
+///
+/// The helper does not exit when it has *asked* for a mount; it exits when the
+/// filesystem has answered `FUSE_INIT` and the kernel's opening `statfs`, which
+/// is what makes its exit status a statement that the mount is live rather than
+/// requested. Waiting for it is therefore how `mount` earns the word "mounted".
+///
+/// Thirty seconds: the whole exchange takes milliseconds on an idle machine, and
+/// the only thing that legitimately stretches it is DCTL's own `statfs` reading
+/// a vault index over a slow link. A helper still running after thirty seconds is
+/// not going to finish, and continuing to wait would be a `dctl mount` that never
+/// returns and never says why.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MOUNT_MACFUSE_ATTACH_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// How often that wait re-checks whether the helper has finished.
+///
+/// The same ten milliseconds as [`MOUNT_SHUTDOWN_POLL`], for the same reason: it
+/// is below human perception and costs nothing against the grace period. Spelled
+/// separately because the two bound different things and one of them changing is
+/// not a reason for the other to.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub const MOUNT_MACFUSE_ATTACH_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// What to tell someone whose macFUSE mount was refused by the helper.
+///
+/// The helper's own message is quoted ahead of this, because it is specific and
+/// usually correct. What it cannot say is the one thing an operator on macOS has
+/// to know: a mount left attached with nothing serving it wedges that directory
+/// until the machine is rebooted, so the *first* thing to check is that no
+/// earlier attempt is still holding the path.
+pub const MOUNT_MACFUSE_HELPER_HINT: &str = "macFUSE's mount helper refused. If an earlier mount at this path was killed \
+     rather than unmounted, macOS can leave the directory attached to a \
+     filesystem with no server behind it: check `mount` for the path, run \
+     `umount <mountpoint>` if it is listed, and mount somewhere else if it is \
+     not. Otherwise the message above is macFUSE's own and names what it \
+     objected to.";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Removal family — `delete`, `deletefile`, `purge`, `rmdir`, `rmdirs`, `cleanup`
 // ─────────────────────────────────────────────────────────────────────────────
@@ -6365,5 +6558,107 @@ mod tests {
                 .iter()
                 .all(|digit| digit.is_ascii_digit() || digit.is_ascii_lowercase())
         );
+    }
+
+    // ── macOS: the macFUSE mount handshake ──────────────────────────────────
+    //
+    // Run on every platform. macFUSE's limits are properties of a program that
+    // is not on the Linux gate machine, which is exactly why they are written
+    // down as constants and asserted here rather than discovered at run time by
+    // the one developer who has a Mac.
+
+    #[test]
+    fn the_macos_type_name_fits_what_macfuse_accepts() {
+        // Measured: `fstypename=dctlro7` is refused with "fstypename can be at
+        // most 6 characters" and the mount never happens. A type name over the
+        // limit is therefore not a cosmetic problem — it is a mount that does
+        // not attach.
+        assert!(
+            MOUNT_MACFUSE_TYPE_NAME.len() <= MOUNT_MACFUSE_TYPE_NAME_MAX,
+            "macFUSE would refuse the mount outright: {MOUNT_MACFUSE_TYPE_NAME}"
+        );
+        // And the reason there are two names at all: the portable one does not
+        // fit, so a build that used it on macOS would not mount.
+        assert!(
+            MOUNT_FS_SUBTYPE.len() > MOUNT_MACFUSE_TYPE_NAME_MAX,
+            "if the portable subtype now fits, the macOS-only name is redundant"
+        );
+        // A comma would be read by the helper as the end of the option, so the
+        // rest would be parsed as an option of its own — and macFUSE ignores an
+        // option it does not know without saying so.
+        assert!(!MOUNT_MACFUSE_TYPE_NAME.contains(','));
+        assert!(!MOUNT_FS_NAME.contains(','));
+    }
+
+    #[test]
+    fn the_macfuse_watchdog_always_outlasts_dctls_own_deadline() {
+        // The failure this exists to prevent: macFUSE's default is 60 seconds,
+        // DCTL waits 300, so a read on a slow provider was killed by macFUSE
+        // first and left a wedged mountpoint instead of a diagnosed EIO.
+        assert!(mount_macfuse_daemon_timeout(DEFAULT_TIMEOUT_SECS) > DEFAULT_TIMEOUT_SECS);
+        for idle in [1_u64, 30, 60, DEFAULT_TIMEOUT_SECS, 299] {
+            assert!(
+                mount_macfuse_daemon_timeout(idle) > idle,
+                "macFUSE would fire before DCTL at --timeout {idle}"
+            );
+        }
+        // Beyond the point where doubling still fits, the answer is the ceiling
+        // rather than an overflow or a number macFUSE will not honour.
+        assert_eq!(
+            mount_macfuse_daemon_timeout(u64::MAX),
+            MOUNT_MACFUSE_DAEMON_TIMEOUT_MAX
+        );
+        assert_eq!(
+            mount_macfuse_daemon_timeout(MOUNT_MACFUSE_DAEMON_TIMEOUT_MAX),
+            MOUNT_MACFUSE_DAEMON_TIMEOUT_MAX
+        );
+        // `--timeout 0` disables DCTL's deadline; macFUSE's watchdog cannot be
+        // disabled, so the honest answer is the longest it will take.
+        assert_eq!(
+            mount_macfuse_daemon_timeout(DEADLINE_DISABLED),
+            MOUNT_MACFUSE_DAEMON_TIMEOUT_MAX
+        );
+        assert_eq!(
+            DEADLINE_DISABLED,
+            dctl_store::deadline::constants::DISABLED_SECONDS,
+            "the disabled sentinel drifted from the deadline layer's own"
+        );
+    }
+
+    #[test]
+    fn the_helper_handover_is_described_the_way_the_helper_reads_it() {
+        // Every one of these is a string the setuid helper parses. A typo does
+        // not fail loudly — macFUSE accepted an invented `no_such_option`
+        // without complaint — so the shape is pinned here.
+        assert!(MOUNT_MACFUSE_HELPER.ends_with("mount_macfuse"));
+        assert!(std::path::Path::new(MOUNT_MACFUSE_HELPER).is_absolute());
+        for variable in [
+            MOUNT_MACFUSE_ENV_CALL_BY_LIB,
+            MOUNT_MACFUSE_ENV_DAEMON_PATH,
+            MOUNT_MACFUSE_ENV_COMMFD,
+            MOUNT_MACFUSE_ENV_COMMVERS,
+        ] {
+            assert!(
+                variable.starts_with("_FUSE_"),
+                "macFUSE 5 reads the underscored names: {variable}"
+            );
+        }
+        // The descriptor number and the protocol version are passed as text and
+        // must parse as the numbers the helper expects.
+        assert_eq!(MOUNT_MACFUSE_COMMFD.parse::<i32>(), Ok(0));
+        assert_eq!(MOUNT_MACFUSE_COMMVERS.parse::<u32>(), Ok(2));
+    }
+
+    #[test]
+    fn the_attach_wait_is_bounded_and_polls_faster_than_it_waits() {
+        // A `dctl mount` that neither returns nor explains is worse than one
+        // that refuses, so the wait for the helper's verdict has an end.
+        assert!(MOUNT_MACFUSE_ATTACH_POLL < MOUNT_MACFUSE_ATTACH_GRACE);
+        assert!(!MOUNT_MACFUSE_ATTACH_GRACE.is_zero());
+        // The hint sends the reader to the check that actually helps on macOS,
+        // and never to the System Settings advice that cost an operator two
+        // reboots for an extension that was already loaded.
+        assert!(MOUNT_MACFUSE_HELPER_HINT.contains("umount"));
+        assert!(!MOUNT_MACFUSE_HELPER_HINT.contains("System Settings"));
     }
 }

@@ -58,8 +58,8 @@ use std::time::Instant;
 use fuser::{Config, MountOption, Session, SessionUnmounter};
 
 use crate::constants::{
-    MOUNT_DETACH_GRACE, MOUNT_FS_NAME, MOUNT_FS_SUBTYPE, MOUNT_SHUTDOWN_GRACE, MOUNT_SHUTDOWN_POLL,
-    MOUNT_STALE_HINT,
+    MOUNT_DETACH_GRACE, MOUNT_FS_NAME, MOUNT_FS_SUBTYPE, MOUNT_MACFUSE_HELPER_HINT,
+    MOUNT_MACFUSE_TYPE_NAME, MOUNT_SHUTDOWN_GRACE, MOUNT_SHUTDOWN_POLL, MOUNT_STALE_HINT,
 };
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -97,6 +97,68 @@ impl Detacher for SessionUnmounter {
     fn unmount(&mut self) -> io::Result<()> {
         Self::unmount(self)
     }
+}
+
+/// What still has to be observed before a mount may be called live.
+///
+/// A second one-implementation-per-platform trait beside [`Detacher`], and for a
+/// reason that is macFUSE's rather than this module's: on Linux the mount syscall
+/// has already returned its verdict by the time a session exists, while on macOS
+/// the verdict belongs to a helper process that **does not reach its `mount(2)`
+/// until the filesystem has answered `FUSE_INIT` and the kernel's opening
+/// `statfs`**. The confirmation therefore has to happen after the session loop is
+/// running, which is a step Linux does not have and a `cfg` at the call site
+/// would hide.
+///
+/// Written as a trait so [`mount`] has one body on both platforms. The
+/// alternative — two `#[cfg]` copies of the whole function — is how the two come
+/// to differ in something neither reviewer noticed.
+pub trait Confirm: Send {
+    /// Prove the filesystem is attached.
+    ///
+    /// # Errors
+    /// Whatever the platform's mount path reported. An error means the mount did
+    /// not happen, never that it half happened.
+    fn confirm(self: Box<Self>) -> io::Result<()>;
+}
+
+/// The confirmation for a platform whose mount call has already answered.
+///
+/// Linux's `mount(2)` returns before `Session::new` does, so by the time there is
+/// anything to confirm there is nothing left to ask.
+///
+/// Compiled off macOS, where nothing constructs it — and under `cfg(test)`
+/// everywhere, so the one thing worth pinning about it (that it does not refuse)
+/// is asserted on the machine that cannot otherwise reach it.
+#[cfg(any(not(target_os = "macos"), test))]
+pub struct Immediate;
+
+#[cfg(any(not(target_os = "macos"), test))]
+impl Confirm for Immediate {
+    fn confirm(self: Box<Self>) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+impl Confirm for super::macfuse::helper::Helper {
+    fn confirm(self: Box<Self>) -> io::Result<()> {
+        Self::confirm(*self)
+    }
+}
+
+/// A filesystem attached to a mountpoint and talking to the kernel, plus the two
+/// things only the platform knows how to do with it.
+///
+/// The one shape both platforms produce, so that everything after the attach —
+/// starting the thread, confirming, undoing a failure — is written once.
+struct Attachment {
+    /// Talking to the kernel; not yet running.
+    session: Session<VaultFs>,
+    /// Takes the mount down again.
+    detacher: Box<dyn Detacher>,
+    /// Establishes that it really went up. See [`Confirm`].
+    confirm: Box<dyn Confirm>,
 }
 
 /// A filesystem currently attached to a mountpoint.
@@ -146,19 +208,21 @@ pub fn mount(
     let filesystem = VaultFs::new(source, config.clone(), mountpoint, runtime);
     let session_config = session_config(&config);
 
-    // Taken before `Session::new`, because after it the mountpoint reports the
+    // Taken before the attach, because afterwards the mountpoint reports the
     // filesystem's device and the original is unrecoverable. This one number is
     // what lets the unmount be confirmed rather than assumed; a failure to read
     // it is not worth refusing a mount over, and is carried as `None`.
     let bare_device = super::detached::device_of(mountpoint).ok();
 
-    // `Session::new` performs the mount syscall *and* the kernel handshake, both
-    // of which block. It runs here rather than on the session thread so that a
-    // failure to mount is an ordinary error return with the platform's own
-    // message, rather than something to be recovered from a thread.
-    let mut session = Session::new(filesystem, mountpoint, &session_config)
-        .map_err(|error| mount_failed(mountpoint, &error))?;
-    let unmounter = session.unmount_callable();
+    // The attach performs the mount *and* the kernel handshake, both of which
+    // block. It runs here rather than on the session thread so that a failure is
+    // an ordinary error return with the platform's own message, rather than
+    // something to be recovered from a thread.
+    let Attachment {
+        session,
+        detacher,
+        confirm,
+    } = attach(filesystem, mountpoint, &session_config, &config)?;
 
     // Not a Tokio worker and not `spawn_blocking`: see the module docs. The
     // callbacks reach the runtime through the handle they were built with.
@@ -172,23 +236,107 @@ pub fn mount(
             )
         });
 
-    match thread {
-        Ok(session) => Ok(Mounted {
+    let mounted = match thread {
+        Ok(session) => Mounted {
             session: Some(session),
-            unmounter: Box::new(unmounter),
+            unmounter: detacher,
             mountpoint: mountpoint.to_path_buf(),
             bare_device,
             detached: false,
-        }),
+        },
         Err(error) => {
-            // The mount succeeded and the thread did not. Leaving it attached
-            // with nothing serving it is the exact failure this module exists to
-            // prevent, so it is undone before the error is returned.
-            let mut unmounter = unmounter;
-            let _ = unmounter.unmount();
-            Err(error)
+            // The attach succeeded and the thread did not. Leaving a filesystem
+            // attached with nothing serving it is the exact failure this module
+            // exists to prevent, so it is undone before the error is returned.
+            let mut detacher = detacher;
+            let _ = detacher.unmount();
+            return Err(error);
         }
-    }
+    };
+
+    // Now, and not before: on macOS the mount is not proven until the helper
+    // says so, and the helper cannot say so until the loop above is answering.
+    // `mounted` is built first so that a failure here takes the mountpoint down
+    // through its `Drop` rather than leaving one behind.
+    confirm
+        .confirm()
+        .map_err(|error| attach_failed(mountpoint, &error))?;
+
+    Ok(mounted)
+}
+
+/// Attach `filesystem` at `mountpoint`, however this platform does that.
+///
+/// Linux: `fuser`'s pure-Rust mount path, unchanged — `/dev/fuse` and the
+/// `mount(2)` it performs itself, with `fusermount3` only for the detach.
+///
+/// # Errors
+/// [`ExitCode::FatalError`] when the FUSE layer refuses. The message quotes what
+/// the layer said, because "operation not permitted" and "no such file or
+/// directory" from a mount attempt mean very different things and only the second
+/// is about the mountpoint.
+#[cfg(not(target_os = "macos"))]
+fn attach(
+    filesystem: VaultFs,
+    mountpoint: &Path,
+    session_config: &Config,
+    _config: &MountConfig,
+) -> Result<Attachment> {
+    let mut session = Session::new(filesystem, mountpoint, session_config)
+        .map_err(|error| attach_failed(mountpoint, &error))?;
+    let unmounter = session.unmount_callable();
+    Ok(Attachment {
+        session,
+        detacher: Box::new(unmounter),
+        // `mount(2)` has already returned by the time `Session::new` does.
+        confirm: Box::new(Immediate),
+    })
+}
+
+/// The same, on macOS, where the mount is a handshake DCTL performs itself.
+///
+/// `fuser` is compiled here with its `macos-no-mount` feature — protocol and
+/// session layers, no mount implementation — and [`super::macfuse`] supplies the
+/// mounted descriptor. See that module for why, and for the ordering that makes
+/// [`Confirm`] a separate step on this platform.
+///
+/// # Errors
+/// [`ExitCode::Usage`] for an option macFUSE cannot be asked for;
+/// [`ExitCode::FatalError`] where macFUSE refused or the kernel handshake failed.
+#[cfg(target_os = "macos")]
+fn attach(
+    filesystem: VaultFs,
+    mountpoint: &Path,
+    session_config: &Config,
+    config: &MountConfig,
+) -> Result<Attachment> {
+    let attached = super::macfuse::attach(mountpoint, session_config, config.idle_seconds)?;
+
+    // `from_fd` performs the FUSE handshake and nothing else: the descriptor it
+    // is given is already mounted. The request is waiting on it by the time this
+    // runs — macFUSE queues `FUSE_INIT` before the helper hands the descriptor
+    // over — so this does not block on a mount that has not happened.
+    let session = Session::from_fd(
+        filesystem,
+        attached.device,
+        session_config.acl,
+        session_config.clone(),
+    )
+    .map_err(|error| {
+        // The handshake failed with a mount already attached. Detaching before
+        // the error returns is the same rule as everywhere else in this module:
+        // no path out leaves a filesystem attached with nothing serving it, and
+        // on macOS that state survives until the machine reboots.
+        let mut detacher = attached.detacher.clone();
+        let _ = detacher.unmount();
+        attach_failed(mountpoint, &error)
+    })?;
+
+    Ok(Attachment {
+        session,
+        detacher: Box::new(attached.detacher),
+        confirm: Box::new(attached.helper),
+    })
 }
 
 impl Mounted {
@@ -215,7 +363,10 @@ impl Mounted {
 
         // Detached before anything is reported, on every branch: a message about
         // an unmount that has not happened yet is a message that can be wrong.
-        self.detach();
+        // The outcome is discarded here on purpose — `confirm_detached` below
+        // asks the mountpoint itself, which is the answer every message is
+        // conditioned on.
+        let _ = self.detach();
 
         // The order here is load-bearing and was got wrong once already.
         //
@@ -293,12 +444,35 @@ impl Mounted {
     }
 
     /// Detach the filesystem, at most once.
-    fn detach(&mut self) {
+    ///
+    /// Returns what the attempt amounted to. The callers ignore it — `Drop` has
+    /// nowhere to put it and [`Mounted::run`] asks the mountpoint itself a moment
+    /// later — and it is returned anyway so the *decision* can be asserted. The
+    /// same reasoning as [`Detacher`]: a message this function chooses between is
+    /// a message worth a test, and a `tracing` call is not observable from one.
+    fn detach(&mut self) -> Detachment {
         if self.detached {
-            return;
+            return Detachment::AlreadyDone;
         }
         self.detached = true;
         if let Err(error) = self.unmounter.unmount() {
+            // A failed unmount is not the same thing as a mountpoint still
+            // carrying a filesystem, and only the second is worth alarming
+            // anybody about. The case that made the difference visible: somebody
+            // runs `umount` from another terminal, the session ends, and this
+            // runs anyway — on macOS `unmount(2)` then answers `EINVAL`, because
+            // there is nothing left at the path. Printing "could not detach the
+            // filesystem" there tells an operator their mountpoint is stuck when
+            // it is free, which is `PLAN.md` §6's misreport pointing the other
+            // way. So the mountpoint is looked at before the warning is written,
+            // by the same predicate that decides the word "unmounted".
+            if super::detached::is_detached(&self.mountpoint, self.bare_device) {
+                tracing::debug!(
+                    mountpoint = %self.mountpoint.display(),
+                    "the mountpoint was already free when the detach was attempted: {error}"
+                );
+                return Detachment::AlreadyFree;
+            }
             // Reported rather than swallowed: a mountpoint that is still attached
             // after the process exits is the failure worth being loud about, and
             // this is the only place that knows it happened.
@@ -306,7 +480,9 @@ impl Mounted {
                 mountpoint = %self.mountpoint.display(),
                 "could not detach the filesystem: {error}"
             );
+            return Detachment::Failed;
         }
+        Detachment::Requested
     }
 
     /// Wait, briefly, for the mountpoint to actually come free.
@@ -388,7 +564,7 @@ impl Drop for Mounted {
     /// resolves in favour of the signal. Without this, that path would leave the
     /// mountpoint attached with the process exiting.
     fn drop(&mut self) {
-        self.detach();
+        let _ = self.detach();
     }
 }
 
@@ -425,6 +601,26 @@ fn signal_outcome(mountpoint: &Path, detached: bool) -> CliError {
     .with_hint(MOUNT_STALE_HINT)
 }
 
+/// What one call to [`Mounted::detach`] amounted to.
+///
+/// Three outcomes and not two, because the middle one is the whole reason this
+/// type exists: an unmount that *failed* over a mountpoint that is *already free*
+/// is not a problem, and reporting it as one tells an operator their directory is
+/// stuck when it is fine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Detachment {
+    /// The kernel accepted the request. Whether the mountpoint is free is a
+    /// separate question, answered by [`super::detached`].
+    Requested,
+    /// The unmount failed and the mountpoint is free anyway — somebody else took
+    /// it down first. Nothing to report.
+    AlreadyFree,
+    /// The unmount failed and the mountpoint is still carrying a filesystem.
+    Failed,
+    /// A detach had already been performed; this call did nothing.
+    AlreadyDone,
+}
+
 /// How a mount ended.
 enum Ended {
     /// The session loop returned, with whatever it returned.
@@ -457,7 +653,20 @@ fn session_config(config: &MountConfig) -> Config {
         // the kernel to maintain them would be asking for writes that must fail.
         MountOption::NoAtime,
         MountOption::FSName(MOUNT_FS_NAME.to_string()),
-        MountOption::Subtype(MOUNT_FS_SUBTYPE.to_string()),
+        // Two spellings of the same statement, because the platforms disagree
+        // about how long it may be. macFUSE refuses a filesystem type name over
+        // six characters *outright* — the mount does not happen — so the
+        // thirteen-character portable one cannot be used there. The short form
+        // still says whose the mount is and that it is read-only, which is what
+        // the field is for; `mount(8)` prints it as `macfuse_dctlro`.
+        MountOption::Subtype(
+            if cfg!(target_os = "macos") {
+                MOUNT_MACFUSE_TYPE_NAME
+            } else {
+                MOUNT_FS_SUBTYPE
+            }
+            .to_string(),
+        ),
     ];
 
     if let Some(name) = &config.volume_name {
@@ -481,7 +690,16 @@ fn session_config(config: &MountConfig) -> Config {
     // every mount would route every mount through that helper and keep one alive
     // for the life of the mount. That is a trade worth making on purpose rather
     // than as a side effect of a docs fix.
-    if config.acl != fuser::SessionACL::Owner {
+    //
+    // **macOS has no such option at all**, and this is not the place to pretend
+    // otherwise. macFUSE was passed `auto_unmount` on this machine and mounted
+    // happily without it doing anything, which is why `macfuse::options` refuses
+    // the option rather than forwarding it — and why it is not asked for here.
+    // The consequence is worth stating plainly: on macOS a `SIGKILL` leaves the
+    // mountpoint attached whatever the ACL, and that directory stays unusable
+    // until the machine is rebooted. Every signal a process can handle is still
+    // covered.
+    if config.acl != fuser::SessionACL::Owner && !cfg!(target_os = "macos") {
         options.push(MountOption::AutoUnmount);
     }
 
@@ -547,21 +765,24 @@ fn join_result(handle: JoinHandle<io::Result<()>>) -> io::Result<()> {
 /// The refusal when the platform's FUSE layer will not attach the filesystem.
 ///
 /// Quotes what the layer said, because the answers are not interchangeable:
-/// "operation not permitted" is a missing `user_allow_other` or a kernel
-/// extension that was never approved, while "no such file or directory" from a
-/// *mount* usually means the FUSE helper itself is not installed. Only the
-/// second is worth checking the mountpoint for, and a message that flattened
-/// them would send half of its readers to the wrong place.
-fn mount_failed(mountpoint: &Path, error: &io::Error) -> CliError {
+/// "operation not permitted" is a missing `user_allow_other`, while "no such file
+/// or directory" from a *mount* usually means the FUSE helper itself is not
+/// installed. Only the second is worth checking the mountpoint for, and a message
+/// that flattened them would send half of its readers to the wrong place.
+///
+/// The macOS hint used to send the reader to System Settings to approve macFUSE's
+/// system extension. That advice is now **wrong by construction**:
+/// [`preflight`](super::preflight) refuses before this is reached unless a
+/// macFUSE device node exists, and a device node existing is proof the extension
+/// is loaded and approved. Sending somebody to re-approve it cost an operator two
+/// reboots and a boot-security downgrade once; it is not repeated here.
+fn attach_failed(mountpoint: &Path, error: &io::Error) -> CliError {
     CliError::new(
         ExitCode::FatalError,
         format!("cannot mount at '{}': {error}", mountpoint.display()),
     )
     .with_hint(if cfg!(target_os = "macos") {
-        "This mount needs macFUSE, and macFUSE needs its system extension to be \
-         allowed in System Settings > General > Login Items & Extensions the \
-         first time it loads. Check that it is installed and enabled, then try \
-         again."
+        MOUNT_MACFUSE_HELPER_HINT
     } else {
         "This mount needs FUSE: check that the fuse3 package and its `fusermount3` \
          helper are installed, that /dev/fuse exists, and — for --allow-other — \
@@ -583,6 +804,7 @@ mod tests {
             read_ahead: 0,
             acl: SessionACL::Owner,
             volume_name: None,
+            idle_seconds: crate::constants::DEFAULT_TIMEOUT_SECS,
             no_modtime: false,
         }
     }
@@ -627,10 +849,29 @@ mod tests {
             &session.mount_options,
             &MountOption::FSName(MOUNT_FS_NAME.to_string())
         ));
+
+        // The subtype has two spellings because the platforms disagree about how
+        // long one may be: macFUSE refuses a filesystem type name over six
+        // characters *outright*, so the portable thirteen-character one cannot be
+        // used there. Both still name the tool and say read-only, which is the
+        // property this test is about.
+        let subtype = if cfg!(target_os = "macos") {
+            MOUNT_MACFUSE_TYPE_NAME
+        } else {
+            MOUNT_FS_SUBTYPE
+        };
         assert!(has(
             &session.mount_options,
-            &MountOption::Subtype(MOUNT_FS_SUBTYPE.to_string())
+            &MountOption::Subtype(subtype.to_string())
         ));
+        assert!(
+            subtype.contains("dctl"),
+            "the tool must be named: {subtype}"
+        );
+        assert!(
+            subtype.contains("ro"),
+            "and that it is read-only: {subtype}"
+        );
     }
 
     #[test]
@@ -671,12 +912,22 @@ mod tests {
             &MountOption::AutoUnmount
         ));
 
+        // Widening the ACL asks for it on Linux and must **not** on macOS, where
+        // macFUSE has no such option. Measured: macFUSE accepts `auto_unmount`
+        // and does nothing with it, so asking would promise a `--allow-other`
+        // user a cleanup after `SIGKILL` that does not happen — and on macOS the
+        // mountpoint that is left behind stays unusable until the machine
+        // reboots. `macfuse::options` refuses the option for the same reason, so
+        // the two would disagree if this were ever switched back on.
         let mut shared = config();
         shared.acl = SessionACL::All;
-        assert!(has(
-            &session_config(&shared).mount_options,
-            &MountOption::AutoUnmount
-        ));
+        assert_eq!(
+            has(
+                &session_config(&shared).mount_options,
+                &MountOption::AutoUnmount
+            ),
+            !cfg!(target_os = "macos")
+        );
     }
 
     #[test]
@@ -711,13 +962,44 @@ mod tests {
     fn a_mount_failure_names_the_mountpoint_and_what_the_layer_said() {
         // "Operation not permitted" and "no such file or directory" mean very
         // different things here, and only one of them is about the mountpoint.
-        let error = mount_failed(
+        let error = attach_failed(
             Path::new("/mnt/vault"),
             &io::Error::from(io::ErrorKind::PermissionDenied),
         );
         assert_eq!(error.code(), ExitCode::FatalError);
         assert!(error.message().contains("/mnt/vault"));
         assert!(error.hint().is_some());
+    }
+
+    #[test]
+    fn a_mount_failure_never_sends_a_macos_reader_to_approve_a_loaded_extension() {
+        // The hint here used to say the macFUSE system extension needed allowing
+        // in System Settings. `preflight` refuses before this is reached unless a
+        // macFUSE device node exists, and a device node existing is proof the
+        // extension is loaded — so on every machine that gets this far, that
+        // advice is wrong. It cost an operator two reboots and a boot-security
+        // downgrade once, which is why it is asserted against rather than merely
+        // deleted.
+        let error = attach_failed(
+            Path::new("/mnt/vault"),
+            &io::Error::from(io::ErrorKind::PermissionDenied),
+        );
+        assert!(
+            !error
+                .hint()
+                .is_some_and(|hint| hint.contains("System Settings")),
+            "{:?}",
+            error.hint()
+        );
+    }
+
+    #[test]
+    fn a_platform_whose_mount_call_has_already_answered_confirms_immediately() {
+        // The Linux half of `Confirm`. Asserted rather than assumed, because the
+        // whole point of the trait is that `mount` calls `confirm` on every
+        // platform and only one of them has anything to do — and a version that
+        // returned an error here would refuse every Linux mount.
+        assert!(Box::new(Immediate).confirm().is_ok());
     }
 
     /// A detacher that does nothing, for a `Mounted` with no filesystem behind
@@ -729,6 +1011,16 @@ mod tests {
     impl Detacher for NoDetach {
         fn unmount(&mut self) -> io::Result<()> {
             Ok(())
+        }
+    }
+
+    /// A detacher whose unmount always fails, the way `unmount(2)` does on macOS
+    /// when there is nothing attached at the path.
+    struct FailDetach(io::ErrorKind);
+
+    impl Detacher for FailDetach {
+        fn unmount(&mut self) -> io::Result<()> {
+            Err(io::Error::from(self.0))
         }
     }
 
@@ -786,6 +1078,44 @@ mod tests {
             .run()
             .await
             .expect("a mountpoint back on its own device is unmounted");
+    }
+
+    #[test]
+    fn a_failed_unmount_over_a_free_mountpoint_is_not_reported_as_a_stuck_one() {
+        // Measured on macOS: run `umount` from another terminal, the session
+        // ends, and `Mounted::run` detaches anyway — at which point `unmount(2)`
+        // answers EINVAL, because there is nothing at the path any more. The
+        // command exited 0 and printed
+        //   WARN could not detach the filesystem: Invalid argument
+        // which tells an operator their mountpoint is stuck when it is free. That
+        // is `PLAN.md` §6's misreport pointing the other way, and it is exactly
+        // as bad: the whole value of the warning is that it means something.
+        //
+        // Described rather than mounted: the detacher always fails, and the only
+        // thing that changes between the two halves is what the mountpoint says.
+        let dir = tempfile::tempdir().unwrap();
+        let real = super::super::detached::device_of(dir.path()).unwrap();
+
+        let mut free = unattached(dir.path(), Some(real));
+        free.unmounter = Box::new(FailDetach(io::ErrorKind::InvalidInput));
+        assert_eq!(
+            free.detach(),
+            Detachment::AlreadyFree,
+            "an unmount that failed over a mountpoint on its own device took nothing down \
+             because there was nothing left to take down"
+        );
+
+        // The other half, so the rule is not "never warn": told the mountpoint is
+        // still on some other device, the same failure is a real one.
+        let mut stuck = unattached(dir.path(), Some(real.wrapping_add(1)));
+        stuck.unmounter = Box::new(FailDetach(io::ErrorKind::ResourceBusy));
+        assert_eq!(stuck.detach(), Detachment::Failed);
+
+        // And a detach that the kernel accepted is neither.
+        let mut ordinary = unattached(dir.path(), Some(real));
+        assert_eq!(ordinary.detach(), Detachment::Requested);
+        // Twice is a no-op: `run` detaches and `Drop` runs afterwards.
+        assert_eq!(ordinary.detach(), Detachment::AlreadyDone);
     }
 
     #[test]

@@ -22,7 +22,7 @@
 //! | OS | Backend | State |
 //! |----|---------|-------|
 //! | Linux | **FUSE3** via `fuser` | Works. Pure-Rust mount path, so no `libfuse` at build time; `fusermount3` at run time. |
-//! | macOS | **macFUSE** via `fuser` | Works. FSKit and fuse-t are §15's later kext-free options — neither has a Rust binding, so macFUSE is what this build can offer, and it says so rather than claiming the others. |
+//! | macOS | **macFUSE**, mounted by [`crate::mount::macfuse`] | Works — verified against macFUSE 5.3.3 on macOS 27. `fuser` is built with `macos-no-mount`, which compiles its protocol and session layers with no mount implementation, and DCTL performs the mount itself through macFUSE's setuid helper. FSKit and fuse-t are §15's later kext-free options — neither has a Rust binding, so macFUSE is what this build can offer, and it says so rather than claiming the others. |
 //! | Windows | **WinFSP** | Not built. WinFSP is not a FUSE binding and cannot be reached through `fuser`; the command refuses by name. |
 //!
 //! The preference order lives in [`backend`], the checks in [`mountpoint`], and
