@@ -242,7 +242,7 @@ pub fn build(
         "building backend"
     );
 
-    let built = assemble(&ProcessVars, target, links, deadlines)?;
+    let built = assemble(&ProcessVars, target, links, deadlines.clone())?;
     // Metered, then made to try again. The order matters and is not arbitrary: a
     // retried request really did cross the link on every attempt, so the meter
     // has to sit *underneath* the retry layer and be charged once per attempt.
@@ -260,7 +260,14 @@ pub fn build(
     // backends, because this is where `--timeout` is multiplied: six attempts
     // per request, several distinct requests per copy. A retry layer that did
     // not know when the run had to be over is the whole of `HANDOVER.md` §32.9.
-    let backend = dctl_store::Retrying::wrap(built.metered(meter), deadlines.run);
+    //
+    // The stall counter goes with it, and it is the *same cell* the backend
+    // underneath was given — `Deadlines` clones the handle, never the count.
+    // That is the whole of the §36.5 fix: the second factor above, "several
+    // distinct requests per copy", stops multiplying only if every layer that
+    // retries counts into one place.
+    let backend =
+        dctl_store::Retrying::wrap(built.metered(meter), deadlines.run, deadlines.stall.clone());
     Ok(dctl_store::Guarded::wrap(backend, target.container()))
 }
 

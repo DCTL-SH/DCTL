@@ -81,7 +81,7 @@ impl B2Backend {
         deadlines: Deadlines,
     ) -> Result<Self> {
         // Hybrid post-quantum TLS (falls back to classical if the server lacks it).
-        let client = crate::tls::post_quantum_client(deadlines)?;
+        let client = crate::tls::post_quantum_client(&deadlines)?;
         Ok(Self {
             client,
             creds,
@@ -217,8 +217,11 @@ impl B2Backend {
     }
 
     async fn authorize(&self) -> Result<AuthState> {
-        let parsed: AuthorizeResponse =
-            retry::run(constants::EP_AUTHORIZE, self.deadlines.run, |_| async {
+        let parsed: AuthorizeResponse = retry::run(
+            constants::EP_AUTHORIZE,
+            self.deadlines.run,
+            &self.deadlines.stall,
+            |_| async {
                 let watch = self.deadlines.watch();
                 let response = watch
                     .guard(
@@ -231,8 +234,9 @@ impl B2Backend {
                     .map_err(stalled_attempt)?
                     .map_err(transport_attempt)?;
                 read_json(Answered { watch, response }).await
-            })
-            .await?;
+            },
+        )
+        .await?;
         // `recommendedPartSize` is read and reported and is deliberately not what
         // parts are cut at — `constants::DEFAULT_PART_SIZE` says why a figure that
         // *is* the process's peak memory must not arrive from the network. Both
@@ -277,8 +281,11 @@ impl B2Backend {
             constants::API_PREFIX,
             constants::EP_LIST_BUCKETS
         );
-        let listed: ListBucketsResponse =
-            retry::run(constants::EP_LIST_BUCKETS, self.deadlines.run, |_| async {
+        let listed: ListBucketsResponse = retry::run(
+            constants::EP_LIST_BUCKETS,
+            self.deadlines.run,
+            &self.deadlines.stall,
+            |_| async {
                 let watch = self.deadlines.watch();
                 let response = watch
                     .guard(
@@ -295,8 +302,9 @@ impl B2Backend {
                     .map_err(stalled_attempt)?
                     .map_err(transport_attempt)?;
                 read_json(Answered { watch, response }).await
-            })
-            .await?;
+            },
+        )
+        .await?;
         listed
             .buckets
             .into_iter()
@@ -323,10 +331,15 @@ impl B2Backend {
         endpoint: &'static str,
         body: serde_json::Value,
     ) -> Result<T> {
-        retry::run(endpoint, self.deadlines.run, |_| async {
-            let auth = self.auth().await.map_err(Attempt::transport)?;
-            self.post_json_once(&auth, endpoint, body.clone()).await
-        })
+        retry::run(
+            endpoint,
+            self.deadlines.run,
+            &self.deadlines.stall,
+            |_| async {
+                let auth = self.auth().await.map_err(Attempt::transport)?;
+                self.post_json_once(&auth, endpoint, body.clone()).await
+            },
+        )
         .await
     }
 

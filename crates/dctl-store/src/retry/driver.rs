@@ -22,11 +22,12 @@
 use std::future::Future;
 use std::time::Duration;
 
-use crate::deadline::RunDeadline;
+use crate::deadline::{RunDeadline, RunStall};
 use crate::error::{Result, StoreError};
 
 use super::backoff;
 use super::classify::{Verdict, verdict};
+use super::observed::Reach;
 use super::policy::RetryPolicy;
 
 /// Run `operation` until it succeeds, until another attempt cannot help, until
@@ -53,14 +54,36 @@ use super::policy::RetryPolicy;
 /// what a run with no `--max-duration` gets — the same default rclone has
 /// (`fs/config.go:361`).
 ///
+/// # `stall` is why `--timeout` is a bound and not a factor
+///
+/// `deadline` ends a run that is *taking too long*, which is a different
+/// question from a run that is *getting nothing back*. §36.5 measured the second
+/// one: `--timeout 30` against a black-holed B2 returned the shell after
+/// **288.7 s**, and 46.3 s and 136.6 s on two other runs of the same command
+/// against the same fault, because the cost was
+/// `--timeout × attempts × distinct requests` and the last factor depended on
+/// which request the cut landed on.
+///
+/// `stall` counts, **for the whole run**, attempts that got no answer at all,
+/// and it is reset by any answer. Its limit is not smaller than this schedule's
+/// own length, so an operation's retries are never cut short — the first request
+/// to meet a dead link spends its whole schedule exactly as before. What it
+/// stops is the *next* request repeating the discovery. See
+/// [`crate::deadline::stall`].
+///
+/// [`RunStall::unbounded`] restores exactly the previous behaviour, and is what
+/// `--timeout 0` gets.
+///
 /// # Errors
 /// The last failure, wrapped in [`StoreError::Retried`] when more than one
-/// attempt was made; or [`StoreError::RunDeadline`] when the run's window closed
-/// before another attempt could be made.
+/// attempt was made; [`StoreError::RunDeadline`] when the run's window closed
+/// before another attempt could be made; or [`StoreError::Stalled`] when the run
+/// had already stopped asking.
 pub async fn run<T, A, F>(
     op: &'static str,
     policy: RetryPolicy,
     deadline: RunDeadline,
+    stall: &RunStall,
     mut attempt: A,
 ) -> Result<T>
 where
@@ -88,8 +111,28 @@ where
             return Err(exceeded.into_store_error());
         }
 
+        // Asked in the same place and for the same reason: a run that has
+        // stopped asking must not open the next connection either. The two are
+        // separate questions — one is "your window closed", the other is
+        // "nothing has answered for a whole schedule" — and they send an
+        // operator to opposite places, so they stay two checks and two errors
+        // rather than one merged "gave up".
+        if let Some(stalled) = stall.exhausted() {
+            tracing::debug!(
+                op,
+                attempts = stalled.attempts,
+                "the run has had no answer for a whole schedule; no further attempt was made"
+            );
+            return Err(stalled.into_store_error());
+        }
+
         match attempt(number).await {
             Ok(value) => {
+                // Any success is an answer, and it puts the whole count back.
+                // Before the attempt count is even looked at, because a run that
+                // is working must be able to survive an unlimited number of
+                // isolated silences.
+                stall.answered();
                 if number > 1 {
                     tracing::info!(
                         op,
@@ -102,6 +145,21 @@ where
             }
             Err(error) => {
                 let observed = super::observed::Observed::of(&error);
+                match observed.reach {
+                    Reach::Silent => {
+                        stall.unanswered();
+                    }
+                    Reach::Answered => stall.answered(),
+                    // Neither. This failure says nothing about whether the far
+                    // end is there — a budget a lower layer already spent, an
+                    // unclassified backend string — so the run's count is left
+                    // exactly as it was. Clearing here is the defect a live B2
+                    // run found: B2's inner schedule counts six silences and
+                    // hands up `Retried(Backend(..))`, which read as an answer
+                    // and reset the count to zero at the moment the bound
+                    // should have fired. See `super::observed::Reach`.
+                    Reach::Unknown => {}
+                }
                 match verdict(&observed, number, waited, &policy) {
                     Verdict::Never => {
                         tracing::debug!(
@@ -173,6 +231,7 @@ fn record(error: StoreError, attempts: u32) -> StoreError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::deadline::constants::UNANSWERED_ATTEMPT_LIMIT;
     use std::sync::atomic::{AtomicU32, Ordering};
 
     /// A policy that retries as usual but never actually waits, so the suite
@@ -195,13 +254,303 @@ mod tests {
         }
     }
 
+    /// A failure where **nothing came back** — the shape a black-holed route
+    /// produces, and the only shape this run-level counter counts.
+    fn silence() -> StoreError {
+        StoreError::Transport {
+            backend: "b2",
+            detail: "no data moved for 30s (--timeout 30s)".to_string(),
+        }
+    }
+
+    /// The stall a run with `--timeout 30` gets.
+    fn stall() -> RunStall {
+        RunStall::from_idle(Some(Duration::from_secs(30)))
+    }
+
+    /// One operation against a link that answers nothing, counting the attempts
+    /// it really made.
+    async fn silent_operation(stall: &RunStall, calls: &AtomicU32) -> StoreError {
+        run("test", instant(), RunDeadline::unbounded(), stall, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(silence()) }
+        })
+        .await
+        .expect_err("nothing answers")
+    }
+
+    // ── the run's own silence ────────────────────────────────────────────
+    //
+    // §36.5: `--timeout 30` against a black-holed B2 returned the shell after
+    // **288.7 s**, and 46.3 s and 136.6 s on two other runs of the same command
+    // against the same fault. The flag was exact every time and the run was not
+    // bounded by it, because the cost was `--timeout × attempts × DISTINCT
+    // REQUESTS` and the last factor is unbounded. Every test below is about
+    // that third factor.
+
+    #[tokio::test]
+    async fn a_second_request_does_not_repeat_the_first_ones_silence() {
+        // The defect, stated as small as it goes. Two operations, one run, a
+        // link that answers nothing: before this counter existed the second
+        // operation spent a whole fresh schedule discovering what the first had
+        // already established — and so did the third, and every request after
+        // it, which is why the measured cost depended on how many requests the
+        // copy had left to make rather than on the operator's flag.
+        let stall = stall();
+        let first = AtomicU32::new(0);
+        let error = silent_operation(&stall, &first).await;
+        assert_eq!(
+            first.load(Ordering::SeqCst),
+            instant().max_attempts,
+            "the FIRST operation must still spend its whole schedule: this bound \
+             is a change in what a run does, never in what one request does"
+        );
+        assert!(matches!(error, StoreError::Retried { .. }));
+
+        let second = AtomicU32::new(0);
+        let error = silent_operation(&stall, &second).await;
+        assert_eq!(
+            second.load(Ordering::SeqCst),
+            0,
+            "the run had already had no answer for a whole schedule and must not \
+             have opened another connection"
+        );
+        assert!(
+            matches!(error, StoreError::Stalled { .. }),
+            "and it must say so rather than reporting the link failing again: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_report_multiplies_out_to_the_operators_own_flag() {
+        // What `--help` now states is `--timeout × attempts`. The error is where
+        // an operator checks that arithmetic against the number they set, so
+        // both halves of it have to be in the message.
+        let stall = stall();
+        let calls = AtomicU32::new(0);
+        let _ = silent_operation(&stall, &calls).await;
+        let error = silent_operation(&stall, &AtomicU32::new(0)).await;
+        let StoreError::Stalled { attempts, idle } = error else {
+            panic!("expected a stall, got {error}");
+        };
+        assert_eq!(attempts, stall.limit().expect("a bounded run"));
+        assert_eq!(idle, Duration::from_secs(30));
+        let rendered = StoreError::Stalled { attempts, idle }.to_string();
+        assert!(rendered.contains("--timeout 30s"), "{rendered}");
+        assert!(rendered.contains(&attempts.to_string()), "{rendered}");
+    }
+
+    #[tokio::test]
+    async fn a_flaky_link_never_accumulates_its_way_into_giving_up() {
+        // The direction that matters more, and the one a careless bound would
+        // fail: **consecutive**, never cumulative. This makes many times the
+        // limit's worth of unanswered attempts in total — a link that drops the
+        // first two attempts of every request and answers the third, which is a
+        // flaky route rather than a dead one — and the run must still be asking
+        // at the end.
+        let stall = stall();
+        let silences_per_request = instant().max_attempts - 1;
+        let requests = 10;
+        for _ in 0..requests {
+            let calls = AtomicU32::new(0);
+            let value = run("test", instant(), RunDeadline::unbounded(), &stall, |_| {
+                let seen = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if seen < silences_per_request {
+                        Err(silence())
+                    } else {
+                        Ok(seen)
+                    }
+                }
+            })
+            .await
+            .expect("the link answers in the end, every time");
+            assert_eq!(value, silences_per_request);
+            assert_eq!(
+                stall.count(),
+                0,
+                "an answer must put the whole count back, not decrement it"
+            );
+        }
+        // Far more silences than the limit, and not one of them consecutive
+        // enough to matter.
+        assert!(
+            requests * (silences_per_request - 1) > stall.limit().expect("bounded") * 2,
+            "the test has to make more silences than the limit for it to prove \
+             anything about accumulation"
+        );
+        assert_eq!(stall.exhausted(), None);
+    }
+
+    #[tokio::test]
+    async fn a_whole_schedule_of_silence_ends_the_run_even_though_retries_remain() {
+        // The cost of this bound, pinned rather than left to be discovered.
+        //
+        // One request's schedule is exactly the run's budget — that is what the
+        // compile-time rule in `deadline::constants` holds, and it is what makes
+        // the first request's behaviour identical to the build before this. The
+        // consequence is that a link which answers **nothing** for a whole
+        // schedule ends the run, where `--retries` would previously have
+        // repeated the file into the same silence. That is the 288.7 s being
+        // removed and not collateral: `--retries` keeps its meaning for every
+        // failure that has an *answer*, which is every other failure there is.
+        //
+        // `--timeout 0` is the documented escape, and
+        // `a_run_with_no_idle_deadline_is_never_stopped` is it.
+        let stall = stall();
+        let calls = AtomicU32::new(0);
+        let _ = silent_operation(&stall, &calls).await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            instant().max_attempts,
+            "the request itself is unaffected: it spends its whole schedule"
+        );
+
+        // What the file-level `--retries` loop would do next.
+        let again = AtomicU32::new(0);
+        let error = silent_operation(&stall, &again).await;
+        assert_eq!(again.load(Ordering::SeqCst), 0);
+        assert!(matches!(error, StoreError::Stalled { .. }), "{error}");
+    }
+
+    #[tokio::test]
+    async fn an_answer_that_is_a_refusal_is_still_an_answer() {
+        // A `503` is the provider talking. It is exactly the case retrying
+        // exists for, and counting it as silence would turn a busy bucket into a
+        // run that gives up — the false failure this counter must not introduce.
+        let stall = stall();
+        for _ in 0..4 {
+            let calls = AtomicU32::new(0);
+            let error = run("test", instant(), RunDeadline::unbounded(), &stall, |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), _>(busy()) }
+            })
+            .await
+            .expect_err("the bucket stays busy");
+            assert_eq!(calls.load(Ordering::SeqCst), instant().max_attempts);
+            assert!(!matches!(error, StoreError::Stalled { .. }), "{error}");
+        }
+        assert_eq!(stall.count(), 0, "every attempt was answered");
+    }
+
+    #[tokio::test]
+    async fn a_budget_a_lower_layer_already_spent_neither_counts_nor_clears() {
+        // **The defect a live run found and this file could not.** Every other
+        // test here hands the driver a `StoreError::Transport`, which is the
+        // shape a backend with no inner retry layer produces. B2 has one: its
+        // request-level schedule counts its own silences and then hands the
+        // exhausted failure up as `Retried` wrapping `Backend(String)` — an
+        // unclassified string, because that is what a `reqwest` transport error
+        // formats to there.
+        //
+        // With `Observed` carrying a two-state answer, "not silent" meant
+        // "answered", so this layer read that string as an answer and reset the
+        // run's count to **zero** every time the inner layer finished counting
+        // six. The bound never fired on B2 at all: a black-holed 160 MiB upload
+        // ran `b2_authorize_account`, `b2_list_buckets`, `b2_upload_part` and
+        // `b2_list_buckets` again, each spending a whole schedule, and exited 6
+        // after 116.5 s — which is §36.5's complaint with the fix installed.
+        //
+        // `Reach::Unknown` is the third state, and this is what it is for.
+        let stall = stall();
+        let already = StoreError::Retried {
+            attempts: 6,
+            source: Box::new(StoreError::Backend(
+                "error sending request for url (https://api003.backblazeb2.com/…)".into(),
+            )),
+        };
+        assert_eq!(
+            super::super::observed::Observed::of(&already).reach,
+            Reach::Unknown
+        );
+
+        // A count the inner layer legitimately earned...
+        for _ in 0..UNANSWERED_ATTEMPT_LIMIT {
+            stall.unanswered();
+        }
+        // ...must survive this layer seeing the exhausted failure travel past.
+        let error = run(
+            "test",
+            instant(),
+            RunDeadline::unbounded(),
+            &stall,
+            |_| async {
+                // Rebuilt per attempt rather than cloned: `StoreError` is not
+                // `Clone` (it holds an `io::Error`), and the closure is `FnMut`.
+                Err::<(), _>(StoreError::Retried {
+                    attempts: 6,
+                    source: Box::new(StoreError::Backend(
+                        "error sending request for url (https://api003.backblazeb2.com/…)".into(),
+                    )),
+                })
+            },
+        )
+        .await
+        .expect_err("the run has stopped asking");
+        assert!(
+            matches!(error, StoreError::Stalled { .. }),
+            "the count was cleared by a failure that said nothing: {error}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failure_from_the_far_end_clears_the_count_and_a_silence_does_not() {
+        // The three states, asserted directly rather than through a loop, so a
+        // variant reclassified by mistake is caught here and not by a live run.
+        use super::super::observed::Observed;
+        assert_eq!(Observed::of(&silence()).reach, Reach::Silent);
+        assert_eq!(Observed::of(&busy()).reach, Reach::Answered);
+        assert_eq!(
+            Observed::of(&StoreError::NotFound("a/b.bin".into())).reach,
+            Reach::Answered,
+            "a provider that said 'no such key' is a provider that is there"
+        );
+        assert_eq!(
+            Observed::of(&StoreError::Backend("something nobody classified".into())).reach,
+            Reach::Unknown,
+            "a string must not be allowed to decide either way"
+        );
+        assert_eq!(
+            Observed::of(&StoreError::RunDeadline {
+                limit: Duration::from_secs(30)
+            })
+            .reach,
+            Reach::Unknown,
+            "DCTL's own clock says nothing about the link"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_run_with_no_idle_deadline_is_never_stopped() {
+        // `--timeout 0` is "wait as long as it takes". An operator who said that
+        // has also said they want it asked again, and this is the control that
+        // proves the bound above is the flag rather than something unconditional.
+        let stall = RunStall::unbounded();
+        for _ in 0..6 {
+            let calls = AtomicU32::new(0);
+            let error = silent_operation(&stall, &calls).await;
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                instant().max_attempts,
+                "every request must still get its whole schedule"
+            );
+            assert!(!matches!(error, StoreError::Stalled { .. }), "{error}");
+        }
+    }
+
     #[tokio::test]
     async fn the_driver_returns_the_first_success_and_counts_its_attempts() {
         let calls = AtomicU32::new(0);
-        let value = run("test", instant(), RunDeadline::unbounded(), |number| {
-            let seen = calls.fetch_add(1, Ordering::SeqCst) + 1;
-            async move { if seen < 3 { Err(busy()) } else { Ok(number) } }
-        })
+        let value = run(
+            "test",
+            instant(),
+            RunDeadline::unbounded(),
+            &RunStall::unbounded(),
+            |number| {
+                let seen = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                async move { if seen < 3 { Err(busy()) } else { Ok(number) } }
+            },
+        )
         .await
         .expect("the third attempt succeeds");
 
@@ -215,17 +564,23 @@ mod tests {
         // claiming exhausted retries over a run that made one attempt. An error
         // that was never retried must carry no retry record at all.
         let calls = AtomicU32::new(0);
-        let error = run("test", instant(), RunDeadline::unbounded(), |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            async {
-                Err::<(), _>(StoreError::Provider {
-                    backend: "b2",
-                    status: 401,
-                    code: "bad_auth_token".to_string(),
-                    retry_after_secs: None,
-                })
-            }
-        })
+        let error = run(
+            "test",
+            instant(),
+            RunDeadline::unbounded(),
+            &RunStall::unbounded(),
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Err::<(), _>(StoreError::Provider {
+                        backend: "b2",
+                        status: 401,
+                        code: "bad_auth_token".to_string(),
+                        retry_after_secs: None,
+                    })
+                }
+            },
+        )
         .await
         .expect_err("a wrong key cannot succeed");
 
@@ -246,10 +601,16 @@ mod tests {
     async fn an_exhausted_budget_reports_the_number_of_attempts_it_really_made() {
         let policy = instant();
         let calls = AtomicU32::new(0);
-        let error = run("test", policy, RunDeadline::unbounded(), |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            async { Err::<(), _>(busy()) }
-        })
+        let error = run(
+            "test",
+            policy,
+            RunDeadline::unbounded(),
+            &RunStall::unbounded(),
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), _>(busy()) }
+            },
+        )
         .await
         .expect_err("a permanently busy provider cannot succeed");
 
@@ -268,15 +629,21 @@ mod tests {
         // that was actually made rather than becoming a product of two
         // schedules.
         let calls = AtomicU32::new(0);
-        let error = run("test", instant(), RunDeadline::unbounded(), |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            async {
-                Err::<(), _>(StoreError::Retried {
-                    attempts: 6,
-                    source: Box::new(busy()),
-                })
-            }
-        })
+        let error = run(
+            "test",
+            instant(),
+            RunDeadline::unbounded(),
+            &RunStall::unbounded(),
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Err::<(), _>(StoreError::Retried {
+                        attempts: 6,
+                        source: Box::new(busy()),
+                    })
+                }
+            },
+        )
         .await
         .expect_err("still busy");
 
@@ -291,6 +658,7 @@ mod tests {
             "test",
             RetryPolicy::none(),
             RunDeadline::unbounded(),
+            &RunStall::unbounded(),
             |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 async { Err::<(), _>(busy()) }
@@ -311,14 +679,20 @@ mod tests {
             ..RetryPolicy::network()
         };
         let started = std::time::Instant::now();
-        let _ = run("test", policy, RunDeadline::unbounded(), |_| async {
-            Err::<(), _>(StoreError::Provider {
-                backend: "s3",
-                status: 503,
-                code: "SlowDown".to_string(),
-                retry_after_secs: Some(1),
-            })
-        })
+        let _ = run(
+            "test",
+            policy,
+            RunDeadline::unbounded(),
+            &RunStall::unbounded(),
+            |_| async {
+                Err::<(), _>(StoreError::Provider {
+                    backend: "s3",
+                    status: 503,
+                    code: "SlowDown".to_string(),
+                    retry_after_secs: Some(1),
+                })
+            },
+        )
         .await;
         assert!(
             started.elapsed() >= Duration::from_millis(900),
@@ -361,6 +735,7 @@ mod tests {
             "test",
             patient(),
             RunDeadline::starting_now(Some(WINDOW)),
+            &RunStall::unbounded(),
             |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 async { Err::<(), _>(busy()) }
@@ -403,6 +778,7 @@ mod tests {
             "test",
             policy,
             RunDeadline::starting_now(Some(WINDOW)),
+            &RunStall::unbounded(),
             |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 async { Err::<(), _>(busy()) }
@@ -427,6 +803,7 @@ mod tests {
             "test",
             patient(),
             RunDeadline::starting_at(std::time::Instant::now() - WINDOW * 4, Some(WINDOW)),
+            &RunStall::unbounded(),
             |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 async { Ok::<(), StoreError>(()) }
@@ -453,6 +830,7 @@ mod tests {
             "test",
             instant(),
             RunDeadline::starting_now(Some(Duration::from_secs(600))),
+            &RunStall::unbounded(),
             |number| {
                 let seen = calls.fetch_add(1, Ordering::SeqCst) + 1;
                 async move { if seen < 3 { Err(busy()) } else { Ok(number) } }
@@ -471,14 +849,20 @@ mod tests {
         // cancelled by the window — it must be terminal. A `--max-duration`
         // classified as transient is the §32.9 defect wearing a new error type.
         let calls = AtomicU32::new(0);
-        let error = run("test", instant(), RunDeadline::unbounded(), |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            async {
-                Err::<(), _>(StoreError::RunDeadline {
-                    limit: Duration::from_secs(30),
-                })
-            }
-        })
+        let error = run(
+            "test",
+            instant(),
+            RunDeadline::unbounded(),
+            &RunStall::unbounded(),
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Err::<(), _>(StoreError::RunDeadline {
+                        limit: Duration::from_secs(30),
+                    })
+                }
+            },
+        )
         .await
         .expect_err("a closed window cannot re-open");
 

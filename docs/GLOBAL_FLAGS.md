@@ -537,22 +537,59 @@ flag (`fs/config.go:122`: *"IO idle timeout"*) and the reason its default is
 generous: a deadline that fires on a transfer which is succeeding destroys work,
 where one that fires late only costs you the difference.
 
-**It bounds one attempt, and it does not bound the run.** That sentence used to
-read *"the bound on the whole run is the product — roughly six times this number
-plus the backoff"*, and that was wrong twice over. It was wrong as arithmetic:
-the schedule runs once per **distinct request**, and one copy makes several —
-so a 160 MiB upload runs it for `b2_upload_part`, again for
-`b2_cancel_large_file` and again for `b2_list_buckets` — and `--retries`
-multiplies all of it. And it was wrong as a promise, because the number it
-offered was not a bound at all. Measured against live B2 with the route
-black-holed and `--retries 1`, `--timeout 30` reported its first failure at
-**30 s**, to the second, and the run had **not ended 943.6 s after the cut**.
-An `sftp:` copy under the same flags had not ended after **601 s**.
+**It bounds one attempt. What it costs a run whose link is GONE is a count and
+not a clock: six attempts in a row that get no answer end it**, after which the
+run stops asking and exits **28** (`link_silent`), without walking the files it
+had left. It is not exit 5: 5 means *retries exhausted*, and here they were not
+— the run stopped early, because a link answering nothing cannot be persuaded by
+asking again. `--retries` does not repeat a file into it, for the same reason.
 
-If you need the run to be over by a certain time, use
-[`--max-duration`](#--max-duration-duration). It is the only flag that bounds a
-run, and this one cannot be made to: an inactivity deadline that behaved like a
-stopwatch would kill every large transfer it is there to protect.
+In time those six attempts cost at most **`6 × --timeout`** when a transfer goes
+quiet — thirty minutes at the default, 180 seconds at `--timeout 30` — plus the
+retry schedule's own backoff (15.5 s deterministic, jittered). An attempt that
+cannot reach the host at all is bounded by `--contimeout` instead, and **on
+`sftp:` an abandoned dial costs that twice**, once waiting for it and once while
+the `ssh` it started is reaped. Measured against a black-holed route with
+`--timeout 30 --contimeout 30`, five repeats each: `b2:` ended **195.9 s** after
+the cut and `sftp:` **370.6 s** — same flags, same fault, and the difference is
+the dial. Keep `--contimeout` well under `--timeout`, as the defaults do, and the
+run's cost is the one `--timeout` states.
+
+The count is the **run's** and not each request's. It counts attempts that got no
+answer at all — not a status, not a protocol reply, not an errno — and **any**
+answer puts the whole count back to zero. Six in a row ends it.
+
+That product is a number now, and it was not before. The sentence here used to
+read *"the bound on the whole run is the product — roughly six times this number
+plus the backoff"*, which was wrong as arithmetic: the schedule ran once per
+**distinct request**, and one copy makes several — a 160 MiB upload runs it for
+`b2_upload_part`, again for `b2_cancel_large_file` and again for
+`b2_list_buckets` — and `--retries` multiplied all of it. The corrected sentence
+that replaced it said the product was not a number this flag could know, which
+was true and was the defect: measured against live B2 with the route
+black-holed, the *same command against the same fault* returned the shell at
+**46.3 s**, **136.6 s** and **288.7 s**, depending on which request the cut
+landed on. §32.9 measured **943.6 s** on an earlier build, and **601 s** on
+`sftp:`.
+
+Counting the run's unanswered attempts instead of each request's removes the
+factor. One request's own schedule is untouched — the limit is not smaller than
+the longest schedule any layer runs, and a compile-time rule holds that — so the
+first request to meet a dead link behaves exactly as it did before. It is the
+*second* request that is refused.
+
+**What this costs.** A link that answers nothing for a whole schedule ends the
+run, where `--retries` would previously have repeated the file into the same
+silence. `--retries` keeps its meaning for every failure that has an answer,
+which is every other failure there is. `--timeout 0` is the escape for an
+operator who really will wait as long as it takes.
+
+**It still does not bound a run that is healthy but slow**, and nothing here
+can: a transfer that is moving resets this on every frame, which is the entire
+point of an inactivity deadline. For a backup window use
+[`--max-duration`](#--max-duration-duration). An inactivity deadline that
+behaved like a stopwatch would kill every large transfer it is there to
+protect.
 
 Where it reaches, and how closely:
 
@@ -598,7 +635,9 @@ reach. That gap is what left a black-holed `sftp:` run alive **601 s** after a
 30 s deadline had fired: the session was discarded correctly, a replacement was
 dialled, and the replacement hung.
 
-Like `--timeout`, it bounds **one attempt** and not the run.
+Like `--timeout`, it bounds **one attempt**. An attempt that could not reach the
+host got no answer either, so it counts towards the same run-level limit
+`--timeout` describes: six in a row and the run stops asking.
 
 ### `--max-transfer SIZE`
 

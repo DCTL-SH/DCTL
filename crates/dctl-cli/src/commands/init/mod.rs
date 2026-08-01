@@ -173,7 +173,8 @@ pub async fn run(ctx: &Ctx, args: &InitArgs) -> Result<()> {
         return InitReport::new(&plan, false, false, None, true, false).emit(ctx);
     }
 
-    let backend = crate::remote::build_backend(&plan.base, ctx.globals.links, ctx.deadlines)?;
+    let backend =
+        crate::remote::build_backend(&plan.base, ctx.globals.links, ctx.deadlines.clone())?;
     let occupant = envelope::probe(&backend).await?;
     let action = refuse_existing_vault(ctx, &plan, occupant)?;
 

@@ -84,6 +84,36 @@ pub const DISABLED_SECONDS: u64 = 0;
 /// framing, and `b2_upload_memory.rs` is what holds that.
 pub const UPLOAD_FRAME_LEN: usize = 64 * 1024;
 
+/// How many attempts in a row may get **no answer at all** before the run stops
+/// asking.
+///
+/// Six, and the number is not free to be smaller: the compile-time rule below
+/// holds it at or above the longest schedule any single layer runs, which is
+/// what makes this bound safe to add. One operation's own retries are never cut
+/// short by it — the first request to meet a dead link spends its whole
+/// schedule exactly as before — and it is the *second* request that is refused.
+/// Nothing that works today can begin to fail because of it, because six
+/// consecutive attempts that got nothing back is a dead link by any reading.
+///
+/// This is the factor `HANDOVER.md` §36.5 measured and could not state. The cost
+/// of a black-holed link used to be
+/// `--timeout × attempts × distinct requests × --retries`, and the third factor
+/// is unbounded: a copy makes as many requests as it makes, and each of them ran
+/// a full schedule against a link that had already proved silent. The same
+/// command against the same fault measured **46.3 s**, **136.6 s** and
+/// **288.7 s** on three runs for exactly that reason. Counting the run's
+/// unanswered attempts rather than each request's removes the factor, and what
+/// is left — `--timeout × attempts` — is a product of two numbers an operator
+/// can see and `--timeout`'s own `--help` now states.
+///
+/// Six rather than a smaller number because it is the network schedule's own
+/// length (`crate::retry::constants::NETWORK_MAX_ATTEMPTS`, and B2's
+/// `RETRY_MAX_ATTEMPTS` beside it). Choosing it independently would be choosing
+/// a number that has to be revisited whenever either schedule changes; deriving
+/// it, and asserting the relationship, is what keeps the two from drifting
+/// apart one commit at a time.
+pub const UNANSWERED_ATTEMPT_LIMIT: u32 = 6;
+
 // ── the rules these numbers have to keep ─────────────────────────────────────
 //
 // Compile-time, for the reason `crate::retry::constants` gives: a constant that
@@ -103,3 +133,10 @@ const _: () = assert!(UPLOAD_FRAME_LEN < 5 * 1024 * 1024);
 /// …and larger than nothing, since a zero-length frame would be a body that
 /// never ends.
 const _: () = assert!(UPLOAD_FRAME_LEN > 0);
+
+/// The stall limit is never smaller than the longest schedule a single layer
+/// runs, or it would cut an operation's own retries short — which would be a
+/// change in what one request does, and this bound is deliberately only a change
+/// in what a *run* does. B2's `RETRY_MAX_ATTEMPTS` is asserted against it in
+/// `crate::b2::constants`, where that number lives.
+const _: () = assert!(UNANSWERED_ATTEMPT_LIMIT >= crate::retry::constants::NETWORK_MAX_ATTEMPTS);

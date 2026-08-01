@@ -82,7 +82,13 @@ pub const fn is_worth_repeating(error: &CliError) -> bool {
         // will record none on the next attempt either. This code is produced by
         // `verify` and `scrub` rather than by any transfer, so repeating a file
         // on the strength of it would be retrying somebody else's finding.
-        | ExitCode::VerificationNotPossible => false,
+        | ExitCode::VerificationNotPossible
+        // The run has already spent a whole schedule of attempts on a link that
+        // answered nothing, and stopped. Repeating the file cannot reach it —
+        // every call refuses before it opens a connection — so a repeat here
+        // would add a *Retries* count and a log line over requests that were
+        // never made, which is the class `PLAN.md` §6 forbids.
+        | ExitCode::LinkSilent => false,
 
         // The run was stopped deliberately. Repeating either of these would be
         // working around the operator rather than for them.
@@ -164,6 +170,26 @@ mod tests {
         ] {
             assert!(!is_worth_repeating(&error(code)), "{code:?}");
         }
+    }
+
+    #[test]
+    fn a_run_that_stopped_asking_is_never_repeated_into() {
+        // The run has already spent a whole schedule of attempts on a link that
+        // answered nothing. Every call now refuses before it opens a
+        // connection, so a repeat would add a *Retries* count and a log line
+        // over requests that were never made — a report of work that did not
+        // happen, which is the class `PLAN.md` §6 forbids and the exact defect
+        // the *Retries* row was built to stop telling.
+        //
+        // This is also why `dctl_store::StoreError::Stalled` does not map to
+        // exit 5: 5 IS repeated here, correctly, and a stalled run wearing it
+        // would repeat every remaining file `--retries` times.
+        assert!(!is_worth_repeating(&error(ExitCode::LinkSilent)));
+        assert!(
+            is_worth_repeating(&error(ExitCode::TemporaryError)),
+            "and the ordinary transient must still be repeated, or this bound \
+             has been bought by breaking the flag it sits next to"
+        );
     }
 
     #[test]

@@ -169,45 +169,50 @@ async fn upload_single(
     // attempt: a header set rebuilt per attempt is a header set that can differ
     // between them.
     let headers = upload_headers(key, &sha1_hex, data.len(), modified);
-    retry::run(constants::OP_UPLOAD_FILE, b2.deadlines.run, |_| async {
-        let upload: GetUploadUrlResponse = b2
-            .post_json_once(
-                auth,
-                constants::EP_GET_UPLOAD_URL,
-                serde_json::json!({ "bucketId": auth.bucket_id }),
-            )
-            .await?;
+    retry::run(
+        constants::OP_UPLOAD_FILE,
+        b2.deadlines.run,
+        &b2.deadlines.stall,
+        |_| async {
+            let upload: GetUploadUrlResponse = b2
+                .post_json_once(
+                    auth,
+                    constants::EP_GET_UPLOAD_URL,
+                    serde_json::json!({ "bucketId": auth.bucket_id }),
+                )
+                .await?;
 
-        tracing::debug!(bytes = data.len(), "b2 upload (single-file)");
-        let mut request = b2
-            .client
-            .post(&upload.upload_url)
-            // Bound to the URL this attempt was handed, so it is the one header
-            // that cannot come from the description above.
-            .header(constants::H_AUTHORIZATION, &upload.authorization_token);
-        for (name, value) in &headers {
-            request = request.header(*name, value);
-        }
-        // The object's one buffer, re-sent rather than re-copied: `Bytes::clone`
-        // moves a refcount, so a retried upload costs no memory beyond the
-        // allocation the first attempt already had. Framing it for the deadline
-        // costs nothing further: the frames are views of that same buffer.
-        let watch = b2.deadlines.watch();
-        let response = watch
-            .guard(request.body(watch.body(data.clone())).send())
-            .await
-            .map_err(stalled_attempt)?
-            .map_err(transport_attempt)?;
+            tracing::debug!(bytes = data.len(), "b2 upload (single-file)");
+            let mut request = b2
+                .client
+                .post(&upload.upload_url)
+                // Bound to the URL this attempt was handed, so it is the one header
+                // that cannot come from the description above.
+                .header(constants::H_AUTHORIZATION, &upload.authorization_token);
+            for (name, value) in &headers {
+                request = request.header(*name, value);
+            }
+            // The object's one buffer, re-sent rather than re-copied: `Bytes::clone`
+            // moves a refcount, so a retried upload costs no memory beyond the
+            // allocation the first attempt already had. Framing it for the deadline
+            // costs nothing further: the frames are views of that same buffer.
+            let watch = b2.deadlines.watch();
+            let response = watch
+                .guard(request.body(watch.body(data.clone())).send())
+                .await
+                .map_err(stalled_attempt)?
+                .map_err(transport_attempt)?;
 
-        let info: UploadFileResponse = b2
-            .observe_expiry(read_json(Answered { watch, response }).await)
-            .await?;
-        // A SHA-1 B2 echoes back wrong is not a busy pod: B2 already checked the
-        // body against the header it was sent, so a different digest in the
-        // answer is what it holds. Settled, so it is reported as the mismatch it
-        // is on the first attempt rather than after five more whole uploads.
-        verify_sha1(&sha1_hex, &info.content_sha1).map_err(Attempt::settled)
-    })
+            let info: UploadFileResponse = b2
+                .observe_expiry(read_json(Answered { watch, response }).await)
+                .await?;
+            // A SHA-1 B2 echoes back wrong is not a busy pod: B2 already checked the
+            // body against the header it was sent, so a different digest in the
+            // answer is what it holds. Settled, so it is reported as the mismatch it
+            // is on the first attempt rather than after five more whole uploads.
+            verify_sha1(&sha1_hex, &info.content_sha1).map_err(Attempt::settled)
+        },
+    )
     .await
 }
 
@@ -469,38 +474,43 @@ async fn upload_one_part(
     part_sha1s: &mut Vec<String>,
 ) -> Result<()> {
     let sha1_hex = ContentHash::sha1(&chunk).hex();
-    retry::run(constants::OP_UPLOAD_PART, b2.deadlines.run, |_| async {
-        let part_url: GetUploadPartUrlResponse = b2
-            .post_json_once(
-                auth,
-                constants::EP_GET_UPLOAD_PART_URL,
-                serde_json::json!({ "fileId": file_id }),
-            )
-            .await?;
+    retry::run(
+        constants::OP_UPLOAD_PART,
+        b2.deadlines.run,
+        &b2.deadlines.stall,
+        |_| async {
+            let part_url: GetUploadPartUrlResponse = b2
+                .post_json_once(
+                    auth,
+                    constants::EP_GET_UPLOAD_PART_URL,
+                    serde_json::json!({ "fileId": file_id }),
+                )
+                .await?;
 
-        let watch = b2.deadlines.watch();
-        let response = watch
-            .guard(
-                b2.client
-                    .post(&part_url.upload_url)
-                    .header(constants::H_AUTHORIZATION, &part_url.authorization_token)
-                    .header(constants::H_PART_NUMBER, part_number.to_string())
-                    .header(constants::H_CONTENT_SHA1, &sha1_hex)
-                    .header(constants::H_CONTENT_LENGTH, chunk.len().to_string())
-                    .body(watch.body(chunk.clone()))
-                    .send(),
-            )
-            .await
-            .map_err(stalled_attempt)?
-            .map_err(transport_attempt)?;
+            let watch = b2.deadlines.watch();
+            let response = watch
+                .guard(
+                    b2.client
+                        .post(&part_url.upload_url)
+                        .header(constants::H_AUTHORIZATION, &part_url.authorization_token)
+                        .header(constants::H_PART_NUMBER, part_number.to_string())
+                        .header(constants::H_CONTENT_SHA1, &sha1_hex)
+                        .header(constants::H_CONTENT_LENGTH, chunk.len().to_string())
+                        .body(watch.body(chunk.clone()))
+                        .send(),
+                )
+                .await
+                .map_err(stalled_attempt)?
+                .map_err(transport_attempt)?;
 
-        let part: UploadPartResponse = b2
-            .observe_expiry(read_json(Answered { watch, response }).await)
-            .await?;
-        // Settled, exactly as on the single-shot path above — and it matters
-        // more here, because the thing that would be re-sent is a whole part.
-        verify_sha1(&sha1_hex, &part.content_sha1).map_err(Attempt::settled)
-    })
+            let part: UploadPartResponse = b2
+                .observe_expiry(read_json(Answered { watch, response }).await)
+                .await?;
+            // Settled, exactly as on the single-shot path above — and it matters
+            // more here, because the thing that would be re-sent is a whole part.
+            verify_sha1(&sha1_hex, &part.content_sha1).map_err(Attempt::settled)
+        },
+    )
     .await?;
     part_sha1s.push(sha1_hex);
     Ok(())

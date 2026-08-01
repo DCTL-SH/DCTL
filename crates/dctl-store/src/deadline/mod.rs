@@ -73,6 +73,7 @@ pub mod activity;
 pub mod constants;
 pub mod http;
 pub mod run;
+pub mod stall;
 pub mod watch;
 
 use std::time::Duration;
@@ -80,13 +81,20 @@ use std::time::Duration;
 pub use activity::Activity;
 pub use http::Answered;
 pub use run::{Exceeded, Left, RunDeadline};
+pub use stall::{RunStall, Stalled};
 pub use watch::{Expired, IdleWatch};
 
 /// How long this run is willing to wait, on every backend that can wait.
 ///
-/// Passed by value and `Copy`, so a backend that needs it holds its own and
-/// nothing can mutate a live connection's patience out from under it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// `Clone` and no longer `Copy`, and the loss is deliberate rather than
+/// incidental. Three of the four fields are lengths of patience or an instant,
+/// which copy perfectly well; [`Deadlines::stall`] is **state the whole run
+/// shares**, and a copy of it would be exactly the defect it exists to close —
+/// every layer counting its own attempts is how `--timeout × attempts` became
+/// `--timeout × attempts × distinct requests`. Cloning a `Deadlines` clones the
+/// handle and not the cell, so a backend that needs its own copy still counts
+/// into the run's.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Deadlines {
     /// `--contimeout`. [`None`] means "as long as it takes".
     pub connect: Option<Duration>,
@@ -102,6 +110,18 @@ pub struct Deadlines {
     /// [`run`] for what the three depths of enforcement are and why each of
     /// them is needed.
     pub run: RunDeadline,
+    /// How many attempts in a row may get **no answer at all** before the run
+    /// stops asking — derived from [`Deadlines::idle`], because it is that
+    /// number the operator set and that number the report quotes.
+    ///
+    /// Here for the same reason [`Deadlines::run`] is: this structure already
+    /// reaches every backend that can wait, and a run-level bound only some of
+    /// them received would be a bound only some of the run respected. It is
+    /// also why this type is `Clone` and not `Copy` — see [`stall`] for the
+    /// whole argument, and for why counting per request instead of per run is
+    /// the arithmetic §36.5 measured at 46.3 s, 136.6 s and 288.7 s on three
+    /// runs of one command against one fault.
+    pub stall: RunStall,
 }
 
 impl Default for Deadlines {
@@ -124,6 +144,9 @@ impl Default for Deadlines {
             // here could be right for both a nightly incremental and a
             // ten-terabyte seed.
             run: RunDeadline::unbounded(),
+            // Derived from `idle` above rather than stated again, so the two can
+            // never disagree about what `--timeout 0` meant.
+            stall: RunStall::from_idle(Some(constants::DEFAULT_IDLE)),
         }
     }
 }
@@ -141,12 +164,19 @@ impl Deadlines {
     /// that only exists once the run has begun. Folding a reading of the clock
     /// into a `const fn` would mean the deadline was set wherever this happened
     /// to be called. [`Deadlines::within`] is where it is attached, once.
+    /// Not `const`, and the reason is [`Deadlines::stall`]: a shared counter is
+    /// an allocation, and an allocation cannot happen in a `const`. That is the
+    /// right way round — a `const Deadlines` would be a *copy* of the run's
+    /// counter per constant, which is precisely the per-request counting this
+    /// field exists to replace.
     #[must_use]
-    pub const fn from_seconds(connect: u64, idle: u64) -> Self {
+    pub fn from_seconds(connect: u64, idle: u64) -> Self {
+        let idle = seconds(idle);
         Self {
             connect: seconds(connect),
-            idle: seconds(idle),
+            idle,
             run: RunDeadline::unbounded(),
+            stall: RunStall::from_idle(idle),
         }
     }
 
@@ -156,12 +186,8 @@ impl Deadlines {
     /// shares one instant. A deadline attached per backend would give each
     /// destination its own window, and a copy between two of them would get two.
     #[must_use]
-    pub const fn within(self, run: RunDeadline) -> Self {
-        Self {
-            connect: self.connect,
-            idle: self.idle,
-            run,
-        }
+    pub fn within(self, run: RunDeadline) -> Self {
+        Self { run, ..self }
     }
 
     /// Neither deadline armed, and no bound on the run.
@@ -170,11 +196,12 @@ impl Deadlines {
     /// does without a clock in the way — the same reason
     /// [`crate::retry::RetryPolicy::none`] exists.
     #[must_use]
-    pub const fn none() -> Self {
+    pub fn none() -> Self {
         Self {
             connect: None,
             idle: None,
             run: RunDeadline::unbounded(),
+            stall: RunStall::unbounded(),
         }
     }
 
@@ -231,6 +258,7 @@ mod tests {
                 connect: None,
                 idle: Some(Duration::from_secs(30)),
                 run: RunDeadline::unbounded(),
+                stall: RunStall::from_idle(Some(Duration::from_secs(30))),
             }
         );
         assert_eq!(
@@ -239,6 +267,7 @@ mod tests {
                 connect: Some(Duration::from_secs(30)),
                 idle: None,
                 run: RunDeadline::unbounded(),
+                stall: RunStall::unbounded(),
             }
         );
     }
@@ -283,6 +312,57 @@ mod tests {
         assert!(
             deadlines.watch().is_armed(),
             "a bounded run must arm the watch even with --timeout 0"
+        );
+    }
+
+    #[test]
+    fn every_copy_of_a_deadlines_counts_into_one_cell() {
+        // The plumbing property the whole bound rests on, and the one nothing
+        // else in the workspace can see. `Deadlines` reaches five backends and
+        // two retry layers, and it gets there by being cloned — into
+        // `Retrying::wrap`, into `B2Backend::new`, through `within` at the top
+        // of the process. If any of those hops minted a *fresh* counter, each
+        // layer would have its own six and the run's bound would be six times
+        // however many layers there are, which is the arithmetic §36.5 measured
+        // wearing a different hat.
+        let deadlines = Deadlines::from_seconds(60, 30);
+        let handed_to_a_backend = deadlines.clone();
+        let inside_a_bounded_run = deadlines
+            .clone()
+            .within(RunDeadline::starting_now(Some(Duration::from_secs(600))));
+
+        for _ in 0..constants::UNANSWERED_ATTEMPT_LIMIT {
+            handed_to_a_backend.stall.unanswered();
+        }
+        assert!(
+            deadlines.stall.exhausted().is_some(),
+            "a clone counted somewhere the original cannot see"
+        );
+        assert!(
+            inside_a_bounded_run.stall.exhausted().is_some(),
+            "`within` minted a fresh counter and gave the run a second budget"
+        );
+
+        inside_a_bounded_run.stall.answered();
+        assert_eq!(
+            deadlines.stall.count(),
+            0,
+            "an answer observed by one holder did not reach the others"
+        );
+    }
+
+    #[test]
+    fn a_run_that_will_wait_forever_has_nothing_counting_against_it() {
+        // `--timeout 0`. The control for the test above: if the counter were
+        // armed unconditionally, every arm of it would pass for the wrong
+        // reason and an operator who asked to wait forever would not.
+        assert!(!Deadlines::from_seconds(60, 0).stall.is_bounded());
+        assert!(!Deadlines::none().stall.is_bounded());
+        assert!(Deadlines::from_seconds(60, 30).stall.is_bounded());
+        assert!(
+            Deadlines::default().stall.is_bounded(),
+            "a run that names neither flag still gets the default --timeout, so \
+             it is bounded by the product of it"
         );
     }
 

@@ -723,6 +723,7 @@ async fn a_slow_down_is_retried_until_the_write_succeeds() {
         Arc::new(backend(&mock)),
         impatient(),
         dctl_store::RunDeadline::unbounded(),
+        dctl_store::RunStall::unbounded(),
     );
     mock.script(503, "<Error><Code>SlowDown</Code></Error>");
     mock.script(503, "<Error><Code>SlowDown</Code></Error>");
@@ -763,6 +764,7 @@ async fn an_exhausted_budget_reports_the_attempts_it_really_made() {
         Arc::new(backend(&mock)),
         policy,
         dctl_store::RunDeadline::unbounded(),
+        dctl_store::RunStall::unbounded(),
     );
     for _ in 0..policy.max_attempts {
         mock.script(503, "<Error><Code>SlowDown</Code></Error>");
@@ -796,6 +798,7 @@ async fn a_wrong_key_is_refused_once_and_never_retried() {
         Arc::new(backend(&mock)),
         policy,
         dctl_store::RunDeadline::unbounded(),
+        dctl_store::RunStall::unbounded(),
     );
     mock.script(403, "<Error><Code>InvalidAccessKeyId</Code></Error>");
 
@@ -828,6 +831,7 @@ async fn a_read_is_retried_as_well_as_a_write() {
         Arc::new(backend(&mock)),
         impatient(),
         dctl_store::RunDeadline::unbounded(),
+        dctl_store::RunStall::unbounded(),
     );
     mock.seed("k", b"restored");
     mock.script(500, "<Error><Code>InternalError</Code></Error>");
@@ -850,6 +854,7 @@ async fn a_server_that_names_a_wait_is_obeyed_and_not_argued_with() {
         Arc::new(backend(&mock)),
         impatient(),
         dctl_store::RunDeadline::unbounded(),
+        dctl_store::RunStall::unbounded(),
     );
     mock.script_with_headers(
         503,
@@ -1808,6 +1813,7 @@ async fn a_completion_refused_once_succeeds_on_the_retry_and_commits_exactly_one
         Arc::new(multipart_backend(&mock)) as Arc<dyn Backend>,
         impatient(),
         dctl_store::RunDeadline::unbounded(),
+        dctl_store::RunStall::unbounded(),
     );
     let data = vec![b'g'; PART as usize * 2];
 

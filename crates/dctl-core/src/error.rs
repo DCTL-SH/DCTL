@@ -162,6 +162,15 @@ fn store_kind(e: &dctl_store::StoreError) -> ErrorKind {
         // transient about it is the *next invocation*, which is the caller's
         // decision and not this classification's.
         S::RunDeadline { .. } => ErrorKind::Permanent,
+        // The run stopped asking a link that answered nothing for a whole
+        // schedule of attempts. **Permanent**, and for the same reason as the
+        // line above rather than a different one: an FFI consumer that re-drove
+        // the operation would spend a second schedule on the silence this one
+        // was raised to end, which is the multiplication `HANDOVER.md` §36.5
+        // measured at 288.7 s. What is transient about it is the *next
+        // invocation*, which is the caller's decision and not this
+        // classification's.
+        S::Stalled { .. } => ErrorKind::Permanent,
         // The server received the request and refused it without naming a
         // cause. **Permanent**, following this module's own rule for anything
         // nobody has classified: guessing `Transient` would have an FFI consumer

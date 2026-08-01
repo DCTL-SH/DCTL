@@ -429,15 +429,18 @@ async fn a_second_write_of_one_object_publishes_over_the_first() {
 /// failure, it is a hang, and the retry layer never gets a turn; without the
 /// re-dial the timeout would fire six times into the same corpse. Each is what
 /// makes the other worth having.
-const REDIAL_DEADLINES: Deadlines = Deadlines::from_seconds(2, 2);
+fn redial_deadlines() -> Deadlines {
+    Deadlines::from_seconds(2, 2)
+}
 
 async fn redialable(base: &str) -> (RedialableSftp, SftpBackend) {
     let mock = RedialableSftp::start();
     std::fs::create_dir_all(mock.root().join(base.trim_start_matches('/')))
         .expect("the fixture directory is created");
-    let backend = SftpBackend::over_dialer(mock.dialer(), base, LinkPolicy::Skip, REDIAL_DEADLINES)
-        .await
-        .expect("the first conversation opens");
+    let backend =
+        SftpBackend::over_dialer(mock.dialer(), base, LinkPolicy::Skip, redial_deadlines())
+            .await
+            .expect("the first conversation opens");
     (mock, backend)
 }
 
@@ -475,6 +478,7 @@ async fn a_severed_session_is_re_dialled_and_the_write_lands() {
     let retrying = dctl_store::Retrying::wrap(
         std::sync::Arc::new(sftp) as _,
         dctl_store::RunDeadline::unbounded(),
+        dctl_store::RunStall::unbounded(),
     );
     retrying
         .put(
@@ -554,7 +558,7 @@ async fn a_dead_session_is_reported_as_transport_so_the_retry_layer_will_try_aga
     );
 
     // Which mechanism produced it, recorded rather than assumed — see
-    // `REDIAL_DEADLINES`. It is the deadline, and the elapsed time is what says
+    // `redial_deadlines()`. It is the deadline, and the elapsed time is what says
     // so: a client library that had reported the closed channel would have
     // failed in microseconds. Pinned here because the day that changes is the
     // day this test could pass for a different reason than it does now.
@@ -623,6 +627,7 @@ async fn the_base_decision_survives_a_re_dial() {
     let retrying = dctl_store::Retrying::wrap(
         std::sync::Arc::new(sftp) as _,
         dctl_store::RunDeadline::unbounded(),
+        dctl_store::RunStall::unbounded(),
     );
     let _ = retrying
         .put(
@@ -1261,11 +1266,13 @@ async fn a_producer_that_stops_mid_object_leaves_no_staging_file_behind() {
 /// reason is a measurement. The **first** attempt after the wire dies does not
 /// reach the dial at all: `openssh_sftp_client` does not surface a severed
 /// session to a request already waiting for a reply — the note above
-/// [`REDIAL_DEADLINES`] records that — so that attempt costs the whole
+/// [`redial_deadlines`] records that — so that attempt costs the whole
 /// `--timeout` before the re-dial is even asked for. At thirty seconds this
 /// arithmetic put 30 s of `--timeout` in front of six 1 s dials and the test
 /// read 40 s, which was a true measurement of the wrong thing.
-const HANGING_DIAL_DEADLINES: Deadlines = Deadlines::from_seconds(1, 3);
+fn hanging_dial_deadlines() -> Deadlines {
+    Deadlines::from_seconds(1, 3)
+}
 
 /// The network schedule with the waiting taken out.
 ///
@@ -1291,14 +1298,22 @@ fn impatient() -> dctl_store::retry::RetryPolicy {
 async fn redialing(deadlines: Deadlines) -> (RedialableSftp, std::sync::Arc<dyn Backend>) {
     let mock = RedialableSftp::start();
     std::fs::create_dir_all(mock.root().join("srv/store")).expect("the fixture directory");
-    let backend =
-        SftpBackend::over_dialer(mock.dialer(), "/srv/store", LinkPolicy::Skip, deadlines)
-            .await
-            .expect("the first conversation opens");
+    let backend = SftpBackend::over_dialer(
+        mock.dialer(),
+        "/srv/store",
+        LinkPolicy::Skip,
+        deadlines.clone(),
+    )
+    .await
+    .expect("the first conversation opens");
+    // The same stall counter the backend underneath was given, exactly as
+    // `remote::registry::build` installs it: the whole point of the counter is
+    // that the two layers count into one cell.
     let retrying = dctl_store::Retrying::with_policy(
         std::sync::Arc::new(backend) as _,
         impatient(),
         deadlines.run,
+        deadlines.stall.clone(),
     );
     (mock, retrying)
 }
@@ -1317,7 +1332,7 @@ async fn write_after_the_fault(backend: &std::sync::Arc<dyn Backend>) -> dctl_st
 
 #[tokio::test]
 async fn a_re_dial_into_a_black_hole_ends_at_contimeout_rather_than_hanging() {
-    let (mock, backend) = redialing(HANGING_DIAL_DEADLINES).await;
+    let (mock, backend) = redialing(hanging_dial_deadlines()).await;
 
     // The wire dies, and the far end stops answering new conversations too —
     // which is what a black-holed route looks like from here, and what the

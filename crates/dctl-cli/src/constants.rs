@@ -1079,6 +1079,26 @@ pub const MAX_DURATION_HINT: &str = "Everything already transferred is committed
      upload it left. Re-run the same command to continue — it will move only \
      what has not landed yet — or raise --max-duration.";
 
+/// What an operator does about a run that stopped asking a silent link.
+///
+/// Worded from the arithmetic rather than from a diagnosis, because the tool
+/// does not have one: nothing came back, so there is nothing to report about
+/// *why*. What it can state exactly is the number of attempts it spent finding
+/// that out and the flag that sized each of them, which is the pair the operator
+/// can act on.
+///
+/// It names `--timeout 0` last and on purpose. It is the honest answer for a
+/// link that stalls for twenty minutes at a time and recovers, and it is the
+/// wrong answer for a link that is gone — so it comes after the two remedies
+/// that do not turn a failed run into one that never ends.
+pub const STALLED_HINT: &str = "Nothing answered for a whole schedule of \
+     attempts, so the run stopped asking rather than repeating the same silence \
+     for every remaining file. Retries were NOT exhausted: it stopped early. \
+     Everything already transferred is committed and verified; re-run the same \
+     command to continue from what landed. Check the route and the provider's \
+     status first. Raise --timeout if the link is slow rather than gone, or set \
+     --timeout 0 to wait as long as it takes.";
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Vault initialisation (`dctl init`)
 // ─────────────────────────────────────────────────────────────────────────────

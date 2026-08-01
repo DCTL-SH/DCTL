@@ -48,7 +48,7 @@ use bytes::Bytes;
 
 use crate::backend::{Backend, UploadTicket};
 use crate::checksum::ContentHash;
-use crate::deadline::RunDeadline;
+use crate::deadline::{RunDeadline, RunStall};
 use crate::error::Result;
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
@@ -71,6 +71,17 @@ pub struct Retrying {
     /// route. [`RunDeadline::unbounded`] is how a caller says "nothing bounds
     /// this", out loud, at the call site.
     deadline: RunDeadline,
+    /// How many attempts in a row the **run** may spend getting no answer —
+    /// derived from `--timeout`.
+    ///
+    /// A required argument at both constructors for exactly the reason the
+    /// deadline above is one, and with one addition: this is the layer that
+    /// multiplies `--timeout` by *distinct requests*, which is the factor
+    /// §36.5 measured and could not state. A construction site that could
+    /// forget to say what stops the run asking is a site that will.
+    /// [`RunStall::unbounded`] is how a caller says "nothing stops this", out
+    /// loud, at the call site — and is what `--timeout 0` means.
+    stall: RunStall,
 }
 
 impl Retrying {
@@ -84,12 +95,17 @@ impl Retrying {
     /// build ships. The deadline *is* a parameter, for the opposite reason:
     /// there is no name to derive it from and no safe default to inherit.
     #[must_use]
-    pub fn wrap(inner: Arc<dyn Backend>, deadline: RunDeadline) -> Arc<dyn Backend> {
+    pub fn wrap(
+        inner: Arc<dyn Backend>,
+        deadline: RunDeadline,
+        stall: RunStall,
+    ) -> Arc<dyn Backend> {
         let policy = RetryPolicy::for_backend(inner.name());
         Arc::new(Self {
             inner,
             policy,
             deadline,
+            stall,
         })
     }
 
@@ -103,11 +119,13 @@ impl Retrying {
         inner: Arc<dyn Backend>,
         policy: RetryPolicy,
         deadline: RunDeadline,
+        stall: RunStall,
     ) -> Arc<dyn Backend> {
         Arc::new(Self {
             inner,
             policy,
             deadline,
+            stall,
         })
     }
 }
@@ -125,7 +143,7 @@ impl Backend for Retrying {
         expected: &ContentHash,
         modified: SourceModified,
     ) -> Result<PutOutcome> {
-        run("put", self.policy, self.deadline, |_| {
+        run("put", self.policy, self.deadline, &self.stall, |_| {
             // `Bytes` is a refcounted handle: cloning it per attempt copies a
             // pointer and a counter, not the object.
             let data = data.clone();
@@ -145,6 +163,7 @@ impl Backend for Retrying {
             "put_from_path",
             self.policy,
             self.deadline,
+            &self.stall,
             |_| async move {
                 self.inner
                     .put_from_path(key, source, expected, modified)
@@ -181,30 +200,46 @@ impl Backend for Retrying {
     }
 
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
-        run("get", self.policy, self.deadline, |_| async move {
-            self.inner.get(key).await
-        })
+        run(
+            "get",
+            self.policy,
+            self.deadline,
+            &self.stall,
+            |_| async move { self.inner.get(key).await },
+        )
         .await
     }
 
     async fn get_to_path(&self, key: &ObjectKey, dest: &Path) -> Result<()> {
-        run("get_to_path", self.policy, self.deadline, |_| async move {
-            self.inner.get_to_path(key, dest).await
-        })
+        run(
+            "get_to_path",
+            self.policy,
+            self.deadline,
+            &self.stall,
+            |_| async move { self.inner.get_to_path(key, dest).await },
+        )
         .await
     }
 
     async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> Result<Bytes> {
-        run("get_range", self.policy, self.deadline, |_| async move {
-            self.inner.get_range(key, range).await
-        })
+        run(
+            "get_range",
+            self.policy,
+            self.deadline,
+            &self.stall,
+            |_| async move { self.inner.get_range(key, range).await },
+        )
         .await
     }
 
     async fn head(&self, key: &ObjectKey) -> Result<ObjectMeta> {
-        run("head", self.policy, self.deadline, |_| async move {
-            self.inner.head(key).await
-        })
+        run(
+            "head",
+            self.policy,
+            self.deadline,
+            &self.stall,
+            |_| async move { self.inner.head(key).await },
+        )
         .await
     }
 
@@ -218,27 +253,36 @@ impl Backend for Retrying {
             "stored_checksum",
             self.policy,
             self.deadline,
+            &self.stall,
             |_| async move { self.inner.stored_checksum(key).await },
         )
         .await
     }
 
     async fn exists(&self, key: &ObjectKey) -> Result<bool> {
-        run("exists", self.policy, self.deadline, |_| async move {
-            self.inner.exists(key).await
-        })
+        run(
+            "exists",
+            self.policy,
+            self.deadline,
+            &self.stall,
+            |_| async move { self.inner.exists(key).await },
+        )
         .await
     }
 
     async fn delete(&self, key: &ObjectKey) -> Result<()> {
-        run("delete", self.policy, self.deadline, |_| async move {
-            self.inner.delete(key).await
-        })
+        run(
+            "delete",
+            self.policy,
+            self.deadline,
+            &self.stall,
+            |_| async move { self.inner.delete(key).await },
+        )
         .await
     }
 
     async fn list_page(&self, prefix: &str, cursor: Option<String>) -> Result<Page> {
-        run("list_page", self.policy, self.deadline, |_| {
+        run("list_page", self.policy, self.deadline, &self.stall, |_| {
             let cursor = cursor.clone();
             async move { self.inner.list_page(prefix, cursor).await }
         })
@@ -253,10 +297,16 @@ impl Backend for Retrying {
         prefix: &str,
         cursor: Option<String>,
     ) -> Result<crate::staging::StagingListing> {
-        run("list_staging", self.policy, self.deadline, |_| {
-            let cursor = cursor.clone();
-            async move { self.inner.list_staging(prefix, cursor).await }
-        })
+        run(
+            "list_staging",
+            self.policy,
+            self.deadline,
+            &self.stall,
+            |_| {
+                let cursor = cursor.clone();
+                async move { self.inner.list_staging(prefix, cursor).await }
+            },
+        )
         .await
     }
 
@@ -271,6 +321,7 @@ impl Backend for Retrying {
             "list_incomplete_uploads",
             self.policy,
             self.deadline,
+            &self.stall,
             |_| {
                 let cursor = cursor.clone();
                 async move { self.inner.list_incomplete_uploads(prefix, cursor).await }
@@ -290,6 +341,7 @@ impl Backend for Retrying {
             "abort_incomplete_upload",
             self.policy,
             self.deadline,
+            &self.stall,
             |_| async move { self.inner.abort_incomplete_upload(upload).await },
         )
         .await
@@ -305,6 +357,7 @@ impl Backend for Retrying {
             "prepare_upload",
             self.policy,
             self.deadline,
+            &self.stall,
             |_| async move {
                 self.inner
                     .prepare_upload(key, content_len, content_sha256)
@@ -325,6 +378,7 @@ impl Backend for Retrying {
             "store_identity",
             self.policy,
             self.deadline,
+            &self.stall,
             |_| async move { self.inner.store_identity().await },
         )
         .await
@@ -383,7 +437,11 @@ mod tests {
         let recording = std::sync::Arc::new(
             CountingBackend::failing("none", 0, busy()).recording(crate::HashAlgo::Sha1),
         );
-        let wrapped = Retrying::wrap(recording, crate::deadline::RunDeadline::unbounded());
+        let wrapped = Retrying::wrap(
+            recording,
+            crate::deadline::RunDeadline::unbounded(),
+            RunStall::unbounded(),
+        );
         assert_eq!(
             wrapped.checksum_support(),
             crate::recorded::ChecksumSupport::Recorded(crate::HashAlgo::Sha1),
@@ -396,7 +454,11 @@ mod tests {
         );
 
         let silent = std::sync::Arc::new(CountingBackend::failing("none", 0, busy()));
-        let wrapped = Retrying::wrap(silent, crate::deadline::RunDeadline::unbounded());
+        let wrapped = Retrying::wrap(
+            silent,
+            crate::deadline::RunDeadline::unbounded(),
+            RunStall::unbounded(),
+        );
         assert!(
             !wrapped.checksum_support().detects_corruption(),
             "a wrapper must not certify a backend that records nothing"
@@ -423,7 +485,7 @@ mod tests {
             ($name:expr, $($call:tt)+) => {{
                 let inner = Arc::new(CountingBackend::failing($name, 2, busy()));
                 let counter = Arc::clone(&inner);
-                let backend = Retrying::with_policy(inner, instant(), RunDeadline::unbounded());
+                let backend = Retrying::with_policy(inner, instant(), RunDeadline::unbounded(), RunStall::unbounded());
                 let outcome = backend.$($call)+.await;
                 assert!(outcome.is_ok(), "{}: {:?}", $name, outcome.err());
                 assert_eq!(
@@ -456,7 +518,12 @@ mod tests {
             StoreError::NotFound("a/b.bin".into()),
         ));
         let counter = Arc::clone(&inner);
-        let backend = Retrying::with_policy(inner, instant(), RunDeadline::unbounded());
+        let backend = Retrying::with_policy(
+            inner,
+            instant(),
+            RunDeadline::unbounded(),
+            RunStall::unbounded(),
+        );
 
         let error = backend
             .get(&ObjectKey::new("a/b.bin"))
@@ -473,7 +540,7 @@ mod tests {
         // `RetryPolicy::for_backend` — the patience. A wrapper that answered
         // "retrying" would silently give every provider the fallback policy.
         let inner = Arc::new(CountingBackend::failing("get", 0, busy()));
-        let backend = Retrying::wrap(inner, RunDeadline::unbounded());
+        let backend = Retrying::wrap(inner, RunDeadline::unbounded(), RunStall::unbounded());
         assert_eq!(backend.name(), "test");
     }
 
@@ -482,7 +549,12 @@ mod tests {
         let inner = Arc::new(CountingBackend::failing("get", u32::MAX, busy()));
         let counter = Arc::clone(&inner);
         let policy = instant();
-        let backend = Retrying::with_policy(inner, policy, RunDeadline::unbounded());
+        let backend = Retrying::with_policy(
+            inner,
+            policy,
+            RunDeadline::unbounded(),
+            RunStall::unbounded(),
+        );
 
         let error = backend
             .get(&ObjectKey::new("a/b.bin"))
@@ -507,6 +579,7 @@ mod tests {
                 std::time::Instant::now() - std::time::Duration::from_secs(60),
                 Some(std::time::Duration::from_secs(30)),
             ),
+            RunStall::unbounded(),
         );
 
         let error = backend
@@ -531,6 +604,7 @@ mod tests {
             inner,
             instant(),
             RunDeadline::starting_now(Some(std::time::Duration::from_secs(600))),
+            RunStall::unbounded(),
         );
         backend
             .get(&ObjectKey::new("a/b.bin"))

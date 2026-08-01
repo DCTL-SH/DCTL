@@ -27,6 +27,44 @@ use std::time::Duration;
 
 use crate::error::StoreError;
 
+/// What one attempt learned about whether the far end is there at all.
+///
+/// **Three states, not two**, and the third is the one a live measurement had
+/// to find. A `bool` here spells "silent or not", and "not silent" then has to
+/// stand for two incompatible things: *the far end answered* and *this failure
+/// says nothing either way*. The run's stall counter
+/// ([`crate::deadline::RunStall`]) clears on an answer, so collapsing them
+/// makes every unclassifiable failure clear a count it knows nothing about.
+///
+/// That is not hypothetical. B2 runs its own request-level schedule underneath
+/// this one, and an error it has exhausted arrives here as
+/// [`StoreError::Retried`] wrapping a [`StoreError::Backend`] — a string, by
+/// construction unclassified. Under the `bool` spelling the outer layer read
+/// that as "answered" and reset the run's count to zero **every time the inner
+/// layer finished counting six silences**, so the bound never fired on B2 at
+/// all. The unit tests could not see it: they hand the driver a
+/// `StoreError::Transport` directly, which is the shape a backend with no inner
+/// layer produces. A black-holed live B2 upload found it in one run.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Reach {
+    /// Nothing came back at all — a connect that never completed, an idle
+    /// deadline, a reset mid-body. The far end may not have received the
+    /// request.
+    Silent,
+    /// The far end answered: a status, a protocol reply, an errno. Whatever the
+    /// answer was, something is there.
+    Answered,
+    /// This failure says nothing either way, so nothing may be concluded from
+    /// it. A budget a lower layer already spent, an unclassified backend
+    /// string, or one of DCTL's own clocks firing.
+    ///
+    /// The **default**, and deliberately: a variant nobody has classified must
+    /// neither push a run towards giving up nor clear a count that was
+    /// legitimately earned.
+    #[default]
+    Unknown,
+}
+
 /// What one attempt observed when it failed.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Observed {
@@ -41,6 +79,17 @@ pub struct Observed {
     /// independently of any status: a reset connection, a timed-out read, a
     /// filesystem that answered `EAGAIN`.
     pub transient: bool,
+    /// Whether anything came back at all.
+    ///
+    /// The module's first question, made a field. It used to be answered by
+    /// reading `status.is_none()`, which conflates *the wire is silent* with
+    /// *this backend does not speak HTTP*: a `local:` filesystem returning
+    /// `EAGAIN` has no status and has emphatically answered. That conflation was
+    /// harmless while the answer only decided whether to retry — both cases
+    /// retry — and stops being harmless now that
+    /// [`crate::deadline::RunStall`] counts silences for the whole run. See
+    /// [`Reach`] for why it is three states and not two.
+    pub reach: Reach,
     /// How many attempts a *lower* layer has already made at this operation.
     ///
     /// [`None`] when nothing below has tried. B2's request-level driver fills
@@ -61,6 +110,7 @@ impl Observed {
             code: None,
             retry_after: None,
             transient: true,
+            reach: Reach::Silent,
             already_attempted: None,
         }
     }
@@ -73,6 +123,7 @@ impl Observed {
             code: None,
             retry_after: None,
             transient: false,
+            reach: Reach::Answered,
             already_attempted: None,
         }
     }
@@ -85,7 +136,23 @@ impl Observed {
             code: None,
             retry_after: None,
             transient: false,
+            reach: Reach::Unknown,
             already_attempted: None,
+        }
+    }
+
+    /// A terminal failure the far end produced, so something is certainly
+    /// there.
+    ///
+    /// Not `const`: struct-update syntax over a type holding a `String` cannot
+    /// be evaluated at compile time, and spelling every field out again to win
+    /// the keyword would be four lines that have to be kept in step with
+    /// [`Observed::terminal`] by hand. Nothing calls this in a const context.
+    #[must_use]
+    pub fn answered() -> Self {
+        Self {
+            reach: Reach::Answered,
+            ..Self::terminal()
         }
     }
 
@@ -108,6 +175,8 @@ impl Observed {
                 code: Some(code.clone()),
                 retry_after: retry_after_secs.map(Duration::from_secs),
                 transient: false,
+                // The provider answered, and the answer is the finding.
+                reach: Reach::Answered,
                 already_attempted: None,
             },
 
@@ -117,16 +186,32 @@ impl Observed {
             // (`fs/fserrors/retriable_errors.go`) plus the two `io` sentinels it
             // adds in `error.go:395`. A local filesystem rarely produces any of
             // them; a network mount produces them exactly when retrying helps.
+            //
+            // `Answered`: an errno *is* an answer. `local:` has no wire to go
+            // quiet, and a run that spent three `EAGAIN`s on a busy mount has
+            // learnt something about the filesystem rather than nothing about a
+            // link.
             StoreError::Io(source) => Self {
                 transient: is_transient_io(source),
-                ..Self::terminal()
+                ..Self::answered()
             },
 
             // Already tried. The count travels so the outer layer can decline to
             // spend a second budget on it and the operator is told the real
             // number.
+            //
+            // [`Reach::Unknown`], **overriding whatever the source said**, and
+            // this line is the whole of a defect a live B2 run found. The inner
+            // layer has already recorded what it observed against the run's
+            // stall counter. If this layer read the source's reach it would
+            // count the same silence twice — or, in the shape that actually
+            // happened, read the unclassified `StoreError::Backend` string B2
+            // wraps its transport failures in, conclude "answered", and reset a
+            // count of six to zero at the exact moment the bound should have
+            // fired.
             StoreError::Retried { attempts, source } => Self {
                 already_attempted: Some(*attempts),
+                reach: Reach::Unknown,
                 ..Self::of(source)
             },
 
@@ -138,25 +223,34 @@ impl Observed {
             // deadline as something worth trying again.
             StoreError::RunDeadline { .. }
 
+            // The run has already stopped asking. [`Reach::Unknown`] like the
+            // line above: letting a conclusion feed the counter that produced it
+            // would be a loop reasoning from itself.
+            | StoreError::Stalled { .. }
+
+            // An unclassified backend failure is treated as permanent on
+            // purpose, and its reach is [`Reach::Unknown`] for the same reason:
+            // it is a string. B2 wraps a dead socket in one, so reading it as
+            // an answer would clear a count that was legitimately earned — and
+            // reading it as silence would let a *stale token* or a *bad bucket*
+            // push a healthy run towards giving up.
+            | StoreError::Backend(_) => Self::terminal(),
+
             // Everything below is a statement about the request, the key or the
-            // data, and every one of them will be exactly as true next time.
+            // data, and every one of them will be exactly as true next time —
+            // and every one of them came *from the far end*, which is what
+            // [`Reach::Answered`] records.
             | StoreError::NotFound(_)
             | StoreError::ChecksumMismatch { .. }
             | StoreError::ShortWrite { .. }
             | StoreError::InvalidKey(_)
             | StoreError::RangeOutOfBounds { .. }
             | StoreError::RootChanged { .. }
-            // An unclassified backend failure is treated as permanent on
-            // purpose. Guessing "temporary" for something nobody has classified
-            // turns a clear failure into a slow one, and the remedy is to
-            // classify it at the site that raised it — which is why the two
-            // structured variants above exist.
-            | StoreError::Backend(_)
             // The server received the request and refused it, so the refusal is
             // equally true on the next attempt. A full disk stays full for the
             // whole schedule, and spending six attempts on it turns a clear
             // failure into a slow one.
-            | StoreError::Refused { .. } => Self::terminal(),
+            | StoreError::Refused { .. } => Self::answered(),
         }
     }
 }

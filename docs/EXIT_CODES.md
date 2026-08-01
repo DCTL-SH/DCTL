@@ -31,6 +31,15 @@ is intact.
 The gap between 10 and 20 is left free so rclone can extend its own range without
 colliding with DCTL's.
 
+**28 is in the DCTL range even though the condition is a network one**, and the
+reason is this page's own rule rather than taxonomy. 5 already means *"temporary
+error; retries exhausted"*, and a run that stopped asking is nearly the
+opposite: the retries were **not** exhausted, it stopped early, because a link
+answering nothing cannot be persuaded by asking again. Re-scoping 5 to cover
+both would change a released code's meaning, which is the one thing this
+contract does not do. The two also want opposite handling *inside* a run — 5 is
+repeated by `--retries` and does not stop the walk, and 28 is neither.
+
 ## All codes
 
 Slugs and descriptions below are taken verbatim from `ExitCode::slug()` and
@@ -56,6 +65,8 @@ Slugs and descriptions below are taken verbatim from `ExitCode::slug()` and
 | 24 | `audit_chain_broken` | Audit log hash chain verification failed |
 | 25 | `cancelled` | Operation cancelled |
 | 26 | `audit_head_mismatch` | Audit log head does not match the expected anchor |
+| 27 | `verification_not_possible` | The check that was asked for could not be made; no claim is offered either way |
+| 28 | `link_silent` | Nothing answered for a whole schedule of attempts; the run stopped asking |
 
 The same table is written once in the code, as `ExitCode::slug` and
 `ExitCode::describe` in `crates/dctl-cli/src/exit.rs`. This page is kept in step
@@ -315,6 +326,9 @@ own loud code rather than the generic bucket.
 | `RangeOutOfBounds { size }` | 1 | `usage` |
 | `Io(_)` | 2 | `uncategorised` |
 | `Backend(_)` | 5 | `temporary_error` |
+| `Transport { .. }` | 5 | `temporary_error` |
+| `RunDeadline { limit }` | 10 | `duration_limit_exceeded` |
+| `Stalled { attempts, idle }` | 28 | `link_silent` |
 
 `Backend` is the retryable class (network, timeout, 429, 5xx). By the time one
 reaches the CLI the retry budget is already spent, which is why it maps to

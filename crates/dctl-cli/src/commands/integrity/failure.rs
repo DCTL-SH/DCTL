@@ -279,8 +279,15 @@ fn hint_for(verdict: Verdict) -> &'static str {
              headers and reconciles it with what the provider actually holds."
         }
         Verdict::Unreadable => {
-            "Retries were exhausted. Check connectivity and provider status, then \
-             run the command again — nothing about the stored data has changed."
+            // Not "retries were exhausted". `ExitCode::LinkSilent` reaches this
+            // verdict through `classify`'s wildcard and its retries were
+            // emphatically **not** exhausted — the run stopped early, because a
+            // link answering nothing cannot be persuaded by asking again. A
+            // hint that described the wrong work would be the same class of
+            // false report the retry hint itself was written to remove.
+            "The object could not be read. Check connectivity and provider \
+             status, then run the command again — nothing about the stored data \
+             has changed."
         }
         Verdict::Unverifiable => {
             "Nothing is known to be wrong with these objects and nothing is known to be \

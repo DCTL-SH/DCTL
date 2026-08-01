@@ -296,7 +296,7 @@ fn build_backend(ctx: &Ctx, spec: &RemoteSpec) -> Result<(Arc<dyn Backend>, bool
             &resolved,
             ctx.globals.links,
             ctx.limits.meter(),
-            ctx.deadlines,
+            ctx.deadlines.clone(),
         )?,
         declared_vault,
         chunk_size,

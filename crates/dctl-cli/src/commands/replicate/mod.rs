@@ -149,7 +149,7 @@ pub async fn run(ctx: &Ctx, args: &ReplicateArgs) -> Result<()> {
         &args.source,
         Side::Source,
         ctx.globals.links,
-        ctx.deadlines,
+        ctx.deadlines.clone(),
     )
     .await?;
     let destination = target::open(
@@ -157,7 +157,7 @@ pub async fn run(ctx: &Ctx, args: &ReplicateArgs) -> Result<()> {
         &args.destination,
         Side::Destination,
         ctx.globals.links,
-        ctx.deadlines,
+        ctx.deadlines.clone(),
     )
     .await?;
     target::refuse_same_place(&source, &destination)?;

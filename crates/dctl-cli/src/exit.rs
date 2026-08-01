@@ -146,6 +146,31 @@ pub enum ExitCode {
     /// Twenty-one means the bytes were checked and failed, which would send an
     /// operator hunting for damage that has not been shown.
     VerificationNotPossible = 27,
+    /// The run stopped asking: nothing answered for a whole schedule of
+    /// consecutive attempts.
+    ///
+    /// Raised when `--timeout` × the attempt count has been spent on requests
+    /// that got no reply at all — not a status, not a protocol reply, not an
+    /// errno. See `dctl_store::deadline::stall`.
+    ///
+    /// **Deliberately not 5.** This module's rule is that a new condition gets
+    /// a new number, and 5 already stands for *"temporary error; retries
+    /// exhausted"* — which is nearly the opposite of what happened: the retries
+    /// were **not** exhausted, the run stopped early because a link that
+    /// answers nothing cannot be persuaded by asking again. The two also want
+    /// opposite handling inside the run. Exit 5 is repeated by `--retries` and
+    /// does not stop the walk, both correctly; if this were 5, a stalled run
+    /// would repeat every remaining file `--retries` times and fail every one
+    /// of them in microseconds, producing a wall of errors over requests that
+    /// were never made — which is the failure mode
+    /// `commands::transfer::pipeline::is_fatal` documents for
+    /// [`ExitCode::DurationLimitExceeded`], and the same complaint
+    /// `HANDOVER.md` §36.5 makes about the run that would not end.
+    ///
+    /// **Deliberately not 10.** `--max-duration` is the operator saying when
+    /// the run must be over, and it did what it was told. This is the network
+    /// being gone. They send somebody to different places.
+    LinkSilent = 28,
 }
 
 impl ExitCode {
@@ -179,6 +204,7 @@ impl ExitCode {
             Self::Cancelled => "cancelled",
             Self::AuditHeadMismatch => "audit_head_mismatch",
             Self::VerificationNotPossible => "verification_not_possible",
+            Self::LinkSilent => "link_silent",
         }
     }
 
@@ -210,6 +236,9 @@ impl ExitCode {
             Self::VerificationNotPossible => {
                 "The integrity check asked for could not be made on this remote"
             }
+            Self::LinkSilent => {
+                "Nothing answered for a whole schedule of attempts; the run stopped asking"
+            }
         }
     }
 
@@ -236,6 +265,7 @@ impl ExitCode {
             Self::Cancelled,
             Self::AuditHeadMismatch,
             Self::VerificationNotPossible,
+            Self::LinkSilent,
         ]
     }
 }

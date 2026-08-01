@@ -140,7 +140,7 @@ impl S3Client {
 
     pub(crate) fn new(config: S3Config, deadlines: Deadlines) -> Result<Self> {
         Ok(Self {
-            http: crate::tls::post_quantum_client(deadlines)?,
+            http: crate::tls::post_quantum_client(&deadlines)?,
             config,
             meter: crate::meter::unmetered(),
             deadlines,

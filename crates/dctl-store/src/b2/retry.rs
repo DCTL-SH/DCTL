@@ -61,7 +61,7 @@
 use std::future::Future;
 use std::time::Duration;
 
-use crate::deadline::RunDeadline;
+use crate::deadline::{RunDeadline, RunStall};
 use crate::error::{Result, StoreError};
 
 use super::constants::{
@@ -262,7 +262,7 @@ fn backoff(attempt: u32) -> Duration {
 /// see that it is one. `op` names the operation in the log line each retry
 /// emits, which is what makes a slow run explicable afterwards.
 ///
-/// # Why `deadline` is here as well as in [`crate::retry::driver`]
+/// # Why `deadline` and `stall` are here as well as in [`crate::retry::driver`]
 ///
 /// Because this loop is a *second* multiplier and §32.9 caught it being one.
 /// The 160 MiB upload that had not ended 943.6 s after the route was cut spent
@@ -271,9 +271,20 @@ fn backoff(attempt: u32) -> Duration {
 /// the operation-level loop that was running its own. A run-level bound
 /// enforced only at the layer above would have been a bound this layer could
 /// outlast.
+///
+/// `stall` is the same argument for the other bound, and on B2 it is the layer
+/// that matters most. An error this loop exhausts arrives at
+/// [`crate::retry::driver`] marked
+/// [`Retried`](crate::StoreError::Retried), which that layer declines to retry
+/// again — so on B2 the outer counter never sees the silences at all, and a
+/// stall counted only there would not have counted them. It is **the same
+/// counter**, shared through [`crate::deadline::Deadlines`], for the same
+/// reason: six here plus six there is twelve, and the whole point is that the
+/// run stops at six.
 pub(super) async fn run<T, A, F>(
     op: &'static str,
     deadline: RunDeadline,
+    stall: &RunStall,
     mut attempt: A,
 ) -> Result<T>
 where
@@ -294,46 +305,75 @@ where
             return Err(exceeded.into_store_error());
         }
 
+        // And before the request for the same reason: a run that has had no
+        // answer for a whole schedule must not open the next connection to B2
+        // either.
+        if let Some(stalled) = stall.exhausted() {
+            tracing::debug!(
+                op,
+                attempts = stalled.attempts,
+                "the run has had no answer for a whole schedule; no further b2 request was made"
+            );
+            return Err(stalled.into_store_error());
+        }
+
         match attempt(number).await {
             Ok(value) => {
+                // Any success is an answer, and it puts the whole count back.
+                stall.answered();
                 if number > 1 {
                     tracing::info!(op, attempts = number, "b2 request succeeded on a retry");
                 }
                 return Ok(value);
             }
-            Err(failed) => match verdict(&failed.observed, number) {
-                Verdict::Never => {
-                    tracing::debug!(
-                        op,
-                        attempts = number,
-                        status = failed.observed.status,
-                        "b2 request will not be retried"
-                    );
-                    return Err(record(failed.error, number));
+            Err(failed) => {
+                // Three outcomes, matching `crate::retry::observed::Reach`,
+                // because two would make one of them a lie. A status is B2
+                // answering. `status: None` and not settled is this module's own
+                // spelling of "nothing came back" — a connect that never
+                // completed, an idle deadline, a reset mid-body. `settled` is
+                // neither: it is the run's own `--max-duration`, or a `200`
+                // whose body contradicts the request, and neither says anything
+                // about whether the link is there.
+                if failed.observed.status.is_some() {
+                    stall.answered();
+                } else if !failed.observed.settled {
+                    stall.unanswered();
                 }
-                Verdict::After(delay) => {
-                    // Never longer than what is left of the run: a wait that
-                    // outlives the window it is inside is time spent on a run
-                    // that was supposed to be over.
-                    let delay = deadline.shorten(Some(delay)).unwrap_or(delay);
-                    // WARN, not DEBUG. A retried request is the difference
-                    // between a backup that took twenty minutes and one that took
-                    // two hours, and an operator diagnosing the second one must
-                    // not have to raise the log level to discover it happened.
-                    tracing::warn!(
-                        op,
-                        attempt = number,
-                        of = RETRY_MAX_ATTEMPTS,
-                        status = failed.observed.status,
-                        code = failed.observed.code.as_deref(),
-                        delay_ms = delay.as_millis(),
-                        error = %failed.error,
-                        "b2 request failed for a reason that may not last; retrying"
-                    );
-                    tokio::time::sleep(delay).await;
-                    number = number.saturating_add(1);
+                match verdict(&failed.observed, number) {
+                    Verdict::Never => {
+                        tracing::debug!(
+                            op,
+                            attempts = number,
+                            status = failed.observed.status,
+                            "b2 request will not be retried"
+                        );
+                        return Err(record(failed.error, number));
+                    }
+                    Verdict::After(delay) => {
+                        // Never longer than what is left of the run: a wait that
+                        // outlives the window it is inside is time spent on a run
+                        // that was supposed to be over.
+                        let delay = deadline.shorten(Some(delay)).unwrap_or(delay);
+                        // WARN, not DEBUG. A retried request is the difference
+                        // between a backup that took twenty minutes and one that took
+                        // two hours, and an operator diagnosing the second one must
+                        // not have to raise the log level to discover it happened.
+                        tracing::warn!(
+                            op,
+                            attempt = number,
+                            of = RETRY_MAX_ATTEMPTS,
+                            status = failed.observed.status,
+                            code = failed.observed.code.as_deref(),
+                            delay_ms = delay.as_millis(),
+                            error = %failed.error,
+                            "b2 request failed for a reason that may not last; retrying"
+                        );
+                        tokio::time::sleep(delay).await;
+                        number = number.saturating_add(1);
+                    }
                 }
-            },
+            }
         }
     }
 }
@@ -503,31 +543,142 @@ mod tests {
         }
     }
 
+    // ── the run's own silence ────────────────────────────────────────────
+    //
+    // This loop is where B2 multiplies `--timeout`. §32.9 read the log of the
+    // 160 MiB upload that had not ended 943.6 s after the cut: `b2_upload_part`,
+    // `b2_cancel_large_file` and `b2_list_buckets`, each running this schedule in
+    // full against a link that had already proved silent. The counter is shared
+    // with `crate::retry::driver` precisely so those are one budget and not
+    // several.
+
+    /// A B2 failure where nothing came back at all.
+    fn silence() -> Attempt {
+        Attempt::transport(StoreError::Transport {
+            backend: "b2",
+            detail: "no data moved for 30s (--timeout 30s)".to_string(),
+        })
+    }
+
+    /// One B2 request against a link that answers nothing.
+    async fn silent_request(stall: &RunStall, calls: &std::sync::atomic::AtomicU32) -> StoreError {
+        use std::sync::atomic::Ordering;
+        run("test", RunDeadline::unbounded(), stall, |_| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async { Err::<(), _>(silence()) }
+        })
+        .await
+        .expect_err("nothing answers")
+    }
+
+    #[tokio::test]
+    async fn a_second_b2_request_does_not_repeat_the_first_ones_silence() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        let stall = RunStall::from_idle(Some(Duration::from_secs(30)));
+        let first = AtomicU32::new(0);
+        let error = silent_request(&stall, &first).await;
+        assert_eq!(
+            first.load(Ordering::SeqCst),
+            RETRY_MAX_ATTEMPTS,
+            "the first request must still spend its whole schedule"
+        );
+        assert!(matches!(error, StoreError::Retried { .. }), "{error}");
+
+        let second = AtomicU32::new(0);
+        let error = silent_request(&stall, &second).await;
+        assert_eq!(
+            second.load(Ordering::SeqCst),
+            0,
+            "the run had had no answer for a whole schedule and must not have \
+             opened another connection to B2"
+        );
+        assert!(matches!(error, StoreError::Stalled { .. }), "{error}");
+    }
+
+    #[tokio::test]
+    async fn the_counter_is_the_same_cell_the_outer_layer_reads() {
+        use std::sync::atomic::AtomicU32;
+
+        // The property the whole bound rests on. An error this loop exhausts
+        // arrives at `crate::retry::driver` marked `Retried`, which that layer
+        // declines to retry — so on B2 the outer counter never sees these
+        // silences, and six here plus six there would be twelve. It is one cell
+        // and the handle is what clones.
+        let stall = RunStall::from_idle(Some(Duration::from_secs(30)));
+        let outer = stall.clone();
+        let _ = silent_request(&stall, &AtomicU32::new(0)).await;
+        assert!(
+            outer.exhausted().is_some(),
+            "the outer layer's handle did not see this loop's silences"
+        );
+        outer.answered();
+        assert_eq!(stall.count(), 0, "and a reset there did not reach here");
+    }
+
+    #[tokio::test]
+    async fn an_answer_from_b2_is_never_counted_as_silence() {
+        use std::sync::atomic::{AtomicU32, Ordering};
+
+        // `503 no tomes available` is B2 talking, and it is the exact failure
+        // this module was written for — five of ten files in the first live
+        // restore drill. Counting it as silence would turn a busy pod into a run
+        // that gives up.
+        let stall = RunStall::from_idle(Some(Duration::from_secs(30)));
+        for _ in 0..4 {
+            let calls = AtomicU32::new(0);
+            let error = run("test", RunDeadline::unbounded(), &stall, |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Err::<(), _>(Attempt {
+                        observed: Observed {
+                            status: Some(503),
+                            code: Some("service_unavailable".to_string()),
+                            retry_after: Some(Duration::ZERO),
+                            settled: false,
+                        },
+                        error: StoreError::Backend("no tomes available".into()),
+                    })
+                }
+            })
+            .await
+            .expect_err("the pod stays busy");
+            assert_eq!(calls.load(Ordering::SeqCst), RETRY_MAX_ATTEMPTS);
+            assert!(!matches!(error, StoreError::Stalled { .. }), "{error}");
+        }
+        assert_eq!(stall.count(), 0, "every attempt was answered");
+    }
+
     #[tokio::test]
     async fn the_driver_returns_the_first_success_and_counts_its_attempts() {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let calls = AtomicU32::new(0);
-        let value = run("test", RunDeadline::unbounded(), |number| {
-            let seen = calls.fetch_add(1, Ordering::SeqCst) + 1;
-            async move {
-                if seen < 3 {
-                    Err(Attempt {
-                        observed: Observed {
-                            status: Some(503),
-                            code: None,
-                            // Zero, so the test does not spend the real schedule
-                            // sleeping; the schedule itself is asserted above.
-                            retry_after: Some(Duration::ZERO),
-                            settled: false,
-                        },
-                        error: StoreError::Backend("busy".into()),
-                    })
-                } else {
-                    Ok(number)
+        let value = run(
+            "test",
+            RunDeadline::unbounded(),
+            &RunStall::unbounded(),
+            |number| {
+                let seen = calls.fetch_add(1, Ordering::SeqCst) + 1;
+                async move {
+                    if seen < 3 {
+                        Err(Attempt {
+                            observed: Observed {
+                                status: Some(503),
+                                code: None,
+                                // Zero, so the test does not spend the real schedule
+                                // sleeping; the schedule itself is asserted above.
+                                retry_after: Some(Duration::ZERO),
+                                settled: false,
+                            },
+                            error: StoreError::Backend("busy".into()),
+                        })
+                    } else {
+                        Ok(number)
+                    }
                 }
-            }
-        })
+            },
+        )
         .await
         .expect("the third attempt succeeds");
 
@@ -540,20 +691,25 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
 
         let calls = AtomicU32::new(0);
-        let error = run("test", RunDeadline::unbounded(), |_| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            async {
-                Err::<(), _>(Attempt {
-                    observed: Observed {
-                        status: Some(401),
-                        code: Some("bad_auth_token".to_string()),
-                        retry_after: None,
-                        settled: false,
-                    },
-                    error: StoreError::Backend("b2 api error 401: bad_auth_token".into()),
-                })
-            }
-        })
+        let error = run(
+            "test",
+            RunDeadline::unbounded(),
+            &RunStall::unbounded(),
+            |_| {
+                calls.fetch_add(1, Ordering::SeqCst);
+                async {
+                    Err::<(), _>(Attempt {
+                        observed: Observed {
+                            status: Some(401),
+                            code: Some("bad_auth_token".to_string()),
+                            retry_after: None,
+                            settled: false,
+                        },
+                        error: StoreError::Backend("b2 api error 401: bad_auth_token".into()),
+                    })
+                }
+            },
+        )
         .await
         .expect_err("a wrong key cannot succeed");
 
@@ -575,17 +731,22 @@ mod tests {
         // The half the hint depends on. Without this the operation-level layer
         // above would spend a second budget on the same failure, and the
         // operator would be told a number that is the product of two schedules.
-        let error = run("test", RunDeadline::unbounded(), |_| async {
-            Err::<(), _>(Attempt {
-                observed: Observed {
-                    status: Some(503),
-                    code: None,
-                    retry_after: Some(Duration::ZERO),
-                    settled: false,
-                },
-                error: StoreError::Backend("busy".into()),
-            })
-        })
+        let error = run(
+            "test",
+            RunDeadline::unbounded(),
+            &RunStall::unbounded(),
+            |_| async {
+                Err::<(), _>(Attempt {
+                    observed: Observed {
+                        status: Some(503),
+                        code: None,
+                        retry_after: Some(Duration::ZERO),
+                        settled: false,
+                    },
+                    error: StoreError::Backend("busy".into()),
+                })
+            },
+        )
         .await
         .expect_err("permanently busy");
 
@@ -607,6 +768,7 @@ mod tests {
                 std::time::Instant::now() - Duration::from_secs(60),
                 Some(Duration::from_secs(30)),
             ),
+            &RunStall::unbounded(),
             |_| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 async { Ok::<(), Attempt>(()) }
@@ -638,6 +800,7 @@ mod tests {
         let value = run(
             "test",
             RunDeadline::starting_now(Some(Duration::from_secs(600))),
+            &RunStall::unbounded(),
             |number| {
                 let seen = calls.fetch_add(1, Ordering::SeqCst) + 1;
                 async move {

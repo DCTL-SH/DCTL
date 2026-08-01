@@ -189,6 +189,15 @@ impl From<StoreError> for CliError {
                     .with_hint(crate::constants::MAX_DURATION_HINT)
             }
 
+            // The run stopped asking. Its own code, for the argument
+            // `ExitCode::LinkSilent` carries: 5 means "retries exhausted",
+            // which is nearly the opposite of what happened, and 5 is repeated
+            // by `--retries` and does not stop the walk — so a stalled run
+            // wearing it would fail every remaining file in microseconds and
+            // report retries over requests that were never made.
+            StoreError::Stalled { .. } => Self::new(ExitCode::LinkSilent, error.to_string())
+                .with_hint(crate::constants::STALLED_HINT),
+
             // Fatal, and fatal is the point: every remaining file would be
             // written into the same wrong place, and the run that this replaced
             // reported all of them as stored. See `dctl_store::local::root`.
@@ -379,6 +388,7 @@ impl CliError {
             StoreError::Refused { .. } => ExitCode::FatalError,
             StoreError::RootChanged { .. } => ExitCode::FatalError,
             StoreError::RunDeadline { .. } => ExitCode::DurationLimitExceeded,
+            StoreError::Stalled { .. } => ExitCode::LinkSilent,
             StoreError::Io(source) if dctl_store::durable::is_out_of_space(source) => {
                 ExitCode::FatalError
             }
@@ -451,6 +461,10 @@ mod tests {
             StoreError::RunDeadline {
                 limit: std::time::Duration::from_secs(30),
             },
+            StoreError::Stalled {
+                attempts: 6,
+                idle: std::time::Duration::from_secs(30),
+            },
             // A retry record over a failure whose code is *not* the temporary
             // one, so a mapping that answered from the wrapper instead of from
             // what it wraps is caught rather than accidentally right.
@@ -486,6 +500,58 @@ mod tests {
         assert!(
             hint.contains("cleanup"),
             "a hard cutoff leaves debris and must say how to reclaim it: {hint}"
+        );
+    }
+
+    #[test]
+    fn a_run_that_stopped_asking_gets_its_own_code_and_not_the_retry_one() {
+        // Exit **28**, not 5. `EXIT_CODES.md`'s own rule is that a code's
+        // meaning never changes and a new condition gets a new number, and 5
+        // already stands for "temporary error; retries exhausted" — which is
+        // nearly the opposite of what happened here: the retries were **not**
+        // exhausted, the run stopped early because a link that answers nothing
+        // cannot be persuaded by asking again. The two also want opposite
+        // handling inside the run; see `pipeline::is_fatal` and
+        // `retry::is_worth_repeating`.
+        let err = CliError::from(StoreError::Stalled {
+            attempts: 6,
+            idle: std::time::Duration::from_secs(30),
+        });
+        assert_eq!(err.code(), ExitCode::LinkSilent);
+
+        // The message is where an operator checks the arithmetic against the
+        // number they set, so both halves of the product are in it.
+        let message = err.message();
+        assert!(message.contains("--timeout 30s"), "{message}");
+        assert!(message.contains('6'), "{message}");
+
+        // It must not read as a run that was told to stop. `--max-duration` is
+        // the operator's own instruction and exits 10; this is the link being
+        // gone, and confusing the two sends somebody to the wrong flag.
+        assert!(
+            !message.contains("--max-duration"),
+            "a dead link is not a closed window: {message}"
+        );
+
+        let hint = err.hint().unwrap_or_default();
+        // The false claim, named rather than banned by keyword. The first
+        // spelling of this forbade the substring "exhaust", which failed on a
+        // hint that *denies* the claim — the assertion was about a word where
+        // it should have been about a sentence.
+        assert!(
+            !hint.to_lowercase().contains("retries were exhausted"),
+            "the hint must not borrow the retry wording PLAN.md §6 forbids, \
+             over a run whose retries were not exhausted: {hint}"
+        );
+        assert!(
+            hint.contains("NOT exhausted"),
+            "and it must say so out loud, because exit 5 is the code that means \
+             the other thing and an operator knows 5: {hint}"
+        );
+        assert!(
+            hint.contains("--timeout 0"),
+            "an operator who really will wait forever needs to be told how to \
+             say so: {hint}"
         );
     }
 

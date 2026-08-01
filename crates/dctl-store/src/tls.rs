@@ -34,7 +34,7 @@ use crate::error::{Result, StoreError};
 /// no `Timeout` field at all — and instead re-arms a deadline on the socket as
 /// bytes move. `crate::deadline` is where DCTL does the equivalent, at the
 /// closest seam reqwest leaves open.
-pub(crate) fn post_quantum_client(deadlines: Deadlines) -> Result<reqwest::Client> {
+pub(crate) fn post_quantum_client(deadlines: &Deadlines) -> Result<reqwest::Client> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
 

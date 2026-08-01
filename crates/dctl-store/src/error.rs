@@ -156,6 +156,40 @@ pub enum StoreError {
         limit: std::time::Duration,
     },
 
+    /// The run stopped asking a link that never answered.
+    ///
+    /// **Not** a [`StoreError::Transport`], and for the same reason
+    /// [`StoreError::RunDeadline`] beside it is not. A transport failure means
+    /// *nothing answered this time*, which is the case another attempt exists
+    /// for; this means *nothing has answered for a whole schedule of attempts,
+    /// and the run has stopped asking*. Another attempt is not merely useless —
+    /// classifying it as worth one is what let `--timeout × attempts` grow into
+    /// `--timeout × attempts × distinct requests`, which `HANDOVER.md` §36.5
+    /// measured at 288.7 s under `--timeout 30`.
+    ///
+    /// The message multiplies out to the number an operator can check against
+    /// the flag they set. The CLI maps it to exit **5**, the same code a link
+    /// that died produces without this bound, because the *cause* is unchanged
+    /// — a scheduler should still come back later. What changed is only how long
+    /// the run spends establishing it.
+    /// # No backend is named, and that is the accurate report
+    ///
+    /// Every other variant here names the backend that failed, because a
+    /// backend failed. This one is counted **across the run** — every request
+    /// it made, to either end of a copy — so naming one remote would be a claim
+    /// about where the silence was that the counter does not hold. What the
+    /// message carries instead is the arithmetic: the attempts, and the
+    /// operator's own `--timeout` they were each bounded by. The failure that
+    /// caused the *first* silence is reported by the backend that saw it, in
+    /// the ordinary way, and is what an operator reads above this line.
+    #[error("gave up after {attempts} attempts that got no answer (--timeout {}s)", idle.as_secs())]
+    Stalled {
+        /// Consecutive attempts that got nothing back.
+        attempts: u32,
+        /// The operator's own `--timeout`, so the report quotes their number.
+        idle: std::time::Duration,
+    },
+
     /// A failure a retry layer already tried again, and how many times.
     ///
     /// Wraps rather than replaces, so the exit code, the message and the type an
@@ -195,6 +229,7 @@ impl StoreError {
             StoreError::Transport { .. } => 2010,
             StoreError::RunDeadline { .. } => 2011,
             StoreError::Refused { .. } => 2012,
+            StoreError::Stalled { .. } => 2013,
             // Delegated, never its own number. A retry record describes how
             // often something was attempted, not what went wrong, and a script
             // branching on the exit code must see the same number whether or not
@@ -272,6 +307,14 @@ mod tests {
             }
             .code(),
             2007
+        );
+        assert_eq!(
+            StoreError::Stalled {
+                attempts: 6,
+                idle: std::time::Duration::from_secs(30),
+            }
+            .code(),
+            2013
         );
     }
 
@@ -375,6 +418,11 @@ mod tests {
             .code(),
             StoreError::RunDeadline {
                 limit: std::time::Duration::from_secs(1),
+            }
+            .code(),
+            StoreError::Stalled {
+                attempts: 6,
+                idle: std::time::Duration::from_secs(30),
             }
             .code(),
         ];

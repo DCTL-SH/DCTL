@@ -177,7 +177,7 @@ pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Opened> {
             &config,
             spec,
             ctx.globals.links,
-            ctx.deadlines,
+            ctx.deadlines.clone(),
         )?),
         prefix,
     })

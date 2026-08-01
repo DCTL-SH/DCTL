@@ -129,7 +129,7 @@ impl PlainRemote {
             &resolved,
             ctx.globals.links,
             ctx.limits.meter(),
-            ctx.deadlines,
+            ctx.deadlines.clone(),
         )?;
         Ok(Self { resolved, backend })
     }

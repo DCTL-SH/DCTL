@@ -63,34 +63,39 @@ pub(super) async fn get_to_path(b2: &B2Backend, key: &ObjectKey, dest: &Path) ->
 /// than silently restarted — restarting a stream without rewinding the hash is
 /// how a truncated object gets committed as a whole one.
 async fn send_download(b2: &B2Backend, key: &ObjectKey, range: Option<String>) -> Result<Answered> {
-    retry::run(constants::OP_DOWNLOAD, b2.deadlines.run, |_| async {
-        let auth = b2.auth().await.map_err(Attempt::transport)?;
-        let url = format!(
-            "{}/{}/{}/{}",
-            auth.download_url,
-            constants::DOWNLOAD_SEGMENT,
-            b2.bucket_name,
-            encode_file_name(key.as_str())
-        );
+    retry::run(
+        constants::OP_DOWNLOAD,
+        b2.deadlines.run,
+        &b2.deadlines.stall,
+        |_| async {
+            let auth = b2.auth().await.map_err(Attempt::transport)?;
+            let url = format!(
+                "{}/{}/{}/{}",
+                auth.download_url,
+                constants::DOWNLOAD_SEGMENT,
+                b2.bucket_name,
+                encode_file_name(key.as_str())
+            );
 
-        tracing::debug!(has_range = range.is_some(), "b2 download");
-        let mut request = b2
-            .client
-            .get(&url)
-            .header(constants::H_AUTHORIZATION, &auth.auth_token);
-        if let Some(range_header) = range.clone() {
-            request = request.header(constants::H_RANGE, range_header);
-        }
+            tracing::debug!(has_range = range.is_some(), "b2 download");
+            let mut request = b2
+                .client
+                .get(&url)
+                .header(constants::H_AUTHORIZATION, &auth.auth_token);
+            if let Some(range_header) = range.clone() {
+                request = request.header(constants::H_RANGE, range_header);
+            }
 
-        let watch = b2.deadlines.watch();
-        let response = watch
-            .guard(request.send())
-            .await
-            .map_err(stalled_attempt)?
-            .map_err(transport_attempt)?;
-        b2.observe_expiry(classify_download(Answered { watch, response }, key).await)
-            .await
-    })
+            let watch = b2.deadlines.watch();
+            let response = watch
+                .guard(request.send())
+                .await
+                .map_err(stalled_attempt)?
+                .map_err(transport_attempt)?;
+            b2.observe_expiry(classify_download(Answered { watch, response }, key).await)
+                .await
+        },
+    )
     .await
 }
 

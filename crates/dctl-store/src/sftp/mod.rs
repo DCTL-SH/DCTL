@@ -362,7 +362,7 @@ impl SftpBackend {
         // be a run `--max-duration` did not cover, and the case is not
         // hypothetical: §32.9's `sftp:` arm hung on a replacement `ssh`, and
         // nothing about the first `ssh` makes it different from the second.
-        let link = Arc::new(dial_within(dialer.as_ref(), deadlines).await?);
+        let link = Arc::new(dial_within(dialer.as_ref(), &deadlines).await?);
         // One `stat`, on the first connection only. A base that is absent now
         // may be created by the first write; one that is present may never be
         // re-created by any write in this run — and neither answer is re-asked
@@ -444,7 +444,7 @@ impl SftpBackend {
             destination = self.dialer.destination(),
             "re-dialling the sftp session"
         );
-        let fresh = Arc::new(dial_within(self.dialer.as_ref(), self.deadlines).await?);
+        let fresh = Arc::new(dial_within(self.dialer.as_ref(), &self.deadlines).await?);
         *cell = Some(Arc::clone(&fresh));
         Ok(fresh)
     }
@@ -993,7 +993,7 @@ impl Backend for SftpBackend {
 /// Whatever the dial reported; a [`StoreError::Transport`] naming
 /// `--contimeout` when nothing came back inside it; or
 /// [`StoreError::RunDeadline`] when the run's window closed first.
-async fn dial_within(dialer: &dyn SftpDial, deadlines: Deadlines) -> Result<Link> {
+async fn dial_within(dialer: &dyn SftpDial, deadlines: &Deadlines) -> Result<Link> {
     let dial = async {
         match deadlines.connect {
             // `--contimeout 0`: wait as long as it takes to reach the host,

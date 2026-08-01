@@ -491,8 +491,8 @@ never prompt for a password.
 | `--bwlimit <RATE>` | | Bandwidth limit, e.g. `10M`. `off` for unlimited. |
 | `--retries <N>` | `3` | Retries of a whole failed file. |
 | `--low-level-retries <N>` | **refused** | Request-level retries exist on every backend, but on a per-provider schedule of four numbers one `N` cannot set. |
-| `--timeout <SECONDS>` | `300` | Inactivity timeout on **one attempt**. Does not bound the run — see `--max-duration`. |
-| `--contimeout <SECONDS>` | `60` | Connection timeout on **one attempt**. Does not bound the run. |
+| `--timeout <SECONDS>` | `300` | Inactivity timeout on **one attempt**. A link that answers nothing costs the run at most `6 ×` this, then exit 28. Does not bound a run that is healthy but slow — see `--max-duration`. |
+| `--contimeout <SECONDS>` | `60` | Connection timeout on **one attempt**. Counts towards the same run-level limit as `--timeout`. |
 | `--max-transfer <SIZE>` | | Stop after transferring this much, e.g. `100G`. Exits **8**. |
 | `--max-duration <DURATION>` | | Stop the whole run after this long, e.g. `4h`. A hard cutoff. Exits **10**. |
 

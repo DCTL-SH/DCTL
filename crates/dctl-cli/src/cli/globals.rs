@@ -304,6 +304,10 @@ pub struct GlobalArgs {
     pub bwlimit: Option<ByteLimit>,
 
     /// Retries of a whole failed file.
+    ///
+    /// Not applied to a link that has answered nothing: once the run has spent
+    /// a whole schedule of attempts getting no reply it stops asking, and
+    /// repeating the file would only spend another one. See --timeout.
     #[arg(
         long,
         global = true,
@@ -325,11 +329,22 @@ pub struct GlobalArgs {
     /// moves resets it, so a 4 GiB restore over a slow link runs for hours and
     /// never approaches it. That is rclone's meaning of the same flag.
     ///
-    /// It bounds one ATTEMPT, and it does NOT bound the run. A copy makes
-    /// several distinct requests, each request is retried on a schedule, and
-    /// --retries repeats the file over all of it — so the time a dead network
-    /// can cost is a product this flag does not know. Use --max-duration to
-    /// bound the run.
+    /// A stalled link is retried, so what a link that is GONE costs the run is
+    /// a COUNT and not a clock: 6 attempts in a row that get no answer end it,
+    /// and any answer puts the count back to zero. The count is the whole
+    /// run's, not each request's.
+    ///
+    /// In time that is at most 6 x --timeout when a transfer goes quiet — 30
+    /// minutes at the default, 180 seconds at --timeout 30 — plus the retry
+    /// schedule's own backoff. An attempt that cannot reach the host at all is
+    /// bounded by --contimeout instead, and on sftp: an abandoned dial costs
+    /// that twice. The run then exits 28, without walking the files it had
+    /// left.
+    ///
+    /// It still does not bound a run that is HEALTHY but slow, and nothing
+    /// here can: a transfer that is moving resets this on every frame, which
+    /// is the entire point of an inactivity deadline. Use --max-duration to
+    /// bound a backup window.
     // ── the history, which is not the operator's business ────────────────
     //
     // Everything above is help text: clap renders this doc comment into
@@ -344,9 +359,20 @@ pub struct GlobalArgs {
     // The measurement behind the correction, against live B2 with the route
     // black-holed and `--retries 1`: the first failure at **30 s**, to the
     // second, and the run **not ended 943.6 s after the cut**. On `sftp:`, not
-    // ended after 601 s. The product is not stated now because it is not a
-    // number this flag knows — and `--max-duration`, which is the honest
-    // answer, is named instead.
+    // ended after 601 s.
+    //
+    // §33 then wrote *"the product is not stated because it is not a number
+    // either flag knows"*, and that sentence was true — which is what made it a
+    // finding rather than a limitation. The product was
+    // `--timeout × attempts × DISTINCT REQUESTS × --retries`, and the third
+    // factor is unbounded: a copy makes as many requests as it makes, and each
+    // one ran a whole schedule against a link that had already proved silent.
+    // §36.5 measured the consequence — the same command against the same fault
+    // returned the shell at **46.3 s**, **136.6 s** and **288.7 s**, depending
+    // on which request the cut landed on. `dctl_store::deadline::stall` counts
+    // the *run's* unanswered attempts instead of each request's, which removes
+    // that factor; what is left is two numbers an operator can see, and the
+    // sentence above states them.
     //
     // The semantics are deliberately unchanged. rclone's `--timeout` is
     // `Help: "IO idle timeout"` with a five-minute default (`fs/config.go:122`)
@@ -370,7 +396,16 @@ pub struct GlobalArgs {
     /// on one costs a round of backoff and nothing else — which is why this is
     /// far more impatient than the deadline on a transfer already carrying data.
     ///
-    /// Like --timeout it bounds one ATTEMPT and does NOT bound the run.
+    /// Like --timeout it bounds one ATTEMPT. An attempt that could not reach
+    /// the host got no answer either, so it counts towards the same run-level
+    /// limit --timeout describes: six in a row and the run stops asking.
+    ///
+    /// On sftp: an abandoned dial costs this TWICE — once waiting for it and
+    /// once while the ssh it started is reaped. Measured against a black-holed
+    /// route with --timeout 30 --contimeout 30: b2: ended 195.9 s after the
+    /// cut and sftp: 370.6 s, same flags, same fault. Keep --contimeout well
+    /// under --timeout, as the defaults do, and the run's cost stays the one
+    /// --timeout states.
     // On `sftp:` it is applied twice over: handed to `ssh` as
     // `-o ConnectTimeout`, so the whole `ProxyCommand` chain is bounded from
     // the inside — which is where rclone puts the same number
@@ -913,20 +948,95 @@ mod tests {
             !help.contains("is the product"),
             "the sentence that promised a product and gave none is back:\n{help}"
         );
-        // Both attempt-scoped deadlines have to disclaim the run, or the
-        // correction is half-made and the half that is missing is the one an
-        // operator reads first.
-        assert_eq!(
-            help.matches("does NOT bound the run").count(),
-            2,
-            "--timeout and --contimeout must each say what they do not bound:\n{help}"
+        // …and neither is the sentence that replaced it, which said the product
+        // was not a number this flag knows. That was true, and §36.5 measured
+        // what it cost: 46.3 s, 136.6 s and 288.7 s on three runs of one command
+        // against one fault, because the unstated factor was how many requests
+        // the copy had left to make. The factor is gone and the product is a
+        // number now, so the disclaimer must not survive it.
+        assert!(
+            !help.contains("a product this flag does not know"),
+            "the product is stated now; the sentence saying it cannot be is stale:\n{help}"
         );
-        // …and the flag that does bound a run has to be on the same page, or
-        // the correction sends the reader nowhere.
+        // The flag that does bound a run is still on the same page, because it
+        // is still the answer for a run that is healthy but slow.
         assert!(help.contains("--max-duration"), "{help}");
         assert!(
             help.contains("Stop the whole run after this long"),
             "the run-level flag must say so in its own first line:\n{help}"
+        );
+    }
+
+    #[test]
+    fn the_help_states_the_product_and_states_the_number_the_build_delivers() {
+        // The other half of §36.5's finding, and the half a rewording cannot
+        // satisfy on its own: what `--help` prints has to be the arithmetic the
+        // binary performs. `dctl_store` owns the attempt count, so it is read
+        // from there rather than typed here — a limit changed in the store with
+        // the help left saying six would be exactly the class of false claim
+        // this test exists for, and nothing else in the workspace would notice.
+        let help = help_text();
+        let limit = dctl_store::deadline::constants::UNANSWERED_ATTEMPT_LIMIT;
+
+        assert!(
+            help.contains(&format!("{limit} attempts in a row")),
+            "--help must state the bound the build actually enforces, which is a \
+             count of attempts ({limit}):\n{help}"
+        );
+        assert!(
+            help.contains(&format!("at most {limit} x --timeout")),
+            "…and the time that count costs, in the flag's own units:\n{help}"
+        );
+        // The one configuration where `6 x --timeout` is not the whole story,
+        // disclosed rather than left for an operator to measure. An abandoned
+        // `sftp` dial waits `--contimeout` again while its `ssh` is reaped:
+        // against a black-holed route with `--timeout 30 --contimeout 30`, `b2:`
+        // ended 195.9 s after the cut and `sftp:` 370.6 s — same flags, same
+        // fault. A ceiling that ignored it would be this pass's own defect
+        // reintroduced in the place an operator reads.
+        assert!(
+            help.contains("on sftp: an abandoned dial costs") || help.contains("costs that twice"),
+            "the sftp dial's doubling must be disclosed where the ceiling is \
+             stated:\n{help}"
+        );
+
+        // Both worked examples, multiplied out here rather than trusted. An
+        // operator sizing a backup window reads these two numbers and nothing
+        // else, so an arithmetic slip in a doc comment is a wrong backup window.
+        let default_secs = u64::from(limit) * constants::DEFAULT_TIMEOUT_SECS;
+        assert_eq!(default_secs / 60, 30, "the default example is out of date");
+        assert!(
+            help.contains("30 minutes at the default"),
+            "the default's product must be stated in the unit an operator plans \
+             in ({default_secs}s):\n{help}"
+        );
+        assert!(
+            help.contains(&format!(
+                "{} seconds at --timeout 30",
+                u64::from(limit) * 30
+            )),
+            "the worked example must multiply out correctly:\n{help}"
+        );
+
+        // The exit code it produces, on the same page, because a scheduler
+        // branches on it and "the run stopped asking" must not read as success.
+        assert_eq!(
+            format!("exits {}", crate::exit::ExitCode::LinkSilent.as_i32()),
+            "exits 28",
+            "the code this help text names has moved"
+        );
+        assert!(
+            help.contains("exits 28"),
+            "the code a stalled run exits with belongs where the bound is \
+             stated:\n{help}"
+        );
+
+        // And the direction that matters more is still disclaimed: this is not
+        // a bound on a healthy transfer, and a reader must not size a window
+        // with it.
+        assert!(
+            help.contains("does not bound a run that is HEALTHY but slow"),
+            "an inactivity deadline must keep saying what it is not:\n{help}"
         );
     }
 

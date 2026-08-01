@@ -243,3 +243,9 @@ pub(super) const RETRY_MAX_BACKOFF: std::time::Duration = std::time::Duration::f
 /// backup would produce a process that sits silent for a day, and a failure an
 /// operator can see beats a wait they cannot.
 pub(super) const RETRY_AFTER_CAP: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// B2's own schedule is never longer than the run's stall limit, or this loop
+/// would spend more consecutive silences than the run has agreed to and the
+/// limit would cut an operation's own retries short. The rule is here rather
+/// than beside the limit because this is the number that could move.
+const _: () = assert!(RETRY_MAX_ATTEMPTS <= crate::deadline::constants::UNANSWERED_ATTEMPT_LIMIT);

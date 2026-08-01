@@ -153,7 +153,7 @@ impl Medium {
             &resolved,
             ctx.globals.links,
             dctl_store::unmetered(),
-            ctx.deadlines,
+            ctx.deadlines.clone(),
         )?;
         Ok(Self::Plain {
             source: PlainSource::new(Arc::clone(&backend)),
@@ -288,7 +288,7 @@ impl Medium {
                     &resolved,
                     ctx.globals.links,
                     dctl_store::unmetered(),
-                    ctx.deadlines,
+                    ctx.deadlines.clone(),
                 )
             }
         }

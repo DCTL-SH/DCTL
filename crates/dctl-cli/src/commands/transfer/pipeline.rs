@@ -564,6 +564,13 @@ pub const fn is_fatal(error: &CliError) -> bool {
             | ExitCode::AuditChainBroken
             | ExitCode::TransferLimitExceeded
             | ExitCode::DurationLimitExceeded
+            // The run has stopped asking a link that answered nothing, and the
+            // second half of the `DurationLimitExceeded` argument above applies
+            // word for word: every remaining backend call refuses instantly
+            // (`dctl_store::retry::driver`), so carrying on would try every
+            // remaining file, fail every one of them in microseconds, and turn
+            // one honest line into a wall of errors and exit 6.
+            | ExitCode::LinkSilent
     )
 }
 
@@ -1186,6 +1193,14 @@ mod tests {
     #[test]
     fn only_run_ending_failures_are_fatal() {
         // One unreadable file must not abandon the other 9,999,999.
+        // A run that has stopped asking cannot continue: every remaining
+        // backend call refuses instantly, so walking the rest of the plan would
+        // fail every file in microseconds and turn one honest line into a wall
+        // of errors and exit 6 — the failure mode this function's own
+        // documentation describes for `--max-duration`.
+        assert!(is_fatal(&CliError::new(ExitCode::LinkSilent, "")));
+        // …and the ordinary transient must still NOT stop the walk, or this
+        // bound has been bought by making every flaky file fatal.
         assert!(!is_fatal(&CliError::new(ExitCode::TemporaryError, "")));
         assert!(!is_fatal(&CliError::new(ExitCode::FileNotFound, "")));
         assert!(!is_fatal(&CliError::new(ExitCode::ChecksumMismatch, "")));
