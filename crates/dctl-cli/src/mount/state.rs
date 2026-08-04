@@ -1101,11 +1101,25 @@ mod tests {
         // Spawned, so let the runtime run them.
         tokio::task::yield_now().await;
         let scheduled = source.prefetches.load(Ordering::Relaxed);
-        assert!(
-            scheduled <= 2,
-            "eight reads inside one read-ahead window scheduled {scheduled} fetches"
+        assert_eq!(
+            scheduled, 0,
+            "reads inside an unproven first window spent {scheduled} fetches — \
+             warming is earned by a full window of streaming, and a fresh \
+             handle has earned nothing (see HandleTable::claim_read_ahead)"
         );
-        assert!(scheduled >= 1, "no read-ahead was scheduled at all");
+
+        // Streaming on: crossing the first window earns one prefetch, and
+        // crossing the second earns the full depth-two top-up. Sixteen more
+        // reads produce exactly three scheduled fetches, not sixteen.
+        for offset in (8_000..24_000).step_by(1_000) {
+            state.read(handle, offset, 1_000).await.unwrap();
+        }
+        tokio::task::yield_now().await;
+        let scheduled = source.prefetches.load(Ordering::Relaxed);
+        assert_eq!(
+            scheduled, 3,
+            "a proven stream schedules once per window earned, not once per read"
+        );
     }
 
     #[tokio::test]
