@@ -198,6 +198,12 @@ impl Source for PlainSource {
         // into one implementation.
     }
 
+    fn tune_cache(&self, _bytes: usize, _max_chunks: usize) {
+        // Nothing to size, for the reason `prefetch` above has nothing to warm:
+        // this view holds no cache. Stated here rather than defaulted so the
+        // absence reads as the decision it is.
+    }
+
     async fn stat(&self, path: &str) -> Result<Option<Entry>> {
         match self.backend.head(&ObjectKey::new(path)).await {
             Ok(meta) => Ok(Some(from_meta(meta))),

@@ -286,6 +286,8 @@ mod tests {
 
         async fn prefetch(&self, _path: &str, _offset: u64, _length: u64) {}
 
+        fn tune_cache(&self, _bytes: usize, _max_chunks: usize) {}
+
         async fn stat(&self, path: &str) -> Result<Option<Entry>> {
             Ok(self.entries.iter().find(|e| e.path == path).cloned())
         }

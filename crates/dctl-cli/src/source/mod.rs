@@ -356,6 +356,25 @@ pub trait Source: Send + Sync {
     /// read as the decision it is.
     async fn prefetch(&self, path: &str, offset: u64, length: u64);
 
+    /// Declare the working set this source should keep resident, in bytes and
+    /// entries.
+    ///
+    /// A hint like [`prefetch`](Source::prefetch), and for the same reason: no
+    /// promise, no error channel. A source with a cache raises its budget to at
+    /// least this — never lowers it below its own floor — and a source without one
+    /// has nothing to size.
+    ///
+    /// The caller that knows the working set is the mount: read-ahead keeps
+    /// `depth` windows in flight, and warming windows a cache cannot hold evicts
+    /// the chunks the reader is about to ask for — every warmed byte fetched
+    /// twice, which is worse than no read-ahead at all. Stating the budget where
+    /// the depth is chosen keeps the two from drifting apart.
+    ///
+    /// Not defaulted, exactly as `prefetch` is not: an implementation must say
+    /// "there is nothing to size here" in its own body, where the statement can
+    /// be read as the decision it is.
+    fn tune_cache(&self, bytes: usize, max_chunks: usize);
+
     /// Describe one object without reading it, or [`None`] if it is not there.
     ///
     /// `None` is the answer for "no such object", never an error, because every

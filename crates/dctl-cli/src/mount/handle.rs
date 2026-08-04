@@ -135,23 +135,59 @@ impl HandleTable {
         }
     }
 
-    /// Claim the read-ahead window `[from, from + length)` for this handle.
+    /// Claim the read-ahead windows that keep the watermark `depth × window`
+    /// bytes ahead of a reader at `from`.
     ///
-    /// Returns `true` — and moves the watermark — only if the read-ahead has not
-    /// already covered `from`. That is what turns "warm the next 16 MiB after
-    /// every read" into "warm it once per 16 MiB of progress", and it is also
-    /// what makes a *backwards* seek re-warm: a reader that jumps back before the
-    /// watermark is not sequential, and its next read has to be able to schedule
-    /// its own read-ahead.
-    pub fn claim_read_ahead(&mut self, handle: FileHandle, from: u64, length: u64) -> bool {
+    /// Returns the whole windows to warm — each `(start, length)` with `length`
+    /// exactly `window` — and moves the watermark past them. Empty when the
+    /// horizon is already covered, which is what turns "warm after every read"
+    /// into "warm once per window of progress": a kernel reading a 1 MiB chunk
+    /// in 4 KiB steps claims nothing 255 times out of 256.
+    ///
+    /// The depth is the pipeline. At depth one the next window is claimed only
+    /// when the reader arrives at the watermark, and every boundary stalls for a
+    /// provider round trip; at depth two the claim fires a full window early, so
+    /// the fetch overlaps the reader's consumption of what is already resident —
+    /// [`MOUNT_READ_AHEAD_DEPTH`](crate::constants::MOUNT_READ_AHEAD_DEPTH)
+    /// argues the figure.
+    ///
+    /// A reader more than the horizon *behind* the watermark jumped backwards:
+    /// it is not sequential, nothing is claimed, and the watermark stays — the
+    /// bytes it re-reads are the cache's problem, and forward progress past the
+    /// horizon re-arms warming exactly as before. Only whole windows are ever
+    /// claimed, so partial progress never issues a fragment request.
+    pub fn claim_read_ahead(
+        &mut self,
+        handle: FileHandle,
+        from: u64,
+        window: u64,
+        depth: u64,
+    ) -> Vec<(u64, u64)> {
         let Some(Handle::File { prefetched_to, .. }) = self.open.get_mut(&handle.0) else {
-            return false;
+            return Vec::new();
         };
-        if from < *prefetched_to {
-            return false;
+        if window == 0 {
+            return Vec::new();
         }
-        *prefetched_to = from.saturating_add(length);
-        true
+        let horizon = window.saturating_mul(depth);
+        let target = from.saturating_add(horizon);
+        if *prefetched_to > target {
+            // More than the horizon behind the watermark: a backwards jump.
+            return Vec::new();
+        }
+        let start = (*prefetched_to).max(from);
+        let missing = target.saturating_sub(start) / window;
+        if missing == 0 {
+            return Vec::new();
+        }
+        let mut windows = Vec::with_capacity(usize::try_from(missing).unwrap_or(usize::MAX));
+        let mut at = start;
+        for _ in 0..missing {
+            windows.push((at, window));
+            at = at.saturating_add(window);
+        }
+        *prefetched_to = at;
+        windows
     }
 
     /// Forget a handle. Answers whether it was one this table had issued.
@@ -278,11 +314,39 @@ mod tests {
         let mut table = HandleTable::new();
         let handle = table.open_file("film.mkv".into());
 
-        assert!(table.claim_read_ahead(handle, 0, 1_000));
-        assert!(!table.claim_read_ahead(handle, 100, 1_000));
-        assert!(!table.claim_read_ahead(handle, 999, 1_000));
-        // Only once the reader has moved past what was warmed.
-        assert!(table.claim_read_ahead(handle, 1_000, 1_000));
+        // The first claim fills the whole pipeline: depth windows at once.
+        assert_eq!(
+            table.claim_read_ahead(handle, 0, 1_000, 2),
+            vec![(0, 1_000), (1_000, 1_000)]
+        );
+        assert!(table.claim_read_ahead(handle, 100, 1_000, 2).is_empty());
+        assert!(table.claim_read_ahead(handle, 999, 1_000, 2).is_empty());
+        // Once the reader has consumed a full window, exactly one more is
+        // claimed — the pipeline refill, not a burst.
+        assert_eq!(
+            table.claim_read_ahead(handle, 1_000, 1_000, 2),
+            vec![(2_000, 1_000)]
+        );
+    }
+
+    #[test]
+    fn the_pipeline_stays_a_window_ahead_of_a_sequential_reader() {
+        // Depth two means the fetch of window k+1 overlaps the consumption of
+        // window k. If the refill arrived only when the reader reached the
+        // watermark, every boundary would stall for a round trip — the
+        // stop-and-go this depth exists to remove.
+        let mut table = HandleTable::new();
+        let handle = table.open_file("film.mkv".into());
+        assert_eq!(table.claim_read_ahead(handle, 0, 1_000, 2).len(), 2);
+        // Reader mid-way through the first window: the second is already
+        // claimed, nothing new is owed.
+        assert!(table.claim_read_ahead(handle, 500, 1_000, 2).is_empty());
+        // Reader entering the second window: the third is claimed while the
+        // second is being consumed.
+        assert_eq!(
+            table.claim_read_ahead(handle, 1_100, 1_000, 2),
+            vec![(2_000, 1_000)]
+        );
     }
 
     #[test]
@@ -291,21 +355,29 @@ mod tests {
         // of view, and its next read must be able to warm what it is heading for.
         let mut table = HandleTable::new();
         let handle = table.open_file("film.mkv".into());
-        assert!(table.claim_read_ahead(handle, 10_000, 1_000));
-        assert!(!table.claim_read_ahead(handle, 10_500, 1_000));
-        // Back to the start: below the watermark, so no claim…
-        assert!(!table.claim_read_ahead(handle, 0, 1_000));
+        assert_eq!(table.claim_read_ahead(handle, 10_000, 1_000, 2).len(), 2);
+        assert!(table.claim_read_ahead(handle, 10_500, 1_000, 2).is_empty());
+        // Back to the start: more than the horizon behind the watermark, so no
+        // claim…
+        assert!(table.claim_read_ahead(handle, 0, 1_000, 2).is_empty());
         // …but the watermark is not moved backwards by the attempt, and forward
-        // progress from the new position still arms it.
-        assert!(table.claim_read_ahead(handle, 11_000, 1_000));
+        // progress past it still arms warming.
+        assert_eq!(
+            table.claim_read_ahead(handle, 11_000, 1_000, 2),
+            vec![(12_000, 1_000)]
+        );
     }
 
     #[test]
     fn read_ahead_cannot_be_claimed_on_a_directory_or_a_stale_handle() {
         let mut table = HandleTable::new();
         let dir = table.open_directory(listing(&[]));
-        assert!(!table.claim_read_ahead(dir, 0, 1_000));
-        assert!(!table.claim_read_ahead(FileHandle(4_242), 0, 1_000));
+        assert!(table.claim_read_ahead(dir, 0, 1_000, 2).is_empty());
+        assert!(
+            table
+                .claim_read_ahead(FileHandle(4_242), 0, 1_000, 2)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -314,8 +386,24 @@ mod tests {
         // mount rather than failing one operation.
         let mut table = HandleTable::new();
         let handle = table.open_file("a.bin".into());
-        assert!(table.claim_read_ahead(handle, u64::MAX, u64::MAX));
-        assert!(!table.claim_read_ahead(handle, u64::MAX - 1, 1));
+        // Nothing addressable lies past the end, so nothing is claimed — and
+        // nothing panics.
+        assert!(
+            table
+                .claim_read_ahead(handle, u64::MAX, u64::MAX, 2)
+                .is_empty()
+        );
+        // Just short of the end, the one window that fits is claimed, clamped.
+        assert_eq!(
+            table.claim_read_ahead(handle, u64::MAX - 1, 1, 2),
+            vec![(u64::MAX - 1, 1)]
+        );
+        // And the watermark it left is saturated, not wrapped.
+        assert!(
+            table
+                .claim_read_ahead(handle, u64::MAX - 1, 1, 2)
+                .is_empty()
+        );
     }
 
     #[test]
