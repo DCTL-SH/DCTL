@@ -25,6 +25,42 @@ impl Vault {
         Ok(out)
     }
 
+    /// Every content-object key the backend actually holds, as one set.
+    ///
+    /// The reconciliation primitive behind honest destination listings: the
+    /// index says what *should* be stored, and this says what *is*. A row
+    /// whose `object_key` is absent here is a file the vault will lose on
+    /// restore, whatever the index believes — the defect this was built for
+    /// reported `Checks: 150/150, Errors: 0` over exactly that damage.
+    ///
+    /// Keys only, paged exactly as [`rebuild_index`](Vault::rebuild_index)
+    /// pages name records — one LIST request per provider page, no GETs, no
+    /// payload bytes. Memory is O(object keys), the same order as the
+    /// materialised `Vec<Record>` [`Vault::list`] already carries; a streaming
+    /// merge-join can replace the set later without changing any call site.
+    ///
+    /// # Errors
+    /// Whatever the backend's listing reported.
+    #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
+    pub async fn stored_object_keys(&self) -> Result<std::collections::HashSet<String>> {
+        let mut keys = std::collections::HashSet::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let page = self
+                .backend
+                .list_page(super::layout::OBJECT_KEY_PREFIX, cursor)
+                .await?;
+            for item in &page.items {
+                keys.insert(item.key.as_str().to_string());
+            }
+            match page.next_cursor {
+                Some(next) => cursor = Some(next),
+                None => break,
+            }
+        }
+        Ok(keys)
+    }
+
     /// The index record for exactly `path`, if the vault holds one.
     ///
     /// A keyed lookup, not a filtered [`Vault::list`], and the difference is not

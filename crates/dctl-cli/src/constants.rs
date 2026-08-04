@@ -2398,6 +2398,11 @@ pub const PLAN_REASON_EXISTS: &str = "exists";
 pub const PLAN_REASON_DESTINATION_NEWER: &str = "destination-newer";
 /// See [`PLAN_REASON_MISSING`]. At the destination only — a `sync` extra.
 pub const PLAN_REASON_EXTRA: &str = "not-at-source";
+/// See [`PLAN_REASON_MISSING`]. The destination's index claims the path but
+/// the store no longer holds its object — a loss discovered by the
+/// destination reconciliation, repaired by a fresh upload. No flag may skip
+/// it, for rule 1's reason: what the row describes is not restorable.
+pub const PLAN_REASON_DESTINATION_LOST: &str = "destination-object-missing";
 /// See [`PLAN_REASON_MISSING`]. An empty source directory
 /// (`--create-empty-src-dirs`).
 pub const PLAN_REASON_EMPTY_SOURCE_DIR: &str = "empty-source-dir";

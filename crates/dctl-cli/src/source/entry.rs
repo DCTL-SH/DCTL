@@ -87,6 +87,19 @@ pub struct Entry {
     /// [`None`] there rather than being filled with a value that means something
     /// else.
     pub content_hash: Option<Vec<u8>>,
+
+    /// Whether the stored object behind this row is known to be GONE.
+    ///
+    /// Only a destination reconciliation sets it
+    /// ([`Source::enumerate_destination`](super::Source::enumerate_destination)):
+    /// the index said this path exists, the backend's own listing said its
+    /// object does not. A planner that sees the mark must treat the path as
+    /// needing a fresh upload whatever the row's size and mtime claim — those
+    /// numbers describe bytes that are no longer restorable, and skipping on
+    /// them is how a nightly reported `Errors: 0` over a destination that had
+    /// lost data. Always `false` on plain sources and on ordinary listings,
+    /// which pay nothing for it.
+    pub object_missing: bool,
 }
 
 impl Entry {
@@ -102,6 +115,7 @@ impl Entry {
             size: Some(size),
             modified_unix: None,
             content_hash: None,
+            object_missing: false,
         }
     }
 
@@ -120,6 +134,7 @@ impl Entry {
             size: None,
             modified_unix: None,
             content_hash: None,
+            object_missing: false,
         }
     }
 

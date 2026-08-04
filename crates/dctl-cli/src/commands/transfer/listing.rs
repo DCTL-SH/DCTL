@@ -243,7 +243,7 @@ impl Listing {
 /// (see [`crate::platform::collision`]); plus whatever opening or reading the
 /// remote reported.
 pub async fn source(ctx: &Ctx, endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
-    let listing = enumerate(ctx, endpoint, options).await?;
+    let listing = enumerate(ctx, endpoint, options, Side::Source).await?;
     if !listing.exists {
         return Err(CliError::new(
             ExitCode::DirNotFound,
@@ -273,7 +273,20 @@ pub async fn destination(
     endpoint: &RemoteSpec,
     options: &ListOptions,
 ) -> Result<Listing> {
-    enumerate(ctx, endpoint, options).await
+    enumerate(ctx, endpoint, options, Side::Destination).await
+}
+
+/// Which side of the transfer a walk is enumerating.
+///
+/// The destination side is the one a transfer is about to make promises
+/// against, so it enumerates through
+/// [`Source::enumerate_destination`](crate::source::Source::enumerate_destination)
+/// — the listing that answers for the store, and marks index rows whose
+/// object is gone. The source side keeps the ordinary listing and its price.
+#[derive(Clone, Copy)]
+enum Side {
+    Source,
+    Destination,
 }
 
 /// A destination that will not be listed at all (`--no-traverse`).
@@ -290,9 +303,18 @@ pub fn untraversed() -> Listing {
 }
 
 /// Enumerate an endpoint, whatever it turns out to be.
-async fn enumerate(ctx: &Ctx, endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
+///
+/// `side` matters only for a named remote: a local directory's listing is the
+/// filesystem itself, and there is nothing for a destination walk to
+/// reconcile it against.
+async fn enumerate(
+    ctx: &Ctx,
+    endpoint: &RemoteSpec,
+    options: &ListOptions,
+    side: Side,
+) -> Result<Listing> {
     match endpoint {
-        RemoteSpec::Named { .. } => walk_remote(ctx, endpoint, options).await,
+        RemoteSpec::Named { .. } => walk_remote(ctx, endpoint, options, side).await,
         RemoteSpec::Local(root) => walk_local(root, options),
     }
 }
@@ -310,12 +332,22 @@ async fn enumerate(ctx: &Ctx, endpoint: &RemoteSpec, options: &ListOptions) -> R
 /// prefix `photos` inside it — and using the spec's would enumerate a subtree
 /// that cannot exist, so the transfer would see an empty destination and copy
 /// everything again on every run. See [`crate::source::Opened`].
-async fn walk_remote(ctx: &Ctx, endpoint: &RemoteSpec, options: &ListOptions) -> Result<Listing> {
+async fn walk_remote(
+    ctx: &Ctx,
+    endpoint: &RemoteSpec,
+    options: &ListOptions,
+    side: Side,
+) -> Result<Listing> {
     let opened = crate::source::open(ctx, endpoint).await?;
     let prefix = opened.prefix().to_string();
     let prefix = prefix.as_str();
     let source = opened.into_source();
-    let mut cursor = source.enumerate(prefix).await?;
+    let mut cursor = match side {
+        Side::Source => source.enumerate(prefix).await?,
+        // The side a transfer makes promises against answers for the store,
+        // not for a local record of it — see `Source::enumerate_destination`.
+        Side::Destination => source.enumerate_destination(prefix).await?,
+    };
 
     let mut listing = Listing::default();
     // The object the prefix names exactly, if there is one. Held rather than
@@ -406,6 +438,9 @@ async fn remote_entry(
         Some(size) => Entry::file(relative, size),
         None => Entry::unmeasured_file(relative),
     };
+    // The reconciliation mark travels with the entry so the planner sees it;
+    // it is never set on a source-side or ordinary listing.
+    entry.object_missing = object.object_missing;
     if let Some(modified) = object.modified_unix.and_then(unix_seconds) {
         entry = entry.with_modified(modified);
     }

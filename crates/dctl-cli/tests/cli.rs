@@ -3961,6 +3961,82 @@ fn a_sampled_read_back_is_accepted_and_the_file_arrives() {
 }
 
 #[test]
+fn a_nightly_copy_repairs_a_destination_that_lost_an_object() {
+    // BENCHMARKS §7.2 defect 1, High: delete one stored object behind the
+    // tool's back and the nightly copy reported `Checks: 150/150, Skipped:
+    // 150, Errors: 0` — the index rows still described the lost bytes as
+    // live, nothing consulted the store, and the loss surfaced at restore.
+    // The destination reconciliation makes the same run repair instead.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", b"alpha");
+    sandbox.write("src/b.txt", b"bravo");
+    sandbox.write("src/c.txt", b"charlie");
+    sandbox.dir("vault");
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success();
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+
+    // The damage, exactly as the benchmark inflicted it.
+    let objects: Vec<_> = std::fs::read_dir(sandbox.path("vault/o"))
+        .expect("the object namespace exists")
+        .map(|entry| entry.expect("a store entry").path())
+        .collect();
+    assert_eq!(objects.len(), 3, "three sealed objects before the damage");
+    std::fs::remove_file(&objects[0]).expect("the damage lands");
+
+    // The nightly. Success is required — but so is the repair.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let after = std::fs::read_dir(sandbox.path("vault/o"))
+        .expect("the object namespace exists")
+        .count();
+    assert_eq!(
+        after, 3,
+        "the nightly must re-upload the lost object, not skip it as identical"
+    );
+
+    // The proof that matters: every byte restores.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(format!("{VAULT_NAME}:"))
+        .arg(sandbox.path("out"))
+        .assert()
+        .success();
+    for (name, bytes) in [
+        ("a.txt", &b"alpha"[..]),
+        ("b.txt", &b"bravo"[..]),
+        ("c.txt", &b"charlie"[..]),
+    ] {
+        assert_eq!(
+            std::fs::read(sandbox.path(&format!("out/{name}"))).expect("the file restores"),
+            bytes,
+            "{name} must restore byte-identical after the repair"
+        );
+    }
+}
+
+#[test]
 fn the_deadlines_publish_the_defaults_they_apply() {
     // A default is a published claim. `--timeout` printed `[default: 300]` for a
     // five-minute idle timeout no backend applied, which is why it carried no
