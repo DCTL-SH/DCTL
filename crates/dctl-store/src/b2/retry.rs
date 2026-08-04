@@ -164,6 +164,20 @@ impl Attempt {
         }
     }
 
+    /// Classify a failed authorization for a retry loop.
+    ///
+    /// A bucket the account's credentials cannot list is an answered fact —
+    /// six identical attempts against the same account answer it six times —
+    /// so it settles after one. Everything else about a failed auth is
+    /// transport-shaped: no status was observed, and another attempt is
+    /// exactly what might differ.
+    pub(super) fn auth(error: StoreError) -> Self {
+        match error.cause() {
+            StoreError::BucketNotFound { .. } => Self::settled(error),
+            _ => Self::transport(error),
+        }
+    }
+
     /// A failure the run's own deadline established.
     ///
     /// Classified as settled rather than as transport, which is what makes the

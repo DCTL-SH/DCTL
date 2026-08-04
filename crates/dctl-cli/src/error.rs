@@ -105,6 +105,19 @@ impl From<StoreError> for CliError {
             StoreError::NotFound(ref key) => Self::new(ExitCode::FileNotFound, error.to_string())
                 .with_hint(format!("No object stored under '{key}'.")),
 
+            // A configuration/credential fact, not a missing object: exit 4's
+            // "file not found" sent an operator hunting for a lost object when
+            // the store itself could not be reached by name. Fatal, with the
+            // three causes worth checking in one hint.
+            StoreError::BucketNotFound { ref bucket } => {
+                Self::new(ExitCode::FatalError, error.to_string()).with_hint(format!(
+                    "The bucket '{bucket}' must exist in the account this \
+                     application key belongs to, spelled as the account spells \
+                     it. A bucket-restricted key can only reach its own \
+                     bucket; a key without listBuckets cannot resolve any."
+                ))
+            }
+
             StoreError::ChecksumMismatch { .. } => {
                 Self::new(ExitCode::ChecksumMismatch, error.to_string()).with_hint(
                     "The destination did not store the bytes we sent. Nothing was \
@@ -379,6 +392,7 @@ impl CliError {
     fn from_store_code(error: &StoreError) -> ExitCode {
         match error {
             StoreError::NotFound(_) => ExitCode::FileNotFound,
+            StoreError::BucketNotFound { .. } => ExitCode::FatalError,
             StoreError::ChecksumMismatch { .. } => ExitCode::ChecksumMismatch,
             StoreError::ShortWrite { .. } => ExitCode::FatalError,
             StoreError::InvalidKey(_) | StoreError::RangeOutOfBounds { .. } => ExitCode::Usage,

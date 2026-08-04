@@ -241,6 +241,7 @@ impl Observed {
             // and every one of them came *from the far end*, which is what
             // [`Reach::Answered`] records.
             | StoreError::NotFound(_)
+            | StoreError::BucketNotFound { .. }
             | StoreError::ChecksumMismatch { .. }
             | StoreError::ShortWrite { .. }
             | StoreError::InvalidKey(_)

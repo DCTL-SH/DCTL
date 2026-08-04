@@ -33,6 +33,13 @@ pub(crate) struct AuthorizeResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Allowed {
     pub bucket_id: Option<String>,
+    /// The name beside the id, when the key is bucket-restricted.
+    ///
+    /// Read so `authorize` can refuse a key whose restriction names a
+    /// DIFFERENT bucket than the one configured — silently substituting the
+    /// key's bucket for the configured one is how a stray half-initialised
+    /// bucket appeared on a shared account.
+    pub bucket_name: Option<String>,
 }
 
 #[derive(Deserialize)]

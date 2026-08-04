@@ -143,7 +143,12 @@ fn store_kind(e: &dctl_store::StoreError) -> ErrorKind {
     match e {
         S::NotFound(_) => ErrorKind::NotFound,
         S::ChecksumMismatch { .. } => ErrorKind::Integrity,
-        S::InvalidKey(_) | S::RangeOutOfBounds { .. } => ErrorKind::Usage,
+        // A bucket the credentials cannot list is configuration, not a lost
+        // object: `Usage` sends the caller to their settings, where the fix
+        // is, rather than hunting for data that was never touched.
+        S::InvalidKey(_) | S::RangeOutOfBounds { .. } | S::BucketNotFound { .. } => {
+            ErrorKind::Usage
+        }
         // A store that moved or vanished is transient in the same practical
         // sense a short write is: nothing about the bytes is in doubt, and the
         // remedy is to put the volume back and run it again. Emphatically not
