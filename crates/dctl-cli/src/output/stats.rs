@@ -235,15 +235,22 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
-    /// Whether the run moved, checked, skipped, deleted or failed **nothing**.
+    /// Whether the run **landed** nothing: no byte moved or verified, no file
+    /// done or deleted, no error, retry or mismatch recorded.
     ///
-    /// The state a command reaches when it refuses before any work begins: a
-    /// destination that is not a vault's object store, a source that does not
-    /// exist, a filter flag a verb does not accept. Every counter is still at
-    /// its initial value because nothing ever touched one.
+    /// The planning-side counters — `bytes_total`, `files_total`,
+    /// `files_skipped`, `checks_done`, `checks_total` — are deliberately not
+    /// consulted. They are set by the planner before a single byte moves:
+    /// announcements of what was *considered*, not a record of what
+    /// *happened*. A `moveto` between two remotes lists its source, accounts
+    /// its skips, and only then reaches the refusal in `Engine::connect` — and
+    /// under the old every-counter predicate that pre-execution accounting was
+    /// enough to print `Checks: 1 / 1` and `Errors: 0` in a table directly
+    /// above the refusal telling the reader nothing was done. A refusal is the
+    /// whole report; what earns a summary above an error is work that landed.
     ///
-    /// It exists so that failure path can suppress the summary. A run that
-    /// refused printed a full statistics block *above* its own error —
+    /// It exists so the failure path can suppress the summary. A run that
+    /// refused used to print a full statistics block *above* its own error —
     ///
     /// ```text
     ///  Transferred: 0 B / 0 B, -
@@ -258,16 +265,11 @@ impl Snapshot {
     /// same zeroes are a positive statement ("this ran and did nothing"), which
     /// is why the rule is about failure and not about emptiness.
     #[must_use]
-    pub const fn attempted_nothing(&self) -> bool {
+    pub const fn nothing_landed(&self) -> bool {
         self.bytes_transferred == 0
-            && self.bytes_total == 0
             && self.bytes_verified == 0
             && self.files_done == 0
-            && self.files_total == 0
-            && self.files_skipped == 0
             && self.files_deleted == 0
-            && self.checks_done == 0
-            && self.checks_total == 0
             && self.errors == 0
             && self.retries == 0
             && self.checksum_mismatches == 0
@@ -296,36 +298,50 @@ mod tests {
     use super::{Stage, Stats};
 
     #[test]
-    fn a_run_that_touched_no_counter_says_so_and_one_that_touched_any_does_not() {
+    fn landed_work_defeats_suppression_and_planning_accounting_does_not() {
         // What decides whether a failing run prints a summary above its own
-        // error. Every counter has to be consulted: a run that only skipped, only
-        // deleted, or only failed still did something worth reporting, and one
-        // that reached even a single file has a record the error message does not
-        // carry.
-        assert!(Stats::new().snapshot().attempted_nothing());
+        // error. The two halves are the whole rule: work that LANDED — a byte
+        // moved or verified, a file done or deleted, an error, a retry, a
+        // mismatch — has a record the error message does not carry, and earns
+        // the summary. Accounting the planner did before execution — totals,
+        // skips, checks — is an announcement of intent, and a refusal must not
+        // be crowned with a table of intentions.
+        assert!(Stats::new().snapshot().nothing_landed());
 
         /// One counter, named, and the call that moves it.
         type Touch = (&'static str, fn(&Stats));
 
-        let touched: [Touch; 11] = [
+        let landed: [Touch; 6] = [
             ("bytes", |s| s.add_bytes(1)),
             ("verified bytes", |s| s.add_verified_bytes(1)),
-            ("total bytes", |s| s.set_total_bytes(1)),
-            ("total files", |s| s.set_total_files(1)),
             ("a file", Stats::file_done),
-            ("a skip", Stats::file_skipped),
             ("a delete", Stats::file_deleted),
-            ("a check", Stats::check_done),
-            ("total checks", |s| s.set_total_checks(1)),
             ("a retry", Stats::retry),
             ("an error", Stats::error),
         ];
-        for (what, touch) in touched {
+        for (what, touch) in landed {
             let stats = Stats::new();
             touch(&stats);
             assert!(
-                !stats.snapshot().attempted_nothing(),
-                "a run that recorded {what} did not attempt nothing"
+                !stats.snapshot().nothing_landed(),
+                "a run that recorded {what} landed something and must report it"
+            );
+        }
+
+        let planning: [Touch; 5] = [
+            ("total bytes", |s| s.set_total_bytes(1)),
+            ("total files", |s| s.set_total_files(1)),
+            ("a skip", Stats::file_skipped),
+            ("a check", Stats::check_done),
+            ("total checks", |s| s.set_total_checks(1)),
+        ];
+        for (what, touch) in planning {
+            let stats = Stats::new();
+            touch(&stats);
+            assert!(
+                stats.snapshot().nothing_landed(),
+                "planning-side accounting ({what}) must not earn a summary \
+                 above a refusal — the moveto counter-block defect"
             );
         }
     }

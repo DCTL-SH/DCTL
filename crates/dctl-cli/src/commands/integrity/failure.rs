@@ -219,6 +219,27 @@ pub fn nothing_examined(cause: &str, hint: &'static str) -> CliError {
     .with_hint(hint)
 }
 
+/// The error for a named target that resolved to nothing at all.
+///
+/// A different claim from [`nothing_examined`], and a different exit code:
+/// `verify store:gone.bin` names ONE object, and an empty walk under that
+/// exact name proves the object is not there — which is
+/// [`ExitCode::FileNotFound`] (4), the published "file not found" every other
+/// verb already uses for a named absence. Folding it into exit 9 told a cron
+/// job "the run did no work" about a run that discovered a loss.
+///
+/// Deliberately not worded as "in the index but absent from the remote": that
+/// sentence is false on a plain remote, and false for a name that was never
+/// indexed. What an empty walk proves is exactly this and no more.
+#[must_use]
+pub fn named_target_missing(target: &str, hint: &'static str) -> CliError {
+    CliError::new(
+        ExitCode::FileNotFound,
+        format!("'{target}' was not found: the remote holds no object with this name"),
+    )
+    .with_hint(hint)
+}
+
 /// The error for a single object that failed authentication.
 ///
 /// Used on the read path, where there is no run-level tally to summarise: `cat`,

@@ -255,21 +255,24 @@ impl Ctx {
         self.finish_with(show_summary, Ran::Completed);
     }
 
-    /// Emit the end-of-run summary, unless the run failed having done nothing.
+    /// Emit the end-of-run summary, unless the run failed having landed
+    /// nothing.
     ///
     /// The exception is narrow on purpose. A `copy` that moved nine hundred of a
     /// thousand files and then failed needs its summary — that is the only
-    /// record of what did land. A run that refused before it started has no such
-    /// record, and printing one anyway put `Errors: 0` in a table directly above
+    /// record of what did land. A run that refused has no such record — even
+    /// when the planner had already listed the source and counted its skips
+    /// before the refusal fired, as every remote-to-remote transfer does —
+    /// and printing one anyway put `Errors: 0` in a table directly above
     /// `error: …`, which is not noise but a contradiction. See
-    /// [`Snapshot::attempted_nothing`](crate::output::stats::Snapshot::attempted_nothing).
+    /// [`Snapshot::nothing_landed`](crate::output::stats::Snapshot::nothing_landed).
     pub fn finish_with(&self, show_summary: bool, ran: Ran) {
         self.progress.finish();
         if !show_summary {
             return;
         }
         let snapshot = self.stats.snapshot();
-        if ran == Ran::Failed && snapshot.attempted_nothing() {
+        if ran == Ran::Failed && snapshot.nothing_landed() {
             return;
         }
         self.out.summary(&snapshot);

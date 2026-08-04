@@ -2006,6 +2006,16 @@ pub const VERIFY_NOTHING_VERIFIED_HINT: &str = "Check the prefix with `dctl ls R
      machine's index has not seen it (`dctl index rebuild REMOTE:`). \
      `--include`, `--exclude` and `--files-from` also narrow what a run covers.";
 
+/// What to do about a `verify` whose explicitly named object is not there.
+///
+/// The absence is the finding, so the hint's job is only to catch the one
+/// honest misreading: an operator who meant a directory and spelled it without
+/// the trailing slash. See
+/// [`named_target_missing`](crate::commands::integrity::failure::named_target_missing)
+/// for why this is exit 4 and not exit 9's "the run did no work".
+pub const VERIFY_NAMED_TARGET_MISSING_HINT: &str = "If you meant a prefix rather than one object, add a trailing '/'; \
+     `dctl ls REMOTE:` shows what the remote holds.";
+
 /// What a restore says when it wrote no file at all.
 ///
 /// The counterpart of [`INTEGRITY_NOTHING_VERIFIED`], and it travels with the

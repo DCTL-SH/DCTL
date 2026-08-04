@@ -2865,16 +2865,24 @@ fn a_mistyped_phrase_says_so_instead_of_blaming_the_vault() {
     // remedies. Reporting the first as `unlock failed` sends someone holding a
     // correct sheet of paper looking for a damaged envelope.
     let sandbox = Sandbox::new();
-    let phrase = vault_with_a_file_and_its_phrase(&sandbox, b"x");
+    let _phrase = vault_with_a_file_and_its_phrase(&sandbox, b"x");
 
-    let mut words: Vec<&str> = phrase.split_whitespace().collect();
-    words[0] = "zoo";
-    let mangled = words.join(" ");
+    // Every word is a real BIP-39 word, so only the checksum can reject it.
+    // Derived from the canonical all-`abandon` vector (valid final word `art`)
+    // with word 0 mistyped to `ability` — the same fixture dctl-crypto's own
+    // mnemonic tests use, for the same reason: a *generated* phrase mangled at
+    // random still passes the 8-bit checksum ~1/256 times, which made this
+    // test flaky.
+    const MISTYPED: &str = "ability abandon abandon abandon abandon abandon abandon abandon \
+                            abandon abandon abandon abandon abandon abandon abandon abandon \
+                            abandon abandon abandon abandon abandon abandon abandon art";
+    dctl_core::validate_recovery_phrase(MISTYPED)
+        .expect_err("fixture must fail the BIP-39 checksum, or this test proves nothing");
 
     sandbox
         .dctl()
         .arg("--no-ask-password")
-        .args(["--recovery-phrase", &mangled])
+        .args(["--recovery-phrase", MISTYPED])
         .arg("cat")
         .arg(format!("{VAULT_NAME}:secret.txt"))
         .assert()
@@ -3284,6 +3292,54 @@ fn a_run_that_failed_partway_still_prints_what_it_moved() {
         stderr.contains("Files:"),
         "the file counters are the record of what landed:\n{stderr}"
     );
+}
+
+#[test]
+fn a_remote_to_remote_refusal_prints_no_counter_lines() {
+    // The harder case of the rule above: `moveto` between two remotes LISTS
+    // its source and accounts its skips before `Engine::connect` refuses, so
+    // planning-side counters have moved even though nothing landed. The old
+    // every-counter predicate took that accounting as work and printed
+    // `Checks: 1 / 1` and `Errors: 0` in a table above a refusal saying
+    // nothing was done. Planning is an intention, not a record.
+    let sandbox = Sandbox::new();
+    sandbox.write("one/render.mov", b"frames");
+    sandbox.dir("two");
+    for (name, dir) in [("pl", "one"), ("p2", "two")] {
+        sandbox
+            .dctl()
+            .args(["config", "create", name, "local"])
+            .arg(format!("path={}", sandbox.path(dir).display()))
+            .assert()
+            .success();
+    }
+
+    let refused = sandbox
+        .dctl()
+        .arg("--force")
+        .args(["moveto", "pl:render.mov", "p2:final.mov"])
+        // 7 = fatal_error (docs/EXIT_CODES.md).
+        .assert()
+        .code(7);
+    let output = refused.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert!(
+        stderr.contains("not implemented in this build"),
+        "the refusal itself must still be reported:\n{stderr}"
+    );
+    assert!(
+        sandbox.path("one/render.mov").exists(),
+        "a refused moveto must leave the source in place"
+    );
+    for row in ["Transferred:", "Files:", "Checks:", "Errors:", "Elapsed:"] {
+        assert!(
+            !stderr.contains(row) && !stdout.contains(row),
+            "a refusal is the whole report; '{row}' must not appear above \
+             it:\nstderr:\n{stderr}\nstdout:\n{stdout}"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
