@@ -59,6 +59,23 @@ pub struct MountConfig {
     /// platform has such a concept.
     pub volume_name: Option<String>,
 
+    /// The resolved `--timeout`, in seconds: the longest DCTL will wait on a
+    /// provider before it gives up on one request. Zero means no deadline.
+    ///
+    /// Not read by any callback, and it is here for one platform's sake. macFUSE
+    /// runs a watchdog of its own — `daemon_timeout`, a minute by default — and
+    /// kills the *volume* when a call outlives it. A minute is shorter than the
+    /// five DCTL is willing to wait, so a read from a slow provider was killed by
+    /// macFUSE first: instead of the diagnosed `EIO` DCTL's own deadline
+    /// produces, the operator got a wedged mountpoint. The mount therefore asks
+    /// macFUSE to wait longer than DCTL does, which needs this number here rather
+    /// than a constant, because a user who raises `--timeout` has raised exactly
+    /// the value the watchdog must stay ahead of.
+    ///
+    /// Linux has no equivalent and ignores it; the field is not `cfg`-gated so
+    /// that the resolution and its tests compile on every platform.
+    pub idle_seconds: u64,
+
     /// Report the mount time for every file instead of its recorded
     /// modification time (`--no-modtime`).
     ///
@@ -84,6 +101,7 @@ mod tests {
             read_ahead: 0,
             acl: SessionACL::Owner,
             volume_name: None,
+            idle_seconds: crate::constants::DEFAULT_TIMEOUT_SECS,
             no_modtime: false,
         }
     }

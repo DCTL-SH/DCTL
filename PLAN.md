@@ -489,8 +489,64 @@ local SSD — not the target.
 | OS | Backend | Notes |
 |---|---|---|
 | Linux | FUSE3 (`fuser`) | writeback cache, large `max_read`/`max_write`, multithreaded, big readahead; `io_uring` cache layer later |
-| macOS | **FSKit** (15+) → **fuse-t** → macFUSE | FSKit = Apple-sanctioned userspace FS, no kext = 20-year-safe; fuse-t (NFS-loopback, no kext) fallback; macFUSE (kext) only for max-throughput opt-in |
+| macOS | **macFUSE** (shipped) → FSKit (15+) → fuse-t | macFUSE 5 works and is what this build mounts with — see below. FSKit = Apple-sanctioned userspace FS, no kext = 20-year-safe, but has no Rust binding; fuse-t (NFS-loopback, no kext) likewise |
 | Windows | **WinFSP** (Dokan alt) | mature FUSE-like layer; **ProjFS** an option for read-first streaming virtualization |
+
+**The macOS ranking, re-stated (2026-07-31)**
+
+This table used to read *FSKit → fuse-t → macFUSE*, on the reasoning that a kext
+is a liability worth paying to avoid. That order was written before anything had
+been mounted on a Mac, and the code now contradicts it, so it is re-stated here
+rather than left to be discovered.
+
+**macFUSE is first because it is the one that works, and the reason the others
+were ranked above it does not apply to a decision this build can take.** FSKit
+and fuse-t are both preferable in the abstract and neither has a Rust binding: to
+reach FSKit DCTL would have to ship a Swift extension in an app bundle, and
+fuse-t speaks NFS loopback rather than the FUSE protocol `fuser` implements. So
+the choice was never macFUSE *versus* those two; it was macFUSE or no mount on
+macOS at all.
+
+What changed is that the obstacle turned out to be a dependency setting rather
+than a wall. `fuser`'s `build.rs` gates its pure-Rust mount to a hardcoded OS list
+that excludes macOS and falls through to a macFUSE-4 path that fails against
+macFUSE 5. Its **`macos-no-mount`** feature compiles the protocol and session
+layers with no mount implementation at all, and DCTL performs the mount itself
+through macFUSE's own setuid helper — which is the interface, not a workaround:
+`mount(2)` is root-only on macOS and macFUSE's argument struct is private, so
+macFUSE's own libfuse does exactly this. `#![forbid(unsafe_code)]` is intact.
+
+Verified live on macOS 27 / macFUSE 5.3.3 (arm64), 64 MiB and 256 MiB objects in
+a real vault: correct listings and sizes; byte-identical reads; the seek test
+below; `EROFS` on every mutating operation; clean detach under `SIGINT`,
+`SIGTERM`, `umount` and `diskutil unmount`, including with a read in flight.
+
+FSKit stays on the list. It remains the right long-term answer for the same
+reason it always was, and the work it needs is a Swift extension and an app
+bundle, not a mount fix.
+
+**What the seek test measures on macOS**
+
+The property the format exists for, measured at the store rather than inferred
+from a clock: a 1 MiB read at offset 32 MiB of a 64 MiB object, read-ahead off,
+costs **1.031 MiB of store traffic — 1.6% of the object**. With the default 16 MiB
+`--buffer-size` the mount additionally warms exactly sixteen chunks, once, which
+is the read-ahead the flag names and not a whole-object fetch.
+
+Two macOS-specific findings worth carrying, because neither is visible on Linux:
+
+- **A repeated read never reaches the filesystem.** macFUSE lets the kernel hold
+  the pages, so "the second read is faster" is the page cache, not DCTL's chunk
+  cache — measured as **0** FUSE `READ` operations arriving for an identical
+  re-read. The chunk cache is real and is worth what it claims, but it has to be
+  measured where the page cache cannot answer: a read 8 MiB further into the
+  warmed window costs **0.000 MiB** from the store, against 1.016 MiB with
+  read-ahead off.
+- **Finder needs `--allow-root`.** At the default ACL every shell operation
+  works and `open` fails with `error -36`, because opening a volume goes through
+  LaunchServices and LaunchServices reaches the mount as root. Widening the
+  default would widen who can read an unlocked vault, so the flag documents it
+  instead.
 
 **Streaming-mount performance (all platforms)**
 - **Aggressive prefetch/readahead:** serve chunk _k_ while fetching _k+1…k+P_;

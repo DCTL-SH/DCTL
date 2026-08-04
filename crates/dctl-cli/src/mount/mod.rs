@@ -110,6 +110,9 @@ pub mod errno;
 pub mod fs;
 pub mod handle;
 pub mod inode;
+/// The macOS mount handshake. Its option translation is compiled everywhere —
+/// see the module docs for why the decision must not be macOS-only code.
+pub mod macfuse;
 pub mod preflight;
 pub mod refuse;
 pub mod session;

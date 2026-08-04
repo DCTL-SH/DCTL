@@ -64,6 +64,12 @@ pub fn resolve(ctx: &Ctx, args: &MountArgs, source: &Source) -> Result<MountConf
         read_ahead: args.buffer_size,
         acl: acl(args),
         volume_name: args.volname.clone(),
+        // The global `--timeout`, carried into the engine rather than re-read
+        // there. macFUSE keeps a watchdog on every call and kills the volume when
+        // one outlives it, so the mount has to ask macFUSE to wait longer than
+        // DCTL does — and "longer than DCTL does" is this number, not a constant.
+        // See `MountConfig::idle_seconds`.
+        idle_seconds: ctx.globals.timeout,
         no_modtime: args.no_modtime,
     })
 }
@@ -138,6 +144,27 @@ fn refuse_unhonourable(ctx: &Ctx, args: &MountArgs) -> Result<()> {
              own name; there is nothing a desktop file manager would show a volume \
              name in.",
         ));
+    }
+
+    // A volume name macFUSE would cut in half, refused here rather than at the
+    // mount. The rule itself belongs to `macfuse::options`, which enforces it on
+    // every option whatever route it takes; this call is the *early* one, and its
+    // whole purpose is the ordering — a refusal at this point costs no password
+    // prompt and unlocks no keys, which is the same reason `preflight` runs
+    // before the vault is opened.
+    if let Some(name) = &args.volname {
+        if let Err(unmappable) =
+            crate::mount::macfuse::options::check_value(&format!("volname={name}"))
+        {
+            return Err(
+                CliError::usage(format!("--volname cannot be honoured: {unmappable}")).with_hint(
+                    "macFUSE takes its options as one comma-separated list, so a comma in \
+                 a volume name ends the option and everything after it is read as \
+                 another one — which macFUSE ignores without a word. Choose a name \
+                 with no comma in it.",
+                ),
+            );
+        }
     }
 
     // Read after the flags rather than beside them: a filter is assembled from
@@ -352,6 +379,38 @@ mod tests {
             assert_eq!(error.code(), ExitCode::Usage);
             assert!(error.message().contains("--volname"));
         }
+    }
+
+    #[test]
+    fn a_volume_name_with_a_comma_is_refused_before_the_vault_is_unlocked() {
+        // macFUSE reads a comma as the end of an option, so `Archive,2024` would
+        // become a volume called `Archive` and an option called `2024` that
+        // macFUSE ignores in silence — a name half applied with nothing said.
+        //
+        // Refused on every platform, for a different reason on each: macOS
+        // because macFUSE would truncate it, and Linux because there is no volume
+        // name at all. What matters equally on both is *when*: `resolve` runs
+        // before the password prompt, so a refusal here unlocks no keys.
+        let error = resolve(&ctx(&[]), &args(&["--volname", "Archive,2024"]), &source())
+            .expect_err("a comma in a volume name is not honourable anywhere");
+        assert_eq!(error.code(), ExitCode::Usage);
+        assert!(error.message().contains("--volname"), "{}", error.message());
+        if cfg!(target_os = "macos") {
+            assert!(
+                error.message().contains("Archive,2024"),
+                "the refusal must quote what was asked for: {}",
+                error.message()
+            );
+            assert!(
+                error.hint().is_some_and(|hint| hint.contains("comma")),
+                "and say what to do about it"
+            );
+        }
+        // A name with no comma is still accepted where the platform has one.
+        assert_eq!(
+            resolve(&ctx(&[]), &args(&["--volname", "Archive 2024"]), &source()).is_ok(),
+            cfg!(target_os = "macos")
+        );
     }
 
     #[test]

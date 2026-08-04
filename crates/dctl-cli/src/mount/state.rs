@@ -741,6 +741,7 @@ mod tests {
             read_ahead,
             acl: SessionACL::Owner,
             volume_name: None,
+            idle_seconds: crate::constants::DEFAULT_TIMEOUT_SECS,
             no_modtime: false,
         }
     }
