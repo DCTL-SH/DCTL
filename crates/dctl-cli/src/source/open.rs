@@ -20,14 +20,19 @@
 //! because [`crate::session::open`] already does it and doing it twice is how
 //! two answers to one question come into existence.
 //!
-//! ## Why `dctl init` produces two remotes, and why both are readable
+//! ## Why `dctl init` produces two remotes, and why only one is readable here
 //!
 //! `dctl init --name archive --base local:/srv/v` registers `archive` (the vault
-//! wrapper) and `archive-store` (the location its objects land in). Both are
-//! legitimate things to read: `dctl ls archive:` shows the files a person put
-//! there, and `dctl ls archive-store:` shows the opaque keys they are stored
-//! under — which is what an operator checking replication or object counts
-//! actually needs. One spec, one rule, two honest views.
+//! wrapper) and `archive-store` (the location its objects land in). Only the
+//! wrapper opens here: `dctl ls archive:` shows the files a person put there,
+//! and a plain read of `archive-store:` is REFUSED with a hint naming both
+//! views — measured, it served 1,005 `n/<hash>` ciphertext keys with exit 0
+//! where the operator expected their files, which is a listing wearing the
+//! wrong meaning. The object-level workflows that genuinely want raw keys —
+//! replication, object counts — go through `dctl replicate`, which builds its
+//! own key-free backend view and never passes this door. The line is drawn
+//! where the write side draws it: `require_vault`, the declaration that a
+//! store's contents belong to a vault.
 //!
 //! ## A spec is never re-decided here
 //!
@@ -167,6 +172,17 @@ pub async fn open(ctx: &Ctx, spec: &RemoteSpec) -> Result<Opened> {
         });
     }
 
+    // A store the configuration claims for a vault does not open plain: its
+    // listing is ciphertext keys wearing the meaning of a file listing, and
+    // the honest outcomes here are sealed, plain, or refused — never a quiet
+    // switch of view. The same line the write side draws, drawn at the one
+    // choke point every read verb passes through.
+    if let RemoteSpec::Named { remote, .. } = spec
+        && let Some(claimed) = crate::config::VaultNamespace::of_remote(&config, remote)
+    {
+        return Err(crate::addressing::plain_read_refusal(&claimed));
+    }
+
     tracing::debug!(
         { crate::logging::fields::REMOTE } = %spec,
         prefix = %prefix,
@@ -252,11 +268,79 @@ mod tests {
 
     #[test]
     fn a_vault_remote_opens_the_sealed_view_and_its_store_does_not() {
-        // Both are readable, and they are not the same view of the same bytes.
+        // The wrapper is sealed; the store is not — and not-sealed no longer
+        // means plain-readable: `open` refuses the claimed store outright,
+        // which the two tests below pin end to end.
         let config = initialised_vault();
 
         assert!(is_sealed(&config, &named("archive")));
         assert!(!is_sealed(&config, &named("archive-store")));
+    }
+
+    #[tokio::test]
+    async fn reading_a_vault_store_plain_is_refused_and_names_the_sealed_view() {
+        // Measured before the guard: 1,005 ciphertext keys served with exit 0
+        // where the operator expected their files. The refusal names both the
+        // store and the view that answers the question actually asked.
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.archive-store]\ntype = \"local\"\npath = {:?}\nrequire_vault = true\n\n\
+                 [remotes.archive]\ntype = \"vault\"\nbase = \"archive-store\"\n",
+                dir.path().join("v").to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let context = ctx(&["--config", &config.to_string_lossy()]);
+
+        let refused = open(&context, &named("archive-store"))
+            .await
+            .err()
+            .expect("a claimed store does not open plain");
+        assert_eq!(refused.code(), crate::exit::ExitCode::FatalError);
+        assert!(
+            refused.message().contains("archive-store")
+                && refused.message().contains("object store"),
+            "the refusal says what this remote is: {}",
+            refused.message()
+        );
+        assert!(
+            refused.hint().is_some_and(|hint| hint.contains("archive:")),
+            "the hint names the sealed view"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_store_no_vault_wraps_says_how_to_register_one() {
+        // The shape the benchmark actually hit: a hand-configured store remote
+        // carrying require_vault = true with no wrapper registered anywhere.
+        // The refusal cannot name a sealed view that does not exist, so it
+        // says how to create one.
+        let dir = tempfile::TempDir::new().unwrap();
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.bench]\ntype = \"local\"\npath = {:?}\nrequire_vault = true\n",
+                dir.path().join("v").to_string_lossy()
+            ),
+        )
+        .unwrap();
+        let context = ctx(&["--config", &config.to_string_lossy()]);
+
+        let refused = open(&context, &named("bench"))
+            .await
+            .err()
+            .expect("a claimed store does not open plain");
+        assert!(
+            refused
+                .hint()
+                .is_some_and(|hint| hint.contains("config create") && hint.contains("base=bench")),
+            "the hint says how to register the sealed view: {:?}",
+            refused.hint()
+        );
     }
 
     #[test]

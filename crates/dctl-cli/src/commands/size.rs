@@ -576,18 +576,23 @@ mod tests {
             "a vault totals the bytes that were written"
         );
 
-        let stored = measure(&context, "archive-store:").await;
-        assert_eq!(stored.sizes, Sizes::Stored);
+        // The store view no longer opens plain: a size of ciphertext keys is a
+        // number wearing the wrong meaning, and the refusal names the view
+        // that answers what the operator asked. The stored-vs-plaintext cost
+        // comparison lives with `dctl replicate`, the sanctioned object view.
+        let target = Target::parse(Some("archive-store:"), None).expect("a valid spec");
+        let filter = Filter::from_globals(&context.globals).expect("no filters");
+        let refused = listing::open(&context, &target, filter)
+            .await
+            .err()
+            .expect("a vault's object store does not total plain");
         assert!(
-            stored.measured_bytes > sealed.measured_bytes,
-            "the sealed objects must cost more than their plaintext: \
-             {} stored vs {} plaintext",
-            stored.measured_bytes,
-            sealed.measured_bytes
+            refused.message().contains("archive-store"),
+            "the refusal names the store: {}",
+            refused.message()
         );
 
-        // And the difference is visible in the output, not just in the struct.
+        // The plaintext meaning is visible in the output, not just the struct.
         assert!(report(&sealed, Units::Binary, &Palette::plain())[1].contains("(plaintext)"));
-        assert!(report(&stored, Units::Binary, &Palette::plain())[1].contains("(stored)"));
     }
 }

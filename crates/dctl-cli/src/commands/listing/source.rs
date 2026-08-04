@@ -402,10 +402,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_sealed_listing_reports_plaintext_sizes_and_a_plain_one_stored() {
+    async fn a_sealed_listing_reports_plaintext_sizes_and_its_claimed_store_refuses() {
         // End to end through `open`, so the wiring from `Source::sizes` to the
-        // page cursor is exercised rather than assumed. Same directory of bytes,
-        // two views, two honest answers about what their numbers mean.
+        // page cursor is exercised rather than assumed — and so the read-side
+        // claim guard is met by a real open, not a unit fixture.
         let dir = tempfile::TempDir::new().unwrap();
         let store = dir.path().join("store");
         std::fs::create_dir_all(&store).unwrap();
@@ -450,10 +450,13 @@ mod tests {
             .expect("the vault lists");
         assert_eq!(sealed.sizes(), source::Sizes::Plaintext);
 
-        let plain = open(&context, &Target::parse(Some("store:"), None).unwrap())
+        // The claimed store refuses rather than reporting Stored sizes of
+        // ciphertext keys; the Stored wiring is exercised by the unclaimed
+        // plain-remote tests around this one.
+        open(&context, &Target::parse(Some("store:"), None).unwrap())
             .await
-            .expect("the store lists");
-        assert_eq!(plain.sizes(), source::Sizes::Stored);
+            .err()
+            .expect("a vault's object store does not list plain");
     }
 
     #[tokio::test]
@@ -657,17 +660,23 @@ mod tests {
             vec!["notes.txt", "photos/a.jpg"]
         );
 
-        // The same bytes through the store remote are opaque keys instead —
-        // one rule, two honest views, and neither leaks the other's names.
+        // The same bytes through the store remote used to list as opaque keys
+        // with exit 0 — a file listing wearing the wrong meaning. It refuses
+        // now, and the refusal names the sealed view that answers what the
+        // operator asked. Neither view ever leaks the other's names.
         let store_target = Target::parse(Some("store:"), None).unwrap();
-        let mut store_pages = open(&context, &store_target)
+        let refused = open(&context, &store_target)
             .await
-            .expect("the store lists");
-        let keys = drain(store_pages.as_mut()).await;
-        assert!(!keys.is_empty(), "the sealed objects are really there");
+            .err()
+            .expect("a vault's object store does not list plain");
         assert!(
-            !keys.iter().any(|key| key.contains("photos")),
-            "a plaintext path leaked into the object view: {keys:?}"
+            refused.message().contains("store"),
+            "the refusal names the store: {}",
+            refused.message()
+        );
+        assert!(
+            refused.hint().is_some_and(|hint| hint.contains("archive:")),
+            "the hint names the sealed view"
         );
     }
 

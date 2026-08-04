@@ -235,6 +235,52 @@ fn refusal(claimed: &VaultNamespace) -> CliError {
     }
 }
 
+/// The refusal for a plain READ of a store the configuration claims.
+///
+/// The read-side twin of [`refusal`], for the same structural reason: a store
+/// declared `require_vault = true` holds a vault's opaque objects, and a plain
+/// `ls` of it shows `n/<hash>` rows where the operator expected their files —
+/// measured at 1,005 ciphertext keys served with exit 0 and no warning. The
+/// honest outcomes are sealed, plain, or refused, and configuration may move
+/// an outcome to refused but never change what a command does (the addressing
+/// model above), so this refuses and names the view that answers the question
+/// the operator actually asked.
+pub fn plain_read_refusal(claimed: &VaultNamespace) -> CliError {
+    let subject = claimed.subject();
+    let store = claimed.store();
+
+    match claimed.vault() {
+        Some(vault) => CliError::new(
+            ExitCode::FatalError,
+            format!(
+                "'{subject}' is the object store for remote '{vault}': a plain \
+                 read of it shows ciphertext objects, not the files stored \
+                 through the vault"
+            ),
+        )
+        .with_hint(format!(
+            "Use `{vault}:` for the decrypted namespace (`dctl ls {vault}:`). \
+             To work with the raw objects themselves — replication, object \
+             counts — run `dctl replicate {store}: DEST-STORE:`, which needs \
+             no vault password."
+        )),
+
+        None => CliError::new(
+            ExitCode::FatalError,
+            format!(
+                "'{subject}' declares require_vault = true and holds a vault's \
+                 opaque objects"
+            ),
+        )
+        .with_hint(format!(
+            "No vault remote in this configuration wraps '{store}'. Register \
+             the sealed view with `dctl config create NAME vault base={store}` \
+             (or `dctl config import` for a vault that already exists there), \
+             then read through `NAME:`."
+        )),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
