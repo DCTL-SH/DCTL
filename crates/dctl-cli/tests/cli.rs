@@ -3847,12 +3847,13 @@ fn every_inert_flag_is_now_refused_by_name_before_anything_runs() {
     //
     // It was seven. `--timeout` and `--contimeout` left this list because they
     // are honoured now, and the test directly below is the other half of that
-    // move: a flag may only leave here by arriving there.
+    // move: a flag may only leave here by arriving there. `--verify-samples`
+    // left the same way when the sampled read-back became real — its arrival
+    // half is `a_sampled_read_back_is_accepted_and_the_file_arrives`.
     let cases: &[(&[&str], &str)] = &[
         (&["--transfers", "8"], "--transfers"),
         (&["--checkers", "16"], "--checkers"),
         (&["--low-level-retries", "5"], "--low-level-retries"),
-        (&["--verify-samples", "4"], "--verify-samples"),
         (&["--dump", "headers"], "--dump"),
     ];
 
@@ -3914,6 +3915,49 @@ fn the_two_deadlines_are_accepted_and_a_healthy_transfer_is_untouched() {
             "{flag:?} must transfer the file, not merely be accepted"
         );
     }
+}
+
+#[test]
+fn a_sampled_read_back_is_accepted_and_the_file_arrives() {
+    // `--verify-samples` left the refused list when the sampled read-back
+    // became real. Accepted has to mean two things at once — the run is
+    // accepted, and the data arrives having survived the sampled
+    // authentication. Driven against a real vault so the sampled arm is the
+    // code that actually runs, not merely parses.
+    let sandbox = Sandbox::new();
+    let _phrase = vault_with_a_file_and_its_phrase(&sandbox, b"seed");
+    sandbox.write("src/a.txt", b"data worth spot checking");
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--verify", "sample", "--verify-samples", "4"])
+        .args(["copy", "src", &format!("{VAULT_NAME}:sampled/")])
+        .assert()
+        .success();
+
+    let out = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:sampled/a.txt"))
+        .assert()
+        .success();
+    assert_eq!(
+        out.get_output().stdout,
+        b"data worth spot checking",
+        "the sampled write must land the same bytes"
+    );
+
+    // Zero is not a legal depth: head and tail are mandatory, and a depth of
+    // nothing is a contradiction the parser refuses rather than reinterprets.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--verify", "sample", "--verify-samples", "0"])
+        .args(["copy", "src", &format!("{VAULT_NAME}:again/")])
+        .assert()
+        .failure();
 }
 
 #[test]

@@ -84,7 +84,8 @@ pub const fn describe(mode: VerifyMode) -> &'static str {
             "compared the provider's stored checksum against ours; no object bytes were read"
         }
         VerifyMode::Sample => {
-            "read, decrypted and authenticated a sample of chunks from each object"
+            "read and authenticated the first, last and a seeded sample of chunks \
+             from each object; whole-object hashes were not evaluated"
         }
         VerifyMode::Strict => {
             "read and decrypted every object in full and confirmed its whole-file BLAKE3"

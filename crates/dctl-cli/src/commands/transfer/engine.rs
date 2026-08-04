@@ -306,6 +306,12 @@ pub struct Engine {
     /// configuration file — cannot change during a run, and
     /// [`StageDriver::verify`] is called once per object.
     verify_mode: VerifyMode,
+    /// Interior chunks a `verify=sample` read-back draws per object —
+    /// `--verify-samples`, or [`DEFAULT_VERIFY_SAMPLES`] when nobody asked.
+    verify_samples: u32,
+    /// The seed sampled read-backs draw their picks from, fixed once per run
+    /// so a reported failure can be replayed from the recorded seed alone.
+    verify_seed: u64,
 }
 
 impl std::fmt::Debug for Engine {
@@ -470,6 +476,26 @@ impl Engine {
         // store a vault wraps — `archive:` is what `dctl config show archive`
         // reports, so it is what states the policy.
         let verify_mode = ctx.verify_mode_for(dest)?;
+        let verify_samples = ctx
+            .globals
+            .verify_samples
+            .unwrap_or(crate::constants::DEFAULT_VERIFY_SAMPLES);
+        // The clock is enough: the seed must differ between runs, not resist
+        // an adversary — the same argument scrub makes where it draws its own.
+        let verify_seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_nanos() as u64);
+        if matches!(verify_mode, VerifyMode::Sample) {
+            // The one line that lets a failure be replayed and keeps the
+            // claim honest: a sample authenticates what it read, no more.
+            tracing::info!(
+                samples = verify_samples,
+                seed = format_args!("{verify_seed:016x}"),
+                "verify=sample reads the first and last chunks plus seeded \
+                 interior picks; per-chunk authentication only, whole-object \
+                 hashes are not evaluated"
+            );
+        }
 
         Ok(Self {
             direction,
@@ -483,7 +509,26 @@ impl Engine {
             hashes: Mutex::new(HashMap::new()),
             meter: ctx.limits.meter(),
             verify_mode,
+            verify_samples,
+            verify_seed,
         })
+    }
+
+    /// The error every failed read-back reports, whatever its depth.
+    ///
+    /// One function rather than two literals so `strict` and `sample` cannot
+    /// drift into different wordings: the operator's next action — do not
+    /// trust the write, do not delete the source — is the same either way.
+    fn read_back_failure(dest: &str) -> CliError {
+        CliError::new(
+            ExitCode::IntegrityFailure,
+            format!("read-back verification failed for '{dest}'"),
+        )
+        .with_hint(
+            "The object did not authenticate when read back. It was \
+             written but must not be trusted; investigate before \
+             deleting any source.",
+        )
     }
 
     /// A logical path inside the vault, under the prefix the spec named.
@@ -767,21 +812,28 @@ impl StageDriver for Engine {
     async fn verify(&self, entry: &PlanEntry, mode: VerifyMode) -> Result<()> {
         match (mode, self.direction) {
             (VerifyMode::Checksum, _) | (_, Direction::LocalOnly) => Ok(()),
-            (VerifyMode::Sample | VerifyMode::Strict, Direction::Upload) => self
+            (VerifyMode::Strict, Direction::Upload) => self
                 .vault()?
                 .verify_file(&self.sealed_path(&entry.dest))
                 .await
-                .map_err(|_| {
-                    CliError::new(
-                        ExitCode::IntegrityFailure,
-                        format!("read-back verification failed for '{}'", entry.dest),
-                    )
-                    .with_hint(
-                        "The object did not authenticate when read back. It was \
-                         written but must not be trusted; investigate before \
-                         deleting any source.",
-                    )
-                }),
+                .map_err(|_| Self::read_back_failure(&entry.dest)),
+            // The genuinely cheaper read-back `sample` names: first and last
+            // chunks plus the run's seeded interior picks, each one's tag
+            // authenticated — and no whole-object claim, which is why this arm
+            // is not a call to `verify_file` with the cost hidden. The picks
+            // replay from the seed the engine logged when it connected.
+            (VerifyMode::Sample, Direction::Upload) => self
+                .vault()?
+                .verify_file_sampled(
+                    &self.sealed_path(&entry.dest),
+                    &dctl_core::SamplePlan {
+                        samples: self.verify_samples,
+                        seed: self.verify_seed,
+                    },
+                )
+                .await
+                .map(|_| ())
+                .map_err(|_| Self::read_back_failure(&entry.dest)),
             (VerifyMode::Sample | VerifyMode::Strict, Direction::Download) => {
                 // Confirm what landed on disk matches what was decrypted. Both
                 // sides are read in bounded windows: the file is stream-hashed
@@ -1297,6 +1349,8 @@ mod tests {
             hashes: Mutex::new(HashMap::new()),
             meter: dctl_store::unmetered(),
             verify_mode: crate::constants::DEFAULT_VERIFY_MODE,
+            verify_samples: crate::constants::DEFAULT_VERIFY_SAMPLES,
+            verify_seed: 0,
         }
     }
 
@@ -1317,6 +1371,8 @@ mod tests {
             hashes: Mutex::new(HashMap::new()),
             meter: dctl_store::unmetered(),
             verify_mode: crate::constants::DEFAULT_VERIFY_MODE,
+            verify_samples: crate::constants::DEFAULT_VERIFY_SAMPLES,
+            verify_seed: 0,
         }
     }
 

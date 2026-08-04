@@ -176,9 +176,10 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     let requested = ctx.verify_mode_for(&target.spec())?;
     if !mode::proves_whole_plaintext(requested) {
         ctx.out.warn(format!(
-            "--verify={} asks for a cheaper check than `{command}` can perform in this \
-             build: dctl-core exposes no stored-object checksum, and no sampling \
-             strategy is defined, so every selected object is read back in full",
+            "--verify={} asks for a cheaper check than `{command}` performs: this \
+             command certifies whole objects, so every selected object is read \
+             back in full (the sampled read is a transfer read-back check, not \
+             a certification)",
             mode::slug(requested)
         ));
     }

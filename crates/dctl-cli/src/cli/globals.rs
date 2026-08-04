@@ -48,7 +48,8 @@ pub enum VerifyMode {
     /// Compare the provider's stored checksum against ours. No extra egress.
     #[default]
     Checksum,
-    /// Additionally Range-read and decrypt a sample of chunks.
+    /// On sealed uploads, range-read and authenticate the first, last and a
+    /// seeded sample of chunks (--verify-samples). No whole-object hash.
     Sample,
     /// Full read-back and decrypt; confirm the whole-file BLAKE3.
     Strict,
@@ -219,14 +220,15 @@ pub struct GlobalArgs {
     )]
     pub verify: Option<VerifyMode>,
 
-    /// Chunks to sample when --verify=sample. REFUSED in this build — sample
-    /// mode reads every chunk, so a depth would describe nothing.
+    /// Interior chunks --verify=sample reads per object, on top of the always
+    /// -read first and last (default: 8).
     ///
-    /// `Option` rather than a defaulted number, and the difference is the whole
-    /// point: a default would make `dctl --help` publish a sampling depth this
-    /// build has never applied, and would leave no way to tell "the user asked
-    /// for eight" from "nobody asked for anything". See [`crate::cli::reach`].
-    #[arg(long, global = true, value_name = "N", help_heading = "Durability")]
+    /// `Option` rather than a defaulted number for the reason `--verify` is:
+    /// only the absence can tell "the operator asked for eight" from "nobody
+    /// asked", and the applied default belongs to one place
+    /// ([`DEFAULT_VERIFY_SAMPLES`](crate::constants::DEFAULT_VERIFY_SAMPLES)),
+    /// not to the parser's help output.
+    #[arg(long, global = true, value_name = "N", value_parser = clap::value_parser!(u32).range(1..), help_heading = "Durability")]
     pub verify_samples: Option<u32>,
 
     /// Compare by checksum rather than size and modification time.

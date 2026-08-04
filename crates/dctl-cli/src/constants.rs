@@ -985,21 +985,22 @@ pub const DEFAULT_CONTIMEOUT_SECS: u64 = dctl_store::deadline::constants::DEFAUL
 /// the parser there is no way to distinguish *"the operator asked for
 /// `checksum`"* from *"the operator asked for nothing"*, so a configured
 /// `strict` would be silently overridden by a value nobody typed. The same
-/// argument `VERIFY_SAMPLES_UNSUPPORTED_REASON`'s flag makes for being an
-/// `Option`. `dctl --help` states this default in prose instead.
+/// argument keeps `--verify-samples` an `Option` (its applied default is
+/// [`DEFAULT_VERIFY_SAMPLES`]). `dctl --help` states this default in prose
+/// instead.
 pub const DEFAULT_VERIFY_MODE: crate::cli::globals::VerifyMode =
     crate::cli::globals::VerifyMode::Checksum;
 
-/// Why `--verify-samples` is refused.
+/// Interior chunks a `--verify sample` upload check reads when
+/// `--verify-samples` is not given, on top of the always-read first and last.
 ///
-/// Worth stating plainly rather than as "not wired": on the vault path
-/// `--verify sample` reads *every* chunk, so a sample depth is not merely
-/// unhonoured, it has nothing to describe.
-pub const VERIFY_SAMPLES_UNSUPPORTED_REASON: &str = "There is no sampled read to set a depth on: \
-     dctl_core::Vault::verify_file reads and authenticates the whole object, so \
-     --verify sample costs a full egress and this number would describe \
-     nothing. Use --verify checksum for the metadata comparison, or --verify \
-     strict, which is what sample currently does.";
+/// Eight is small enough that a sampled verify of any object costs a bounded
+/// handful of ranged reads — the entire point of the mode — and large enough
+/// that scattered bit rot has a real chance of landing in the sample on the
+/// multi-hundred-chunk objects the mode exists for. The honest limit stands
+/// regardless of the number and is stated wherever the mode is described: a
+/// sample authenticates the chunks it read and makes no whole-object claim.
+pub const DEFAULT_VERIFY_SAMPLES: u32 = 8;
 
 /// Why `--dump` is refused.
 pub const DUMP_UNSUPPORTED_REASON: &str = "The protocol tracing layer this selects from is not installed: \
