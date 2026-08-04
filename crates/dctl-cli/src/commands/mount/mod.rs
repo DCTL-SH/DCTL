@@ -115,8 +115,12 @@ pub struct MountArgs {
 
     /// Detach and run in the background.
     ///
-    /// Unavailable on Windows, where a service, not a fork, is how a filesystem
-    /// stays up.
+    /// Refused on Linux and macOS: this process holds a thread pool, live
+    /// provider connections and an open encrypted database, and detaching
+    /// means fork(), which is not safe in a threaded process. On Windows a
+    /// filesystem stays up as a service, not a detached process, so the flag
+    /// has no effect there either. Background the mount the way your system
+    /// already does it: `dctl mount … &`, a systemd unit, or a launchd job.
     #[arg(long)]
     pub daemon: bool,
 
@@ -465,6 +469,32 @@ mod tests {
                 "--allow-root must name {expected}: a macOS user whose vault will \
                  not open in Finder has no other way to learn that this is the \
                  flag.\n{allow_root}"
+            );
+        }
+    }
+
+    #[test]
+    fn daemon_help_admits_it_is_refused_and_names_the_alternative() {
+        // The help said "Unavailable on Windows", implying it works everywhere
+        // else — and at runtime the flag is refused on Linux and macOS too,
+        // with a fork-safety error. A user whose mount just refused --daemon
+        // reads --help to learn why and what to do instead; the help lying by
+        // omission is the same defect class as --allow-root's silence about
+        // Finder, and it is pinned the same way, because a truthful sentence
+        // in a doc comment is deletable without anything else noticing.
+        use clap::CommandFactory as _;
+        let help = Harness::command().render_long_help().to_string();
+        let daemon = help
+            .split("--daemon")
+            .nth(1)
+            .expect("--daemon is on the mount flag surface");
+        for expected in [
+            "Refused", "Linux", "macOS", "fork", "&", "systemd", "launchd",
+        ] {
+            assert!(
+                daemon.contains(expected),
+                "--daemon's help must name {expected}: the refusal at runtime \
+                 points here, and here must answer.\n{daemon}"
             );
         }
     }
