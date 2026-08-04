@@ -75,6 +75,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use dctl_core::Vault;
 use dctl_core::range::RangeReader;
+use tokio::sync::Notify;
 use zeroize::Zeroizing;
 
 use crate::constants::{
@@ -106,25 +107,96 @@ pub struct ChunkCache {
 
 /// The cache's mutable interior. Split out so [`ChunkCache`] exposes only operations that
 /// take and release the lock correctly.
-#[derive(Default)]
 struct State {
     /// Open readers by logical path.
     readers: HashMap<String, Held<Arc<RangeReader>>>,
     /// Decrypted chunks by object and index.
     chunks: HashMap<ChunkKey, Held<Chunk>>,
+    /// Chunks a task is fetching right now, so a second task wanting one waits for
+    /// the flight instead of fetching it again.
+    ///
+    /// This is what makes read-ahead and a fast reader cooperate rather than race:
+    /// without it, a reader that catches up to the warm task's window re-fetches the
+    /// very bytes already on the wire — a duplicate transfer issued precisely when
+    /// the link is slowest. An entry is inserted only by the task that will fetch,
+    /// and removed — with its waiters notified — when that fetch resolves, by a
+    /// guard that runs on success, on error and on cancellation alike, so nothing
+    /// waits on a flight that no longer exists.
+    in_flight: HashMap<ChunkKey, Arc<Notify>>,
     /// Total plaintext bytes in `chunks`, tracked rather than recomputed so an eviction
     /// loop does not walk the map to decide whether it is done.
     bytes: usize,
+    /// The byte bound eviction enforces. Starts at [`VAULT_CHUNK_CACHE_BYTES`] and is
+    /// raised — never lowered — by [`ChunkCache::set_budget`], because the useful
+    /// working set is the caller's to know: a mount warming `depth` windows ahead
+    /// needs the cache to hold what it warmed, or read-ahead evicts the very chunks
+    /// the reader is about to ask for and the warm becomes wasted egress.
+    budget_bytes: usize,
+    /// The entry-count bound beside it, kept proportional so the linear eviction scan
+    /// stays a walk over a small collection whatever the chunk size.
+    budget_chunks: usize,
     /// Monotonic tick stamped onto every entry when it is used. A counter rather than a
     /// clock because it is only ever compared, never displayed, and a monotonic counter
     /// cannot be reordered by a clock adjustment mid-run.
     tick: u64,
 }
 
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            readers: HashMap::new(),
+            chunks: HashMap::new(),
+            in_flight: HashMap::new(),
+            bytes: 0,
+            budget_bytes: VAULT_CHUNK_CACHE_BYTES,
+            budget_chunks: VAULT_CHUNK_CACHE_MAX_CHUNKS,
+            tick: 0,
+        }
+    }
+}
+
 /// A cached value plus the tick at which it was last used — the recency an eviction reads.
 struct Held<T> {
     value: T,
     used: u64,
+}
+
+/// What [`ChunkCache::partition`] found for the chunks a window still lacks: either a
+/// claim this task must now fetch, or flights other tasks already own.
+enum Work<'cache> {
+    /// Chunks nobody was fetching. The guard holds the claim; fetching them is now
+    /// this task's obligation, discharged through [`ChunkCache::fetch_claimed`].
+    Fetch(FlightGuard<'cache>),
+    /// Every missing chunk is already on somebody's wire. Wait for these flights,
+    /// then look again.
+    Wait(Vec<(u64, Arc<Notify>)>),
+}
+
+/// A claim on in-flight chunks, resolved on drop.
+///
+/// Removal-and-notify lives in `Drop` rather than after the fetch so that every exit —
+/// the stored chunk, the propagated error, and a cancelled task — resolves the flight.
+/// A marker that outlived its fetch would make every later read of that chunk wait on
+/// a wakeup that can never come, which is a wedged mount with no error anywhere.
+struct FlightGuard<'cache> {
+    cache: &'cache ChunkCache,
+    file_id: [u8; 16],
+    /// Ascending, as `partition` builds it — which is what lets the fetch walk it as
+    /// contiguous runs without sorting.
+    indexes: Vec<u64>,
+}
+
+impl Drop for FlightGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.cache.state();
+        for index in &self.indexes {
+            // Only the claimer inserts a marker for a chunk, and only its guard removes
+            // it, so this key is ours by construction.
+            if let Some(flight) = state.in_flight.remove(&(self.file_id, *index)) {
+                flight.notify_waiters();
+            }
+        }
+    }
 }
 
 impl ChunkCache {
@@ -172,33 +244,38 @@ impl ChunkCache {
         // `offset + want <= plaintext_len`, so neither the sum nor the decrement can wrap.
         let last = (offset + want - 1) / chunk_size;
 
-        // ── What is already decrypted. The lock is taken and released here; nothing is
-        //    awaited while it is held. ──
+        // ── Assemble the covering set in rounds. Each round takes what the cache
+        //    holds, then either fetches the chunks nobody has claimed or waits for the
+        //    flights that already carry them — never both fetching and waiting in one
+        //    round, and never fetching a byte that is already on the wire. One round
+        //    is the ordinary case; a second happens only when a flight this read
+        //    waited on resolved without leaving its chunk behind (its fetch failed,
+        //    or the budget evicted the chunk before this read looked), and then the
+        //    next round claims the chunk itself and meets the bytes — or the error —
+        //    first-hand. Each round removes at least one chunk from the missing set
+        //    or waits on a flight that must resolve, so the loop terminates. ──
         let file_id = *reader.file_id();
         let mut covering: BTreeMap<u64, Chunk> = BTreeMap::new();
-        {
-            let mut state = self.state();
-            for index in first..=last {
-                if let Some(chunk) = state.take_chunk(&(file_id, index)) {
-                    covering.insert(index, chunk);
+        while let Some(work) = self.partition(file_id, first, last, &mut covering) {
+            match work {
+                Work::Fetch(guard) => {
+                    for (index, chunk) in self.fetch_claimed(&reader, &guard).await? {
+                        covering.insert(index, chunk);
+                    }
                 }
-            }
-        }
-
-        // ── One request for the missing run. Its ends are the first and last chunk the
-        //    cache lacks; a chunk that happens to be held between them is re-fetched
-        //    rather than split into two requests, because a second round trip costs far
-        //    more than the bytes it would save. ──
-        let missing_lo = (first..=last).find(|index| !covering.contains_key(index));
-        if let Some(lo) = missing_lo {
-            let hi = (first..=last)
-                .rev()
-                .find(|index| !covering.contains_key(index))
-                .unwrap_or(lo);
-            for chunk in reader.read_chunks(lo, hi - lo + 1).await? {
-                let plaintext: Chunk = Arc::new(chunk.plaintext);
-                covering.insert(chunk.index, Arc::clone(&plaintext));
-                self.state().store_chunk((file_id, chunk.index), plaintext);
+                Work::Wait(flights) => {
+                    for (index, flight) in flights {
+                        // Register interest before re-checking the flight, so a
+                        // resolution landing between the check and the await cannot
+                        // be missed — an unregistered waiter would sleep forever.
+                        let notified = flight.notified();
+                        tokio::pin!(notified);
+                        notified.as_mut().enable();
+                        if self.flight_is_current(&(file_id, index), &flight) {
+                            notified.await;
+                        }
+                    }
+                }
             }
         }
 
@@ -248,44 +325,53 @@ impl ChunkCache {
         let first = offset / chunk_size;
         let last = (offset + want - 1) / chunk_size;
 
-        // Only the chunks that are missing, and only the run of them: a chunk already held
-        // is exactly what read-ahead was trying to achieve, and re-fetching it would make
-        // a warm cache cost more than a cold one.
+        // Only the chunks that are missing, that nobody else is fetching, and only the
+        // runs of them: a chunk already held is exactly what read-ahead was trying to
+        // achieve, and one already in flight is read-ahead (or a reader) at work —
+        // waiting on it would make the advisory path block, and re-fetching it would
+        // make a warm cache cost more than a cold one. So warming claims what it can
+        // and otherwise walks away.
         let file_id = *reader.file_id();
-        let (lo, hi) = {
-            let state = self.state();
-            let lo = (first..=last).find(|index| !state.chunks.contains_key(&(file_id, *index)));
-            let hi = (first..=last)
-                .rev()
-                .find(|index| !state.chunks.contains_key(&(file_id, *index)));
-            match (lo, hi) {
-                (Some(lo), Some(hi)) => (lo, hi),
-                // Everything the window covers is already decrypted. Nothing to do, and
-                // nothing to report: this is read-ahead working.
-                _ => return,
+        let guard = {
+            let mut state = self.state();
+            let mut claimed = Vec::new();
+            for index in first..=last {
+                if state.chunks.contains_key(&(file_id, index))
+                    || state.in_flight.contains_key(&(file_id, index))
+                {
+                    continue;
+                }
+                state
+                    .in_flight
+                    .insert((file_id, index), Arc::new(Notify::new()));
+                claimed.push(index);
+            }
+            FlightGuard {
+                cache: self,
+                file_id,
+                indexes: claimed,
             }
         };
+        if guard.indexes.is_empty() {
+            // Everything the window covers is decrypted or arriving. Nothing to do,
+            // and nothing to report: this is read-ahead working.
+            return;
+        }
 
-        match reader.read_chunks(lo, hi - lo + 1).await {
-            Ok(chunks) => {
-                let fetched = chunks.len();
-                for chunk in chunks {
-                    self.state()
-                        .store_chunk((file_id, chunk.index), Arc::new(chunk.plaintext));
-                }
+        match self.fetch_claimed(&reader, &guard).await {
+            Ok(fetched) => {
                 tracing::debug!(
                     { crate::logging::fields::PATH } = path,
                     offset,
-                    chunks = fetched,
+                    chunks = fetched.len(),
                     "read-ahead warmed the chunk cache"
                 );
             }
             Err(error) => {
                 // Deliberately not propagated — see the note above. The read that needs
                 // these bytes will fetch them again and fail visibly.
-                // `CoreError` carries no `message()` accessor; its `Display` is
-                // the message, and is what every other diagnostic in this crate
-                // renders.
+                // `CliError`'s `Display` is the message, and is what every other
+                // diagnostic in this crate renders.
                 tracing::debug!(
                     { crate::logging::fields::PATH } = path,
                     offset,
@@ -293,6 +379,113 @@ impl ChunkCache {
                 );
             }
         }
+    }
+
+    /// Raise the cache's byte and entry budgets to fit a caller's working set.
+    ///
+    /// Raise, never lower: the defaults are the floor argued at
+    /// [`VAULT_CHUNK_CACHE_BYTES`], and shrinking a cache mid-run would evict a
+    /// working set some reader is mid-way through. The caller that knows better is
+    /// the mount: warming `depth` read-ahead windows is only useful if the cache can
+    /// hold `depth + 1` of them — the windows arriving plus the one being consumed —
+    /// otherwise read-ahead evicts what the reader is about to ask for, and every
+    /// warmed byte is fetched twice.
+    pub fn set_budget(&self, bytes: usize, max_chunks: usize) {
+        let mut state = self.state();
+        state.budget_bytes = bytes.max(VAULT_CHUNK_CACHE_BYTES);
+        state.budget_chunks = max_chunks.max(VAULT_CHUNK_CACHE_MAX_CHUNKS);
+    }
+
+    /// One round of [`read_range`](ChunkCache::read_range)'s assembly: take what the
+    /// cache holds into `covering`, and say what to do about the rest.
+    ///
+    /// [`None`] when `covering` is complete. Otherwise a claim to fetch — taking
+    /// priority so a task that can make progress does — or, when every missing chunk
+    /// is on somebody's wire, the flights to wait for.
+    fn partition<'cache>(
+        &'cache self,
+        file_id: [u8; 16],
+        first: u64,
+        last: u64,
+        covering: &mut BTreeMap<u64, Chunk>,
+    ) -> Option<Work<'cache>> {
+        let mut state = self.state();
+        let mut claimed = Vec::new();
+        let mut flights = Vec::new();
+        for index in first..=last {
+            if covering.contains_key(&index) {
+                continue;
+            }
+            if let Some(chunk) = state.take_chunk(&(file_id, index)) {
+                covering.insert(index, chunk);
+            } else if let Some(flight) = state.in_flight.get(&(file_id, index)) {
+                flights.push((index, Arc::clone(flight)));
+            } else {
+                state
+                    .in_flight
+                    .insert((file_id, index), Arc::new(Notify::new()));
+                claimed.push(index);
+            }
+        }
+        drop(state);
+
+        if !claimed.is_empty() {
+            // Flights found alongside a claim are deliberately dropped: fetching what
+            // this round claimed comes first, and the next round will find those
+            // chunks cached — or their flights still current, and wait then.
+            return Some(Work::Fetch(FlightGuard {
+                cache: self,
+                file_id,
+                indexes: claimed,
+            }));
+        }
+        if !flights.is_empty() {
+            return Some(Work::Wait(flights));
+        }
+        None
+    }
+
+    /// Fetch, authenticate and cache the claimed chunks, as contiguous runs.
+    ///
+    /// One ranged request per run. A claim is usually one run; it splits only where a
+    /// chunk mid-window was cached or in flight when the claim was made, and the
+    /// requests on either side of it are the round trips that were genuinely owed.
+    ///
+    /// # Errors
+    /// Whatever [`RangeReader::read_chunks`] reported for the run that failed; runs
+    /// fetched before it are already cached and stay.
+    async fn fetch_claimed(
+        &self,
+        reader: &RangeReader,
+        guard: &FlightGuard<'_>,
+    ) -> Result<Vec<(u64, Chunk)>> {
+        let mut fetched = Vec::with_capacity(guard.indexes.len());
+        let mut runs: Vec<(u64, u64)> = Vec::new();
+        for &index in &guard.indexes {
+            match runs.last_mut() {
+                Some((lo, count)) if lo.saturating_add(*count) == index => *count += 1,
+                _ => runs.push((index, 1)),
+            }
+        }
+        for (lo, count) in runs {
+            for chunk in reader.read_chunks(lo, count).await? {
+                let plaintext: Chunk = Arc::new(chunk.plaintext);
+                self.state()
+                    .store_chunk((guard.file_id, chunk.index), Arc::clone(&plaintext));
+                fetched.push((chunk.index, plaintext));
+            }
+        }
+        Ok(fetched)
+    }
+
+    /// Whether `flight` is still the marker for `key` — the same allocation, not
+    /// merely a marker under the same key, so a resolved-and-reclaimed chunk is not
+    /// mistaken for one still on its first flight.
+    fn flight_is_current(&self, key: &ChunkKey, flight: &Arc<Notify>) -> bool {
+        self.state()
+            .in_flight
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, flight))
     }
 
     /// The object's plaintext length and its recorded whole-plaintext BLAKE3, from the
@@ -391,9 +584,7 @@ impl State {
         // Evict oldest-first until both the byte budget and the entry count are met. The
         // entry bound is what keeps this scan cheap: it caps the map, so "find the oldest"
         // is a walk over a small, known-size collection rather than over an unbounded one.
-        while self.bytes > VAULT_CHUNK_CACHE_BYTES
-            || self.chunks.len() > VAULT_CHUNK_CACHE_MAX_CHUNKS
-        {
+        while self.bytes > self.budget_bytes || self.chunks.len() > self.budget_chunks {
             let Some(oldest) = oldest_key(&self.chunks) else {
                 break;
             };
@@ -507,6 +698,352 @@ fn window_too_large(path: &str) -> CliError {
         format!("{path}: the requested window is larger than this platform can address"),
     )
     .with_hint("Read the object in smaller pieces, or use a 64-bit build.")
+}
+
+/// The in-flight protocol, proved against a real vault over a watched store.
+///
+/// Separate from the `assemble` tests below because these need a seeded vault,
+/// a backend double and a multi-threaded runtime; those need three maps and a
+/// pattern. What these prove is the wire discipline: no byte fetched twice, no
+/// waiter left asleep, no working set evicted out from under its reader.
+#[cfg(test)]
+mod flight_tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use dctl_core::{MIN_CHUNK_SIZE, Modified, Vault};
+    use dctl_store::{
+        Backend, ByteRange, ChecksumSupport, ContentHash, IncompleteUpload, IncompleteUploads,
+        LocalFs, ObjectKey, ObjectMeta, Page, PutOutcome, SourceModified, StagingListing,
+        StoreIdentity, StoredChecksum,
+    };
+    use tempfile::TempDir;
+
+    /// Any ranged read at least this long is a chunk fetch.
+    ///
+    /// The only other ranged read the vault issues is the header probe, whose
+    /// length is pinned at 4096 (`OBJECT_HEADER_PROBE_LEN`); the smallest chunk
+    /// fetch is one [`MIN_CHUNK_SIZE`] chunk plus its 16-byte tag. The gap
+    /// between the two is what makes the classification exact rather than
+    /// heuristic.
+    const CHUNK_FETCH_FLOOR: u64 = MIN_CHUNK_SIZE as u64 + 8;
+
+    /// A real [`LocalFs`], watched — and slowed, so two tasks genuinely overlap.
+    ///
+    /// The sleep is the test's stand-in for a provider round trip. Without it a
+    /// loopback fetch completes before the racing task has looked at the cache,
+    /// and a test meaning to prove "a chunk on the wire is not fetched twice"
+    /// would pass whether or not that is true.
+    struct Counting {
+        inner: LocalFs,
+        delay: Duration,
+        chunk_fetch_calls: AtomicU64,
+        chunk_fetch_bytes: AtomicU64,
+        /// Fail the next chunk fetch with a not-found, once. What the
+        /// failed-flight test uses to make the *first* claimer lose.
+        fail_next_chunk_fetch: AtomicBool,
+    }
+
+    impl Counting {
+        fn new(root: &Path, delay: Duration) -> Self {
+            Self {
+                inner: LocalFs::new(root.to_path_buf()),
+                delay,
+                chunk_fetch_calls: AtomicU64::new(0),
+                chunk_fetch_bytes: AtomicU64::new(0),
+                fail_next_chunk_fetch: AtomicBool::new(false),
+            }
+        }
+
+        fn chunk_fetch_calls(&self) -> u64 {
+            self.chunk_fetch_calls.load(Ordering::SeqCst)
+        }
+
+        fn chunk_fetch_bytes(&self) -> u64 {
+            self.chunk_fetch_bytes.load(Ordering::SeqCst)
+        }
+
+        fn reset(&self) {
+            self.chunk_fetch_calls.store(0, Ordering::SeqCst);
+            self.chunk_fetch_bytes.store(0, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl Backend for Counting {
+        fn name(&self) -> &'static str {
+            self.inner.name()
+        }
+        async fn store_identity(&self) -> dctl_store::Result<Option<StoreIdentity>> {
+            self.inner.store_identity().await
+        }
+        fn checksum_support(&self) -> ChecksumSupport {
+            self.inner.checksum_support()
+        }
+        async fn stored_checksum(&self, key: &ObjectKey) -> dctl_store::Result<StoredChecksum> {
+            self.inner.stored_checksum(key).await
+        }
+        async fn put(
+            &self,
+            key: &ObjectKey,
+            data: Bytes,
+            expected: &ContentHash,
+            modified: SourceModified,
+        ) -> dctl_store::Result<PutOutcome> {
+            self.inner.put(key, data, expected, modified).await
+        }
+        async fn put_from_path(
+            &self,
+            key: &ObjectKey,
+            source: &Path,
+            expected: &ContentHash,
+            modified: SourceModified,
+        ) -> dctl_store::Result<PutOutcome> {
+            self.inner
+                .put_from_path(key, source, expected, modified)
+                .await
+        }
+        async fn put_stream(
+            &self,
+            key: &ObjectKey,
+            source: dctl_store::ObjectStream,
+            modified: SourceModified,
+        ) -> dctl_store::Result<PutOutcome> {
+            self.inner.put_stream(key, source, modified).await
+        }
+        async fn get(&self, key: &ObjectKey) -> dctl_store::Result<Bytes> {
+            self.inner.get(key).await
+        }
+        async fn get_range(&self, key: &ObjectKey, range: ByteRange) -> dctl_store::Result<Bytes> {
+            // An unbounded range is a whole-object read; both it and any bounded
+            // range past the floor are chunk traffic. Only the header probe is
+            // smaller.
+            let requested = range.length.unwrap_or(u64::MAX);
+            if requested >= CHUNK_FETCH_FLOOR {
+                if self.fail_next_chunk_fetch.swap(false, Ordering::SeqCst) {
+                    return Err(dctl_store::StoreError::NotFound(key.as_str().to_string()));
+                }
+                self.chunk_fetch_calls.fetch_add(1, Ordering::SeqCst);
+                self.chunk_fetch_bytes
+                    .fetch_add(requested, Ordering::SeqCst);
+                tokio::time::sleep(self.delay).await;
+            }
+            self.inner.get_range(key, range).await
+        }
+        async fn head(&self, key: &ObjectKey) -> dctl_store::Result<ObjectMeta> {
+            self.inner.head(key).await
+        }
+        async fn exists(&self, key: &ObjectKey) -> dctl_store::Result<bool> {
+            self.inner.exists(key).await
+        }
+        async fn delete(&self, key: &ObjectKey) -> dctl_store::Result<()> {
+            self.inner.delete(key).await
+        }
+        async fn list_page(
+            &self,
+            prefix: &str,
+            cursor: Option<String>,
+        ) -> dctl_store::Result<Page> {
+            self.inner.list_page(prefix, cursor).await
+        }
+        async fn list_staging(
+            &self,
+            prefix: &str,
+            cursor: Option<String>,
+        ) -> dctl_store::Result<StagingListing> {
+            self.inner.list_staging(prefix, cursor).await
+        }
+        async fn list_incomplete_uploads(
+            &self,
+            prefix: &str,
+            cursor: Option<String>,
+        ) -> dctl_store::Result<IncompleteUploads> {
+            self.inner.list_incomplete_uploads(prefix, cursor).await
+        }
+        async fn abort_incomplete_upload(
+            &self,
+            upload: &IncompleteUpload,
+        ) -> dctl_store::Result<()> {
+            self.inner.abort_incomplete_upload(upload).await
+        }
+    }
+
+    struct Fixture {
+        _store: TempDir,
+        _index: TempDir,
+        vault: Arc<Vault>,
+        watched: Arc<Counting>,
+        plaintext: Vec<u8>,
+    }
+
+    /// A real vault over a watched local store, holding one object of `chunks`
+    /// minimum-size chunks — small enough that a debug build seals it
+    /// instantly, chunked enough that a window has structure to race over.
+    async fn fixture(chunks: usize, delay: Duration) -> Fixture {
+        let store = TempDir::new().expect("a temporary store");
+        let index = TempDir::new().expect("a temporary index");
+        let watched = Arc::new(Counting::new(store.path(), delay));
+        let backend: Arc<dyn Backend> = Arc::clone(&watched) as Arc<dyn Backend>;
+        let index_path = index.path().join("index.redb");
+
+        let vault = Vault::init(Arc::clone(&backend), &index_path, "pw")
+            .await
+            .expect("a fresh vault initialises")
+            .vault
+            .with_chunk_size(Some(u64::from(MIN_CHUNK_SIZE)));
+
+        // A pattern rather than randomness, so a wrong byte names its offset.
+        let plaintext: Vec<u8> = (0..chunks * MIN_CHUNK_SIZE as usize)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let source = index.path().join("source.bin");
+        std::fs::write(&source, &plaintext).expect("a source file");
+        vault
+            .put_file_from_path("big.bin", &source, Modified::At(1_700_000_000))
+            .await
+            .expect("the object stores");
+        watched.reset();
+
+        Fixture {
+            _store: store,
+            _index: index,
+            vault: Arc::new(vault),
+            watched,
+            plaintext,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_chunk_already_on_the_wire_is_awaited_rather_than_fetched_twice() {
+        // A reader racing the warm task over the same window — the mount's
+        // steady state on a slow link. Whatever the interleaving, every chunk
+        // must cross the wire exactly once: the loser of each claim waits for
+        // the winner's flight instead of re-issuing it. Without the in-flight
+        // registry both sides fetch the whole window and this counts double.
+        let fx = fixture(8, Duration::from_millis(25)).await;
+        let cache = Arc::new(ChunkCache::new());
+        let length = fx.plaintext.len() as u64;
+
+        let warm = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            let vault = Arc::clone(&fx.vault);
+            async move { cache.warm(&vault, "big.bin", 0, length).await }
+        });
+        let read = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            let vault = Arc::clone(&fx.vault);
+            async move { cache.read_range(&vault, "big.bin", 0, None).await }
+        });
+
+        let bytes = read
+            .await
+            .expect("the read task runs")
+            .expect("the read succeeds");
+        warm.await.expect("the warm task runs");
+
+        assert_eq!(&bytes[..], &fx.plaintext[..], "the window is byte-exact");
+        let stride = u64::from(MIN_CHUNK_SIZE) + 16;
+        assert_eq!(
+            fx.watched.chunk_fetch_bytes(),
+            8 * stride,
+            "every chunk crossed the wire exactly once; more means the race \
+             fetched bytes that were already in flight"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_failed_flight_wakes_its_waiter_and_the_waiter_fetches_for_itself() {
+        // The claimer's fetch fails; the task waiting on that flight must be
+        // woken and then meet the store first-hand — a marker that outlived its
+        // fetch would leave the waiter asleep forever, a wedged mount with no
+        // error anywhere. The test completing at all is the wake; the waiter's
+        // clean read is the reclaim.
+        let fx = fixture(4, Duration::from_millis(25)).await;
+        let cache = Arc::new(ChunkCache::new());
+
+        fx.watched
+            .fail_next_chunk_fetch
+            .store(true, Ordering::SeqCst);
+        let loser = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            let vault = Arc::clone(&fx.vault);
+            async move { cache.read_range(&vault, "big.bin", 0, None).await }
+        });
+        // Give the loser time to claim, then queue up behind its flight.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        let waiter = tokio::spawn({
+            let cache = Arc::clone(&cache);
+            let vault = Arc::clone(&fx.vault);
+            async move { cache.read_range(&vault, "big.bin", 0, None).await }
+        });
+
+        let lost = loser.await.expect("the loser task runs");
+        let won = waiter
+            .await
+            .expect("the waiter task runs")
+            .expect("the waiter reclaims the failed flight and reads");
+        assert!(
+            lost.is_err(),
+            "the injected failure surfaced on the claimer"
+        );
+        assert_eq!(
+            &won[..],
+            &fx.plaintext[..],
+            "the waiter's read is byte-exact"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn raising_the_budget_keeps_a_working_set_the_floor_would_evict() {
+        // More chunks than the entry floor holds: at the defaults a second pass
+        // re-fetches what the first evicted, and with the budget raised — the
+        // mount's move, sized to its read-ahead — the second pass costs
+        // nothing. This is the geometry defect measured on the loopback rig:
+        // a cache exactly one window deep turns read-ahead into wasted egress.
+        let fx = fixture(VAULT_CHUNK_CACHE_MAX_CHUNKS * 2, Duration::ZERO).await;
+
+        let floor = ChunkCache::new();
+        floor
+            .read_range(&fx.vault, "big.bin", 0, None)
+            .await
+            .expect("the first pass reads");
+        fx.watched.reset();
+        floor
+            .read_range(&fx.vault, "big.bin", 0, None)
+            .await
+            .expect("the second pass reads");
+        assert!(
+            fx.watched.chunk_fetch_calls() > 0,
+            "at the floor, a working set twice the entry bound cannot be held \
+             and the second pass pays again — if this stops failing, the floor \
+             grew and this test should shrink with it"
+        );
+
+        let raised = ChunkCache::new();
+        raised.set_budget(
+            VAULT_CHUNK_CACHE_BYTES * 4,
+            VAULT_CHUNK_CACHE_MAX_CHUNKS * 4,
+        );
+        raised
+            .read_range(&fx.vault, "big.bin", 0, None)
+            .await
+            .expect("the first pass reads");
+        fx.watched.reset();
+        raised
+            .read_range(&fx.vault, "big.bin", 0, None)
+            .await
+            .expect("the second pass reads");
+        assert_eq!(
+            fx.watched.chunk_fetch_calls(),
+            0,
+            "with the budget raised past the working set, a re-read is served \
+             entirely from the cache"
+        );
+    }
 }
 
 #[cfg(test)]

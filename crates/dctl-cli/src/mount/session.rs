@@ -205,6 +205,26 @@ pub fn mount(
     mountpoint: &Path,
     runtime: tokio::runtime::Handle,
 ) -> Result<Mounted> {
+    // Size the source's cache for the read-ahead this mount schedules: the
+    // windows in flight plus the one being consumed. Stated here, where the
+    // depth is chosen, so budget and depth cannot drift apart — a cache one
+    // window short evicts exactly what the reader is about to ask for, and
+    // read-ahead becomes wasted egress. With read-ahead off, the cache keeps
+    // its own floor.
+    if config.read_ahead > 0 {
+        let budget = config
+            .read_ahead
+            .saturating_mul(crate::constants::MOUNT_READ_AHEAD_DEPTH.saturating_add(1));
+        let bytes = usize::try_from(budget).unwrap_or(usize::MAX);
+        // The entry bound at the ratio the defaults argue for — one entry per
+        // 64 KiB of budget — so it engages exactly where the default's does:
+        // only for objects sealed with unusually small chunks.
+        let per_entry = (crate::constants::VAULT_CHUNK_CACHE_BYTES
+            / crate::constants::VAULT_CHUNK_CACHE_MAX_CHUNKS)
+            .max(1);
+        source.tune_cache(bytes, bytes / per_entry);
+    }
+
     let filesystem = VaultFs::new(source, config.clone(), mountpoint, runtime);
     let session_config = session_config(&config);
 

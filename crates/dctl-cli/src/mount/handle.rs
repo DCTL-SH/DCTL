@@ -58,6 +58,24 @@ pub enum Handle {
         /// beyond it. Without it a player reading a 1 MiB chunk in 4 KiB steps
         /// would schedule 256 read-aheads of the same bytes.
         prefetched_to: u64,
+        /// Where the current sequential run began — reset on every jump.
+        ///
+        /// Progress measured from here is what *earns* read-ahead depth. The
+        /// kernel splits one application read into many smaller ones, so "the
+        /// read after this one moved forward" is true eight times over inside a
+        /// single `dd` of a seek test and proves nothing about streaming; a
+        /// full window of progress from the last jump is the evidence the
+        /// pipeline deepens on.
+        streak_base: u64,
+        /// Where the previous read ended — how a jump is recognised.
+        ///
+        /// A run is contiguous while each read lands within one window of the
+        /// last one; anything further, in either direction, is a jump and
+        /// resets the streak. Judged against the previous *read* rather than
+        /// the watermark because a handle that has not yet earned any warming
+        /// has a watermark of zero, and against that, every read of a
+        /// sequential run would look like a jump.
+        last_read_end: u64,
     },
     /// An open directory, with the listing it was opened on.
     Directory {
@@ -105,6 +123,8 @@ impl HandleTable {
         self.insert(Handle::File {
             path,
             prefetched_to: 0,
+            streak_base: 0,
+            last_read_end: 0,
         })
     }
 
@@ -135,23 +155,80 @@ impl HandleTable {
         }
     }
 
-    /// Claim the read-ahead window `[from, from + length)` for this handle.
+    /// Claim the read-ahead windows that keep the watermark `depth × window`
+    /// bytes ahead of a reader at `from`.
     ///
-    /// Returns `true` — and moves the watermark — only if the read-ahead has not
-    /// already covered `from`. That is what turns "warm the next 16 MiB after
-    /// every read" into "warm it once per 16 MiB of progress", and it is also
-    /// what makes a *backwards* seek re-warm: a reader that jumps back before the
-    /// watermark is not sequential, and its next read has to be able to schedule
-    /// its own read-ahead.
-    pub fn claim_read_ahead(&mut self, handle: FileHandle, from: u64, length: u64) -> bool {
-        let Some(Handle::File { prefetched_to, .. }) = self.open.get_mut(&handle.0) else {
-            return false;
+    /// Returns the whole windows to warm — each `(start, length)` with `length`
+    /// exactly `window` — and moves the watermark past them. Empty when the
+    /// horizon is already covered, which is what turns "warm after every read"
+    /// into "warm once per window of progress": a kernel reading a 1 MiB chunk
+    /// in 4 KiB steps claims nothing 255 times out of 256.
+    ///
+    /// The depth is the pipeline. At depth one the next window is claimed only
+    /// when the reader arrives at the watermark, and every boundary stalls for a
+    /// provider round trip; at depth two the claim fires a full window early, so
+    /// the fetch overlaps the reader's consumption of what is already resident —
+    /// [`MOUNT_READ_AHEAD_DEPTH`](crate::constants::MOUNT_READ_AHEAD_DEPTH)
+    /// argues the figure.
+    ///
+    /// **Every window of depth is earned, including the first.** A run is
+    /// contiguous while each read lands within one window of the previous one;
+    /// anything further, in either direction, is a jump that resets the
+    /// streak. Warming begins only after a full window of contiguous reads —
+    /// so the first read of a handle warms nothing, a seek warms nothing, and
+    /// a `dd` of one megabyte at a random offset costs exactly its own bytes.
+    /// This is not caution for its own sake: a fresh handle warming a window
+    /// on its first read put 16 MiB of speculative egress behind *every* seek
+    /// of a seek test — each `dd` opens its own handle — measured on loopback
+    /// as seek medians more than doubling and on a 12 MB/s WAN as seek latency
+    /// climbing monotonically through the run. A genuine stream pays one
+    /// unwarmed boundary at the end of its first window and runs at full
+    /// depth from the second; the kernel's own readahead covers the ramp.
+    /// Only whole windows are ever claimed, so partial progress never issues
+    /// a fragment request.
+    pub fn claim_read_ahead(
+        &mut self,
+        handle: FileHandle,
+        from: u64,
+        window: u64,
+        depth: u64,
+    ) -> Vec<(u64, u64)> {
+        let Some(Handle::File {
+            prefetched_to,
+            streak_base,
+            last_read_end,
+            ..
+        }) = self.open.get_mut(&handle.0)
+        else {
+            return Vec::new();
         };
-        if from < *prefetched_to {
-            return false;
+        if window == 0 {
+            return Vec::new();
         }
-        *prefetched_to = from.saturating_add(length);
-        true
+        if from.abs_diff(*last_read_end) > window {
+            // A jump: this reader's history no longer predicts anything.
+            *streak_base = from;
+        }
+        *last_read_end = from;
+        let progressed = from.saturating_sub(*streak_base) / window;
+        let earned = progressed.min(depth);
+        if earned == 0 {
+            return Vec::new();
+        }
+        let target = from.saturating_add(window.saturating_mul(earned));
+        let start = (*prefetched_to).max(from);
+        let missing = target.saturating_sub(start) / window;
+        if missing == 0 {
+            return Vec::new();
+        }
+        let mut windows = Vec::with_capacity(usize::try_from(missing).unwrap_or(usize::MAX));
+        let mut at = start;
+        for _ in 0..missing {
+            windows.push((at, window));
+            at = at.saturating_add(window);
+        }
+        *prefetched_to = at;
+        windows
     }
 
     /// Forget a handle. Answers whether it was one this table had issued.
@@ -278,11 +355,86 @@ mod tests {
         let mut table = HandleTable::new();
         let handle = table.open_file("film.mkv".into());
 
-        assert!(table.claim_read_ahead(handle, 0, 1_000));
-        assert!(!table.claim_read_ahead(handle, 100, 1_000));
-        assert!(!table.claim_read_ahead(handle, 999, 1_000));
-        // Only once the reader has moved past what was warmed.
-        assert!(table.claim_read_ahead(handle, 1_000, 1_000));
+        // The first read of a handle has earned nothing — not even one window.
+        // A fresh handle that warmed on sight put a whole window of
+        // speculative egress behind every seek of a seek test, because every
+        // `dd` opens its own handle.
+        assert!(table.claim_read_ahead(handle, 0, 1_000, 2).is_empty());
+        // Reads inside the first window prove nothing yet — one application
+        // read arrives as many kernel reads, and none of them may spend a
+        // request.
+        assert!(table.claim_read_ahead(handle, 100, 1_000, 2).is_empty());
+        assert!(table.claim_read_ahead(handle, 999, 1_000, 2).is_empty());
+        // A full window of contiguous reads is the proof of a stream: the
+        // first read-ahead window is earned here.
+        assert_eq!(
+            table.claim_read_ahead(handle, 1_000, 1_000, 2),
+            vec![(1_000, 1_000)]
+        );
+        // A second window of progress earns full depth.
+        assert!(table.claim_read_ahead(handle, 1_500, 1_000, 2).is_empty());
+        assert_eq!(
+            table.claim_read_ahead(handle, 2_000, 1_000, 2),
+            vec![(2_000, 1_000), (3_000, 1_000)]
+        );
+        // From then on: one refill per window crossed, at full depth.
+        assert_eq!(
+            table.claim_read_ahead(handle, 3_000, 1_000, 2),
+            vec![(4_000, 1_000)]
+        );
+    }
+
+    #[test]
+    fn a_seek_spends_one_window_and_streaming_earns_the_rest() {
+        // A seek-heavy reader must not pay depth × window of speculative
+        // egress per jump — on a slow link that queue is exactly what its next
+        // seek waits behind, measured as seek latency climbing through a run.
+        // One window on the jump; the pipeline deepens only once progress
+        // inside the horizon proves a stream.
+        let mut table = HandleTable::new();
+        let handle = table.open_file("film.mkv".into());
+        assert!(table.claim_read_ahead(handle, 0, 1_000, 2).is_empty());
+        // A far forward seek: a jump, and a jump spends nothing at all — the
+        // seek costs exactly its own bytes. This is the line that held seek
+        // medians at more than double when every fresh position warmed a
+        // window it had not earned.
+        assert!(table.claim_read_ahead(handle, 50_000, 1_000, 2).is_empty());
+        // The seek's own tail — the kernel's split of the same application
+        // read — moves forward without proving anything, and claims nothing.
+        assert!(table.claim_read_ahead(handle, 50_200, 1_000, 2).is_empty());
+        // A full window read past the seek is streaming: warming begins.
+        assert_eq!(
+            table.claim_read_ahead(handle, 51_000, 1_000, 2),
+            vec![(51_000, 1_000)]
+        );
+    }
+
+    #[test]
+    fn the_pipeline_stays_a_window_ahead_of_a_sequential_reader() {
+        // Depth two means the fetch of window k+1 overlaps the consumption of
+        // window k. If the refill arrived only when the reader reached the
+        // watermark, every boundary would stall for a round trip — the
+        // stop-and-go this depth exists to remove.
+        let mut table = HandleTable::new();
+        let handle = table.open_file("film.mkv".into());
+        assert!(table.claim_read_ahead(handle, 0, 1_000, 2).is_empty());
+        // One window of proof: warming starts, one window deep.
+        assert_eq!(
+            table.claim_read_ahead(handle, 1_000, 1_000, 2),
+            vec![(1_000, 1_000)]
+        );
+        // Two windows of proof: full depth — the third window's fetch is
+        // claimed while the second is consumed, and from here the reader
+        // never arrives at an unclaimed watermark again.
+        assert_eq!(
+            table.claim_read_ahead(handle, 2_000, 1_000, 2),
+            vec![(2_000, 1_000), (3_000, 1_000)]
+        );
+        assert!(table.claim_read_ahead(handle, 2_500, 1_000, 2).is_empty());
+        assert_eq!(
+            table.claim_read_ahead(handle, 3_000, 1_000, 2),
+            vec![(4_000, 1_000)]
+        );
     }
 
     #[test]
@@ -291,21 +443,37 @@ mod tests {
         // of view, and its next read must be able to warm what it is heading for.
         let mut table = HandleTable::new();
         let handle = table.open_file("film.mkv".into());
-        assert!(table.claim_read_ahead(handle, 10_000, 1_000));
-        assert!(!table.claim_read_ahead(handle, 10_500, 1_000));
-        // Back to the start: below the watermark, so no claim…
-        assert!(!table.claim_read_ahead(handle, 0, 1_000));
-        // …but the watermark is not moved backwards by the attempt, and forward
-        // progress from the new position still arms it.
-        assert!(table.claim_read_ahead(handle, 11_000, 1_000));
+        // A jump to 10_000 spends nothing; a window of streaming earns one.
+        assert!(table.claim_read_ahead(handle, 10_000, 1_000, 2).is_empty());
+        assert_eq!(
+            table.claim_read_ahead(handle, 11_000, 1_000, 2),
+            vec![(11_000, 1_000)]
+        );
+        // Back to the start: a jump, nothing claimed, and the watermark is
+        // not moved backwards by the attempt…
+        assert!(table.claim_read_ahead(handle, 0, 1_000, 2).is_empty());
+        // …re-reading behind the watermark earns streaming credit but claims
+        // nothing new while the horizon is already covered…
+        assert!(table.claim_read_ahead(handle, 1_000, 1_000, 2).is_empty());
+        // …and a fresh run past the watermark re-arms warming the same way
+        // every run does: after its window of proof.
+        assert!(table.claim_read_ahead(handle, 12_000, 1_000, 2).is_empty());
+        assert_eq!(
+            table.claim_read_ahead(handle, 13_000, 1_000, 2),
+            vec![(13_000, 1_000)]
+        );
     }
 
     #[test]
     fn read_ahead_cannot_be_claimed_on_a_directory_or_a_stale_handle() {
         let mut table = HandleTable::new();
         let dir = table.open_directory(listing(&[]));
-        assert!(!table.claim_read_ahead(dir, 0, 1_000));
-        assert!(!table.claim_read_ahead(FileHandle(4_242), 0, 1_000));
+        assert!(table.claim_read_ahead(dir, 0, 1_000, 2).is_empty());
+        assert!(
+            table
+                .claim_read_ahead(FileHandle(4_242), 0, 1_000, 2)
+                .is_empty()
+        );
     }
 
     #[test]
@@ -314,8 +482,24 @@ mod tests {
         // mount rather than failing one operation.
         let mut table = HandleTable::new();
         let handle = table.open_file("a.bin".into());
-        assert!(table.claim_read_ahead(handle, u64::MAX, u64::MAX));
-        assert!(!table.claim_read_ahead(handle, u64::MAX - 1, 1));
+        // Nothing addressable lies past the end, so nothing is claimed — and
+        // nothing panics.
+        assert!(
+            table
+                .claim_read_ahead(handle, u64::MAX, u64::MAX, 2)
+                .is_empty()
+        );
+        // Just short of the end, the one window that fits is claimed, clamped.
+        assert_eq!(
+            table.claim_read_ahead(handle, u64::MAX - 1, 1, 2),
+            vec![(u64::MAX - 1, 1)]
+        );
+        // And the watermark it left is saturated, not wrapped.
+        assert!(
+            table
+                .claim_read_ahead(handle, u64::MAX - 1, 1, 2)
+                .is_empty()
+        );
     }
 
     #[test]

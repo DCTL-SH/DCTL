@@ -498,28 +498,35 @@ impl MountState {
     /// Warm the chunks after a read, if this handle has not already covered them.
     ///
     /// `PLAN.md` §15's latency hiding: serve chunk *k* while fetching *k+1…k+P*,
-    /// with *P* set by `--buffer-size`. Spawned rather than awaited — the read
+    /// with *P* set by `--buffer-size` and the number of windows in flight by
+    /// [`MOUNT_READ_AHEAD_DEPTH`](crate::constants::MOUNT_READ_AHEAD_DEPTH) —
+    /// claimed a window early, so the fetch of the next window overlaps the
+    /// consumption of the current one instead of starting when the reader is
+    /// already waiting at the boundary. Spawned rather than awaited — the read
     /// that triggered it is already answerable, and making a reader wait for
-    /// somebody else's bytes would turn read-ahead into read-behind.
+    /// somebody else's bytes would turn read-ahead into read-behind. One task
+    /// per window, so the windows' fetches overlap each other too, and a warm
+    /// that finds its chunks already in flight claims nothing and costs nothing.
     fn schedule_read_ahead(&self, handle: FileHandle, path: &str, offset: u64, size: u64) {
         let window = self.config.read_ahead;
         if window == 0 {
             return;
         }
         let from = offset.saturating_add(size);
-        if !self
-            .interior()
-            .handles
-            .claim_read_ahead(handle, from, window)
-        {
-            return;
-        }
+        let windows = self.interior().handles.claim_read_ahead(
+            handle,
+            from,
+            window,
+            crate::constants::MOUNT_READ_AHEAD_DEPTH,
+        );
 
-        let source = Arc::clone(&self.source);
-        let path = path.to_string();
-        tokio::spawn(async move {
-            source.prefetch(&path, from, window).await;
-        });
+        for (start, length) in windows {
+            let source = Arc::clone(&self.source);
+            let path = path.to_string();
+            tokio::spawn(async move {
+                source.prefetch(&path, start, length).await;
+            });
+        }
     }
 
     /// Resolve an inode to its path and kind.
@@ -701,6 +708,10 @@ mod tests {
 
         async fn prefetch(&self, _path: &str, _offset: u64, _length: u64) {
             self.prefetches.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn tune_cache(&self, _bytes: usize, _max_chunks: usize) {
+            // The fixture holds no cache; what the tests observe is the calls.
         }
 
         async fn stat(&self, path: &str) -> Result<Option<Entry>> {
@@ -1090,11 +1101,25 @@ mod tests {
         // Spawned, so let the runtime run them.
         tokio::task::yield_now().await;
         let scheduled = source.prefetches.load(Ordering::Relaxed);
-        assert!(
-            scheduled <= 2,
-            "eight reads inside one read-ahead window scheduled {scheduled} fetches"
+        assert_eq!(
+            scheduled, 0,
+            "reads inside an unproven first window spent {scheduled} fetches — \
+             warming is earned by a full window of streaming, and a fresh \
+             handle has earned nothing (see HandleTable::claim_read_ahead)"
         );
-        assert!(scheduled >= 1, "no read-ahead was scheduled at all");
+
+        // Streaming on: crossing the first window earns one prefetch, and
+        // crossing the second earns the full depth-two top-up. Sixteen more
+        // reads produce exactly three scheduled fetches, not sixteen.
+        for offset in (8_000..24_000).step_by(1_000) {
+            state.read(handle, offset, 1_000).await.unwrap();
+        }
+        tokio::task::yield_now().await;
+        let scheduled = source.prefetches.load(Ordering::Relaxed);
+        assert_eq!(
+            scheduled, 3,
+            "a proven stream schedules once per window earned, not once per read"
+        );
     }
 
     #[tokio::test]

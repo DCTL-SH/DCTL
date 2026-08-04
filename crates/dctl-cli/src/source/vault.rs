@@ -242,6 +242,13 @@ impl Source for VaultSource {
             .await;
     }
 
+    fn tune_cache(&self, bytes: usize, max_chunks: usize) {
+        // The one source with a cache to size. The floor below which this cannot
+        // shrink is the cache's own — see
+        // [`ChunkCache::set_budget`](super::chunk_cache::ChunkCache::set_budget).
+        self.chunks.set_budget(bytes, max_chunks);
+    }
+
     async fn stat(&self, path: &str) -> Result<Option<Entry>> {
         // Answered from the local index, which is the only thing that can answer
         // it without reading the object: a vault's sizes live in its index, and

@@ -4014,13 +4014,35 @@ pub const MOUNT_DEFAULT_DIR_CACHE_TIME: &str = "5m";
 /// size; shorter turns every `stat` into a round trip and makes `ls -l` crawl.
 pub const MOUNT_DEFAULT_ATTR_TIMEOUT: &str = "1s";
 
-/// Default `--buffer-size`, the in-memory read-ahead buffer held per open file.
+/// Default `--buffer-size`, the in-memory read-ahead window per open file.
 ///
-/// 16 MiB is four of the 4 MiB AEAD chunks `PLAN.md` §15 aligns reads to, so a
-/// sequential reader always has whole chunks queued and never waits on a partial
-/// one. Per *open file*, so the ceiling on a mount's memory is this times the
-/// number of files a player has open — small enough to be safe on a laptop.
+/// 16 MiB is sixteen of the 1 MiB AEAD chunks the format seals by default
+/// (`dctl_crypto`'s `DEFAULT_CHUNK_SIZE`), so a sequential reader always has
+/// whole chunks queued and never waits on a partial one, and one warm request
+/// covers sixteen chunks in a single ranged read. Per *open file*, so the
+/// ceiling on a mount's memory is this times [`MOUNT_READ_AHEAD_DEPTH`] times
+/// the number of files a player has open — small enough to be safe on a laptop.
 pub const MOUNT_DEFAULT_BUFFER_SIZE: &str = "16M";
+
+/// Read-ahead windows the mount keeps ahead of a sequential reader, in units of
+/// `--buffer-size`.
+///
+/// Depth one is stop-and-go: the next window is requested only when the reader
+/// arrives at the watermark, so every window boundary costs a full provider
+/// round trip plus the transfer, during which the reader is stalled — on a
+/// network store that alternation was measured at roughly a third of rclone's
+/// sequential throughput on the same link. Depth two keeps one window buffered
+/// while the next is on the wire: the claim fires a window *early*, the fetch
+/// overlaps the reader's consumption, and a boundary costs nothing unless the
+/// link is slower than the reader.
+///
+/// Two, not more: each additional window is `--buffer-size` of resident
+/// plaintext and of speculative egress per open file, and a depth the link
+/// cannot fill adds memory without adding throughput. The chunk cache is sized
+/// to hold `depth + 1` windows (the windows arriving plus the one being read) —
+/// see `ChunkCache::set_budget` — so raising this raises the mount's memory
+/// ceiling with it.
+pub const MOUNT_READ_AHEAD_DEPTH: u64 = 2;
 
 /// Default `--vfs-read-ahead`, extra data fetched past what was asked for when
 /// the VFS cache is on.
