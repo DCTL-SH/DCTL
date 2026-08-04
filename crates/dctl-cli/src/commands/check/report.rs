@@ -251,10 +251,22 @@ impl Report {
                 self.source, self.dest
             );
         }
-        format!(
-            "{} paths compared, all match ({}){scope}: '{}' and '{}'",
-            self.summary.checked, self.comparison, self.source, self.dest
-        )
+        // "all match" is a content claim, and only a content-proving run has
+        // earned it. A metadata run says exactly what it compared and names
+        // what it did not — the previous wording asserted more than the run
+        // checked, over exactly the damage a backup check exists to find.
+        if self.proves_contents {
+            format!(
+                "{} paths compared, all match ({} — contents verified){scope}: '{}' and '{}'",
+                self.summary.checked, self.comparison, self.source, self.dest
+            )
+        } else {
+            format!(
+                "{} paths compared, metadata matches ({}) — contents not \
+                 verified{scope}: '{}' and '{}'",
+                self.summary.checked, self.comparison, self.source, self.dest
+            )
+        }
     }
 
     /// Render exactly the bytes stdout should receive.

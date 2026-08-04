@@ -1283,7 +1283,9 @@ fn sync_into_a_plain_remote_is_incremental_and_check_agrees_with_it() {
         .arg(format!("{PLAIN_REMOTE}:"))
         .assert()
         .success()
-        .stderr(predicates::str::contains("all match"));
+        // A metadata run no longer says "all match" — that is a content claim
+        // it has not earned. The clean verdict it does make is pinned instead.
+        .stderr(predicates::str::contains("metadata matches"));
 
     // One file, moved well outside the modify window.
     sandbox.age("src/b.txt", A_DAY * 30);

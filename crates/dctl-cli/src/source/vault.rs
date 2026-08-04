@@ -275,6 +275,12 @@ impl Source for VaultSource {
         self.chunks.set_budget(bytes, max_chunks);
     }
 
+    async fn exists(&self, path: &str) -> Result<bool> {
+        // The sealed listing is a record, and a record can outlive its object.
+        // This asks the store itself — one existence probe, no payload bytes.
+        Ok(self.session.vault.object_exists(path).await?)
+    }
+
     async fn stat(&self, path: &str) -> Result<Option<Entry>> {
         // Answered from the local index, which is the only thing that can answer
         // it without reading the object: a vault's sizes live in its index, and

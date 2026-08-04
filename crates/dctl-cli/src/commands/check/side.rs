@@ -52,11 +52,21 @@ use super::difference::Entry;
 /// One object as one side described it.
 pub struct Found {
     /// The full logical path inside that side's source, which is what a read
-    /// needs. Never printed: the report speaks in keys, so that a path appearing
-    /// in `--missing-on-dst` can be fed straight to `dctl copy --files-from`.
+    /// needs. Never printed in the report: it speaks in keys, so that a path
+    /// appearing in `--missing-on-dst` can be fed straight to `dctl copy
+    /// --files-from`. The accessor exists for the ghost-row warning, which
+    /// names the path an operator must go look at.
     path: String,
     /// The comparison view, keyed relative to the side's own root.
     pub entry: Entry,
+}
+
+impl Found {
+    /// The full logical path inside the side's source.
+    #[must_use]
+    pub fn path(&self) -> &str {
+        &self.path
+    }
 }
 
 impl Found {
@@ -172,6 +182,30 @@ impl Side {
         }
         let bytes = self.source.read(&found.path).await?;
         Ok(hex::encode(blake3::hash(&bytes).as_bytes()))
+    }
+
+    /// Whether this side's listing is a record rather than the store itself.
+    ///
+    /// The question that decides whether an entry needs confirming: a
+    /// `Recorded` inventory can list a path whose object is gone, and a
+    /// comparison that trusted the row would call the loss a `Match`.
+    #[must_use]
+    pub fn recorded(&self) -> bool {
+        matches!(self.source.inventory(), crate::source::Inventory::Recorded)
+    }
+
+    /// Ask the store — not the listing — whether `found`'s object is there.
+    ///
+    /// One existence probe, no payload bytes. Only worth calling on a
+    /// [`recorded`](Side::recorded) side; a self-reported listing already IS
+    /// the store's answer.
+    ///
+    /// # Errors
+    /// Whatever the probe reported. The caller must turn that into
+    /// [`Difference::Error`](super::difference::Difference::Error) rather than
+    /// either verdict — "could not ask" is a third answer.
+    pub async fn confirm(&self, found: &Found) -> Result<bool> {
+        self.source.exists(&found.path).await
     }
 }
 

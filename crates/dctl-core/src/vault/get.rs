@@ -49,6 +49,28 @@ impl Vault {
         }
     }
 
+    /// Whether the stored object behind `path` is actually in the backend.
+    ///
+    /// The index answers what *should* be there; this asks the store. One
+    /// `Backend::exists` probe — no payload bytes — and `false` for a path
+    /// recorded nowhere, because a row that does not exist has no object to be
+    /// present. The reconciliation primitive that keeps a ghost row — a path
+    /// the index lists whose object was deleted behind the tool's back — out
+    /// of a `Match` verdict.
+    ///
+    /// # Errors
+    /// Whatever the backend's existence probe reported. A probe that cannot
+    /// answer is an error, never `false`: "gone" and "could not ask" send an
+    /// operator to different places.
+    #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
+    pub async fn object_exists(&self, path: &str) -> Result<bool> {
+        let normalized = path::normalize(path)?;
+        let Some(object_key) = self.lookup_object_key(&normalized).await? else {
+            return Ok(false);
+        };
+        Ok(self.backend.exists(&ObjectKey::new(object_key)).await?)
+    }
+
     /// Fetch and decrypt the file at `path`, verifying the plaintext against the object's
     /// own DEK-authenticated content hash. Returns the plaintext wiped-on-drop.
     ///

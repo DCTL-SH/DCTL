@@ -228,6 +228,22 @@ pub trait Source: Send + Sync {
         self.enumerate(prefix).await
     }
 
+    /// Whether the object behind `path` is actually there — in the *store*,
+    /// not merely in a record of it.
+    ///
+    /// For a source whose listing is the store, presence in the listing IS
+    /// presence, and the honest implementation is a constant `true`. For the
+    /// sealed source the two can disagree — an index row survives the deletion
+    /// of its object — and this is the probe that tells them apart. Required
+    /// rather than defaulted: a source added later must say which kind it is,
+    /// because a default `true` on a recorded listing is exactly the ghost-row
+    /// `Match` this method exists to prevent.
+    ///
+    /// # Errors
+    /// Whatever the probe reported. "Could not ask" must surface as an error,
+    /// never as either answer.
+    async fn exists(&self, path: &str) -> Result<bool>;
+
     /// What the `size` on every [`Entry`] this source yields measures.
     ///
     /// Not a way to ask which implementation is in hand — see [`sizes`] — but

@@ -288,6 +288,10 @@ mod tests {
 
         fn tune_cache(&self, _bytes: usize, _max_chunks: usize) {}
 
+        async fn exists(&self, path: &str) -> Result<bool> {
+            Ok(self.entries.iter().any(|entry| entry.path == path))
+        }
+
         async fn stat(&self, path: &str) -> Result<Option<Entry>> {
             Ok(self.entries.iter().find(|e| e.path == path).cloned())
         }
