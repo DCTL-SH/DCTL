@@ -1,0 +1,46 @@
+DCTL
+Copyright 2026 KONG GROUP LLC
+
+This product is source-available, not open source. Two licences apply, and
+which one covers a file depends on what that file is for.
+
+------------------------------------------------------------------------------
+The tool — PolyForm Noncommercial License 1.0.0 (see LICENSE.md)
+------------------------------------------------------------------------------
+
+Everything in this repository except the files listed in the next section is
+licensed under the PolyForm Noncommercial License 1.0.0. In short: you may read
+it, run it, study it and modify it for any noncommercial purpose. Commercial use
+requires a separate licence from KONG GROUP LLC.
+
+Personal use, research, study and hobby projects are permitted purposes, as are
+charitable, educational, research, safety, health, environmental and government
+organisations. See LICENSE.md for the terms that actually govern; this paragraph
+is a summary and the licence is not.
+
+------------------------------------------------------------------------------
+The format and its reference decoder — Apache License 2.0 (see LICENSE-Apache-2.0.txt)
+------------------------------------------------------------------------------
+
+  docs/FORMAT.md
+  crates/dctl-decode/reference/
+
+These are licensed under the Apache License, Version 2.0, deliberately and
+separately from the tool.
+
+The reason is the promise the format makes. DCTL claims its objects will still
+be readable in twenty years, and that claim is hollow if reading them requires
+this tool, this company, or this company continuing to exist. The specification
+and a working decoder therefore carry a permissive licence that anyone may
+implement against, sell, or fork, with no obligation to KONG GROUP LLC and no
+permission needed from it.
+
+If those two licences ever appear to conflict over one of these files, the
+Apache 2.0 grant is the one that governs them.
+
+------------------------------------------------------------------------------
+Third-party components
+------------------------------------------------------------------------------
+
+Dependencies retain their own licences. See Cargo.toml files for the dependency
+set and `cargo license` for the resolved list.
