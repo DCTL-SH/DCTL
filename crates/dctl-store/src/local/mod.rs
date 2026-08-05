@@ -14,7 +14,7 @@ mod verified_write;
 mod walk;
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -26,6 +26,7 @@ use crate::links::LinkPolicy;
 use crate::meter::{self, Meter};
 use crate::model::{ByteRange, ObjectKey, ObjectMeta, Page, PutOutcome};
 use crate::modified::SourceModified;
+use crate::staging::Want;
 
 /// A [`Backend`] backed by a local directory tree rooted at `root`.
 #[derive(Clone, Debug)]
@@ -56,6 +57,39 @@ pub struct LocalFs {
     /// object a command touches — and a per-call argument is one a new call site
     /// can omit, which is a window that silently escapes the cap.
     meter: Arc<dyn Meter>,
+    /// The key list one paged listing is walking, held between its pages.
+    ///
+    /// This backend has no server to page for it, so a listing is a tree walk
+    /// sliced into pages — and each page used to re-walk and re-sort the whole
+    /// tree. With `PAGE_SIZE` at 1000, a store of 200,001 objects walked it 201
+    /// times, which is quadratic and was measured as such: `dctl check` took
+    /// 252 ms over 1,000 files, 885 ms over 10,000 and **30.1 s** over 100,000,
+    /// roughly 34× for each 10× of files.
+    ///
+    /// Holding the walk turns a paged listing back into one walk. It also makes
+    /// the listing *more* truthful, which was the surprise: re-walking between
+    /// pages meant a tree that changed mid-listing could hand back a page
+    /// sequence no single walk ever saw, silently skipping or repeating keys.
+    /// A snapshot cannot.
+    ///
+    /// Only continuations read it — a listing that starts (`cursor: None`)
+    /// always walks afresh — so this is never a stale answer to a new question.
+    /// Two interleaved listings of different prefixes simply evict each other
+    /// and fall back to walking, which is what every page did before.
+    listing: Arc<Mutex<Option<WalkSnapshot>>>,
+}
+
+/// The sorted, prefix-filtered keys of one paged listing.
+#[derive(Debug)]
+struct WalkSnapshot {
+    /// What the caller asked for, so a continuation of a *different* listing
+    /// cannot be served this one's keys.
+    prefix: String,
+    /// Objects or staging debris — the two listings walk the same tree with
+    /// opposite predicates and must not be confused for one another.
+    want: Want,
+    /// Every matching key, sorted, as the first page found them.
+    keys: Vec<String>,
 }
 
 impl LocalFs {
@@ -68,7 +102,52 @@ impl LocalFs {
             links: LinkPolicy::default(),
             opened_as,
             meter: meter::unmetered(),
+            listing: Arc::new(Mutex::new(None)),
         }
+    }
+
+    /// The keys this page should slice, walking only when a listing begins.
+    ///
+    /// # Errors
+    /// Whatever the tree walk reported.
+    pub(crate) async fn listing_keys(
+        &self,
+        prefix: &str,
+        cursor: Option<&str>,
+        want: Want,
+        links: LinkPolicy,
+    ) -> Result<(Vec<String>, Option<crate::local::tree::Walked>)> {
+        // A poisoned lock is not a reason to fail a listing: the snapshot is an
+        // optimisation, and walking again is exactly what this code did before
+        // it existed. Falling through is the honest answer, and it is also the
+        // correct one.
+        if cursor.is_some() {
+            if let Ok(held) = self.listing.lock() {
+                if let Some(snapshot) = held.as_ref() {
+                    if snapshot.prefix == prefix && snapshot.want == want {
+                        return Ok((snapshot.keys.clone(), None));
+                    }
+                }
+            }
+        }
+
+        let walked = tree::collect(self.root(), links, want).await?;
+        let mut keys: Vec<String> = walked
+            .keys
+            .iter()
+            .filter(|key| key.starts_with(prefix))
+            .cloned()
+            .collect();
+        keys.sort();
+
+        if let Ok(mut held) = self.listing.lock() {
+            *held = Some(WalkSnapshot {
+                prefix: prefix.to_string(),
+                want,
+                keys: keys.clone(),
+            });
+        }
+        Ok((keys, Some(walked)))
     }
 
     /// The same backend, declaring every window it moves to `meter`.

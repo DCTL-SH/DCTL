@@ -57,19 +57,21 @@ pub(super) async fn exists(fs: &LocalFs, key: &ObjectKey) -> Result<bool> {
 }
 
 pub(super) async fn list_page(fs: &LocalFs, prefix: &str, cursor: Option<String>) -> Result<Page> {
-    let walked = super::tree::collect(fs.root(), fs.links(), Want::Objects).await?;
-    let (items, next_cursor) = paginate(fs, walked.keys, prefix, cursor.as_deref()).await?;
+    let (keys, walked) = fs
+        .listing_keys(prefix, cursor.as_deref(), Want::Objects, fs.links())
+        .await?;
+    let (items, next_cursor) = paginate(fs, keys, cursor.as_deref()).await?;
 
-    // The report describes the *walk*, and this backend re-walks the whole tree
-    // for every page (`HANDOVER.md` §9.3 item 10). Attaching it to each page
-    // would therefore multiply one tree's links by the number of pages and tell
-    // the operator a number that is simply wrong. It rides on the first page —
-    // the one request every listing makes — and the continuations carry an empty
-    // report, which merges into the total without changing it.
-    let (links, specials) = if cursor.is_none() {
-        (walked.links, walked.specials)
-    } else {
-        (LinkReport::default(), SpecialReport::default())
+    // The report describes the *walk*, and one listing is now one walk — held
+    // across its pages rather than repeated for each (`HANDOVER.md` §9.3 item
+    // 10, which is what this closes). Attaching it to every page would multiply
+    // one tree's links by the number of pages and tell the operator a number
+    // that is simply wrong, so it rides on the first page — the one request
+    // every listing makes — and continuations carry an empty report, which
+    // merges into the total without changing it.
+    let (links, specials) = match walked {
+        Some(walked) if cursor.is_none() => (walked.links, walked.specials),
+        _ => (LinkReport::default(), SpecialReport::default()),
     };
 
     Ok(Page {
@@ -100,9 +102,15 @@ pub(super) async fn list_staging_page(
     prefix: &str,
     cursor: Option<String>,
 ) -> Result<StagingListing> {
-    let walked =
-        super::tree::collect(fs.root(), crate::links::LinkPolicy::Skip, Want::Staging).await?;
-    let (items, next_cursor) = paginate(fs, walked.keys, prefix, cursor.as_deref()).await?;
+    let (keys, _walked) = fs
+        .listing_keys(
+            prefix,
+            cursor.as_deref(),
+            Want::Staging,
+            crate::links::LinkPolicy::Skip,
+        )
+        .await?;
+    let (items, next_cursor) = paginate(fs, keys, cursor.as_deref()).await?;
     Ok(StagingListing::Page(StagingPage { items, next_cursor }))
 }
 
@@ -119,12 +127,11 @@ pub(super) async fn list_staging_page(
 /// somebody else already reclaimed. Neither is this call's failure to report.
 async fn paginate(
     fs: &LocalFs,
-    mut keys: Vec<String>,
-    prefix: &str,
+    keys: Vec<String>,
     cursor: Option<&str>,
 ) -> Result<(Vec<ObjectMeta>, Option<String>)> {
-    keys.retain(|k| k.starts_with(prefix));
-    keys.sort();
+    // Already filtered to the prefix and sorted, once, by
+    // `LocalFs::listing_keys` — doing it here meant doing it per page.
 
     // Items strictly after the cursor (the last key returned previously).
     let start = match cursor {
