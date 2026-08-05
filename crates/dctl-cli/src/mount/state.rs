@@ -372,20 +372,45 @@ impl MountState {
 
     /// The whole-mount totals a `statfs` reports.
     ///
-    /// Read from the mount root's listing, which is where the aggregation the
-    /// mount already performs lands ([`super::tree`]). That listing is the
-    /// expensive one — it walks the whole index — so this deliberately goes
-    /// through the same TTL cache as `readdir`, and a `df` right after an `ls`
-    /// costs nothing.
+    /// Asked of the source, which for a vault keeps them as files arrive and
+    /// leave — one row read, at any vault size. This used to be read out of the
+    /// mount root's *listing*, which meant `df` walked the entire index, and
+    /// meant a listing had to visit everything beneath it to be able to answer.
+    /// That second consequence is the one that mattered: it made a tree walk
+    /// quadratic.
+    ///
+    /// Two things fall back to walking, and both are honest about why. A source
+    /// that maintains no totals — a plain object store — has no cheaper answer
+    /// than counting, and pays for it on `df` alone rather than on every
+    /// `readdir`. And a **subtree** mount asks about a prefix, while the vault's
+    /// maintained totals describe the whole vault; reporting the whole where the
+    /// part was asked for would overstate `df` on every subtree mount, so the
+    /// maintained figure is used only when this mount is the whole of it.
     ///
     /// # Errors
-    /// Whatever listing the root reported.
+    /// Whatever the source reported.
     pub async fn statfs(&self) -> Result<Totals> {
-        let listing = self.listing(&self.config.root).await?;
-        Ok(Totals {
-            bytes: listing.subtree_bytes,
-            objects: listing.subtree_objects,
-        })
+        if self.config.root.is_empty() {
+            if let Some(totals) = self.source.totals().await? {
+                return Ok(Totals {
+                    bytes: totals.bytes,
+                    objects: totals.objects,
+                });
+            }
+        }
+
+        // Known zero, not unknown: an empty tree genuinely holds zero bytes. It
+        // becomes unknown the moment an unmeasured object is counted into it.
+        let mut cursor = self.source.enumerate(&self.config.root).await?;
+        let mut bytes = Some(0u64);
+        let mut objects = 0u64;
+        while let Some(entry) = cursor.next().await? {
+            objects = objects.saturating_add(1);
+            bytes = bytes
+                .zip(entry.size)
+                .map(|(total, size)| total.saturating_add(size));
+        }
+        Ok(Totals { bytes, objects })
     }
 
     /// Drop everything cached. Called from `destroy`, when the session ends.

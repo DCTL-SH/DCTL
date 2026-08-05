@@ -16,4 +16,4 @@ pub mod record;
 
 pub use error::{IndexError, Result};
 pub use index::Index;
-pub use record::Record;
+pub use record::{Record, Totals};

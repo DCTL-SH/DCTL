@@ -187,6 +187,33 @@ pub trait Entries: Send {
 ///
 /// Held behind a `Box<dyn Source>` by every caller, which is what makes the
 /// vault/plain decision invisible above [`open`].
+/// The immediate contents of one directory: what a `readdir` owes.
+///
+/// Two lists rather than one tagged sequence, because the two are answered from
+/// different places — the files from the records, the directories from the rows
+/// that count what is under them — and joining them into one order is the
+/// caller's job, done once, over a directory's width.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Children {
+    /// Objects sitting directly in the directory.
+    pub files: Vec<Entry>,
+    /// Full logical paths of the directories sitting directly in it.
+    pub dirs: Vec<String>,
+}
+
+/// What a whole source holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Totals {
+    /// Objects, at every depth.
+    pub objects: u64,
+    /// Plaintext bytes, or [`None`] when some object has never been measured.
+    ///
+    /// Absorbing rather than partial: a total that quietly omits the files
+    /// nobody has read is the same misreport a zero would be, only harder to
+    /// notice from the outside.
+    pub bytes: Option<u64>,
+}
+
 #[async_trait]
 pub trait Source: Send + Sync {
     /// Open a cursor over every object whose logical path lies under `prefix`.
@@ -226,6 +253,42 @@ pub trait Source: Send + Sync {
     /// listing reported.
     async fn enumerate_destination(&self, prefix: &str) -> Result<Box<dyn Entries>> {
         self.enumerate(prefix).await
+    }
+
+    /// The immediate contents of one directory, when the source can answer that
+    /// without walking the subtree under it.
+    ///
+    /// [`None`] — the default — means it cannot, and the caller falls back to
+    /// [`enumerate`](Source::enumerate) and groups the stream itself. That is
+    /// the honest answer for a plain object store, which has no directories and
+    /// no cheaper question than "every key under this prefix".
+    ///
+    /// The sealed source overrides it, and the reason is the whole point of this
+    /// method. Its index keys paths by a *keyed hash*, so rows arrive in an order
+    /// unrelated to their paths and a prefix could neither be sought nor stopped
+    /// at: answering "what is in this directory" meant decrypting every row in
+    /// the index. Measured on a 100,000-file vault that was 413 ms per `readdir`
+    /// — and since a walk does one per directory, a full traversal was quadratic,
+    /// taking 417 seconds where 10,000 files took 4. A directory now costs its
+    /// own width.
+    ///
+    /// # Errors
+    /// Whatever the index or provider reported.
+    async fn children(&self, _dir: &str) -> Result<Option<Children>> {
+        Ok(None)
+    }
+
+    /// What the whole source holds, when it is maintained rather than counted.
+    ///
+    /// [`None`] — the default — means the only way to know is to walk, which is
+    /// what the caller then does. The sealed source keeps running totals, so a
+    /// `statfs` over a mounted vault costs one row read instead of the
+    /// whole-index scan it used to inherit from listing the mount root.
+    ///
+    /// # Errors
+    /// Whatever the index reported.
+    async fn totals(&self) -> Result<Option<Totals>> {
+        Ok(None)
     }
 
     /// Whether the object behind `path` is actually there — in the *store*,

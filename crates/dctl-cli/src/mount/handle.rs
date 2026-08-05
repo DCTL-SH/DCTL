@@ -281,8 +281,6 @@ mod tests {
                     modified_unix: None,
                 })
                 .collect(),
-            subtree_bytes: Some(0),
-            subtree_objects: names.len() as u64,
         })
     }
 
