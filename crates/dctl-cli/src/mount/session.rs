@@ -184,6 +184,18 @@ pub struct Mounted {
     /// why an errno cannot do it. [`None`] if the mountpoint could not be read at
     /// the time, which weakens the check rather than failing the mount.
     bare_device: Option<u64>,
+    /// The device the filesystem itself reports, once attached.
+    ///
+    /// What [`attachments`](Self::attachments) looks for in the kernel's mount
+    /// table: the same filesystem can be attached at more than one path, and
+    /// the device is what identifies it across all of them.
+    mount_device: Option<u64>,
+    /// Whether the kernel still lists any attachment of `mount_device`.
+    ///
+    /// A field rather than a direct call so the composite predicate can be
+    /// exercised without a bind mount — the arrangement that produced the
+    /// defect is a two-path data volume, which a test cannot conjure.
+    attachments: Box<dyn Fn(Option<u64>) -> bool + Send>,
     /// Whether the mount has already been detached, so `Drop` does not try again
     /// and log a spurious failure.
     detached: bool,
@@ -262,6 +274,14 @@ pub fn mount(
             unmounter: detacher,
             mountpoint: mountpoint.to_path_buf(),
             bare_device,
+            // Read after the attach, so it is the filesystem's own device.
+            // Only meaningful when it differs from the bare one; identical
+            // numbers mean the mount could not be observed and the mount-table
+            // check has nothing to look for.
+            mount_device: super::detached::device_of(mountpoint)
+                .ok()
+                .filter(|device| Some(*device) != bare_device),
+            attachments: Box::new(super::detached::any_attachment),
             detached: false,
         },
         Err(error) => {
@@ -485,7 +505,7 @@ impl Mounted {
             // it is free, which is `PLAN.md` §6's misreport pointing the other
             // way. So the mountpoint is looked at before the warning is written,
             // by the same predicate that decides the word "unmounted".
-            if super::detached::is_detached(&self.mountpoint, self.bare_device) {
+            if self.mountpoint_free() {
                 self.detached = true;
                 tracing::debug!(
                     mountpoint = %self.mountpoint.display(),
@@ -539,7 +559,7 @@ impl Mounted {
     async fn confirm_detached(&mut self) -> bool {
         let deadline = Instant::now().checked_add(MOUNT_DETACH_GRACE);
         loop {
-            if super::detached::is_detached(&self.mountpoint, self.bare_device) {
+            if self.mountpoint_free() {
                 return true;
             }
             // `checked_add` returning `None` means the clock cannot represent the
@@ -572,7 +592,7 @@ impl Mounted {
         let _ = self.detach();
         let deadline = Instant::now().checked_add(MOUNT_DETACH_GRACE);
         loop {
-            if super::detached::is_detached(&self.mountpoint, self.bare_device) {
+            if self.mountpoint_free() {
                 return true;
             }
             if deadline.is_none_or(|deadline| Instant::now() >= deadline) {
@@ -581,6 +601,20 @@ impl Mounted {
             std::thread::sleep(MOUNT_SHUTDOWN_POLL);
             let _ = self.unmounter.unmount();
         }
+    }
+
+    /// Whether the mountpoint is free of this filesystem — at the recorded
+    /// path AND everywhere else the kernel still lists it.
+    ///
+    /// Both halves are needed, and the second was the defect. The path check
+    /// alone answered "free" the moment one alias was unmounted, on a host
+    /// where a bind mount makes the same directory visible twice; `detach`
+    /// then latched, `run` printed "unmounted", and a live attachment stayed
+    /// behind at the other path — the stale mount this module exists to
+    /// prevent, arriving by the one route a single `stat` cannot see.
+    fn mountpoint_free(&self) -> bool {
+        super::detached::is_detached(&self.mountpoint, self.bare_device)
+            && !(self.attachments)(self.mount_device)
     }
 
     /// The refusal for a mountpoint this process could not free.
@@ -1276,8 +1310,44 @@ mod tests {
             unmounter: Box::new(NoDetach),
             mountpoint: mountpoint.to_path_buf(),
             bare_device: bare,
+            mount_device: None,
+            // Nothing attached anywhere, which is the truth for a `Mounted`
+            // that never mounted; the alias case sets its own probe.
+            attachments: Box::new(|_| false),
             detached: false,
         }
+    }
+
+    #[tokio::test]
+    async fn a_mountpoint_free_at_its_own_path_is_still_attached_at_an_alias() {
+        // The two-path data volume: a bind mount under shared propagation
+        // makes one directory visible twice, attaching a filesystem attaches
+        // it at both, and `umount` of one leaves the other. The recorded path
+        // then answers "free" — so `detach` latched, `run` printed
+        // "unmounted", and a live attachment stayed behind. The mount table
+        // is the only place that fact exists, and the composite predicate is
+        // what reads it.
+        let dir = tempfile::tempdir().expect("a temporary mountpoint");
+        let real = super::super::detached::device_of(dir.path()).expect("a device");
+
+        let mut aliased = unattached(dir.path(), Some(real));
+        aliased.mount_device = Some(real + 1);
+        aliased.attachments = Box::new(|device| device == Some(u64::MAX) || device.is_some());
+
+        assert!(
+            !aliased.mountpoint_free(),
+            "an attachment the kernel still lists is not a free mountpoint, \
+             however free the recorded path looks"
+        );
+        assert!(
+            !aliased.confirm_detached().await,
+            "and the wait must not report success over one"
+        );
+
+        // The control: the same mountpoint with nothing left in the table.
+        let mut clear = unattached(dir.path(), Some(real));
+        clear.mount_device = Some(real + 1);
+        assert!(clear.mountpoint_free(), "no attachment, no stale mount");
     }
 
     #[tokio::test]
