@@ -253,9 +253,8 @@ impl Index {
         let mut carried = Carried::default();
         {
             let mut read = tx.prepare("SELECT key, value FROM records;")?;
-            let mut write = tx.prepare(
-                "INSERT INTO records_migrating(key, parent, value) VALUES(?1, ?2, ?3);",
-            )?;
+            let mut write = tx
+                .prepare("INSERT INTO records_migrating(key, parent, value) VALUES(?1, ?2, ?3);")?;
             let mut rows = read.query([])?;
             while let Some(row) = rows.next()? {
                 let key: Vec<u8> = row.get(0)?;
@@ -292,9 +291,8 @@ impl Index {
     pub fn put(&self, record: &Record) -> Result<()> {
         let key = index_key(&self.keying_key, &record.path);
         let parent = index_key(&self.keying_key, parent_of(&record.path));
-        let plaintext = Zeroizing::new(
-            postcard::to_allocvec(record).map_err(|_| IndexError::Serialize)?,
-        );
+        let plaintext =
+            Zeroizing::new(postcard::to_allocvec(record).map_err(|_| IndexError::Serialize)?);
         let blob =
             aead::encrypt(&self.enc_key, &plaintext, &key).map_err(|_| IndexError::Crypto)?;
 
@@ -578,11 +576,7 @@ impl Index {
     }
 
     /// Read the sealed totals row, or a zeroed one when it has never been written.
-    fn read_totals(
-        conn: &Connection,
-        keying_key: &[u8; 32],
-        enc_key: &[u8; 32],
-    ) -> Result<Totals> {
+    fn read_totals(conn: &Connection, keying_key: &[u8; 32], enc_key: &[u8; 32]) -> Result<Totals> {
         let key = index_key(keying_key, TOTALS_DOMAIN);
         let value: Option<Vec<u8>> = conn
             .query_row(

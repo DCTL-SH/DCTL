@@ -3526,7 +3526,10 @@ fn concurrent_transfers_move_every_file_exactly_once() {
     // accounting: every file present, exactly once, with the counters agreeing.
     let sandbox = Sandbox::new();
     for i in 0..40 {
-        sandbox.write(&format!("src/d{}/f{i}.bin", i % 4), format!("body-{i}").as_bytes());
+        sandbox.write(
+            &format!("src/d{}/f{i}.bin", i % 4),
+            format!("body-{i}").as_bytes(),
+        );
     }
 
     let done = sandbox

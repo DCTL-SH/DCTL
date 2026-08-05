@@ -728,9 +728,14 @@ async fn a_paged_listing_is_one_walk_and_therefore_one_snapshot() {
     // Enough to page: `PAGE_SIZE` is 1000.
     for i in 0..1_500 {
         let key = ObjectKey::new(format!("o/{i:05}.bin"));
-        fs.put(&key, Bytes::from_static(b"x"), &blake3(b"x"), SourceModified::unknown())
-            .await
-            .unwrap();
+        fs.put(
+            &key,
+            Bytes::from_static(b"x"),
+            &blake3(b"x"),
+            SourceModified::unknown(),
+        )
+        .await
+        .unwrap();
     }
 
     let first = fs.list_page("o/", None).await.unwrap();
@@ -740,9 +745,14 @@ async fn a_paged_listing_is_one_walk_and_therefore_one_snapshot() {
     // The tree changes underneath the listing, in both directions.
     for i in 1_500..1_600 {
         let key = ObjectKey::new(format!("o/{i:05}.bin"));
-        fs.put(&key, Bytes::from_static(b"x"), &blake3(b"x"), SourceModified::unknown())
-            .await
-            .unwrap();
+        fs.put(
+            &key,
+            Bytes::from_static(b"x"),
+            &blake3(b"x"),
+            SourceModified::unknown(),
+        )
+        .await
+        .unwrap();
     }
     fs.delete(&ObjectKey::new("o/01400.bin")).await.unwrap();
 
@@ -797,16 +807,18 @@ async fn a_fresh_listing_sees_what_the_last_one_missed() {
     let fs = LocalFs::new(dir.path());
     for i in 0..1_100 {
         let key = ObjectKey::new(format!("o/{i:05}.bin"));
-        fs.put(&key, Bytes::from_static(b"x"), &blake3(b"x"), SourceModified::unknown())
-            .await
-            .unwrap();
+        fs.put(
+            &key,
+            Bytes::from_static(b"x"),
+            &blake3(b"x"),
+            SourceModified::unknown(),
+        )
+        .await
+        .unwrap();
     }
 
     let first = fs.list_page("o/", None).await.unwrap();
-    let _ = fs
-        .list_page("o/", first.next_cursor.clone())
-        .await
-        .unwrap();
+    let _ = fs.list_page("o/", first.next_cursor.clone()).await.unwrap();
 
     fs.put(
         &ObjectKey::new("o/99999.bin"),
@@ -823,10 +835,15 @@ async fn a_fresh_listing_sees_what_the_last_one_missed() {
         .await
         .unwrap();
     let total = restarted.items.len() + later.items.len();
-    assert_eq!(total, 1_101,
+    assert_eq!(
+        total,
+        1_101,
         "a new listing must see the new object; page1={} cursor={:?} page2={} last2={:?}",
-        restarted.items.len(), restarted.next_cursor, later.items.len(),
-        later.items.last().map(|i| i.key.as_str().to_string()));
+        restarted.items.len(),
+        restarted.next_cursor,
+        later.items.len(),
+        later.items.last().map(|i| i.key.as_str().to_string())
+    );
 }
 
 #[tokio::test]
@@ -837,13 +854,32 @@ async fn a_high_sorting_key_is_listed_like_any_other() {
     let fs = LocalFs::new(dir.path());
     for i in 0..1_100 {
         let key = ObjectKey::new(format!("o/{i:05}.bin"));
-        fs.put(&key, Bytes::from_static(b"x"), &blake3(b"x"), SourceModified::unknown()).await.unwrap();
+        fs.put(
+            &key,
+            Bytes::from_static(b"x"),
+            &blake3(b"x"),
+            SourceModified::unknown(),
+        )
+        .await
+        .unwrap();
     }
-    fs.put(&ObjectKey::new("o/99999.bin"), Bytes::from_static(b"x"), &blake3(b"x"), SourceModified::unknown()).await.unwrap();
+    fs.put(
+        &ObjectKey::new("o/99999.bin"),
+        Bytes::from_static(b"x"),
+        &blake3(b"x"),
+        SourceModified::unknown(),
+    )
+    .await
+    .unwrap();
 
     let p1 = fs.list_page("o/", None).await.unwrap();
     let p2 = fs.list_page("o/", p1.next_cursor.clone()).await.unwrap();
-    assert_eq!(p1.items.len() + p2.items.len(), 1_101,
+    assert_eq!(
+        p1.items.len() + p2.items.len(),
+        1_101,
         "walk must see every key; p1={} p2={} last={:?}",
-        p1.items.len(), p2.items.len(), p2.items.last().map(|i| i.key.as_str().to_string()));
+        p1.items.len(),
+        p2.items.len(),
+        p2.items.last().map(|i| i.key.as_str().to_string())
+    );
 }

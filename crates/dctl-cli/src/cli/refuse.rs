@@ -229,8 +229,9 @@ mod tests {
         // zero would transfer nothing at all, and past the ceiling asks for more
         // lanes than a client or a provider usefully holds.
         for lanes in ["0", "65"] {
-            let error = refuse_if_present(&globals(&["--transfers", lanes]), "dctl copy", "Nothing.")
-                .unwrap_err();
+            let error =
+                refuse_if_present(&globals(&["--transfers", lanes]), "dctl copy", "Nothing.")
+                    .unwrap_err();
             assert!(
                 error.message().contains("--transfers"),
                 "--transfers {lanes}: {}",

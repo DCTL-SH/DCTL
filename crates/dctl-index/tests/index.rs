@@ -298,7 +298,10 @@ fn a_sibling_sharing_a_name_prefix_is_a_different_directory() {
     idx.put(&sample("photos-backup/b.jpg", 2)).unwrap();
 
     assert_eq!(children_of(&idx, "photos"), vec!["photos/a.jpg"]);
-    assert_eq!(children_of(&idx, "photos-backup"), vec!["photos-backup/b.jpg"]);
+    assert_eq!(
+        children_of(&idx, "photos-backup"),
+        vec!["photos-backup/b.jpg"]
+    );
 }
 
 #[test]
