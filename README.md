@@ -31,7 +31,24 @@
 > [`docs/RESTORE_DRILL.md`](docs/RESTORE_DRILL.md) is the drill.
 
 
-**An rclone-style, streaming-first, post-quantum-ready encrypted multi-cloud transfer, backup, and streaming tool — written in Rust, built so that nothing is ever reported stored until it is provably, durably stored.**
+**Encrypted multi-cloud backup and transfer that never reports a file stored until it provably is.**
+
+DCTL copies, syncs and streams data between local disks and cloud object
+storage — S3, Backblaze B2, Cloudflare R2, SFTP — encrypting every byte on your
+own machine before it leaves it. Each write is read back and checked at the
+destination before it counts, so a run that reports success has demonstrated it,
+and a run that could not finish says so with an exit code rather than leaving a
+silent gap.
+
+Its command surface is **inspired by rclone** — `copy`, `sync`, `check`, `ls`,
+`mount`, and filter and addressing rules that behave the way you would expect if
+you have used it. What differs is underneath: a self-describing encrypted object
+format, a tamper-evident audit chain over what was done, and post-quantum key
+wrapping for data that has to stay confidential for decades.
+
+Written in Rust, built for large media — multi-gigabyte video, disk images —
+and around a single hard promise: *a run that says a file is stored is telling
+the truth.*
 
 > The name **DCTL** is a working title, centralized in one crate (`dctl-meta`) so
 > it can be changed later. On-disk **format identifiers are deliberately
@@ -43,12 +60,12 @@
 
 ## What DCTL is
 
-DCTL moves and stores data across cloud providers the way `rclone` does — `copy`,
-`sync`, `cat`, `mount`, familiar filter and addressing rules — but every byte it
-writes to a provider is **encrypted client-side** in a frozen, self-describing
-format, and every write is **verified at the destination before it is reported as
-done**. It is designed around large media (huge videos, disk images) and around a
-single hard promise: *a run that says a file is stored is telling the truth.*
+The verbs and the addressing will be familiar to anyone who has used `rclone`,
+which is deliberate — there is no reason to make people relearn `copy`, `sync`,
+`cat`, `mount` and a filter syntax that already works. The difference is what
+happens to the bytes: every one written to a provider is **encrypted
+client-side** in a frozen, self-describing format, and every write is
+**verified at the destination before it is reported as done**.
 
 **Who it is for.** People who want provider-independent, end-to-end-encrypted
 backup and transfer with a durability contract they can audit — homelab and
