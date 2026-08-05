@@ -190,14 +190,14 @@ mod tests {
     fn the_override_wins_over_the_users_home() {
         // One variable moves everything, so a profile cannot end up half in one
         // place and half in another.
-        let home = resolve_home(Some(p("/srv/profile")), Some(p("/Users/mx")));
+        let home = resolve_home(Some(p("/srv/profile")), Some(p("/Users/example")));
         assert_eq!(home, p("/srv/profile"));
     }
 
     #[test]
     fn without_an_override_it_is_a_dotted_directory_in_the_users_home() {
-        let home = resolve_home(None, Some(p("/Users/mx")));
-        assert_eq!(home, p("/Users/mx").join(format!(".{BINARY_NAME}")));
+        let home = resolve_home(None, Some(p("/Users/example")));
+        assert_eq!(home, p("/Users/example").join(format!(".{BINARY_NAME}")));
     }
 
     #[test]
@@ -211,8 +211,8 @@ mod tests {
         // `DCTL_HOME=` and `HOME=` are both "unset" for this purpose; treating
         // an empty string as a root would put the tree at the filesystem root.
         assert_eq!(
-            resolve_home(Some(p("")), Some(p("/Users/mx"))),
-            p("/Users/mx").join(format!(".{BINARY_NAME}"))
+            resolve_home(Some(p("")), Some(p("/Users/example"))),
+            p("/Users/example").join(format!(".{BINARY_NAME}"))
         );
         assert_eq!(
             resolve_home(Some(p("")), Some(p(""))),

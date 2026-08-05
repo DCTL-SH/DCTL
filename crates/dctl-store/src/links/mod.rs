@@ -9,8 +9,8 @@
 //! neither *file* nor *directory* — so the entry fell past both arms and was
 //! dropped. `copy` then reported `Files: 0 / 0, Errors: 0` and exited 0, `sync`
 //! read the same emptiness as permission to delete the destination, and the
-//! operator found out on restore day. It is the only defect on `HANDOVER.md`'s
-//! lists that destroyed data without saying anything.
+//! operator found out on restore day. It is the only defect this project has
+//! found that destroyed data without saying anything.
 //!
 //! The loss was not the skipping. It was the **silence**. Everything in this
 //! module exists so that a walk which passes over a link says so, with a count
@@ -21,9 +21,7 @@
 //! [`LinkPolicy::Skip`] is the default and following is opt-in, which is also
 //! where rclone settled: its local backend ignores symlinks unless `-L`
 //! (`--copy-links`) is given, and logs `Can't follow symlink without
-//! -L/--copy-links` for each one it passes over
-//! (`backend/local/local.go:1294`, and the option at `:102`). Three reasons
-//! decide it here.
+//! -L/--copy-links` for each one it passes over. Three reasons decide it here.
 //!
 //! *Following changes what a backup contains, invisibly.* A single link named
 //! `etc -> /etc` inside the tree pulls a machine's whole configuration into an
@@ -60,12 +58,12 @@
 //! # What is deliberately not here
 //!
 //! Storing the link *itself* — rclone's `-l/--links`, which writes the target
-//! path into a `.rclonelink` file (`backend/local/local.go:110`) — is not
-//! implemented. A vault keyed by logical path has no record type for "this path
-//! is a link to that one", so a followed link restores as an ordinary **copy**
-//! of what it pointed at, and a skipped one restores as nothing at all. That is
-//! stated in the restore documentation and pinned by a drill rather than left
-//! for someone to discover.
+//! path into a `.rclonelink` file — is not implemented. A vault keyed by
+//! logical path has no record type for "this path is a link to that one", so a
+//! followed link restores as an ordinary **copy** of what it pointed at, and a
+//! skipped one restores as nothing at all. That is stated in the restore
+//! documentation and pinned by a drill rather than left for someone to
+//! discover.
 
 mod cycle;
 mod report;

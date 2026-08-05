@@ -9,11 +9,11 @@
 //!
 //! ## What drifted
 //!
-//! `docs/HANDOVER.md` §16.3. `dctl config create store sftp base=/srv/vault`
-//! meant `/srv/vault`; `dctl init --base sftp:host/srv/vault` meant
-//! `$HOME/srv/vault`, because the shorthand's `HOST/BASE` separator consumed the
-//! leading slash and the remainder was read as login-relative. Same host, same
-//! visible path, two directories — and `dctl init` printed
+//! `dctl config create store sftp base=/srv/vault` meant `/srv/vault`;
+//! `dctl init --base sftp:host/srv/vault` meant `$HOME/srv/vault`, because the
+//! shorthand's `HOST/BASE` separator consumed the leading slash and the
+//! remainder was read as login-relative. Same host, same visible path, two
+//! directories — and `dctl init` printed
 //! `OK created vault 'v' on 'sftp:host/srv/vault'` while writing the envelope
 //! somewhere else. An operator who configured a remote one way and re-created it
 //! the other way after a rebuild pointed their backups at a directory nobody had
@@ -28,10 +28,11 @@
 //! Keeping the split separator made every bare `sftp:HOST/dir` **absolute**,
 //! which is not what anyone types it expecting: `scp host:dir`, rclone's sftp
 //! backend and an operator's own ssh habits all read that as the login
-//! directory. Measured cost of the mismatch — `sftp:lsx-002/dctl-bench-store`
-//! put 1.6 GiB of a benchmark's ciphertext at the server's filesystem **root**,
-//! on the OS disk, while the operator was reading the number of free terabytes
-//! on the data volume they thought they had named.
+//! directory. Measured cost of the mismatch —
+//! `sftp:archive.example.com/dctl-bench-store` put 1.6 GiB of a benchmark's
+//! ciphertext at the server's filesystem **root**, on the OS disk, while the
+//! operator was reading the number of free terabytes on the data volume they
+//! thought they had named.
 //!
 //! So the rule is rclone's now: one slash is the login directory, two is the
 //! root (`sftp:HOST//srv/vault`), and `~` may still be spelled explicitly. The
@@ -118,7 +119,7 @@ pub fn from_spec(spec: &str, path: &str) -> Result<(String, String)> {
             CliError::new(ExitCode::Usage, format!("'{spec}' names no ssh host")).with_hint(
                 format!(
                     "Write it as '{PROVIDER_SFTP}{REMOTE_SEPARATOR}HOST/BASE-DIR' — for \
-             example '{PROVIDER_SFTP}{REMOTE_SEPARATOR}lsx-001/srv/dctl-store'. \
+             example '{PROVIDER_SFTP}{REMOTE_SEPARATOR}backup.example.com/srv/dctl-store'. \
              HOST is an ~/.ssh/config alias or user@host, and all of its \
              connection details come from your ssh config."
                 ),
@@ -253,10 +254,10 @@ mod tests {
         for written in ["/srv/vault", "/srv//vault/", "~/dctl-store", "~", "/data"] {
             let through_setting = from_setting(written)
                 .unwrap_or_else(|e| panic!("base={written} was refused: {}", e.message()));
-            let spec = spec_for("lsx-001", written);
+            let spec = spec_for("backup.example.com", written);
             let (host, through_spec) =
                 via_spec(&spec).unwrap_or_else(|e| panic!("{spec}: {}", e.message()));
-            assert_eq!(host, "lsx-001", "{spec}");
+            assert_eq!(host, "backup.example.com", "{spec}");
             assert_eq!(
                 through_spec, through_setting,
                 "'{written}' means two things depending on which command wrote it"
@@ -308,14 +309,14 @@ mod tests {
         // A host with no base is the more likely typo, and the one that used to
         // be worth catching: it is a whole vault addressed at a directory nobody
         // named.
-        let error = via_spec("sftp:lsx-001").unwrap_err();
+        let error = via_spec("sftp:backup.example.com").unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
         assert!(
             error.message().contains("base directory"),
             "{}",
             error.message()
         );
-        let error = via_spec("sftp:lsx-001/").unwrap_err();
+        let error = via_spec("sftp:backup.example.com/").unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
     }
 

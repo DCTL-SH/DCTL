@@ -3,11 +3,10 @@
 //! # The distinction this module exists to keep
 //!
 //! `--timeout` is an **inactivity** deadline, not a deadline on the operation.
-//! rclone is explicit about it in the flag's own help — `"IO idle timeout"`,
-//! `fs/config.go:122` — and implements it by re-arming a socket deadline after
-//! every successful read and write that moved a byte
-//! (`fs/fshttp/dialer.go:101-127`). Getting that backwards is not a small error:
-//! a 4 GiB restore over a domestic uplink takes hours, and a five-minute
+//! rclone is explicit about it in the flag's own help — an IO idle timeout —
+//! and implements it by re-arming a socket deadline after every successful read
+//! and write that moved a byte. Getting that backwards is not a small error: a
+//! 4 GiB restore over a domestic uplink takes hours, and a five-minute
 //! *operation* deadline would destroy it at minute five, every time, while
 //! reporting a network fault that did not happen.
 //!
@@ -69,7 +68,7 @@ use super::run::RunDeadline;
 /// of the same thing. One is *transient by definition* — a link that went quiet
 /// may not be quiet on another connection — and the other is *terminal by
 /// definition*: no number of attempts gives back a window that has closed.
-/// Retrying the second is the §32.9 defect written down.
+/// Retrying the second is the measured defect written down.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Expired {
     /// `--timeout`: nothing moved for as long as the operator was willing to
@@ -495,7 +494,7 @@ mod tests {
 
     // ── the run's own deadline ───────────────────────────────────────────
     //
-    // §32.9: `--timeout 30` fired at exactly 30 s and the run carried on for
+    // `--timeout 30` fired at exactly 30 s and the run carried on for
     // 943.6 s. Every test below is about the second half of that sentence.
 
     /// A run window short enough to fire inside a test, and — deliberately —
@@ -538,8 +537,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_request_in_flight_is_abandoned_when_the_runs_window_closes() {
-        // The §32.9 shape at the layer that owns the request: connected, silent,
-        // and — before this — waited on until something else gave up.
+        // The defect's shape at the layer that owns the request: connected,
+        // silent, and — before this — waited on until something else gave up.
         let watch = IdleWatch::new(Some(IDLE), bounded_run());
         let started = std::time::Instant::now();
         let out = guarded(&watch, async { std::future::pending::<()>().await }).await;

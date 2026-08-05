@@ -16,9 +16,8 @@
 //! ## Why these tests assert on *requests* rather than on resident memory
 //!
 //! Because peak RSS is a property of a process and these are library tests. The
-//! honest proof is the measurement above, repeated after the fix and recorded in
-//! `HANDOVER.md`; what a test can do is pin the mechanism that produced it, and
-//! do so deterministically.
+//! honest proof is the measurement above, repeated after the fix; what a test
+//! can do is pin the mechanism that produced it, and do so deterministically.
 //!
 //! The mechanism is exactly this: a constant-memory path asks the backend for
 //! **windows**, and a buffering one asks for the **whole object**. So the

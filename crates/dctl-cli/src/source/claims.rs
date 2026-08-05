@@ -18,8 +18,8 @@
 //! Because two arguments is the shape that has already gone wrong here twice.
 //! `engine::verify` took a source and a prefix separately and the call site
 //! passed the prefix of the *spec* instead of the prefix of the *resolver*, so
-//! `dctl verify b2:DCTL001/photos` enumerated nothing and reported a clean tree
-//! (`HANDOVER.md` §35.3). The fix was to make the caller stop choosing.
+//! `dctl verify b2:DCTL001/photos` enumerated nothing and reported a clean tree.
+//! The fix was to make the caller stop choosing.
 //!
 //! The same hazard is here and is worse, because both values are plain `Copy`
 //! enums that type-check anywhere: a report could name the assurance of the

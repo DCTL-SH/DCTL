@@ -352,37 +352,37 @@ pub struct GlobalArgs {
     // ── the history, which is not the operator's business ────────────────
     //
     // Everything above is help text: clap renders this doc comment into
-    // `dctl --help`, and `HANDOVER.md` §32.9 is a finding about what it used to
-    // say there. It ended with *"the whole-run bound is the product — which is
-    // stated here because an operator sizing a backup window needs the product
-    // and not the factor"* and then stated no product: no number, and no
-    // mention that the schedule runs once per distinct request. A claim to have
-    // said something, in the place an operator reads, which is the same class
-    // of false report as a transfer that did not happen.
+    // `dctl --help`, and what it used to say there was itself a finding. It
+    // ended with *"the whole-run bound is the product — which is stated here
+    // because an operator sizing a backup window needs the product and not the
+    // factor"* and then stated no product: no number, and no mention that the
+    // schedule runs once per distinct request. A claim to have said something,
+    // in the place an operator reads, which is the same class of false report
+    // as a transfer that did not happen.
     //
     // The measurement behind the correction, against live B2 with the route
     // black-holed and `--retries 1`: the first failure at **30 s**, to the
     // second, and the run **not ended 943.6 s after the cut**. On `sftp:`, not
     // ended after 601 s.
     //
-    // §33 then wrote *"the product is not stated because it is not a number
-    // either flag knows"*, and that sentence was true — which is what made it a
-    // finding rather than a limitation. The product was
+    // The answer that followed was *"the product is not stated because it is
+    // not a number either flag knows"*, and that sentence was true — which is
+    // what made it a finding rather than a limitation. The product was
     // `--timeout × attempts × DISTINCT REQUESTS × --retries`, and the third
     // factor is unbounded: a copy makes as many requests as it makes, and each
     // one ran a whole schedule against a link that had already proved silent.
-    // §36.5 measured the consequence — the same command against the same fault
-    // returned the shell at **46.3 s**, **136.6 s** and **288.7 s**, depending
-    // on which request the cut landed on. `dctl_store::deadline::stall` counts
-    // the *run's* unanswered attempts instead of each request's, which removes
-    // that factor; what is left is two numbers an operator can see, and the
-    // sentence above states them.
+    // The consequence was then measured — the same command against the same
+    // fault returned the shell at **46.3 s**, **136.6 s** and **288.7 s**,
+    // depending on which request the cut landed on. `dctl_store::deadline::stall`
+    // counts the *run's* unanswered attempts instead of each request's, which
+    // removes that factor; what is left is two numbers an operator can see, and
+    // the sentence above states them.
     //
-    // The semantics are deliberately unchanged. rclone's `--timeout` is
-    // `Help: "IO idle timeout"` with a five-minute default (`fs/config.go:122`)
-    // and DCTL matches it. An inactivity deadline made to behave like a
-    // stopwatch would destroy exactly the transfers it exists to protect, which
-    // would be a worse defect than the one being fixed.
+    // The semantics are deliberately unchanged. rclone's `--timeout` is an IO
+    // idle timeout with a five-minute default, and DCTL matches it. An
+    // inactivity deadline made to behave like a stopwatch would destroy exactly
+    // the transfers it exists to protect, which would be a worse defect than
+    // the one being fixed.
     #[arg(
         long,
         global = true,
@@ -412,15 +412,16 @@ pub struct GlobalArgs {
     /// --timeout states.
     // On `sftp:` it is applied twice over: handed to `ssh` as
     // `-o ConnectTimeout`, so the whole `ProxyCommand` chain is bounded from
-    // the inside — which is where rclone puts the same number
-    // (`backend/sftp/sftp.go:946`) — and applied again around the dial, because
-    // `ConnectTimeout` covers the TCP connect and stops watching after it.
+    // the inside — which is where rclone puts the same number — and applied
+    // again around the dial, because `ConnectTimeout` covers the TCP connect
+    // and stops watching after it.
     //
-    // The second one closes a measured hole. §32.9's `sftp:` arm dropped port 22
-    // six seconds into a copy: the deadline fired at exactly 30 s, the dead
-    // session was discarded correctly, a replacement was dialled — and the
-    // replacement hung, with the run still alive when the harness killed it at
-    // 601 s. Everything above the dial was working.
+    // The second one closes a measured hole. The `sftp:` arm of the same
+    // black-holed-route measurement dropped port 22 six seconds into a copy:
+    // the deadline fired at exactly 30 s, the dead session was discarded
+    // correctly, a replacement was dialled — and the replacement hung, with the
+    // run still alive when the harness killed it at 601 s. Everything above the
+    // dial was working.
     #[arg(
         long,
         global = true,
@@ -459,11 +460,13 @@ pub struct GlobalArgs {
     // "do not start what will not fit" has no meaning here; and a flag that only
     // stopped *between* files would not stop a run whose last object is a
     // terabyte. rclone's default for the same flag is `--cutoff-mode hard`,
-    // implemented by giving the transfer context a deadline
-    // (`fs/sync/sync.go:203-205`), and this is the same act in the Rust idiom.
+    // implemented by giving the transfer context a deadline, and this is the
+    // same act in the Rust idiom.
     //
-    // `HANDOVER.md` §11.3 item 2 is the entry it closes and §32.9 is the
-    // measurement that opened it.
+    // This closes a measured defect: with only per-attempt deadlines nothing
+    // bounded the invocation as a whole, and the black-holed-route run recorded
+    // above was still alive 943.6 s after the cut. That measurement is what
+    // opened it.
     #[arg(
         long,
         global = true,
@@ -906,10 +909,9 @@ mod tests {
 
     #[test]
     fn the_run_has_no_deadline_unless_one_is_asked_for() {
-        // The default rclone ships for the same flag (`fs/config.go:361`,
-        // `max_duration`, `Default: time.Duration(0)`). A window invented here
-        // would end somebody's first ten-terabyte sync at whatever number this
-        // file happened to pick.
+        // rclone's default for the same flag is zero: no window at all. A
+        // window invented here would end somebody's first ten-terabyte sync at
+        // whatever number this file happened to pick.
         assert_eq!(parse(&[]).max_duration, None);
         assert_eq!(
             parse(&["--max-duration", "off"]).max_duration,
@@ -939,7 +941,7 @@ mod tests {
 
     #[test]
     fn the_help_no_longer_claims_a_bound_it_does_not_deliver() {
-        // §32.9's finding about `--help` itself. It said the whole-run bound
+        // A finding about `--help` itself. It said the whole-run bound
         // "is the product — which is stated here because an operator sizing a
         // backup window needs the product and not the factor", and then stated
         // no product: no number, and no mention that the schedule runs once per
@@ -959,8 +961,8 @@ mod tests {
             "the sentence that promised a product and gave none is back:\n{help}"
         );
         // …and neither is the sentence that replaced it, which said the product
-        // was not a number this flag knows. That was true, and §36.5 measured
-        // what it cost: 46.3 s, 136.6 s and 288.7 s on three runs of one command
+        // was not a number this flag knows. That was true, and measurement put
+        // a cost on it: 46.3 s, 136.6 s and 288.7 s on three runs of one command
         // against one fault, because the unstated factor was how many requests
         // the copy had left to make. The factor is gone and the product is a
         // number now, so the disclaimer must not survive it.
@@ -979,7 +981,7 @@ mod tests {
 
     #[test]
     fn the_help_states_the_product_and_states_the_number_the_build_delivers() {
-        // The other half of §36.5's finding, and the half a rewording cannot
+        // The other half of the `--help` finding, and the half a rewording cannot
         // satisfy on its own: what `--help` prints has to be the arithmetic the
         // binary performs. `dctl_store` owns the attempt count, so it is read
         // from there rather than typed here — a limit changed in the store with
@@ -1053,7 +1055,7 @@ mod tests {
     /// `dctl --help` as a user sees it, with every run of whitespace collapsed
     /// to one space.
     ///
-    /// Long help, because that is what `--help` renders and what §32.9 quoted:
+    /// Long help, because that is what `--help` renders and what was read from it:
     /// clap puts the first line of a doc comment in `-h` and the whole of it in
     /// `--help`, so every paragraph written above a flag is user-facing text.
     ///

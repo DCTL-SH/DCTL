@@ -18,8 +18,8 @@
 //! remote called `r`, which `dctl config create` will happily make and every
 //! other command addresses — were refused on Linux with "'r:' is a local path,
 //! not a vault". The command an operator reaches for when everything else is
-//! gone told them their vault was a directory. `HANDOVER.md` §18.1 recorded the
-//! drift as closed across five command families; this one and the byte-stream
+//! gone told them their vault was a directory. The drift had already been
+//! recorded as closed across five command families; this one and the byte-stream
 //! family ([`crate::commands::pipeline::spec`]) were not among them.
 
 use std::fmt;
@@ -298,8 +298,8 @@ mod tests {
         //
         // One binary, one remote, two readings — and the family that disagreed
         // is the one an operator reaches for when everything else is gone.
-        // `HANDOVER.md` §18.1 recorded this drift as closed; it was closed in
-        // five command families and not in this one.
+        // This drift was recorded as closed; it was closed in five command
+        // families and not in this one.
         //
         // Asserted through `classify` rather than `parse` so both platforms are
         // exercised from either kind of machine. A test that only called `parse`

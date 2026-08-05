@@ -1,14 +1,15 @@
 //! The vault's chunk size: what it costs, and how an operator sets it.
 //!
-//! It was §11.3 item 8's remaining half. `chunk_size` is declared on five
-//! provider definitions in the configuration, is documented in
+//! It was the remaining half of a half-wired setting. `chunk_size` is declared
+//! on five provider definitions in the configuration, is documented in
 //! `dctl config providers`, and until this module was **read by nothing on a
 //! `vault` remote**: an operator could write `chunk_size = 262144`, see it in
 //! `dctl config show`, and have every object sealed at the compiled-in default
-//! anyway. That is the §13 defect — a setting that parses, is documented, and
-//! reaches nothing — on the configuration surface rather than the flag surface.
+//! anyway. That is the recurring defect — a setting that parses, is documented,
+//! and reaches nothing — on the configuration surface rather than the flag
+//! surface.
 //!
-//! The B2 half was closed in §25 because on B2 the part size *is* an upload's
+//! The B2 half was closed earlier because on B2 the part size *is* an upload's
 //! peak memory. This half is closed for the same kind of reason: since the
 //! streaming write, the sealer's own buffers are a term in the peak
 //! ([`put_stream`](super::put_stream)) rather than a detail of a temporary file
@@ -32,7 +33,7 @@
 //!
 //! ## Why it is clamped and not refused
 //!
-//! The same argument B2's part size settled on (§25.3): the failure a refusal
+//! The same argument B2's part size settled on: the failure a refusal
 //! prevents is a configuration file that will not load, and the failure clamping
 //! prevents is an object sealed at a size the format cannot hold — which is
 //! discovered when somebody tries to read it. A value outside the envelope is
@@ -66,8 +67,8 @@ pub const MIN_CHUNK_SIZE: u32 = 4 * 1024;
 /// Pure, and separate from [`Vault::with_chunk_size`] so the envelope is
 /// assertable without a vault, a backend or a password — which matters, because
 /// the middle of a setting's journey is where this project has lost one before
-/// (§21.7: a meter installed in one arm of `registry::build` and silently dropped
-/// in four).
+/// (a meter installed in one arm of `registry::build` and silently dropped in
+/// four).
 #[must_use]
 pub fn clamp_chunk_size(requested: Option<u64>) -> u32 {
     let Some(requested) = requested else {

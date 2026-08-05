@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn a_missing_subcommand_is_a_usage_error() {
         // `dctl config` alone has no sensible default: rclone's is an
-        // interactive menu, and PLAN.md §14 rules those out.
+        // interactive menu, and PLAN.md §14 rules that out.
         let error = Cli::try_parse_from(["dctl", "config"]).unwrap_err();
         assert!(error.use_stderr());
     }

@@ -1,9 +1,9 @@
 //! Why a walk that follows links still finishes.
 //!
 //! A link pointing at one of its own ancestors is the oldest way to make a
-//! backup tool run until the disk fills. `HANDOVER.md` §11.3 item 1 names loop
-//! protection as the reason the symlink fix had not been attempted, so it is not
-//! an afterthought here: nothing in this crate follows a link without it.
+//! backup tool run until the disk fills. Loop protection is precisely why the
+//! symlink fix had gone unattempted for so long, so it is not an afterthought
+//! here: nothing in this crate follows a link without it.
 //!
 //! # Why the ancestors and not everywhere the walk has been
 //!
@@ -28,10 +28,9 @@
 //! link is refused only when its target is already somewhere on that chain. Two
 //! links to one tree copy it twice — a cost the operator sees in the report and
 //! in the byte count, not a loss they discover on restore day. rclone reaches the
-//! same outcome by a cheaper route, letting the kernel's `ELOOP` stop the descent
-//! (`backend/local/local.go:739`, `isCircularSymlinkError`); that stops at the
-//! forty-link limit rather than at the first repetition, and says nothing about
-//! which link did it.
+//! same outcome by a cheaper route, letting the kernel's `ELOOP` stop the
+//! descent; that stops at the forty-link limit rather than at the first
+//! repetition, and says nothing about which link did it.
 //!
 //! # What identifies a directory
 //!
@@ -130,7 +129,7 @@ impl Ancestors {
     /// Exposed because a backend whose identities are canonical paths builds the
     /// next one from the last: an ordinary subdirectory's path is its parent's
     /// plus its own name, which saves a `realpath` round trip per directory on a
-    /// walk that already costs too many (`HANDOVER.md` §9.3 item 10).
+    /// walk that already makes too many of them.
     #[must_use]
     pub const fn id(&self) -> &DirId {
         &self.id

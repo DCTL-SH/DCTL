@@ -12,7 +12,8 @@
 //!
 //! **Passed over is a warning**, always shown short of `--quiet`. Those are
 //! files the operator asked for and did not get, and finding that out from a
-//! restore is far too late — the exact failure `HANDOVER.md` §11.2 recorded.
+//! restore is far too late — a `/srv` whose data was a symlink copied one
+//! `readme.txt`, reported `Errors: 0`, and exited 0.
 //!
 //! **Followed is a note**, shown at `-v`. The operator asked for it and got it;
 //! a `WARNING` on requested behaviour is how people learn to skim past
@@ -20,10 +21,9 @@
 //!
 //! **Broken is a warning and an error.** A link a run was told to follow, that
 //! leads nowhere, is a path that was named and not stored, so it raises the
-//! run's error count and its exit code. rclone treats it identically —
-//! `fs.Errorf` plus `accounting.Stats(ctx).Error(...)` at
-//! `backend/local/local.go:741`, which fails the sync — and the alternative is
-//! a `copy` that reports success over files it could not read.
+//! run's error count and its exit code. rclone treats it identically — it logs
+//! the failure and counts it against the run, which fails the sync — and the
+//! alternative is a `copy` that reports success over files it could not read.
 //!
 //! Every name is a note, never a warning: a tree with forty thousand links must
 //! not produce forty thousand lines on a terminal that has already been told

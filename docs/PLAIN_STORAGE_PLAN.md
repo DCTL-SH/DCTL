@@ -29,8 +29,8 @@ pub trait Backend: Send + Sync {
     // ... existing 8 methods unchanged; doc-comment updated to the hash-domain
     //     contract above (hash is over the logical object get() returns) ...
 
-    /// Cheap static advertisement — the Rust port of rclone `fs.Features` bool
-    /// flags, for *planning* before any network op. Must agree with which `as_*`
+    /// Cheap static advertisement — the Rust port of rclone's per-backend
+    /// feature flags, for *planning* before any network op. Must agree with which `as_*`
     /// accessors return `Some` (asserted per-backend by a unit test).
     fn caps(&self) -> Caps { Caps::empty() }   // opt-in; nothing implied by default (D8)
 
@@ -81,8 +81,8 @@ bitflags! {
 }
 impl Caps {
     pub const OBJECT_STORE_MINIMUM: Caps = Caps::BUCKET_BASED;
-    /// rclone `Features.Mask`: a capability is usable across a transfer only if
-    /// BOTH endpoints advertise it.
+    /// rclone's feature-masking rule: a capability is usable across a transfer
+    /// only if BOTH endpoints advertise it.
     #[must_use] pub fn mask(self, other: Caps) -> Caps { self.intersection(other) }
 }
 
@@ -159,7 +159,7 @@ async fn move_one(src: &Endpoint, dst: &Endpoint, from: &ObjectKey, to: &ObjectK
 }
 ```
 
-Object-safety justification (validated by the review, D8): every accessor is `fn(&self) -> Option<&dyn Trait>` — no generics, no `Self` by value — so `Backend` stays object-safe and `Arc<dyn Backend>` (the runtime-chosen type) survives; each capability trait is itself object-safe (`#[async_trait]` desugars to `Pin<Box<dyn Future>>`). Rejected: `Any`+`downcast` (recouples ops to concrete backends), `Caps` alone (a flag hands you no vtable), generic `fn copy<B: ServerCopy>` (no monomorphization behind `dyn`). `caps()` = rclone's `Features` bool flags; `as_*()` = its func-pointers; `Caps::mask` = `Features.Mask`.
+Object-safety justification (validated by the review, D8): every accessor is `fn(&self) -> Option<&dyn Trait>` — no generics, no `Self` by value — so `Backend` stays object-safe and `Arc<dyn Backend>` (the runtime-chosen type) survives; each capability trait is itself object-safe (`#[async_trait]` desugars to `Pin<Box<dyn Future>>`). Rejected: `Any`+`downcast` (recouples ops to concrete backends), `Caps` alone (a flag hands you no vtable), generic `fn copy<B: ServerCopy>` (no monomorphization behind `dyn`). `caps()` = rclone's per-backend feature flags; `as_*()` = its optional-operation hooks; `Caps::mask` = its rule that a capability survives a transfer only if both endpoints advertise it.
 
 ### A.5 Metadata enrichment (deferred, additive)
 
@@ -319,7 +319,7 @@ Common shape: each backend is a directory mirroring `b2/` — `mod.rs` (thin `im
 
 - **Crates:** none new for transport — reuse `reqwest 0.12`+`quick-xml 0.37` through the mandatory `crate::tls::post_quantum_client()`. Add `httpdate`, `percent-encoding`, `http-auth` (Digest only). Rejected `reqwest_dav` (owns its client → breaks the PQ-TLS mandate + verified-write hook).
 - **Verb map:** `head`/`exists`→`PROPFIND Depth:0`; `list_page`→`PROPFIND Depth:1` with a **BFS frontier cursor** (`postcard`-encoded `VecDeque<pending_dir>` as the opaque `next_cursor`) for constant-memory resumable recursive listing; `get`/`get_range`→`GET`(+`Range:`); `put`→`MKCOL` parents then `PUT`; `delete`→`DELETE`; `ServerCopy`→`COPY`; `ServerMove`→`MOVE` (absolute Destination, `Overwrite: T`).
-- **Modules:** `client.rs` (reqwest wrapper: auth, headers, error mapping like `b2::parse_json`), `vendor.rs` (`setQuirks` port — Nextcloud/Owncloud/InfiniteScale/Sharepoint/Fastmail/Generic), `propfind.rs`+`api.rs` (207 Multistatus via the `s3/xml.rs` event-loop style, reusing `local_name`). Sharepoint cookie/NTLM out of scope v1 → `StoreError::Unsupported`.
+- **Modules:** `client.rs` (reqwest wrapper: auth, headers, error mapping like `b2::parse_json`), `vendor.rs` (per-vendor quirk selection, ported from rclone — Nextcloud/Owncloud/InfiniteScale/Sharepoint/Fastmail/Generic), `propfind.rs`+`api.rs` (207 Multistatus via the `s3/xml.rs` event-loop style, reusing `local_name`). Sharepoint cookie/NTLM out of scope v1 → `StoreError::Unsupported`.
 - **Verified write:** Owncloud/Nextcloud → send `OC-Checksum: SHA1:<hex>` (2xx ⇒ verified); generic → `PROPFIND Depth:0` read-back of `getcontentlength` (+ `oc:checksums`/`ME:sha1hex` when present) vs `expected`; best-effort `DELETE` of partials on failure.
 - **Capabilities:** `ServerCopy`, `ServerMove`, `DirOps`, `SetModTime` (X-OC-Mtime/PROPPATCH), `StreamRead`, `StreamWrite` (per vendor), `RemoteHasher` (Owncloud/Nextcloud SHA1/MD5 only).
 
@@ -330,7 +330,7 @@ Common shape: each backend is a directory mirroring `b2/` — `mod.rs` (thin `im
 
 ### C.5 Shared connection pool — `crates/dctl-store/src/pool/mod.rs`
 
-Port of rclone's `getSftpConnection`/`putSftpConnection`/`drainPool`, generic over `Poolable`:
+Port of rclone's SFTP connection pool — check out, return, drain the idle ones — generic over `Poolable`:
 
 ```rust
 #[async_trait] pub(crate) trait Poolable: Send + Sync + Sized + 'static {
@@ -350,7 +350,7 @@ RAII `Checkout` returns the conn on drop; a transport error (`StoreError::Backen
 
 ## D. operations / sync layer — `dctl-ops` (runtime-agnostic)
 
-Ports rclone `fs/operations`, `fs/sync`, `fs/march`. Generic over an `Endpoint` (a rooted `Arc<dyn Backend>`), driven from the tokio edge. **No `tokio::spawn`; no tokio dep.**
+Ports rclone's operations, sync and lockstep-merge layers. Generic over an `Endpoint` (a rooted `Arc<dyn Backend>`), driven from the tokio edge. **No `tokio::spawn`; no tokio dep.**
 
 ```rust
 // dctl-ops::endpoint
@@ -395,7 +395,7 @@ pub trait CpuOffload: Send + Sync {
 pub trait Accounting: Send + Sync { fn transferred(&self, bytes: u64); fn checked(&self); fn error(&self, e: &OpError); }
 ```
 
-### D.2 `copy` — server-side vs stream-through vs whole-buffer (port of `operations/copy.go`)
+### D.2 `copy` — server-side vs stream-through vs whole-buffer (port of rclone's copy operation)
 
 ```
 plan_copy(dst, src_obj):
@@ -409,15 +409,15 @@ plan_copy(dst, src_obj):
 
 `transfer.rs` runs the chosen strategy inside a `LOW_LEVEL_RETRIES` loop, then **verifies**: size must match, and if `common_hash(src,dst) != None` the (logical-domain, A.1) hashes must match — else the just-written object is `delete`d and the copy errors (PLAN §6). `StreamThrough` = `src.as_stream_read().open(all)` piped into `dst.as_stream_write().put_streaming(...)`; when either side lacks the stream capability, fall back to whole-buffer under a size guard. **Endpoints that advertise `INDEX_BACKED` (VaultBackend) are excluded from `StreamThrough` while no streaming sealer exists** — they always take `WholeBuffer` under the whole-file guard (D14; see §F, §G-M7).
 
-### D.3 `equal` / `need_transfer` — the delta predicate (port of `operations.go`)
+### D.3 `equal` / `need_transfer` — the delta predicate (port of rclone's transfer-decision predicates)
 
 `need_transfer`: dst absent ⇒ transfer; `--ignore-existing` ⇒ skip; `--ignore-times` ⇒ transfer; `--update` ⇒ modtime compare in the modify-window; else `!equal`. `equal` ladder: size differs ⇒ differ (unless `--ignore-size`); `--size-only` ⇒ equal; `--checksum` ⇒ compare the single `common_hash` (warn+size-only if none); default = modtime+size within `modify_window = max(src.precision, dst.precision)`; either precision `NotSupported` (FTP) ⇒ size-only. `common_hash(a,b)` = overlap of the two backends' hash sets (from `RemoteHasher::supported()`/`ObjectMeta.hash`), BLAKE3-first. **Because both endpoints expose logical-domain hashes (A.1), `common_hash` is always a same-domain comparison — plain↔plain, plain↔Vault, and Vault↔Vault alike (resolves D3).**
 
-### D.4 `march` — lockstep merge (port of `fs/march`)
+### D.4 `march` — lockstep merge (port of rclone's lockstep directory merge)
 
 `walk.rs` turns `Backend::list_page` pagination into an ordered stream of logical paths (object stores already return lexicographic keys → free ordering; dir-native backends' recursive walk is sorted per level then merged). `march.rs` merges src and dst streams by sorted key into `SrcOnly | DstOnly | Match(src,dst)`. `--no-traverse` skips the dst walk. NFC + case-fold applied when either side is case-insensitive.
 
-### D.5 `sync` — delta + delete + track-renames (port of `fs/sync`)
+### D.5 `sync` — delta + delete + track-renames (port of rclone's sync)
 
 `sync/mod.rs` wires three back-pressured stages via `buffer_unordered`: **checkers** (`need_transfer`) → **transferrers** (`copy`) → **renamers**. `SrcOnly` ⇒ copy; `Match` ⇒ copy-if-needed; `DstOnly` ⇒ delete-candidate. `sync/delete.rs`: `DeleteMode {Off, Before, During, After}` (copy/move use `Off`; sync deletes extras). `sync/rename.rs` **track-renames**: enabled only when `dst.caps().contains(SERVER_MOVE)` and delete-mode≠Off (forces `After`); builds a fingerprint map (`size|modtime|hash`, `SlowHash`-aware) over delete-candidates; a src-only file matching a dst-only fingerprint becomes a server-side `move_object`. `sync/dirs.rs`: empty-dir create/delete via `DirOps` gated on `REAL_DIRS`.
 
@@ -431,7 +431,7 @@ plan_copy(dst, src_obj):
 
 ## E. mount + serve
 
-### E.1 VFS — `dctl-vfs` (runtime-agnostic policy), maps rclone `vfs/`
+### E.1 VFS — `dctl-vfs` (runtime-agnostic policy), mirrors rclone's VFS layer
 
 - **`FsView`** is served by any `Arc<dyn Backend>` through **`PlainFs`** (`backend_fs.rs`): `readdir` collapses `list_page` pagination + synthesizes dir `Attr`s from prefixes; `open_read` → `BackendRangeReader` over `get_range` (byte-exact); `rename`→`as_server_move` or copy+delete; write → cache-staged.
 - **Node tree / dir cache** (`node.rs`/`dir.rs`/`file.rs`): `Dir`/`File` with a TTL'd `DirCache`; an `InodeTable` (`AtomicU64` + bidirectional `VPath↔u64`) because FUSE/NFS address by inode.
@@ -579,7 +579,7 @@ Additive `dctl-store` modules; each is a `Target` variant + `build`/`resolve` ar
 - **Touch:** new crates `crates/dctl-vfs/`, `crates/dctl-mount/`; `commands/mount/engine.rs` replaces the terminal `Err`; capture the tokio `Handle` at mount and `block_on` in callbacks (D17); reconcile the `off`+writable default via startup warning + `EROFS` refusal on non-`WRITABLE_RANGE` backends (D11).
 - **Crates:** `fuser 0.18` (Linux/macOS); Windows `winfsp`/`dokan` behind a feature + legal gate.
 - **Commands lit:** `mount` of a plain remote (read; write in `--vfs-cache-mode writes`).
-- **Tests:** port rclone's `vfstest` conformance cases; real mount → read/seek (assert ranged `get_range` calls) → write-flush → unmount drains or exits non-zero; cache-mode `off` + write on S3 → `EROFS` + logged refusal.
+- **Tests:** port rclone's VFS conformance cases; real mount → read/seek (assert ranged `get_range` calls) → write-flush → unmount drains or exits non-zero; cache-mode `off` + write on S3 → `EROFS` + logged refusal.
 
 ### M9 — Ranged Vault crypto: efficient/huge Vault mount + full-read integrity (resolves D5, D12)
 `VaultBackend` already exists (M4); this milestone makes its `get_range` chunk-ranged instead of whole-fetch-slice, and restores whole-file integrity on complete reads.

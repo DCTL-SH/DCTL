@@ -1,6 +1,6 @@
 # DCTL — Feature & Completion Status
 
-> **Verified 2026-07-27** against commit `534218b` (`main`, pushed) **plus the current
+> **Verified 2026-07-27** against the then-current `main` (fully pushed) **plus the current
 > working tree**, which builds clean (`cargo build --workspace` → 0 warnings; all test
 > binaries compile). This document is descriptive of what the code *actually does today*,
 > not aspirational. For design rationale see [PLAN.md](../PLAN.md); for the byte format see
@@ -98,8 +98,8 @@ encryption, and **20-year restorability** (data decodable from the format spec a
 
 Library-level streaming (`dctl-store/src/streaming.rs`) already moves multi-TiB objects at
 O(part-size) memory for the cloud backends — **one** part size, on B2 measured rather than
-argued (`B2Backend::upload_peak_bytes()`, HANDOVER §25), and settable per remote with
-`chunk_size`.
+argued (`B2Backend::upload_peak_bytes()` returns the peak that was actually observed on a
+live bucket, not an assumed one), and settable per remote with `chunk_size`.
 
 ---
 
@@ -140,9 +140,9 @@ separate gap (§7).
 | local → Vault (seal) / Vault → local (open) | 🟢 | verified write + index commit |
 | local ↔ plain remote | 🟢 | `PlainUpload` / `PlainDownload` directions |
 | **remote ↔ remote (general)** | ⬜ | refused loudly at connect; only ciphertext `replicate` works today |
-| Streaming transfers > 1 GiB | 🟢 | constant-memory both directions under a 512 MiB cgroup cap: peak RSS flat at 139–144 MiB from 256 MiB to 4 GiB on `local:` and `sftp:` (HANDOVER §21), and flat at 147 MiB from 99 MiB to 4 GiB on live B2 (HANDOVER §25, where it was 213–218 MiB before B2 stopped holding two parts per upload) |
+| Streaming transfers > 1 GiB | 🟢 | constant-memory both directions under a 512 MiB cgroup cap: peak RSS flat at 139–144 MiB from 256 MiB to 4 GiB on `local:` and `sftp:`, and flat at 147 MiB from 99 MiB to 4 GiB on live B2, where it was 213–218 MiB before B2 stopped holding two parts per upload |
 | Server-side copy / move | ⬜ | needs a backend capability model |
-| Parallel transfers / bandwidth limit / retries | 🟡 | `--bwlimit` paces per window inside a file (HANDOVER §21.8); parallelism and request-level retries outside B2 are still open |
+| Parallel transfers / bandwidth limit / retries | 🟡 | `--bwlimit` paces per window inside a file; parallelism and request-level retries outside B2 are still open |
 
 ---
 
@@ -211,9 +211,14 @@ network backends and mount/serve, depends on it.
 
 ---
 
-## Repository state (2026-07-27)
+## Repository state at the 2026-07-27 development snapshot
 
-- `main` = `534218b`, pushed to origin; nothing unpushed.
+The entries below describe the private working tree this document was written
+against on that date. They are not claims about the published repository, where
+none of them holds; they are kept because the milestone notes above refer to
+the in-flight work they describe.
+
+- `main` was fully pushed to origin; nothing unpushed.
 - ~168 uncommitted working-tree entries (the 🟢 CLI work above) — builds/tests clean; pending a clean commit.
 - Two accidental scratch dirs at the repo root (`a:site-a/`, `a:site-b/`) awaiting cleanup — not source.
-- Wiki published at `…/XSIS/DCTL/wiki` (mirrors `docs/`).
+- An internal wiki mirrored the contents of `docs/`.

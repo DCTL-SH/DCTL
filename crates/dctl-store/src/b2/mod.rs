@@ -105,9 +105,8 @@ impl B2Backend {
     ///
     /// It exists for the reason `mock_s3` exists: B2 is the one cloud provider
     /// this repository has credentials for, its part-buffering behaviour is a
-    /// memory contract stated in `HANDOVER.md`, and a contract that can only be
-    /// checked by spending money on a live bucket is a contract that stops being
-    /// checked.
+    /// stated memory contract, and a contract that can only be checked by
+    /// spending money on a live bucket is a contract that stops being checked.
     ///
     /// It is **also** a `b2` remote's `endpoint` setting arriving. That setting
     /// was declared on `B2Def`, accepted by `dctl config create`, printed by
@@ -123,9 +122,9 @@ impl B2Backend {
     /// The endpoint this backend authorizes against.
     ///
     /// The far end of the `endpoint` setting's journey, and public for the
-    /// reason `SftpBackend::chunk_size` is: §21.7's lesson is that the *middle*
-    /// of a setting's path is where this project loses one, so both ends are
-    /// pinned and the resolver's end alone is not enough.
+    /// reason `SftpBackend::chunk_size` is: the *middle* of a setting's path is
+    /// where this project loses one, so both ends are pinned and the resolver's
+    /// end alone is not enough.
     #[must_use]
     pub fn authorize_url(&self) -> &str {
         &self.authorize_url
@@ -184,8 +183,7 @@ impl B2Backend {
     ///
     /// It does **not** include the process's own baseline — an unlocked vault's
     /// Argon2id working set dominates that — and it is not the whole of a
-    /// `dctl copy`, which also stages the sealed object on disk. `HANDOVER.md` §25
-    /// carries the measured totals.
+    /// `dctl copy`, which also stages the sealed object on disk.
     #[must_use]
     pub const fn upload_peak_bytes(&self) -> u64 {
         self.part_size
@@ -449,7 +447,7 @@ fn transport_attempt(e: reqwest::Error) -> Attempt {
 /// and they mean opposite things: one is a link that went quiet, which another
 /// connection may fix, and one is the operator's deadline, which nothing fixes.
 /// Sending the second down the transient path is what turns an exact 30 s
-/// deadline into a run still going 943.6 s later (§32.9).
+/// deadline into a run still going 943.6 s later.
 fn stalled_attempt(expired: Expired) -> Attempt {
     let error = expired.into_store_error(B2_BACKEND_NAME);
     if expired.is_run_deadline() {

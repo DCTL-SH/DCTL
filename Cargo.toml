@@ -16,8 +16,12 @@ exclude = ["crates/dctl-crypto/fuzz"]
 [workspace.package]
 edition = "2024"
 rust-version = "1.85"
-license = "Proprietary"
-repository = "local"
+license = "PolyForm-Noncommercial-1.0.0 OR PolyForm-Free-Trial-1.0.0 OR LicenseRef-DCTL-Commercial"
+license-file = "LICENSE.md"
+homepage = "https://www.dctl.sh"
+repository = "https://github.com/DCTL-SH/DCTL"
+documentation = "https://github.com/DCTL-SH/DCTL#readme"
+authors = ["Michael Farahat"]
 
 # Single source of truth for shared dependency versions across the workspace.
 [workspace.dependencies]

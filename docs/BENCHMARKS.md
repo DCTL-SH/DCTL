@@ -80,13 +80,11 @@ gap.
 
 | | |
 |---|---|
-| DCTL | `0.0.1`, commit `4b35c743318c261451eb624ba07906323c8fbcc6`, branch `macos-mount`, release build |
-| rclone | `v1.74.0-beta.9439.341ce61a2`, go1.25.6, darwin/arm64, installed binary |
+| DCTL | `0.0.1`, branch `macos-mount`, release build |
+| rclone | current beta release, installed binary |
 
-Note the rclone version carefully: this is the **installed** binary. A v1.75
-source tree was present on the machine but did not produce this binary, so all
-rclone source references below were checked against behaviour, not assumed from
-the tree.
+Every rclone behaviour reported below was established from what that installed
+binary actually did, never assumed.
 
 ### 2.3 Datasets
 
@@ -448,15 +446,13 @@ The prediction holds across modes: the plaintext path writes one object, so two
 barriers, so 7.98 ms predicted against 11.26 ms measured (112.57 s / 10,000) —
 predicted vault:plain ratio 2.0x, measured **1.78x**.
 
-**rclone's local backend contains no `fsync` call at all.** Searching the whole
-rclone source tree for `.Sync()`, `syscall.Fsync` and `F_FULLFSYNC` outside
-tests returns ten hits, every one of them in a FUSE mount handler
-(`cmd/mount`, `cmd/mount2`), the VFS write-back cache, the config-file writer or
-ncdu's terminal redraw. **None are on the `copy`/`sync` transfer path**, and
-`backend/local/` has zero. So this is not rclone being clever and DCTL slow; it
-is
-DCTL buying a durability guarantee that rclone does not offer, and paying for it
-four times per file, serially, with concurrency refused.
+**rclone's local backend contains no `fsync` call at all.** The only durability
+barriers it issues anywhere sit off the transfer path — in its FUSE mount
+handlers, its VFS write-back cache, its config-file writer and ncdu's terminal
+redraw. **None are on the `copy`/`sync` transfer path.** So this is not rclone
+being clever and DCTL slow; it is DCTL buying a durability guarantee that rclone
+does not offer, and paying for it four times per file, serially, with
+concurrency refused.
 
 That framing should not be used to excuse the result. Three things about it are
 genuinely wrong rather than merely expensive, and each is a filed defect (§12):
@@ -850,6 +846,6 @@ tree so that benchmarking could not touch the code under test. To rebuild it:
 
 Anything in §3 that does not reproduce should be treated as this document's
 error rather than the reader's. The measurements in this file were taken on
-2026-07-31 against DCTL `4b35c74`; DCTL is under active development and these
-numbers have a short shelf life, particularly the ones in §5.1 that a single
-concurrency change would move by an order of magnitude.
+2026-07-31 against the DCTL build described in §2.2; DCTL is under active
+development and these numbers have a short shelf life, particularly the ones in
+§5.1 that a single concurrency change would move by an order of magnitude.

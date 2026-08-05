@@ -2,8 +2,7 @@
 //!
 //! ## The defect this exists to close
 //!
-//! `base` used to mean two different things depending on which command wrote it
-//! (`docs/HANDOVER.md` §16.3):
+//! `base` used to mean two different things depending on which command wrote it:
 //!
 //! ```text
 //! $ dctl config create store sftp host=h base=/srv/vault   → /srv/vault
@@ -20,9 +19,9 @@
 //!
 //! ## The rule
 //!
-//! One rule, and it is rclone's (`docs/content/sftp.md`: *"If the path does not
-//! begin with a `/` it is relative to the home directory of the user"*), made
-//! explicit so it cannot be read two ways:
+//! One rule, and it is rclone's — *if the path does not begin with a `/` it is
+//! relative to the home directory of the user* — made explicit so it cannot be
+//! read two ways:
 //!
 //! * `/srv/vault` — **absolute** on the server.
 //! * `~/vault`, or `~` alone — **relative to the SSH login directory**.

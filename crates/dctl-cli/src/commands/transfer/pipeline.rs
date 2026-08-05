@@ -311,9 +311,9 @@ async fn walk<D: StageDriver>(ctx: &Ctx, driver: &D, entry: &PlanEntry) -> Resul
     // ten-file copy to a plain remote emitted zero INFO records — at any
     // verbosity, including `trace`, since every level shows the records of the
     // ones below it and there were none to show. `-v` was useless for the one
-    // thing an operator reaches for it (`HANDOVER.md` §11.2). A promise in
-    // `--help` that the binary does not keep is the same class of statement as a
-    // transfer reported that did not happen, one layer out.
+    // thing an operator reaches for it. A promise in `--help` that the binary
+    // does not keep is the same class of statement as a transfer reported that
+    // did not happen, one layer out.
     //
     // A failed file gets one too, carrying `stored = false`. That is more than
     // the promise, not less: a log of successes cannot answer "what did not make
@@ -552,9 +552,10 @@ pub fn record_failure(ctx: &Ctx, path: &str, error: &CliError) {
 /// every backend call refuses instantly (`dctl_store::retry::driver`), so
 /// carrying on would try every remaining file, fail every one of them in
 /// microseconds, and produce a wall of errors and exit 6 — a ten-million-file
-/// plan turning a deliberate stop into a ten-million-line log. `HANDOVER.md`
-/// §32.9 is about a run that would not end; a stop that ground through the rest
-/// of the plan would be the same complaint with a smaller number.
+/// plan turning a deliberate stop into a ten-million-line log. The measurement
+/// behind this flag was a run still going 943.6 s after a 30 s deadline had
+/// fired; a stop that ground through the rest of the plan would be the same
+/// complaint with a smaller number.
 #[must_use]
 pub const fn is_fatal(error: &CliError) -> bool {
     matches!(
@@ -831,11 +832,11 @@ mod tests {
 
     #[tokio::test]
     async fn the_verify_stage_is_given_the_strength_the_driver_reports() {
-        // The wiring `HANDOVER.md` §11.3 item 9 was about, at the one seam where
-        // it decides what actually happens to a file. The strength used to come
-        // from `ctx.verify_mode()` — a function of the flag and nothing else — so
-        // a destination's `verify = "strict"` could not reach this call no matter
-        // what the resolver made of it.
+        // The wiring behind a destination's `verify` setting, at the one seam
+        // where it decides what actually happens to a file. The strength used to
+        // come from `ctx.verify_mode()` — a function of the flag and nothing
+        // else — so a destination's `verify = "strict"` could not reach this call
+        // no matter what the resolver made of it.
         //
         // `Recording` answers `Strict` and the context asks for nothing, so a
         // pipeline that still consulted the flag would hand `checksum` here.
@@ -1098,10 +1099,10 @@ mod tests {
     /// It was false for the whole plain transfer path: the only per-file record
     /// was at `debug`, so a ten-file copy at `--log-level info` emitted nothing
     /// at all and `-v` was useless for the one thing an operator would reach for
-    /// it (`HANDOVER.md` §11.2). The assertion is on the **filter**, not on the
-    /// macro call, because those are different claims and only the first is what
-    /// the flag promises — a record emitted at `debug` and discarded by an
-    /// `info` filter is exactly what the defect was.
+    /// it. The assertion is on the **filter**, not on the macro call, because
+    /// those are different claims and only the first is what the flag promises —
+    /// a record emitted at `debug` and discarded by an `info` filter is exactly
+    /// what the defect was.
     #[test]
     fn one_info_record_is_emitted_for_every_file() {
         let ctx = ctx(&[]);
@@ -1232,7 +1233,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_file_is_started_after_the_runs_deadline_and_none_is_recorded() {
-        // §11.3 item 2, at the layer that decides whether to begin work. The
+        // The run's deadline, at the layer that decides whether to begin work. The
         // deadline is already in the past when this run starts, which is the
         // state a long run reaches on its own; the assertion is that the file is
         // refused, at exit 10, with no audit record — because nothing happened,

@@ -455,7 +455,7 @@ async fn no_key_shape_reaches_outside_the_store_root() {
     // green either way. What it changes is the sentence the operator is handed
     // — "disallowed path component" for a key whose whole problem is that it
     // names an absolute path — and a diagnosis that does not say what is wrong
-    // is how §16.1's `checksum mismatch: expected … got …` sent somebody
+    // is how a bare `checksum mismatch: expected … got …` sent somebody
     // hunting a corrupt provider when their disk was full.
     let absolute = fs
         .head(&ObjectKey::new("/etc/passwd"))

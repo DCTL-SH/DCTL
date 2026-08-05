@@ -17,12 +17,12 @@
 //! # Which statuses, per provider
 //!
 //! Every HTTP provider retries `5xx`, `408` and `429`; that is the intersection
-//! of what Backblaze and AWS both document and what rclone implements
-//! (`backend/s3/s3.go:1267-1271` lists exactly `429`, `500`, `503`). What no
-//! policy here retries is `401` or `403`: a wrong key and an exhausted cap are
-//! both stable facts, and classifying them as temporary is what once made a
-//! permanently wrong `DCTL_B2_APP_KEY` report an exit code telling a scheduler
-//! to back off and try again forever.
+//! of what Backblaze and AWS both document and what rclone implements — its S3
+//! backend retries exactly `429`, `500` and `503`. What no policy here retries
+//! is `401` or `403`: a wrong key and an exhausted cap are both stable facts,
+//! and classifying them as temporary is what once made a permanently wrong
+//! `DCTL_B2_APP_KEY` report an exit code telling a scheduler to back off and
+//! try again forever.
 //!
 //! B2's own `401 expired_auth_token` **is** retryable — after re-authorizing —
 //! and stays where the re-authorization is: `b2::retry`, one layer down. A rule
@@ -55,7 +55,7 @@ pub struct RetryPolicy {
     ///
     /// `false` for `local:`, where a status is not a thing that exists — and
     /// where a policy that pretended otherwise would be a dial that does
-    /// nothing, which is the class of defect `HANDOVER.md` §13 is about.
+    /// nothing: a knob an operator can turn that changes no behaviour at all.
     pub understands_http: bool,
 }
 

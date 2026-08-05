@@ -258,14 +258,14 @@ mod tests {
         // the directory is visible at two paths.
         let mountinfo = format!(
             "{}\n{}\n",
-            line(90, FUSE_FIELD, "/mnt/sxd/bench/mnt"),
-            line(91, FUSE_FIELD, "/mnt/SXD001/bench/mnt")
+            line(90, FUSE_FIELD, "/mnt/data/bench/mnt"),
+            line(91, FUSE_FIELD, "/mnt/DATA001/bench/mnt")
         );
         assert!(attached_anywhere(&mountinfo, Some(FUSE_DEVICE)));
 
         // Unmounting ONE alias leaves the other — and this is the whole point:
         // the recorded path now stats free while the filesystem is still up.
-        let after_one = format!("{}\n", line(91, FUSE_FIELD, "/mnt/SXD001/bench/mnt"));
+        let after_one = format!("{}\n", line(91, FUSE_FIELD, "/mnt/DATA001/bench/mnt"));
         assert!(
             attached_anywhere(&after_one, Some(FUSE_DEVICE)),
             "the surviving alias is exactly the stale mount"
@@ -283,7 +283,7 @@ mod tests {
         // Permissive, exactly as `detached`'s `bare: None` case is: this check
         // exists to catch an attachment the path comparison missed, never to
         // manufacture one out of a measurement nobody took.
-        let mountinfo = format!("{}\n", line(90, FUSE_FIELD, "/mnt/sxd/bench/mnt"));
+        let mountinfo = format!("{}\n", line(90, FUSE_FIELD, "/mnt/data/bench/mnt"));
         assert!(!attached_anywhere(&mountinfo, None));
     }
 

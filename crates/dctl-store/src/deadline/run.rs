@@ -1,16 +1,15 @@
 //! `--max-duration`: the one deadline that is about the **run**.
 //!
-//! # The entry this closes
+//! # The defect this closes
 //!
-//! `HANDOVER.md` §11.2, and it is the entry that says a flag did not bound what
-//! it claimed to bound. `--timeout` is exact — a black-holed B2 request fails at
-//! **30 s** under `--timeout 30`, to the second — and it bounds *one attempt*,
-//! which is rclone's meaning of the same flag (`fs/config.go:122`,
-//! `Help: "IO idle timeout"`). What it does not do is end the run. Measured in
-//! §32.9: a 160 MiB upload with `--timeout 30 --retries 1` had **not ended
-//! 943.6 s after the route was cut**, and an `sftp` copy had not ended after
-//! 601 s, because `--timeout` × six attempts × several distinct requests ×
-//! `--retries` is a product an operator cannot compute and no flag stated.
+//! A flag did not bound what it claimed to bound. `--timeout` is exact — a
+//! black-holed B2 request fails at **30 s** under `--timeout 30`, to the
+//! second — and it bounds *one attempt*, which is rclone's meaning of the same
+//! flag: an IO idle timeout. What it does not do is end the run. Measured: a
+//! 160 MiB upload with `--timeout 30 --retries 1` had **not ended 943.6 s after
+//! the route was cut**, and an `sftp` copy had not ended after 601 s, because
+//! `--timeout` × six attempts × several distinct requests × `--retries` is a
+//! product an operator cannot compute and no flag stated.
 //!
 //! An operator sizing a backup window needs one number that means *be finished
 //! by then*. This module is that number.
@@ -28,16 +27,15 @@
 //! # What happens when it fires
 //!
 //! The run stops — hard. rclone's `--max-duration` defaults to
-//! `--cutoff-mode hard` and implements it by giving the transfer context a
-//! deadline (`fs/sync/sync.go:203-205`, `context.WithDeadline`), which cancels
-//! whatever is in flight. DCTL does the same thing in the Rust idiom: the
-//! future is dropped, which is what cancels it, at three depths that each cover
-//! what the ones below cannot —
+//! `--cutoff-mode hard` and implements it by giving the transfer a deadline,
+//! which cancels whatever is in flight. DCTL does the same thing in the Rust
+//! idiom: the future is dropped, which is what cancels it, at three depths that
+//! each cover what the ones below cannot —
 //!
 //! | depth | what it stops | why the depth below is not enough |
 //! |---|---|---|
 //! | [`RunDeadline::guard`] around a request | the in-flight request | a request that never answers is never *observed* to be late by anything above it |
-//! | [`crate::retry::driver`] | the next attempt, and the backoff before it | a cancelled request classifies as transient, and six attempts of it is the §32.9 arithmetic |
+//! | [`crate::retry::driver`] | the next attempt, and the backoff before it | a cancelled request classifies as transient, and six attempts of it is the arithmetic above |
 //! | the process's own `select!` | everything, including work no future owns | a blocking read, a `spawn_blocking`, an `ssh` child |
 //!
 //! Nothing is left half-written by the cut. A verified write does not commit
@@ -116,8 +114,7 @@ pub struct RunDeadline(Option<Bound>);
 
 impl RunDeadline {
     /// A run nothing bounds — what an absent `--max-duration` means, and what
-    /// rclone's absent `--max-duration` means too (`fs/config.go:361`,
-    /// `Default: time.Duration(0)`).
+    /// rclone's absent `--max-duration` means too: a default duration of zero.
     #[must_use]
     pub const fn unbounded() -> Self {
         Self(None)
@@ -185,9 +182,10 @@ impl RunDeadline {
     /// two reads of a monotonic clock return the identical instant, which on a
     /// nanosecond-resolution clock is a coincidence no test can arrange — so
     /// deleting that arm left `cargo test --workspace` entirely green, which is
-    /// how it was found (`HANDOVER.md` §35.5). An argument that the arm cannot
-    /// fire would have been wrong: it can, on a coarse clock, and this is the
-    /// half of the run's deadline that decides whether an attempt is made.
+    /// how it was found: by reinstating the defect, not by the suite. An
+    /// argument that the arm cannot fire would have been wrong: it can, on a
+    /// coarse clock, and this is the half of the run's deadline that decides
+    /// whether an attempt is made.
     #[must_use]
     pub fn left_at(&self, now: Instant) -> Left {
         match self.0 {
@@ -242,7 +240,7 @@ impl RunDeadline {
     /// The arithmetic that stops a wait outliving the window it is inside.
     /// `dctl_store::retry` sleeps between attempts, and a backoff of two minutes
     /// begun with thirty seconds left is two minutes of a run that was supposed
-    /// to be over — the §32.9 shape in miniature. [`None`] means *no wait at
+    /// to be over — the 943.6 s overrun in miniature. [`None`] means *no wait at
     /// all is bounded*, which happens only when the caller had no patience of
     /// its own and the run has no deadline either.
     #[must_use]
@@ -366,8 +364,8 @@ mod tests {
         // machine, and the one that decides whether the next attempt is made.
         // `Left::Remaining(0)` reads as *open* to every caller: `is_spent` is
         // false, `exceeded` yields nothing, and `retry::driver` makes another
-        // request for a run whose window has closed — which is §32.9's shape,
-        // the run that continued 943.6 s past the cut.
+        // request for a run whose window has closed — which is the shape of the
+        // run that continued 943.6 s past the cut.
         //
         // `shorten` is the other half and would go the same way: a backoff
         // shortened to `Some(0)` under `Spent` becomes `Some(wait.min(0))`, the
@@ -395,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_operation_that_never_answers_is_abandoned_at_the_deadline() {
-        // The §32.9 shape: connected, silent, and without this it runs until
+        // The 943.6 s shape: connected, silent, and without this it runs until
         // something else gives up.
         let deadline = RunDeadline::starting_now(Some(WINDOW));
         let started = Instant::now();

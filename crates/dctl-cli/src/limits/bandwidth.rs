@@ -28,8 +28,8 @@
 //! asked often enough, because the engine handed a whole file to the storage
 //! layer in one call and got a byte count back at the end. Now that bytes move in
 //! bounded windows there is a seam every few megabytes, and this is charged at
-//! each one — which is the granularity rclone has always had
-//! (`fs/accounting/token_bucket.go`, charged per `io.Reader.Read`).
+//! each one — which is the granularity rclone has always had, charging its
+//! token bucket on every read of the underlying reader.
 //!
 //! Charging **after** each window rather than before is deliberate. The bytes are
 //! then a measurement rather than an intention, so a window that failed and was

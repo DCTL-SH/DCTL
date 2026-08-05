@@ -125,8 +125,8 @@ pub async fn run(ctx: &Ctx, args: &CreateArgs) -> Result<()> {
 /// *creation* rather than at load so a configuration stays portable: a file
 /// written on Linux with a remote called `r` opens on Windows, is listed, and
 /// can be repaired — it simply cannot be reached as `r:`, because there `r:` is
-/// the R: drive. rclone draws the line in the same place
-/// (`fs/config/ui.go:577`), and this is the non-interactive equivalent.
+/// the R: drive. rclone draws the line in the same place, and this is the
+/// non-interactive equivalent.
 ///
 /// # Errors
 /// [`ExitCode::Usage`] naming the drive the name would collide with.

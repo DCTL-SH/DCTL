@@ -1,13 +1,16 @@
 //! Live SFTP round-trip test. Ignored by default; runs only against a real host.
 //!
-//! This targets an **ssh-config host**: `DCTL_SFTP_HOST` must be a destination the
-//! system `ssh` can resolve from `~/.ssh/config` (or `user@host`). For DCTL's
-//! `lsx-001` that means the config's `ProxyCommand cloudflared access ssh
-//! --hostname %h` and `IdentityFile` are honored transparently — the test needs the
-//! system `ssh` binary (and, for cloudflared hosts, a working `cloudflared access`).
+//! This targets an **ssh-config host**: `DCTL_SFTP_HOST` must be a destination
+//! the system `ssh` can resolve from `~/.ssh/config` (or `user@host`). Where
+//! that entry is a cloudflared-fronted host — `backup.example.com` in the
+//! example below — the config's `ProxyCommand cloudflared access ssh
+//! --hostname %h` and `IdentityFile` are honoured transparently; the test
+//! needs the system `ssh` binary (and, for cloudflared hosts, a working
+//! `cloudflared access`).
 //!
 //! ```sh
-//! DCTL_SFTP_HOST=lsx-001 cargo test -p dctl-store --test sftp_live -- --ignored --nocapture
+//! DCTL_SFTP_HOST=backup.example.com \
+//!   cargo test -p dctl-store --test sftp_live -- --ignored --nocapture
 //! ```
 //!
 //! Optional: `DCTL_SFTP_BASE` overrides the remote scratch directory
@@ -15,11 +18,13 @@
 //! per-run subdirectory that is removed at the end.
 //!
 //! LIVE VERIFICATION STATUS: **run**, on 2026-07-27, against a real `sshd` +
-//! `internal-sftp` subsystem on lsx-002 (`DCTL_SFTP_HOST=sftpprobe`). It still
-//! never runs in CI — `#[ignore]` keeps it out of the default run, and asking for
-//! it without `DCTL_SFTP_HOST` is a **failure** rather than a skip
-//! (`tests/gated/mod.rs`) — so this line is the only record that it has been
-//! exercised. Re-run it after any change to `sftp/`, and update the date.
+//! `internal-sftp` subsystem on a second host — `archive.example.com`, reached
+//! through its own ssh-config alias, which is why that run was invoked as
+//! `DCTL_SFTP_HOST=sftpprobe`. It still never runs in CI — `#[ignore]` keeps
+//! it out of the default run, and asking for it without `DCTL_SFTP_HOST` is a
+//! **failure** rather than a skip (`tests/gated/mod.rs`) — so this line is the
+//! only record that it has been exercised. Re-run it after any change to
+//! `sftp/`, and update the date.
 //!
 //! It is no longer the only witness to the *order* of a staged write. That —
 //! stage, flush, close, stamp the source's time, rename, and clean up on every
@@ -366,13 +371,13 @@ async fn sftp_full_round_trip() {
 
 /// The canonical layout, over the wire: `/srv/data -> /mnt/bigdisk/data`.
 ///
-/// `HANDOVER.md` §9.3 item 1 named this as the single most valuable remaining
-/// fix and named sftp first, because the layout it describes is what a hosted
-/// server looks like: a small root filesystem and the data on a mounted volume,
-/// linked into place. A `SSH_FXP_READDIR` entry carries `lstat` attributes, so
-/// the link's type was neither *file* nor *directory*, the arm that matched
-/// those two dropped it, and `dctl copy sftp-host:/srv ./restore` listed an
-/// empty tree and exited 0.
+/// This was the single most valuable fix outstanding, and sftp was where it
+/// mattered most, because the layout it describes is what a hosted server looks
+/// like: a small root filesystem and the data on a mounted volume, linked into
+/// place. A `SSH_FXP_READDIR` entry carries `lstat` attributes, so the link's
+/// type was neither *file* nor *directory*, the arm that matched those two
+/// dropped it, and `dctl copy sftp-host:/srv ./restore` listed an empty tree and
+/// exited 0.
 ///
 /// Only a real server can answer the questions here: that `SSH_FXP_STAT` really
 /// traverses, that `SSH_FXP_REALPATH` returns a path the cycle guard can

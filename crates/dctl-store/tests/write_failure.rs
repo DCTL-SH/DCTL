@@ -1,8 +1,8 @@
 //! What DCTL says when a write does not land: it must name the failure, not the
 //! bytes.
 //!
-//! This is `docs/HANDOVER.md` §16.1 held in place. A `tokio::fs::File` reports a
-//! successful `write_all` before the kernel has been asked to store anything and
+//! The defect this file pins open: a `tokio::fs::File` reports a successful
+//! `write_all` before the kernel has been asked to store anything and
 //! `sync_all` consumes the resulting error without returning it
 //! (`dctl_store::durable`), so a full filesystem used to be noticed for the first
 //! time by the read-back hash comparison — and a hash comparison can only ever
@@ -195,8 +195,8 @@ async fn a_write_the_filesystem_refuses_is_reported_as_that_refusal() {
 ///
 /// `#[ignore]` because it needs one, and it obtains [`FULL_FS_DIR`] through the
 /// same [`gated::require`] every other gated test in this crate uses — one rule,
-/// one implementation. A test that prints "skipping" and reports `ok` is
-/// `HANDOVER.md` §11.3 item 2, and the whole point of this file is that a failure
+/// one implementation. A test that prints "skipping" and reports `ok` is a false
+/// success in its own right, and the whole point of this file is that a failure
 /// must not be able to look like a success.
 ///
 /// Run with, for example:

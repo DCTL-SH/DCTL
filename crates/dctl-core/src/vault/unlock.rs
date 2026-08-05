@@ -115,8 +115,8 @@ impl Vault {
     /// definition, so `dctl index rebuild` on one reported *"wrong password or
     /// corrupted envelope"* and advised restoring `system/envelope.bin` from a
     /// replica: a file that cannot be there, a password that was never involved,
-    /// and an operator sent to look for both (`docs/HANDOVER.md` §16.2). A
-    /// permission error or a dead connection produced the same sentence.
+    /// and an operator sent to look for both. A permission error or a dead
+    /// connection produced the same sentence.
     ///
     /// The constant-answer property is untouched. It protects a password from
     /// being probed against an envelope that exists; these two answers are about

@@ -2,18 +2,18 @@
 //!
 //! The two flags a migrating rclone user reaches for after `--exclude`, and the
 //! pair whose direction is easiest to get backwards. rclone's reading, kept
-//! exactly (`fs/filter/filter.go:205,532`):
+//! exactly:
 //!
 //! * **`--min-age 7d`** keeps files that are *at least* seven days old. It is a
-//!   floor on **age**, which is a ceiling on modification time: rclone computes
-//!   `ModTimeTo = now - 7d` and drops anything modified after it.
+//!   floor on **age**, which is a ceiling on modification time: rclone takes
+//!   `now - 7d` as the ceiling and drops anything modified after it.
 //! * **`--max-age 7d`** keeps files modified within the last seven days. A
 //!   ceiling on age, a floor on modification time.
 //!
-//! Both ends are **inclusive**, because rclone's comparisons are strict
-//! (`Before`/`After`) and a file sitting exactly on the boundary therefore
-//! survives. That also matches [`super::size::SizeBounds`], so the two pairs of
-//! flags cannot disagree about what "the limit" means.
+//! Both ends are **inclusive**, because rclone's comparisons are strict and a
+//! file sitting exactly on the boundary therefore survives. That also matches
+//! [`super::size::SizeBounds`], so the two pairs of flags cannot disagree about
+//! what "the limit" means.
 //!
 //! ## The window is fixed once, not re-read per file
 //!
@@ -22,7 +22,7 @@
 //! candidate would make `--max-age 1h` mean something different for the first
 //! file than for the last, and a `sync` whose two sides were enumerated minutes
 //! apart would see a different window on each side and delete the difference.
-//! rclone fixes the window in `NewFilter` for the same reason.
+//! rclone fixes the window when it builds the filter, for the same reason.
 //!
 //! ## A file whose time nobody knows
 //!
@@ -35,10 +35,10 @@
 //! the row and letting the time column say `-` puts the uncertainty where it can
 //! be read.
 //!
-//! **rclone does not do this.** A zero `modTime` is `Before` every floor, so
-//! `--max-age` there drops an object whose time is merely unknown. The
+//! **rclone does not do this.** A zero modification time sorts before every
+//! floor, so `--max-age` there drops an object whose time is merely unknown. The
 //! difference is deliberate and is one of the few places DCTL declines to copy
-//! a behaviour; it is recorded in `HANDOVER.md` §11.4 rather than left to be
+//! rclone's behaviour; it is written down here rather than left to be
 //! discovered.
 
 use std::fmt;
@@ -55,9 +55,9 @@ pub enum AgeProblem {
     /// The bounds cross, so nothing can satisfy both.
     ///
     /// `--min-age 30d --max-age 7d` asks for files both older than a month and
-    /// younger than a week. rclone refuses the same pair
-    /// (`fs/filter/filter.go:210`), and for the reason `PLAN.md` §6 cares about:
-    /// a run that can only ever move nothing must not report success.
+    /// younger than a week. rclone refuses the same pair, and for the reason
+    /// `PLAN.md` §6 cares about: a run that can only ever move nothing must not
+    /// report success.
     Crossed { min: i64, max: i64 },
 }
 
@@ -216,7 +216,7 @@ pub fn parse_age(input: &str) -> Result<Option<i64>, String> {
 /// length of time — `--max-duration` — reads it here, because `500ms`
 /// truncated to zero seconds would mean *unbounded*, and a run silently left
 /// unbounded by a value the parser accepted is the exact class of failure this
-/// project keeps finding (`HANDOVER.md` §13).
+/// project keeps finding in itself.
 ///
 /// # Errors
 /// A message naming the input and the accepted spellings.
@@ -282,8 +282,8 @@ mod tests {
 
     #[test]
     fn every_suffix_rclone_accepts_is_worth_what_rclone_says() {
-        // `fs/parseduration.go:39` plus `time.ParseDuration`. A table that
-        // disagreed by a factor would make `--max-age 30d` select a year.
+        // rclone's suffix table, kept whole. A table that disagreed by a factor
+        // would make `--max-age 30d` select a year.
         for (written, seconds) in [
             ("1s", 1_i64),
             ("90s", 90),
@@ -295,8 +295,8 @@ mod tests {
             ("1y", 365 * DAY),
             // A bare number is seconds, which is rclone's default unit.
             ("3600", 3_600),
-            // Fractional ages are legal in rclone (`strconv.ParseFloat`) and
-            // truncate towards zero here.
+            // Fractional ages are legal in rclone and truncate towards zero
+            // here.
             ("1.5d", 36 * 3_600),
         ] {
             assert_eq!(

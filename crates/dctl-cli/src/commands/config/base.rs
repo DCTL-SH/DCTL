@@ -135,7 +135,7 @@ impl BaseLocation {
                 "A base is a *place*, written as \
                  'provider{REMOTE_SEPARATOR}container' — for example \
                  'b2{REMOTE_SEPARATOR}my-bucket', \
-                 'sftp{REMOTE_SEPARATOR}lsx-001/dctl-store' or \
+                 'sftp{REMOTE_SEPARATOR}backup.example.com/dctl-store' or \
                  'local{REMOTE_SEPARATOR}/srv/vault'. To wrap a remote that is \
                  already configured, use `dctl config create NAME vault \
                  base={remote}` instead."
@@ -176,11 +176,12 @@ impl BaseLocation {
     /// [`BaseLocation::base_path`] stays `None` and [`refuse_subdirectory`] has
     /// nothing to catch.
     ///
-    /// The split is [`crate::remote::sftp_base`]'s, and that is the fix for
-    /// `docs/HANDOVER.md` §16.3. This function used to do its own
-    /// `split_once('/')`, which threw the separator away — so `--base
-    /// sftp:h/srv/vault` wrote `base = "srv/vault"`, the backend resolved it
-    /// against the SSH login directory, and the vault was created in
+    /// The split is [`crate::remote::sftp_base`]'s rather than this function's
+    /// own, and that is the fix for a vault that was created somewhere other
+    /// than where it was reported. This function used to do its own
+    /// `split_once('/')`, which threw the separator away — so
+    /// `--base sftp:h/srv/vault` wrote `base = "srv/vault"`, the backend
+    /// resolved it against the SSH login directory, and the vault was created in
     /// `$HOME/srv/vault` while this command reported it on `sftp:h/srv/vault`.
     /// `dctl config create NAME sftp host=h base=/srv/vault` meant the other one.
     ///

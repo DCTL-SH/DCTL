@@ -5,14 +5,14 @@
 //! statement about the S3 family — that it signs correctly, that it addresses
 //! path-style, that it pages a listing, that it cuts a multipart upload where it
 //! says it does, that it cleans up after a failure — rested on reading the code.
-//! Reading the code is how four claims in `HANDOVER.md` §11.4 turned out false.
+//! Reading the code is how four of those claims turned out false.
 //!
 //! What runs here is the **real** `S3Backend` and the **real** `R2Backend`,
 //! unchanged, pointed at [`support::mock_s3`] — a loopback listener that verifies
 //! every SigV4 signature by recomputing it independently. What that buys and what
-//! it does not is set out in that module's documentation and repeated in
-//! `HANDOVER.md`: this proves the protocol DCTL speaks, not the provider's
-//! behaviour under load, its consistency model, or its error catalogue.
+//! it does not is set out in that module's documentation, and bears repeating
+//! here: this proves the protocol DCTL speaks, not the provider's behaviour
+//! under load, its consistency model, or its error catalogue.
 //!
 //! Every test that could be satisfied by a client that did nothing asserts the
 //! request the server actually saw, not merely that the call returned `Ok`.
@@ -26,8 +26,8 @@
 //! it at three moments with three different consequences: nothing opened,
 //! parts left billing, or — the expensive one — every byte uploaded and the
 //! object still not existing. Four of those arms could be deleted with
-//! `cargo test --workspace` staying green before this group existed
-//! (`handover-scripts/protocol-2026-07-30/reinstate-before.txt`).
+//! `cargo test --workspace` staying green before this group existed — measured
+//! by deleting each arm in turn and re-running the gate.
 
 mod support;
 
@@ -753,7 +753,7 @@ async fn a_slow_down_is_retried_until_the_write_succeeds() {
 
 #[tokio::test]
 async fn an_exhausted_budget_reports_the_attempts_it_really_made() {
-    // The other half, and the one `HANDOVER.md` §11.2 is actually about: when
+    // The other half, and the one the original defect was actually about: when
     // retrying does not help, the failure that reaches the operator has to carry
     // the number of attempts rather than a claim about them. Every backend error
     // used to arrive with the hint "Retries were exhausted" over a run that had
@@ -881,7 +881,7 @@ async fn a_server_that_names_a_wait_is_obeyed_and_not_argued_with() {
 
 #[tokio::test]
 async fn the_error_a_provider_returns_still_reads_the_way_it_always_did() {
-    // The rendering is a contract: `HANDOVER.md` quotes it and scripts grep for
+    // The rendering is a contract: operators quote it and scripts grep for
     // it. Structuring the error so the retry layer can classify it must not have
     // changed one character of what an operator sees.
     let mock = MockS3::start().await;
@@ -1125,7 +1125,7 @@ async fn abandon_one(mock: &support::mock_s3::MockS3, s3: &S3Backend, key: &str)
 
 #[tokio::test]
 async fn an_upload_no_object_listing_shows_is_enumerated_and_aborted() {
-    // §11.3 item 12 on the S3 family. The parts of an incomplete upload are
+    // The billing leak, on the S3 family. The parts of an incomplete upload are
     // stored and billed and `ListObjectsV2` does not return them, so until
     // `ListMultipartUploads` was wired the only honest thing `cleanup` could say
     // was `unsupported`.
@@ -1354,10 +1354,9 @@ async fn a_provider_that_accepts_and_then_goes_silent_is_given_up_on() {
 
 #[tokio::test]
 async fn the_operator_chooses_the_number_and_a_larger_one_really_waits_longer() {
-    // The point of the whole entry. `HANDOVER.md` §11.2 recorded that a
-    // black-holed network *did* terminate — at 200 s — and that the problem was
-    // that 200 s was nobody's choice. Two runs, two numbers, and the difference
-    // has to be the operator's.
+    // The point of the whole exercise. A black-holed network *did* terminate —
+    // at 200 s — and the problem was that 200 s was nobody's choice. Two runs,
+    // two numbers, and the difference has to be the operator's.
     let brisk = {
         let mock = MockS3::start().await;
         let s3 = deadlined(&mock, 1);
@@ -1418,10 +1417,9 @@ async fn a_transfer_that_keeps_moving_outlives_a_deadline_shorter_than_itself() 
 
 #[tokio::test]
 async fn a_run_that_asked_for_no_deadline_waits_for_a_silent_provider() {
-    // Zero is rclone's "wait forever" (`fs/fshttp/dialer.go:102`,
-    // `if c.timeout > 0`), and it has to genuinely disable the clock rather than
-    // be read as a deadline of no length — which would abort every request
-    // instantly and look, from the outside, like a broken network.
+    // Zero is rclone's "wait forever", and it has to genuinely disable the clock
+    // rather than be read as a deadline of no length — which would abort every
+    // request instantly and look, from the outside, like a broken network.
     //
     // Proved by outliving a deadline that would have fired several times over,
     // rather than by waiting forever, which no test can do.
@@ -1445,9 +1443,8 @@ async fn a_run_that_asked_for_no_deadline_waits_for_a_silent_provider() {
 
 // ── the three ways a multipart upload fails, told apart ──────────────────────
 //
-// `HANDOVER.md` §11.3 item 10. DCTL issues a multipart upload as one call, and
-// the provider can refuse it at three different moments with three different
-// consequences:
+// DCTL issues a multipart upload as one call, and the provider can refuse it at
+// three different moments with three different consequences:
 //
 //   * the **create** is refused — nothing was ever opened, so there is nothing to
 //     abort and nothing to bill, and the only wrong answer is reporting success;
@@ -1605,7 +1602,7 @@ async fn a_refused_completion_is_a_failure_even_though_every_byte_arrived() {
 
 #[tokio::test]
 async fn a_producer_that_declares_more_than_it_supplies_commits_nothing() {
-    // The other half of `HANDOVER.md` §26.1's worst outcome, on S3's two
+    // The other half of the worst outcome this product has, on S3's two
     // streaming arms: a producer that ends **cleanly** having handed over fewer
     // bytes than it declared. Nothing errors — the stream closes properly, every
     // part that was sent was accepted — so the only thing between this and a
@@ -1664,8 +1661,8 @@ async fn a_producer_that_declares_more_than_it_supplies_commits_nothing() {
     );
     assert!(state.completed.is_empty(), "{:?}", state.completed);
     // The multipart attempt opened an upload, so it has to have been closed
-    // again — a short producer that left parts billing would be §24.1's defect
-    // with a different cause.
+    // again — a short producer that left parts billing would be the debris
+    // defect with a different cause.
     assert_eq!(state.aborted.len(), 1, "{:?}", state.aborted);
 
     // **Where the multipart arm's own length check earns its place**, and the
@@ -1698,7 +1695,7 @@ fn the_single_shot_arm_refuses_a_short_producer_with_the_seals_own_numbers() {
     // `filled != size` comparison cannot fire, because `sealed()` one line
     // above it refuses the only input that could reach it, with an identical
     // error. That argument is correct and was re-measured — deleting the
-    // comparison leaves the whole workspace gate green (`HANDOVER.md` §35.2).
+    // comparison leaves the whole workspace gate green.
     //
     // What was **not** correct was the sentence it ended with: that an edit
     // moving `sealed` below the comparison "would make the check reachable and

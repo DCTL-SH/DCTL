@@ -1,15 +1,15 @@
 //! What comes back where a symbolic link used to be.
 //!
-//! The question `HANDOVER.md` §11.2's last defect leaves behind once the link is
-//! no longer dropped in silence: a followed link goes *in* as a directory tree
-//! under the link's own name — does it come *out* as a link, or as a copy?
+//! The question left behind once links are no longer dropped in silence: a
+//! followed link goes *in* as a directory tree under the link's own name — does
+//! it come *out* as a link, or as a copy?
 //!
 //! **As a copy, and that is the whole answer.** A vault is keyed by logical
 //! path. It has records for paths that hold bytes and no record type for "this
 //! path is a link to that one" — rclone has one, `-l/--links`, which writes the
-//! target into a `.rclonelink` file (`backend/local/local.go:110`), and DCTL
-//! deliberately does not. So `srv/data -> /mnt/bigdisk/data` backed up with
-//! `--links follow` restores as a real directory `srv/data` holding real files.
+//! target into a `.rclonelink` file, and DCTL deliberately does not. So
+//! `srv/data -> /mnt/bigdisk/data` backed up with `--links follow` restores as a
+//! real directory `srv/data` holding real files.
 //! A skipped link restores as nothing at all, because nothing about it was ever
 //! stored.
 //!

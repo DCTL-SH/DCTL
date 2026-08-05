@@ -147,12 +147,12 @@ pub(super) async fn collect(root: &Path, policy: LinkPolicy, want: Want) -> Resu
                 // A socket, fifo or device node: nothing a transfer can carry,
                 // and — unlike a link — not a door into a whole tree. Passing
                 // over it is rclone's behaviour too, and so is *saying so*:
-                // `Storable` matches `os.ModeNamedPipe|os.ModeSocket|os.ModeDevice`
-                // and returns false (`backend/local/local.go:1299`), and the
-                // next line logs `Can't transfer non file/directory` (`:1301`)
-                // unless the operator asked for silence with `skip_specials`.
-                // DCTL cited the first half of that as its authority and omitted
-                // the second, so a backup of `/var` was told nothing at all.
+                // rclone treats a named pipe, a socket or a device node as
+                // unstorable and skips it, and then logs
+                // `Can't transfer non file/directory` for it unless the operator
+                // asked for silence with `skip_specials`. DCTL cited the first
+                // half of that as its authority and omitted the second, so a
+                // backup of `/var` was told nothing at all.
                 walked.specials.observe(key, kind_of(&entry).await);
             }
         }
@@ -399,8 +399,8 @@ mod tests {
     async fn a_fifo_in_the_tree_is_named_rather_than_dropped() {
         // The second half of the silence: a link *pointing at* a fifo has always
         // been reported, and the fifo itself was invisible. rclone logs
-        // `Can't transfer non file/directory` (`backend/local/local.go:1301`)
-        // and this walk cited that very line while saying nothing.
+        // `Can't transfer non file/directory` for it, and this walk cited that
+        // very behaviour as its authority while saying nothing.
         let temp = tempfile::TempDir::new().unwrap();
         std::fs::write(temp.path().join("keep.txt"), b"ordinary").unwrap();
         make_fifo(&temp.path().join("pipe"));

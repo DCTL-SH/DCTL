@@ -97,7 +97,7 @@ Verified live against macFUSE 5.3.3 on macOS 27 (arm64): reads are
 byte-identical, a 1 MiB read at offset 32 MiB of a 64 MiB object costs 1.031 MiB
 of store traffic, every mutating operation is refused, and the mountpoint comes
 free under `SIGINT`, `SIGTERM`, `umount` and `diskutil unmount` — including with
-a read in flight. See `HANDOVER.md` §33.
+a read in flight.
 
 **Finder needs `--allow-root` on macOS.** At the default — the mounting user
 alone — the shell reads the mount perfectly while `open` fails with `error -36`

@@ -70,7 +70,7 @@ single-character prefix before a colon is read as a drive letter there, so `C:`,
 
 **Everywhere else there are no drive letters, so `r:` is a reference to the
 remote `r`** — which resolves to nothing and fails with `unknown remote 'r'`.
-This matches rclone, whose `IsDriveLetter` returns false off Windows.
+This matches rclone, which recognises a drive letter on Windows and nowhere else.
 
 This is the one classification rule in DCTL that depends on the platform, and it
 earns the exception. Applying the drive rule everywhere meant that on Linux
@@ -79,13 +79,12 @@ exited **0** — a backup landing somewhere nobody named, silently, on the platf
 DCTL is most likely to run on.
 
 What makes the split safe rather than merely rclone-compatible is the rule at the
-other end, which is also rclone's (`fs/config/ui.go:577`): **`dctl config create`
-refuses a drive-letter name on a platform that has drives**. So a Windows machine
-can never hold a configuration whose name Windows itself would hide. A
-configuration carried over from Linux may contain one — it loads, it is listed,
-it can be verified and repaired by name — it simply is not reachable as `c:`
-there. That is exactly rclone's position, and it is stated here rather than left
-to be discovered.
+other end, which is also rclone's: **`dctl config create` refuses a drive-letter
+name on a platform that has drives**. So a Windows machine can never hold a
+configuration whose name Windows itself would hide. A configuration carried over
+from Linux may contain one — it loads, it is listed, it can be verified and
+repaired by name — it simply is not reachable as `c:` there. That is exactly
+rclone's position, and it is stated here rather than left to be discovered.
 
 Names are 2–64 characters of ASCII letters, digits, `-`, `_` and `.`, and must
 **start** with a letter or a digit — which is also why an argument beginning with

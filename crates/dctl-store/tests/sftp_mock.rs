@@ -3,8 +3,8 @@
 //!
 //! `sftp_live.rs` needs a host, so until this file existed three of this
 //! backend's promises rested on a test the plain gate does not run. All three
-//! were re-attacked in `HANDOVER.md` §23.0 by deleting them from the source, and
-//! all three came back **GREEN**:
+//! were re-attacked by deleting them from the source, and all three came back
+//! **GREEN**:
 //!
 //! * `mtime-sftp-settimes` — the `SETSTAT` is never sent, so every object keeps
 //!   the *server's* write time and the next `sync` transfers the whole tree
@@ -28,15 +28,14 @@
 //!
 //! 1. **The three original guarantees, and the round trip around them.** These
 //!    arrange a *directory* and watch the backend deal with it.
-//! 2. **Re-dialling** (§28), which needs a server that can be killed and will
-//!    answer a second conversation over the same directory.
-//! 3. **The protocol layer's own refusals** (§30), which need a server that
+//! 2. **Re-dialling**, which needs a server that can be killed and will answer
+//!    a second conversation over the same directory.
+//! 3. **The protocol layer's own refusals**, which need a server that
 //!    **answers wrongly** — no size where the protocol allows none, a permission
 //!    denial, a read that stops before the length it declared, a write it will
 //!    not accept. Ten guards across this backend and S3's were deletable with
-//!    `cargo test --workspace` staying green before this group existed;
-//!    `handover-scripts/protocol-2026-07-30/reinstate-before.txt` is that
-//!    measurement.
+//!    `cargo test --workspace` staying green before this group existed, and
+//!    that measurement is why the group is here.
 //!
 //! Every test here is named for the **consequence** rather than for the packet,
 //! because that is what a failure at three in the morning has to communicate.
@@ -396,12 +395,11 @@ async fn a_second_write_of_one_object_publishes_over_the_first() {
 
 // ── re-dialling a dead session ───────────────────────────────────────────────
 //
-// `HANDOVER.md` §11.2's last open entry: *"Re-dial a dead connection."* Every
-// backend retried, and none could re-establish anything — which on sftp is not
-// a small gap, because a dropped session invalidates every open handle. The
-// entry recorded that DCTL classified a dead session as terminal and told the
-// operator to run the command again, and that this was the honest report of a
-// thing the tool would not do.
+// *"Re-dial a dead connection."* Every backend retried, and none could
+// re-establish anything — which on sftp is not a small gap, because a dropped
+// session invalidates every open handle. DCTL classified a dead session as
+// terminal and told the operator to run the command again, and that was the
+// honest report of a thing the tool would not do.
 //
 // These run the **real** `SftpBackend` over the real client library against
 // `support::mock_sftp::RedialableSftp`, which answers as many conversations as
@@ -696,11 +694,10 @@ async fn a_write_to_a_server_that_stops_answering_is_given_up_on() {
 
 // ── the protocol layer's own refusals ────────────────────────────────────────
 //
-// `HANDOVER.md` §11.3 item 10, and the entries in §11.2 it stands behind. What
-// separates these from everything above is where the fault comes from: the tests
-// so far arrange a *directory* and watch the backend deal with it, and these
-// arrange a **server that answers wrongly**, which is the only way to reach the
-// arms that exist because a server can.
+// What separates these from everything above is where the fault comes from: the
+// tests so far arrange a *directory* and watch the backend deal with it, and
+// these arrange a **server that answers wrongly**, which is the only way to
+// reach the arms that exist because a server can.
 //
 // Every fault below is one a real server produces — `support::mock_sftp::Faults`
 // says which, per knob, and why a fault nobody's `sshd` can make would be worth
@@ -788,8 +785,9 @@ async fn a_permission_denial_is_terminal_and_does_not_cost_the_session() {
     // statement about the *request*, equally true next time, so retrying it
     // spends five attempts to be told the same thing five times. A severed
     // session is a statement about the *conversation*, so not retrying it turns
-    // a recoverable drop into a failed backup. §28.4 moved one arm between these
-    // two and this is the test that says the other one did not move with it.
+    // a recoverable drop into a failed backup. One arm was moved between these
+    // two classes, and this is the test that says the other one did not move
+    // with it.
     let (mock, sftp) = redialable("/srv/store").await;
     mock.deny("locked");
 
@@ -803,7 +801,7 @@ async fn a_permission_denial_is_terminal_and_does_not_cost_the_session() {
         .await
         .expect_err("a write the server refuses must not report success");
 
-    // The variant moved with the sweep (§34): a denial used to be a
+    // The variant moved with the sweep: a denial used to be a
     // `StoreError::Backend` string that nothing above could act on, and is now
     // the same `io::ErrorKind` `local:` raises for the same condition -- which
     // is what the `transient` assertion below actually reads.
@@ -951,8 +949,8 @@ async fn a_write_the_server_stops_accepting_leaves_no_staging_file_behind() {
     // leaves 60% of an object under a staging name nobody looks at again, on
     // every retry, for as long as the disk stays full.
     //
-    // `HANDOVER.md` §24.1 is what that debris costs and `cleanup` is what
-    // reclaims it, but the cheaper answer is the write path not making any: the
+    // What that debris costs was measured, and `cleanup` is what reclaims it,
+    // but the cheaper answer is the write path not making any: the
     // `remove_quiet` in the loop's error arm. It could be deleted with the plain
     // gate staying green.
     let (mock, sftp) = backend("/srv/store", &["/srv/store"]).await;
@@ -962,10 +960,10 @@ async fn a_write_the_server_stops_accepting_leaves_no_staging_file_behind() {
     mock.accept_at_most(64 * 1024);
 
     // All **three** writers, because each stages and each cleans up in its own
-    // error arm — the same shape `HANDOVER.md` §26.1 found in `source::plain`'s
-    // three truncation refusals, where two of the three had no witness. A test
-    // that exercised only `put` would leave the two streaming writers, which are
-    // the ones a large object actually takes, unwatched.
+    // error arm — the same shape found in `source::plain`'s three truncation
+    // refusals, where two of the three had no witness. A test that exercised
+    // only `put` would leave the two streaming writers, which are the ones a
+    // large object actually takes, unwatched.
     let dir = tempfile::TempDir::new().expect("a temporary directory");
     let source = dir.path().join("big.bin");
     std::fs::write(&source, &data).expect("the source file is written");
@@ -1242,7 +1240,7 @@ async fn a_producer_that_stops_mid_object_leaves_no_staging_file_behind() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// The dial, bounded — `HANDOVER.md` §32.9's `sftp:` row
+// The dial, bounded — the `sftp:` row of the 601 s overrun
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // The measurement that opened this: a copy of thirty objects with
@@ -1293,8 +1291,9 @@ fn impatient() -> dctl_store::retry::RetryPolicy {
 /// exactly as `remote::registry::build` installs it in production.
 ///
 /// The retry layer is not optional scenery here: it is what asks for a second
-/// connection after the first is discarded, and the re-dial is the step §32.9
-/// found unbounded. Without it these tests would measure one dead session.
+/// connection after the first is discarded, and the re-dial is the step the
+/// 601 s measurement found unbounded. Without it these tests would measure one
+/// dead session.
 async fn redialing(deadlines: Deadlines) -> (RedialableSftp, std::sync::Arc<dyn Backend>) {
     let mock = RedialableSftp::start();
     std::fs::create_dir_all(mock.root().join("srv/store")).expect("the fixture directory");
@@ -1336,7 +1335,7 @@ async fn a_re_dial_into_a_black_hole_ends_at_contimeout_rather_than_hanging() {
 
     // The wire dies, and the far end stops answering new conversations too —
     // which is what a black-holed route looks like from here, and what the
-    // §32.9 arm hit: the replacement `ssh` had nothing to talk to either.
+    // 601 s run hit: the replacement `ssh` had nothing to talk to either.
     mock.hang_on_dial();
     mock.sever();
 
@@ -1403,7 +1402,7 @@ async fn a_run_out_of_time_stops_dialling_rather_than_starting_another_connectio
          network fault: {error:?}"
     );
     // And terminal, or the layer above spends its whole schedule re-dialling
-    // into a run that is already over — which is §32.9 with a new error type.
+    // into a run that is already over — the 601 s defect with a new error type.
     assert!(
         !dctl_store::retry::Observed::of(&error).transient,
         "a closed window is not worth another attempt: {error:?}"
@@ -1411,7 +1410,7 @@ async fn a_run_out_of_time_stops_dialling_rather_than_starting_another_connectio
 }
 
 // ---------------------------------------------------------------------------
-// The protocol's status codes, as the layers above have to read them (§34).
+// The protocol's status codes, as the layers above have to read them.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -1504,8 +1503,8 @@ async fn a_denial_arrives_as_a_permission_error_the_retry_layer_can_read() {
 async fn chunk_fetches_of_one_object_reuse_the_handle_they_opened() {
     // The mount's hot path: chunk after chunk of the same object. Each fetch
     // used to OPEN, FSTAT, read and CLOSE — two extra protocol round trips per
-    // chunk, which on a real link is the dominant per-request cost
-    // (`HANDOVER.md` §40.5). The handle is kept now, so N reads cost one open.
+    // chunk, which on a real link is the dominant per-request cost. The handle
+    // is kept now, so N reads cost one open.
     let (mock, sftp) = backend("/srv", &["srv"]).await;
     let key = ObjectKey::new("o/film");
     let data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();

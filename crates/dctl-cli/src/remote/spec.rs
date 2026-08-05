@@ -42,9 +42,8 @@
 //! `dctl copy /srv/data r:` on Linux created a **local directory named `r:`**
 //! and exited 0 — a backup landing somewhere nobody named, silently, on the
 //! platform DCTL is most likely to run on. rclone treats `r` as a remote
-//! everywhere except Windows for exactly this reason
-//! (`fs/fspath/path.go:163` consults `driveletter.IsDriveLetter`, which is a
-//! constant `false` off Windows).
+//! everywhere except Windows for exactly this reason: the drive-letter test it
+//! consults is a constant `false` off Windows.
 //!
 //! Off Windows a single-character reference now resolves to a remote that can
 //! genuinely be configured, so `r:` addresses `r`. What keeps that safe is the
@@ -307,16 +306,15 @@ pub fn looks_local_on(spec: &str, drive_letters: bool) -> bool {
 ///
 /// This rule is **platform-independent**, and that is the change rclone parity
 /// required. The drive-letter question is asked once, earlier, by
-/// [`looks_local_on`] — which is where rclone asks it too
-/// (`fs/fspath/path.go:163`) — so a length rule here would only ever catch names
-/// that are *not* drives: `1:file` and `é:x` name no drive on any Windows
-/// machine, and rclone reads both as remotes because its `IsDriveLetter`
-/// requires a single ASCII letter.
+/// [`looks_local_on`] — which is where rclone asks it too — so a length rule
+/// here would only ever catch names that are *not* drives: `1:file` and `é:x`
+/// name no drive on any Windows machine, and rclone reads both as remotes
+/// because its drive-letter test requires a single ASCII letter.
 ///
 /// The `..` rejection is DCTL going further than rclone rather than matching it:
-/// rclone's `configNameRe` admits `.` and `..` as config names, so `..:y` parses
-/// there as a remote called `..`. A path that climbs is the one spelling worth
-/// refusing outright, so it stays refused.
+/// rclone's config-name pattern admits `.` and `..` as config names, so `..:y`
+/// parses there as a remote called `..`. A path that climbs is the one spelling
+/// worth refusing outright, so it stays refused.
 #[must_use]
 pub fn names_a_remote(candidate: &str) -> bool {
     if candidate.is_empty() {
@@ -452,7 +450,7 @@ mod tests {
 
     #[test]
     fn a_single_letter_reference_is_a_remote_where_drives_do_not() {
-        // rclone's `IsDriveLetter` is false off Windows, so `r:` means the
+        // rclone's drive-letter test is false off Windows, so `r:` means the
         // remote `r` there. DCTL matched Windows everywhere and therefore made
         // `dctl copy /srv/data r:` create a directory literally named `r:` and
         // exit 0 — the backup went somewhere nobody named.
@@ -467,9 +465,9 @@ mod tests {
     fn a_single_letter_remote_is_declarable_and_addressable_off_windows() {
         // The gap this closed: `MIN_REMOTE_NAME_LEN` used to be 2, so `r:`
         // parsed as a remote on Linux and then resolved to nothing, on every
-        // platform, for ever. rclone accepts the name (`configNameRe`) and
-        // addresses it off Windows, so an rclone user migrating a config that
-        // contains one had no path forward at all.
+        // platform, for ever. rclone accepts the name and addresses it off
+        // Windows, so an rclone user migrating a config that contains one had
+        // no path forward at all.
         assert_eq!(
             MIN_REMOTE_NAME_LEN, 1,
             "a name rclone accepts must be declarable"
@@ -530,11 +528,11 @@ mod tests {
 
     #[test]
     fn only_an_ascii_letter_is_a_drive_and_the_rest_are_remotes() {
-        // Corrected against rclone this pass. `IsDriveLetter` requires a single
-        // ASCII letter, so a digit and an accented letter are remotes on Windows
-        // too — the old rule made both local paths there, which meant a config
-        // named `1` was unreachable on the one platform that has drives, for a
-        // drive that cannot exist.
+        // Corrected against rclone this pass. Its drive-letter test requires a
+        // single ASCII letter, so a digit and an accented letter are remotes on
+        // Windows too — the old rule made both local paths there, which meant a
+        // config named `1` was unreachable on the one platform that has drives,
+        // for a drive that cannot exist.
         assert_eq!(remote_on("1:file", WINDOWS), "1");
         assert_eq!(remote_on("é:x", WINDOWS), "é");
         assert_eq!(remote_on("1:file", POSIX), "1");

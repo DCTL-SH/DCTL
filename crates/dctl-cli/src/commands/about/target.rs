@@ -263,9 +263,9 @@ mod tests {
     fn a_one_letter_remote_loads_and_is_addressable_where_no_drive_shadows_it() {
         // The sharpest edge in the CLI, exercised end to end, and corrected this
         // pass: a file declaring `[remotes.C]` now *loads* on every platform,
-        // because rclone's `configNameRe` accepts the name and a config that
-        // could not be imported was the whole of the gap. What differs by
-        // platform is only whether `C:\Users\me` reaches it.
+        // because rclone's own name grammar accepts it and a config that could
+        // not be imported was the whole of the gap. What differs by platform is
+        // only whether `C:\Users\me` reaches it.
         let (_dir, ctx) = ctx_with_config("[remotes.C]\ntype = \"b2\"\nbucket = \"wrong\"\n");
         let described = Described::resolve(&ctx, Some("C:x")).expect("the remote is declared");
         if crate::constants::DRIVE_LETTERS_EXIST {

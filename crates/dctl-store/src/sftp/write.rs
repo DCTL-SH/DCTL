@@ -456,7 +456,7 @@ mod tests {
     /// find a difference, and upload it again — forever, with nothing on either
     /// stream to say why. Deleting the `set_times` call, or the modification
     /// time inside it, turns this red in `cargo test --workspace`, which is
-    /// exactly what `HANDOVER.md` §15.4 could not say before.
+    /// exactly what nothing in the gate could say before this test existed.
     #[tokio::test]
     async fn a_write_stamps_the_source_time_on_the_staging_path_before_the_rename() {
         let fake = Fake::default();

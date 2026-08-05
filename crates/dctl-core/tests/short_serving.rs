@@ -335,9 +335,8 @@ async fn a_footer_the_store_will_not_serve_in_full_is_refused_not_skipped() {
     // recorded hash, which cannot match — so the *failure* still happens, and it
     // says the object's footer does not match the bytes it served. That is a
     // report of a corrupt archive for a store that merely stopped talking, and
-    // it is the exact substitution `HANDOVER.md` §16.1 was about: an operator
-    // told their data is damaged goes looking for a backup instead of at their
-    // network.
+    // that substitution is the whole defect: an operator told their data is
+    // damaged goes looking for a backup instead of at their network.
     let sealed = sealed().await;
     let footer_len = 32;
     let vault = short_vault(&sealed, sealed.object_len - footer_len / 2).await;

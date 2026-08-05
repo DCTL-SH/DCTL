@@ -7,14 +7,14 @@
 //! around, because a test that mutates the environment of a multi-threaded test
 //! binary is a test that changes another test's answer.
 //!
-//! So the arms of that match had **no way in from a test at all**, and what lives
-//! in them is the last step of every per-remote setting's journey: the
+//! So the arms of that match had **no way in from a test at all**, and what
+//! lives in them is the last step of every per-remote setting's journey: the
 //! configuration file's `chunk_size` becomes a `Target` field, and one line in
 //! one arm passes it to the constructor. That line was measured: dropping it on
-//! the B2 arm left `cargo test --workspace` entirely green (`HANDOVER.md`
-//! §35.3), while the *helper* it calls has been covered for two passes. The
-//! setting parses, round-trips through `config show`, reaches the resolver, and
-//! then an operator's memory ceiling is silently ignored.
+//! the B2 arm left `cargo test --workspace` entirely green, while the *helper*
+//! it calls has been covered for two passes. The setting parses, round-trips
+//! through `config show`, reaches the resolver, and then an operator's memory
+//! ceiling is silently ignored.
 //!
 //! [`Vars`] is the seam that ends that. Production passes [`ProcessVars`] and
 //! behaves exactly as before; a test passes a map and can then assert what came

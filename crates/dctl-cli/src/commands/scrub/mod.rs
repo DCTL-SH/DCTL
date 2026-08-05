@@ -220,7 +220,7 @@ pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
 
     // The target's own policy, not the flag alone: `verify = "strict"` on the
     // remote being scrubbed is the operator saying how hard this destination is
-    // checked, and it was read by nothing until §29.
+    // checked, and it was read by nothing until it was wired here.
     let requested = ctx.verify_mode_for(&target.spec())?;
     if !mode::proves_whole_plaintext(requested) {
         ctx.out.warn(format!(
@@ -437,7 +437,7 @@ mod tests {
         // two commands reach the gate down different paths — `verify` from a
         // listing walk, `scrub` from the index — and a claim only one of them
         // enforced is a claim nobody can rely on. That is the exact history of
-        // the `assurance` field itself (`HANDOVER.md` §31.4).
+        // the `assurance` field itself.
         let (_dir, config) = plain_remote(&[("a.txt", b"1"), ("sub/b.txt", b"22")]);
         let (ctx, args) = parse(&["scrub", "store:", "--config", &config]);
 

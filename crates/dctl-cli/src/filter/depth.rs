@@ -3,8 +3,8 @@
 //! Depth is counted in **path components below the transfer root**, so the root
 //! itself is 0, a file sitting directly in it is 1, and `a/b.txt` is 2. That is
 //! rclone's reading, in which `--max-depth 1` means "the top level only" — and
-//! it is the reading a person checks against their own shell, where
-//! `ls` shows exactly the entries at depth 1.
+//! it is the reading a person checks against their own shell, where `ls` shows
+//! exactly the entries at depth 1.
 //!
 //! Counting from the *logical* path rather than from a walk's own recursion
 //! counter is what keeps a local walk and a remote listing in step. A remote

@@ -114,7 +114,8 @@ fn run(cli: Cli) -> ExitCode {
     // and it did: measured live, a `--max-duration 3s` copy of 8 MiB at
     // `--bwlimit 64k` into a configured `local:` remote printed its deadline on
     // time and exited **126 s** later. The report was right and the process was
-    // still there, which is §32.9's complaint with a new cause.
+    // still there — the same defect with a new cause: a deadline that reports
+    // on time and does not end the run.
     //
     // The cause is that `spawn_blocking` work cannot be cancelled. `local:`
     // copies inside one and paces there with a real `std::thread::sleep`
@@ -256,8 +257,8 @@ async fn execute(cli: Cli) -> (ExitCode, Ending) {
             // blocking read inside `spawn_blocking`, an `ssh` child, a
             // filesystem call in uninterruptible sleep. Dropping the command
             // future is what makes `--max-duration` a bound rather than a
-            // request, and it is exactly what rclone's default `--cutoff-mode
-            // hard` does with a cancelled context (`fs/sync/sync.go:203-205`).
+            // request, and it is exactly what rclone's default
+            // `--cutoff-mode hard` does with a cancelled context.
             //
             // Nothing is left half-written by it. A verified write commits only
             // when the stored bytes match, so an abandoned object was never an

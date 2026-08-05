@@ -1,17 +1,19 @@
 //! Native SFTP backend — a verified-write [`Backend`] over an SSH host, driven by
-//! the **system `ssh`** so `~/.ssh/config` is honored transparently.
+//! the **system `ssh`** so `~/.ssh/config` is honoured transparently.
 //!
 //! # Why the system ssh (and not a pure-Rust SSH client)
 //!
-//! DCTL's target hosts are often only reachable through an `~/.ssh/config` entry —
-//! e.g. `lsx-001` uses `ProxyCommand cloudflared access ssh --hostname %h` plus a
-//! specific `IdentityFile`. A pure-Rust SSH library (russh/ssh2) would ignore that
+//! DCTL's target hosts are often only reachable through an
+//! `~/.ssh/config` entry — e.g. `backup.example.com` uses
+//! `ProxyCommand cloudflared access ssh --hostname %h` plus a specific
+//! `IdentityFile`. A pure-Rust SSH library (russh/ssh2) would ignore that
 //! `ProxyCommand` and could never connect. So this backend uses the [`openssh`]
 //! crate, which drives the real `ssh` binary and keeps a persistent multiplexed
 //! (`ControlMaster`) session: [`Session::connect_mux`] resolves the destination
-//! exactly as `ssh <host>` would — `ProxyCommand`, `IdentityFile`, `User`, `Port`,
-//! and every other `Host` directive apply — and [`openssh_sftp_client`] runs the
-//! `sftp` subsystem over that same mux session for all file operations.
+//! exactly as `ssh <host>` would — `ProxyCommand`, `IdentityFile`, `User`,
+//! `Port`, and every other `Host` directive apply — and [`openssh_sftp_client`]
+//! runs the `sftp` subsystem over that same mux session for all file
+//! operations.
 //!
 //! # Path mapping
 //!
@@ -45,7 +47,7 @@
 //!
 //! The rule and the order that carries it are in [`ops`] and [`write`], stated
 //! against a trait so both are provable without an ssh host — which they were
-//! not, and the cost of that is `HANDOVER.md` §15.4.
+//! not, and the cost of that is what the next section sets out.
 //!
 //! # What is below the trait, and how it is reached
 //!
@@ -164,10 +166,11 @@ const PAGE_SIZE: usize = 1000;
 /// Connection settings for an [`SftpBackend`].
 ///
 /// The one required field is [`host`](SftpConfig::host): a destination `ssh`
-/// understands — a bare `Host` alias from `~/.ssh/config` (e.g. `"lsx-001"`), or a
-/// full `user@host:port`. Resolving user/port/identity/ProxyCommand is delegated to
-/// `ssh` and the user's config, which is exactly what makes cloudflared-proxied
-/// hosts work. [`base`](SftpConfig::base) is the remote directory objects live under.
+/// understands — a bare `Host` alias from `~/.ssh/config` (e.g.
+/// `"backup.example.com"`), or a full `user@host:port`. Resolving
+/// user/port/identity/ProxyCommand is delegated to `ssh` and the user's config,
+/// which is exactly what makes cloudflared-proxied hosts work.
+/// [`base`](SftpConfig::base) is the remote directory objects live under.
 #[derive(Clone, Debug)]
 pub struct SftpConfig {
     /// SSH destination as `ssh` resolves it: a `~/.ssh/config` `Host` alias or
@@ -241,9 +244,9 @@ pub struct SftpBackend {
     /// operation must open another.
     ///
     /// A cell rather than a field, because "the session is gone" has to be
-    /// expressible. It is the one-connection form of rclone's pool
-    /// (`backend/sftp/sftp.go:804-833`), which discards a closed connection on
-    /// the way out and dials when it finds nothing to hand over.
+    /// expressible. It is the one-connection form of rclone's connection pool,
+    /// which discards a closed connection on the way out and dials when it
+    /// finds nothing to hand over.
     ///
     /// An `RwLock` and not a `Mutex`: every ordinary operation only *reads* it,
     /// so concurrent requests on one healthy session do not queue behind each
@@ -331,7 +334,7 @@ impl SftpBackend {
     /// *below* the [`ops::RemoteFs`] seam, in the code that talks to the client
     /// library. Their only witness was `tests/sftp_live.rs`, which is
     /// `#[ignore]`d and needs `DCTL_SFTP_HOST`, so deleting any of the three left
-    /// `cargo test --workspace` entirely green (`HANDOVER.md` §23.0).
+    /// `cargo test --workspace` entirely green.
     ///
     /// `stdin` is where requests are written and `stdout` is where responses are
     /// read — the shape a subprocess's pipes have, and the shape
@@ -360,10 +363,10 @@ impl SftpBackend {
     /// **The seam that makes re-dialling testable**, and the reason it is public.
     /// A re-dial whose only witness needs a real `sshd` is a re-dial the stated
     /// gate does not hold — which is the position two of this backend's other
-    /// guarantees were in, and what `HANDOVER.md` §11.3 item 10 is about. A
-    /// dialer that serves the protocol in this process closes it: the real
-    /// backend, the real client library, the real packets, dialled again for
-    /// real after a session is severed.
+    /// guarantees were in, and the gap this seam exists for. A dialer that
+    /// serves the protocol in this process closes it: the real backend, the
+    /// real client library, the real packets, dialled again for real after a
+    /// session is severed.
     ///
     /// # Errors
     /// Whatever the first dial reported.
@@ -377,8 +380,8 @@ impl SftpBackend {
         // The first dial is bounded exactly as every later one is. A run that
         // could not be ended while it was *opening* its first connection would
         // be a run `--max-duration` did not cover, and the case is not
-        // hypothetical: §32.9's `sftp:` arm hung on a replacement `ssh`, and
-        // nothing about the first `ssh` makes it different from the second.
+        // hypothetical: the measured `sftp:` arm hung on a replacement `ssh`,
+        // and nothing about the first `ssh` makes it different from the second.
         let link = Arc::new(dial_within(dialer.as_ref(), &deadlines).await?);
         // One `stat`, on the first connection only. A base that is absent now
         // may be created by the first write; one that is present may never be
@@ -431,9 +434,9 @@ impl SftpBackend {
     /// The window this backend moves bytes in, after clamping.
     ///
     /// The far end of the `chunk_size` journey, and public so a test can assert
-    /// it without a server: §21.7's lesson is that the middle of a setting's
-    /// path is where this project loses one, so both ends are pinned and the
-    /// resolver's end alone is not enough.
+    /// it without a server: the middle of a setting's path is where this
+    /// project loses one, so both ends are pinned and the resolver's end alone
+    /// is not enough.
     #[must_use]
     pub const fn chunk_size(&self) -> u64 {
         self.chunk
@@ -948,10 +951,9 @@ impl Backend for SftpBackend {
             })
             .await?;
 
-        // First page only. This backend re-walks the whole subtree per call
-        // (`HANDOVER.md` §9.3 item 10), so attaching the report to every page
-        // would multiply one tree's links by the page count and report a number
-        // that was never true.
+        // First page only. This backend re-walks the whole subtree on every
+        // call, so attaching the report to every page would multiply one tree's
+        // links by the page count and report a number that was never true.
         let (links, specials) = if cursor.is_none() {
             (walked.links, walked.specials)
         } else {
@@ -1032,7 +1034,7 @@ impl Backend for SftpBackend {
 
 /// One dial, bounded by `--contimeout` and by the run's own deadline.
 ///
-/// **The hole §32.9 measured on this backend.** Its `sftp:` arm reported the
+/// **The hole measured on this backend.** Its `sftp:` arm reported the
 /// deadline firing at exactly 30 s and the run *not terminated after 600 s*: the
 /// session was discarded correctly, the retry layer asked for another, and the
 /// replacement `ssh` hung on the same black hole. Everything above this function
@@ -1045,9 +1047,9 @@ impl Backend for SftpBackend {
 /// and then goes quiet are all past the point `ConnectTimeout` stops watching.
 /// The number is still handed to `ssh` as well ([`dial::SshDialer`]) so the
 /// whole `ProxyCommand` chain is bounded from the inside too, exactly as rclone
-/// does (`backend/sftp/sftp.go:946`,
-/// `ssh.ClientConfig.Timeout = ci.ConnectTimeout`). The two are complementary,
-/// not duplicates: one bounds what `ssh` can see and one bounds `ssh` itself.
+/// does by handing its own connect timeout to the ssh client. The two are
+/// complementary, not duplicates: one bounds what `ssh` can see and one bounds
+/// `ssh` itself.
 ///
 /// A free function rather than a method because the **first** dial happens
 /// before there is a backend to call a method on, and a first connection that
@@ -1104,7 +1106,7 @@ async fn dial_within(dialer: &dyn SftpDial, deadlines: &Deadlines) -> Result<Lin
 /// * **The request met an I/O fault** — [`StoreError::Io`], carrying the errno,
 ///   which is what decides it: a reset connection or an `EAGAIN` on the link is
 ///   retried, a permission denial is not
-///   (`crate::retry::observed`, following `fs/fserrors/retriable_errors.go`).
+///   (`crate::retry::observed`, following rclone's retriable-error set).
 /// * **The session itself is gone** — every remaining variant of
 ///   [`SftpError`], plus the `io` kinds that mean the pipe to `ssh` has closed.
 ///   [`StoreError::Transport`], because nothing answered and because another
@@ -1117,8 +1119,7 @@ async fn dial_within(dialer: &dyn SftpDial, deadlines: &Deadlines) -> Result<Lin
 ///   there and then reporting that five attempts were made is the shape of
 ///   claim `PLAN.md` §6 forbids. What changed is not the wording but the
 ///   capability, which is the only thing that makes the new answer true. rclone
-///   reaches the same place from a connection pool
-///   (`backend/sftp/sftp.go:804-833`).
+///   reaches the same place from a connection pool.
 ///
 /// The protocol's other server-side codes — `PermDenied`, `Failure`,
 /// `BadMessage`, `OpUnsupported` — are statements about the request and are

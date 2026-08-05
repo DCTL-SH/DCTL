@@ -1316,10 +1316,9 @@ fn sync_into_a_plain_remote_is_incremental_and_check_agrees_with_it() {
         .stdout(predicates::str::contains("differ  a.txt"));
 
     // …and so does `sync --checksum`, which used to exit **7** here with
-    // `--checksum: no content hash for 'a.txt'` (`HANDOVER.md` §11.2). A plain
-    // store holds the plaintext, so reading an object and hashing it is exactly
-    // the digest the comparison needs; it costs a read, and the run says so
-    // once.
+    // `--checksum: no content hash for 'a.txt'`. A plain store holds the
+    // plaintext, so reading an object and hashing it is exactly the digest the
+    // comparison needs; it costs a read, and the run says so once.
     sync(&["--checksum"])
         .assert()
         .success()
@@ -3617,12 +3616,12 @@ fn max_transfer_smaller_than_the_first_file_moves_nothing() {
 #[test]
 fn max_duration_stops_the_run_and_reaches_exit_10() {
     // Exit code 10 was reserved and unreachable in every build, because
-    // `--max-duration` did not exist — and its absence was the defect
-    // `HANDOVER.md` §11.3 item 2 names: `--timeout` bounds one attempt, so a run
-    // that met a dead network had no flag that bounded it at all, and one
-    // measured against live B2 under `--timeout 30 --retries 1` was still going
-    // **943.6 s** after the cut. This is the test that makes the published
-    // contract real, against the real binary.
+    // `--max-duration` did not exist — and its absence was the defect:
+    // `--timeout` bounds one attempt, so a run that met a dead network had no
+    // flag that bounded it at all, and one measured against live B2 under
+    // `--timeout 30 --retries 1` was still going **943.6 s** after the cut.
+    // This is the test that makes the published contract real, against the real
+    // binary.
     //
     // The window is deliberately far too short rather than merely tight, so the
     // assertion is about the *stop* and not about a race with the machine's
@@ -3662,8 +3661,9 @@ fn max_duration_stops_the_run_and_reaches_exit_10() {
 
 #[test]
 fn max_duration_ends_the_process_rather_than_merely_reporting_the_deadline() {
-    // The half §32.9 is actually about. The deadline firing was never in doubt —
-    // it fired at exactly 30 s, to the second — and the run carried on for
+    // The half the defect is actually about. The deadline firing was never in
+    // doubt — it fired at exactly 30 s, to the second — and the run carried on
+    // for
     // another fifteen minutes. So what is measured here is **wall time of the
     // whole process**, against a run that would otherwise take far longer than
     // its window: 2 MiB at 32 KiB/s is a minute of transfer, given two seconds.
@@ -3706,7 +3706,7 @@ fn max_duration_ends_the_process_even_when_the_work_it_stopped_cannot_be_cancell
     // release binary, `--max-duration 3s` on 8 MiB at `--bwlimit 64k` printed
     // its deadline on time and the process exited **126 seconds** later — the
     // whole of the pacing, for bytes nobody would ever look at. The report was
-    // right and the run was still there, which is `HANDOVER.md` §32.9's
+    // right and the run was still there, which is the 943.6 s overrun's
     // complaint with a new cause.
     //
     // The **bare-path** form of the same copy exits on time and always did, so
@@ -4092,8 +4092,8 @@ fn the_deadlines_publish_the_defaults_they_apply() {
 
     assert!(stdout.contains("--timeout"), "{stdout}");
     assert!(stdout.contains("--contimeout"), "{stdout}");
-    // rclone's own two numbers (`fs/config.go:115-123`), which is what makes a
-    // migrating script's expectations hold.
+    // rclone's own two numbers, which is what makes a migrating script's
+    // expectations hold.
     assert!(
         stdout.contains("[default: 300]"),
         "the idle deadline must publish its five minutes:\n{stdout}"
@@ -4277,12 +4277,12 @@ fn status_records(stderr: &[u8]) -> usize {
 /// `-P` has to change what a run actually writes, or it is a belief rather than
 /// a flag.
 ///
-/// This is `HANDOVER.md` §11.2's fourth bullet, end to end: the flag was
-/// accepted, documented, and produced byte-identical output in every
-/// environment. Off a terminal the display is periodic records, and their
-/// cadence is what `-P` selects — a minute by default, which is right for an
-/// unattended nightly job and useless to somebody watching, against one second,
-/// which is what asking to watch means.
+/// The defect, driven end to end: the flag was accepted, documented, and
+/// produced byte-identical output in every environment. Off a terminal the
+/// display is periodic records, and their cadence is what `-P` selects — a
+/// minute by default, which is right for an unattended nightly job and useless
+/// to somebody watching, against one second, which is what asking to watch
+/// means.
 ///
 /// Both runs are redirected, because `assert_cmd` captures the streams: that is
 /// the environment the flag exists for and the one where the previous behaviour
@@ -4399,7 +4399,7 @@ fn log_source_stamps_every_record_even_when_a_log_file_is_open() {
     //
     // The assertion is on the *records*, not on the flag being read: a flag
     // whose only witness is that some code mentions the field is exactly what
-    // §13.3's guard admits it cannot catch.
+    // `cli::reach`'s scan admits it cannot catch.
     const PAYLOAD: &[u8] = b"a record worth locating in the source";
 
     let sandbox = Sandbox::new();
@@ -4494,11 +4494,11 @@ fn canonical_layout() -> (Sandbox, PathBuf) {
 #[cfg(unix)]
 #[test]
 fn copying_a_tree_whose_data_is_a_symlink_says_so_instead_of_exiting_quietly() {
-    // `HANDOVER.md` §11.2's last data-destroying defect, driven through the
-    // shipped binary. `/srv/data -> /mnt/bigdisk/data` is the canonical layout
-    // of every machine with a small system disk, and pointing DCTL at `/srv`
-    // copied `readme.txt`, said `Errors: 0`, and exited 0 — the operator found
-    // out on restore day.
+    // The last of the data-destroying defects, driven through the shipped
+    // binary. `/srv/data -> /mnt/bigdisk/data` is the canonical layout of every
+    // machine with a small system disk, and pointing DCTL at `/srv` copied
+    // `readme.txt`, said `Errors: 0`, and exited 0 — the operator found out on
+    // restore day.
     //
     // The default still does not follow the link. What it may never do again is
     // pass over it in silence, so the assertion is on *stderr*: the count, and
@@ -4630,10 +4630,10 @@ fn verbose_names_the_links_a_run_passed_over() {
 #[cfg(unix)]
 #[test]
 fn a_symlink_cycle_terminates_rather_than_filling_the_disk() {
-    // `HANDOVER.md` §11.3 item 1 names loop protection as the reason this fix
-    // had not been attempted. A link at its own ancestor is the oldest way to
-    // make a backup tool run until the disk fills; the run must finish, list the
-    // real file once, and say which link closed the loop.
+    // Loop protection was the reason this fix had not been attempted. A link at
+    // its own ancestor is the oldest way to make a backup tool run until the
+    // disk fills; the run must finish, list the real file once, and say which
+    // link closed the loop.
     let sandbox = Sandbox::new();
     let root = sandbox.dir("tree");
     sandbox.write("tree/inner/a.txt", b"a");
@@ -4708,8 +4708,8 @@ fn a_link_out_of_the_tree_is_followed_or_refused_by_policy_and_never_in_silence(
 fn a_broken_link_is_named_and_counted_without_stopping_the_run() {
     // A dangling link must not abort a backup of 200 000 other files. It must
     // also not pass unnoticed: the operator asked for it and did not get it, so
-    // it is an error the exit code reflects — the same answer rclone gives
-    // (`backend/local/local.go:741` fails the sync on one).
+    // it is an error the exit code reflects — the same answer rclone gives,
+    // which fails the sync on one.
     let sandbox = Sandbox::new();
     let root = sandbox.dir("tree");
     sandbox.write("tree/good.txt", b"kept");
@@ -4790,7 +4790,7 @@ fn plant_staging_file(directory: &Path, bytes: &[u8]) -> PathBuf {
 #[cfg(unix)]
 #[test]
 fn cleanup_reclaims_the_staging_file_an_interrupted_write_left_in_a_plain_store() {
-    // `HANDOVER.md` §11.2: a `SIGKILL` three seconds into a copy leaves
+    // A `SIGKILL` three seconds into a copy leaves
     // `o/.dctl-staging.<pid>.<seq>` in the store, and
     // `cleanup --class staging --min-age 0s` reported `OK removed: 0 object(s)`
     // with the file still there. A nightly backup over a flaky link leaks one
@@ -4913,8 +4913,7 @@ fn a_sweep_that_left_debris_because_it_was_young_says_so_rather_than_reporting_n
     // transfer still running, which is why `--min-age` is load-bearing rather
     // than a tuning knob. Saying "no reclaimable debris found" over it is not.
     // That sentence is the false all-clear this whole family spent a release
-    // printing — the one `HANDOVER.md` §11.3 item 1 was closed to stop — moved
-    // from the listing to the age filter rather than removed.
+    // printing, moved from the listing to the age filter rather than removed.
     let sandbox = Sandbox::new();
     let store = sandbox.dir("store");
     let debris = plant_staging_file(&store.join("o"), &vec![9u8; 8192]);
@@ -4933,7 +4932,8 @@ fn a_sweep_that_left_debris_because_it_was_young_says_so_rather_than_reporting_n
         // all-clear is emitted through `Out::info`, which is silent below
         // verbosity 1 — so this assertion used to be the absence of a sentence
         // the command would not have printed either way, and deleting the guard
-        // that suppresses it left the gate green. Measured: `HANDOVER.md` §35.3.
+        // that suppresses it left the gate green — which is how the gap was
+        // found, by reinstating the defect.
         .arg("-v")
         .arg("cleanup")
         .arg(format!("{PLAIN_REMOTE}:"))
@@ -4984,7 +4984,7 @@ fn an_explicit_min_age_that_holds_everything_still_names_what_it_held() {
     // 36-hour minimum over a file planted a moment ago exercises is the
     // *younger-than* arm — the same one the test above it drives, through a
     // different door. Deleting the unknown-age arm therefore left the gate
-    // green, and the name said otherwise (`HANDOVER.md` §35.3).
+    // green, and the name said otherwise.
     //
     // No shipped backend can be made to omit a modification time from a listing
     // on demand, so that arm is held where it can be held honestly: in
@@ -5137,12 +5137,12 @@ fn tree_with_special_files(sandbox: &Sandbox) -> PathBuf {
 #[cfg(unix)]
 #[test]
 fn a_fifo_and_a_socket_in_the_source_are_counted_and_named_rather_than_passed_over() {
-    // `HANDOVER.md` §11.2: a tree holding `real.txt` and a named pipe copied as
+    // A tree holding `real.txt` and a named pipe copied as
     // `Files: 1 / 1, Errors: 0`, exit 0, with the pipe appearing nowhere in
     // stdout, stderr or the log even at `-v`. Skipping is right and matches
-    // rclone — but rclone logs `Can't transfer non file/directory`
-    // (`backend/local/local.go:1301`), and DCTL's own source cites that very
-    // line as its authority for skipping while omitting the half that speaks.
+    // rclone — but rclone logs `Can't transfer non file/directory`, and DCTL's
+    // own source cited rclone as its authority for skipping while omitting the
+    // half that speaks.
     let sandbox = Sandbox::new();
     let src = tree_with_special_files(&sandbox);
     let destination = sandbox.dir("dst");
@@ -5169,8 +5169,8 @@ fn a_fifo_and_a_socket_in_the_source_are_counted_and_named_rather_than_passed_ov
         stderr.contains("sock: a unix socket"),
         "-v must name the socket and say what it is:\n{stderr}"
     );
-    // The skip itself is unchanged, and it is still not an error: rclone's
-    // `Storable` returns false and logs, and raises no error count with it.
+    // The skip itself is unchanged, and it is still not an error: rclone treats
+    // the entry as unstorable and logs it, raising no error count with it.
     assert!(sandbox.exists("dst/keep.txt"));
     assert!(!sandbox.exists("dst/pipe"));
     assert!(!sandbox.exists("dst/sock"));

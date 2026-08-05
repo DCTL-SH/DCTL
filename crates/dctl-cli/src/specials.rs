@@ -15,10 +15,9 @@
 //! tree and did not get all of it, and finding that out from a restore is far
 //! too late. **Never an error**, because there is nothing there to lose: a fifo
 //! has no bytes, a socket has no bytes, a device node's contents are not the
-//! device. rclone settles it identically — `Storable` returns false and logs
-//! `Can't transfer non file/directory` (`backend/local/local.go:1301`) without
-//! touching `accounting.Stats(ctx).Error(...)`, so a `/var` full of sockets does
-//! not fail a sync. A broken *symlink* is an error and this is not, and the
+//! device. rclone settles it identically — it logs the entry as one it cannot
+//! transfer and counts no error against the run, so a `/var` full of sockets
+//! does not fail a sync. A broken *symlink* is an error and this is not, and the
 //! difference is exactly that a broken link names a path that was supposed to
 //! have bytes behind it.
 //!
@@ -122,8 +121,8 @@ mod tests {
     #[test]
     fn a_skipped_special_file_is_worth_saying_and_is_not_an_error() {
         // A socket in `/var/run` must not fail a nightly backup; it must not be
-        // invisible either. rclone logs and does not count an error, and the
-        // whole of this fix is the logging half it left out.
+        // invisible either. rclone logs it and counts no error, and the whole of
+        // this fix is the logging half DCTL left out.
         let mut specials = SpecialReport::default();
         specials.observe("run/docker.sock", SpecialKind::Socket);
 

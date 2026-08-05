@@ -21,8 +21,8 @@
 //!
 //! That is the forbidden class of `PLAN.md` §6 in its purest form: work reported
 //! as done that did not happen. It is the write-side twin of the read-side
-//! defect `HANDOVER.md` §11.2 records — an unmounted volume listing as an empty
-//! backup — which [`crate::local::LocalFs`]'s caller guards with
+//! defect — an unmounted volume listing as an empty backup — which
+//! [`crate::local::LocalFs`]'s caller guards with
 //! `Place::require_readable_tree`. Nothing guarded the write.
 //!
 //! # Why identity, and not existence
@@ -50,7 +50,7 @@
 //! filesystem owns. What it removes is the *silent* case — a whole run's worth of
 //! objects written into a replacement directory and reported as success — and it
 //! is `local:` only. The equivalent for a deleted bucket or a removed SFTP base
-//! is `HANDOVER.md` §11.3's business, not this module's.
+//! is the remote backends' business, not this module's.
 
 use std::path::Path;
 

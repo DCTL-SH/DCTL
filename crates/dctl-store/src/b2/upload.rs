@@ -10,14 +10,15 @@
 //! `to_vec` or `copy_from_slice` on a body, and nothing should: those were the
 //! two lines that made this backend cost twice its part size while the doc
 //! comment above the buffer said `O(part_size)`. Measured on the release binary
-//! under a 512 MiB cap, that was 213 MiB of RSS for every object from 128 MiB to
-//! 4 GiB; the same runs afterwards are in `HANDOVER.md` §25.
+//! under a 512 MiB cap, that was 213 MiB of RSS for every object from 128 MiB
+//! to 4 GiB; repeating those runs against the shape kept here gives 147 MiB
+//! across the same range.
 //!
-//! `rclone` reaches the same place from the other direction: it hands the part
-//! upload an `io.ReadSeeker` over one pooled buffer and **rewinds** it for a
-//! retry rather than buffering a second copy (`backend/b2/upload.go:251-259`),
-//! and returns the buffer to a pool afterwards (`lib/multipart/multipart.go:74`,
-//! `:80-83`). A `Bytes` clone is the same idea with the refcount doing the work.
+//! rclone reaches the same place from the other direction: it hands the part
+//! upload a seekable reader over one pooled buffer and **rewinds** it for a
+//! retry rather than buffering a second copy, then returns the buffer to a pool
+//! afterwards. A `Bytes` clone is the same idea with the refcount doing the
+//! work.
 
 use std::path::Path;
 
@@ -61,8 +62,8 @@ fn file_info(modified: SourceModified) -> serde_json::Value {
 /// assembles, and that is the point: the source's modification time is carried
 /// in `fileInfo`, and while each call site built its own JSON the only thing
 /// that could notice the field going missing was a live test against a real
-/// bucket (`HANDOVER.md` §15.4). Deleting it from here fails
-/// `cargo test --workspace`, which is the gate this project quotes.
+/// bucket. Deleting it from here fails `cargo test --workspace`, which is the
+/// gate this project quotes.
 fn start_large_file_body(
     bucket_id: &str,
     key: &ObjectKey,
@@ -829,8 +830,8 @@ mod tests {
     /// The two large-file paths used to assemble this inline, so deleting the
     /// `fileInfo` line from either left `cargo test --workspace` green and was
     /// caught only by `b2_stores_and_returns_the_source_modification_time` with
-    /// live credentials (`HANDOVER.md` §15.4). Asserting the body as a whole is
-    /// what closes that: there is one description, and this is a test of it.
+    /// live credentials. Asserting the body as a whole is what closes that:
+    /// there is one description, and this is a test of it.
     #[test]
     fn a_large_file_starts_with_the_source_time_in_its_file_info() {
         assert_eq!(

@@ -56,8 +56,8 @@ impl Mode {
     /// cadence, so a redirected run reports every second instead of every
     /// `--stats` seconds. Between the two, the flag has an observable effect in
     /// every environment where progress is possible at all — which is what
-    /// [`crate::cli::reach`] requires of every flag and what HANDOVER §11.2 said
-    /// this one still lacked.
+    /// [`crate::cli::reach`] requires of every flag, and what this one lacked
+    /// while it changed nothing anywhere.
     ///
     /// Note that the terminal test is on **stderr**, not stdout: progress is
     /// written to stderr precisely so `dctl cat … | ffplay -` can keep its bars
@@ -133,7 +133,7 @@ mod tests {
     /// stdout. That is a courtesy, not a constraint — progress is written to
     /// stderr and cannot reach the JSON — so an operator who wants to watch a
     /// four-hour `--json` run can have it back. Without this, `-P` changed
-    /// nothing in any environment (HANDOVER §11.2).
+    /// nothing in any environment.
     #[test]
     fn progress_restores_the_display_that_machine_output_silences() {
         for is_terminal in [false, true] {

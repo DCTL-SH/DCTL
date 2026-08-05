@@ -21,10 +21,9 @@
 //!
 //! This is the one place these flags **refuse** an input rclone accepts, and it
 //! exists because the two tools disagree about what the input means by a factor
-//! of 1024. rclone's `SizeSuffix.Set` (`fs/sizesuffix.go:141`) gives a bare
-//! number the *kibibyte* multiplier — `--max-size 1024` there is one mebibyte —
-//! while [`parse_size`] reads it as bytes, which is what every other size in
-//! DCTL's own output means.
+//! of 1024. rclone gives a bare number the *kibibyte* multiplier —
+//! `--max-size 1024` there is one mebibyte — while [`parse_size`] reads it as
+//! bytes, which is what every other size in DCTL's own output means.
 //!
 //! Either reading is defensible; silently applying one to a command line written
 //! for the other is not. `--max-size 100` would carry files up to 100 KiB for an
@@ -249,11 +248,11 @@ mod tests {
 
     #[test]
     fn a_bare_number_is_refused_because_rclone_and_dctl_read_it_1024_apart() {
-        // The silent divergence this closes. rclone's `SizeSuffix.Set` gives a
-        // unitless value the kibibyte multiplier (`fs/sizesuffix.go:141`), so
-        // `--max-size 100` selects files up to 100 KiB there and would have
-        // selected files up to 100 bytes here. On a sync the files in between
-        // are deletion candidates at the destination, not merely absent.
+        // The silent divergence this closes. rclone gives a unitless value the
+        // kibibyte multiplier, so `--max-size 100` selects files up to 100 KiB
+        // there and would have selected files up to 100 bytes here. On a sync
+        // the files in between are deletion candidates at the destination, not
+        // merely absent.
         for flag in [FILTER_FLAG_MIN_SIZE, FILTER_FLAG_MAX_SIZE] {
             let error = if flag == FILTER_FLAG_MIN_SIZE {
                 SizeBounds::parse(Some("100"), None)

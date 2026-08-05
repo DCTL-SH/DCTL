@@ -23,8 +23,8 @@
 //! Measured on the shipped binary, on a plain `local:` remote holding three
 //! objects under `verify --allow-read-back`: one object deleted outright gave
 //! `OK  2 objects examined` and **exit 0**. The `--help` of the flag that was
-//! set said the check "is how a replica quietly losing objects is caught"
-//! (`HANDOVER.md` §11.2). It is the one damage measured there that it does not
+//! set said the check "is how a replica quietly losing objects is caught". A
+//! deleted object is the one damage that claim names, and the one it does not
 //! catch.
 //!
 //! ## Why there is no plain manifest, rather than a smaller one

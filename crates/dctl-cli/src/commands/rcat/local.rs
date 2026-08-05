@@ -99,8 +99,9 @@ impl Staging {
         // first; this one reached straight for the staging sibling.
         //
         // Creating it is also what rclone does on every write rather than a
-        // convenience invented here: `Object.Update` opens with `o.mkdirAll()`
-        // (`backend/local/local.go:1555`), and `rclone rcat` goes through it.
+        // convenience invented here: its local backend makes the parent
+        // directory before it opens the object, and `rclone rcat` goes through
+        // that path.
         //
         // The shape that met the defect is the ordinary one — a nightly dump
         // piped into a dated directory — so it failed on the first night of

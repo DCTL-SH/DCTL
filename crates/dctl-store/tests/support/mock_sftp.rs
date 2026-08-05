@@ -9,9 +9,9 @@
 //! that tells the store guard whether the store is still there. Their only
 //! witness was `tests/sftp_live.rs`, which is `#[ignore]`d and needs
 //! `DCTL_SFTP_HOST`, so deleting any of the three left `cargo test --workspace`
-//! entirely green (`HANDOVER.md` §23.0). A guarantee whose only witness needs a
-//! server is a guarantee the stated gate does not hold, and the gate is what
-//! every report in this project quotes as proof.
+//! entirely green, and that was measured rather than assumed. A guarantee whose
+//! only witness needs a server is a guarantee the stated gate does not hold, and
+//! the gate is what every report in this project quotes as proof.
 //!
 //! [`super::mock_b2`] and [`super::mock_s3`] solve the same problem for the two
 //! HTTP providers by speaking their wire protocol on loopback. This is that, one
@@ -224,8 +224,7 @@ pub struct Faults {
     /// under the reader, a backing store that lost a block, a proxy that ended a
     /// transfer early. What it must never produce is a *short object that reads
     /// as complete*, because the digest taken over the prefix is internally
-    /// consistent and wrong — the worst outcome this product has
-    /// (`HANDOVER.md` §26.1).
+    /// consistent and wrong — the worst outcome this product has.
     ///
     /// [`usize::MAX`] means unlimited, and is what [`Faults::new`] sets — which
     /// is why `new` exists beside the derived `Default`: a zero budget would
@@ -242,24 +241,24 @@ pub struct Faults {
     /// **part-way through an object** rather than at the `open`. That distinction
     /// is the point: an `open` that fails leaves nothing behind, and a write that
     /// fails at 60% leaves a staging file holding 60% of an object under a name
-    /// nobody will ever look at again. `HANDOVER.md` §24.1 is what that debris
-    /// costs, and the arms that prevent it are the `remove_quiet` in **each of
-    /// the three writers** — `put_bytes`, `put_stream` and `put_object_stream`
-    /// — which is why the test driven by this knob puts an object through all
-    /// three rather than through whichever one `Backend::put` happens to use.
+    /// nobody will ever look at again. What that debris costs was measured, and
+    /// the arms that prevent it are the `remove_quiet` in **each of the three
+    /// writers** — `put_bytes`, `put_stream` and `put_object_stream` — which is
+    /// why the test driven by this knob puts an object through all three rather
+    /// than through whichever one `Backend::put` happens to use.
     ///
     /// [`usize::MAX`] means unlimited, and is what [`Faults::new`] sets.
     pub accept_at_most: Arc<AtomicUsize>,
     /// Never complete a dial: the connection is opened and the server never
     /// speaks, so the client's protocol handshake waits forever.
     ///
-    /// The **black hole**, at the one place `HANDOVER.md` §32.9 found nothing
-    /// bounding it. Its `sftp:` arm dropped port 22 with `iptables`, watched the
-    /// deadline fire at exactly 30 s, watched the dead session be discarded
-    /// correctly — and then watched the *replacement* `ssh` hang on the same
-    /// black hole, with the run still alive 601 s later. Every layer above the
-    /// dial was working; the dial was the only step in the cycle with no
-    /// deadline on it.
+    /// The **black hole**, at the one place where nothing bounded it. The
+    /// measurement that found it dropped port 22 with `iptables` under an
+    /// `sftp:` run, watched the deadline fire at exactly 30 s, watched the dead
+    /// session be discarded correctly — and then watched the *replacement* `ssh`
+    /// hang on the same black hole, with the run still alive 601 s later. Every
+    /// layer above the dial was working; the dial was the only step in the cycle
+    /// with no deadline on it.
     ///
     /// Reproduces a real server, which is the bar for everything in this
     /// structure: a route black-holed after the TCP connect succeeds, a host
@@ -389,16 +388,15 @@ pub fn start() -> (MockSftp, ClientPipes) {
 // ── re-dialling: many conversations, one directory ───────────────────────────
 //
 // `start` above hands over one pipe pair and is right for every test whose
-// subject is a request. It cannot express the subject of `HANDOVER.md` §11.2's
-// last open entry — *re-dial a dead connection* — because that needs three
-// things this file did not have: a **second** conversation, served on the **same
-// directory** so the recovered operation can be seen to have really happened,
-// and a way to **kill** the first one mid-run.
+// subject is a request. It cannot express the last guarantee left open —
+// *re-dial a dead connection* — because that needs three things this file did
+// not have: a **second** conversation, served on the **same directory** so the
+// recovered operation can be seen to have really happened, and a way to
+// **kill** the first one mid-run.
 //
 // Without them the re-dial would be provable only against a real `sshd`, which
-// is the position `HANDOVER.md` §11.3 item 10 already records for two other
-// guarantees: a promise whose only witness needs a host is a promise the stated
-// gate does not hold.
+// is the position already measured for two other guarantees: a promise whose
+// only witness needs a host is a promise the stated gate does not hold.
 
 /// A server that will answer as many conversations as it is asked for, all of
 /// them over one directory.

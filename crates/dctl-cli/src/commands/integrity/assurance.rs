@@ -8,7 +8,7 @@
 //! | **rot** | are these the bytes that were written? | a digest recorded at write time ([`Assurance`]) |
 //! | **loss** | is everything that was written still here? | a list of what was written ([`Inventory`]) |
 //!
-//! ## Rot: measured, and refused since `HANDOVER.md` §34
+//! ## Rot: measured, then refused
 //!
 //! On a remote that records no digest of its own, `verify` cannot detect a
 //! changed byte: every byte comes back, nothing disagrees with anything, and the
@@ -16,7 +16,7 @@
 //! `sshd`: a byte flipped in place and a 4 KiB object truncated to 100 bytes
 //! produced `ok` in the table and **exit 0** on all four.
 //!
-//! ## Loss: measured, and refused since `HANDOVER.md` §36
+//! ## Loss: measured, then refused
 //!
 //! On **every** plain remote — including one whose provider does record digests
 //! — `verify` enumerates the remote and then checks the keys the remote just
@@ -56,9 +56,9 @@
 //! `verify` and `scrub` share their verdicts, their exit codes and their
 //! wording, and a claim only one of them enforced would be a claim nobody could
 //! rely on — which is the exact history of the `assurance` field itself, which
-//! `scrub` published and `verify` spent on a stderr warning (`HANDOVER.md` §11).
-//! One gate, flattened into both argument structs, so the flags have one
-//! spelling and the refusal has one wording.
+//! `scrub` published and `verify` spent on a stderr warning. One gate,
+//! flattened into both argument structs, so the flags have one spelling and
+//! the refusal has one wording.
 
 use clap::Args;
 
@@ -75,8 +75,8 @@ use crate::source::Claims;
 ///
 /// Flattened into both `VerifyArgs` and `ScrubArgs` rather than declared twice,
 /// and deliberately **not** global flags: eleven flags reached `dctl --help` and
-/// did nothing because they were global and only some commands read them
-/// (`HANDOVER.md` §13). These are on exactly the two commands that honour them.
+/// did nothing because they were global and only some commands read them.
+/// These are on exactly the two commands that honour them.
 #[derive(Args, Debug, Default)]
 pub struct AssuranceArgs {
     /// Run against a remote that cannot detect a changed byte, and accept that
@@ -117,7 +117,7 @@ pub struct AssuranceArgs {
 ///
 /// A struct rather than two parallel `Vec`s, so a notice can never be joined to
 /// another limit's hint — which is the failure mode of a refusal that names the
-/// wrong next action, and `HANDOVER.md` §16 records three of those.
+/// wrong next action, and this CLI has shipped three of those.
 struct Unmet {
     /// What the remote does not have, phrased as a predicate on the remote.
     notice: &'static str,
@@ -379,8 +379,8 @@ mod tests {
 
     #[test]
     fn the_operator_can_ask_for_the_weaker_run_and_then_gets_it() {
-        // The flags have to actually do something, or they are two of the
-        // eleven (`HANDOVER.md` §13).
+        // The flags have to actually do something, or they are two more of
+        // the eleven that reached `--help` and did nothing.
         require("dctl verify", "pl:", plain_filesystem(), &accepting_both())
             .expect("the operator accepted both limits by name");
         require(

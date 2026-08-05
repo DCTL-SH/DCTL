@@ -25,8 +25,8 @@
 //!
 //! What it does **not** prove is anything about a real provider's behaviour —
 //! its eventual consistency, its rate limiting, its error catalogue, or the
-//! quirks R2 and MinIO have that AWS does not. `HANDOVER.md` §11.2 says so
-//! plainly and this comment is not a substitute for that.
+//! quirks R2 and MinIO have that AWS does not. Only a run against the real
+//! provider settles any of those, and this comment is not a substitute for one.
 //!
 //! ## Why it is hand-written
 //!

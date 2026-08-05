@@ -15,15 +15,16 @@
 //! bucket inside a cgroup with `memory.max=512M`, that was **213 MiB of RSS for
 //! every object from 128 MiB to 4 GiB**, and 218 MiB for a 99 MiB one. Flat, as
 //! promised, and twice as large as it needed to be — which is why a flat number
-//! is not by itself evidence of anything. The same runs afterwards are in
-//! `HANDOVER.md` §25.
+//! is not by itself evidence of anything. Repeating those runs against the same
+//! live bucket once the second copy was removed gave **147 MiB on every row**,
+//! the 99 MiB object included.
 //!
 //! ## Why it reads `/proc/self/status`
 //!
 //! `VmHWM` is the kernel's own high-water mark for this process's resident set:
 //! the same quantity `/usr/bin/time -v` reports as *Maximum resident set size*
-//! and the same one the cgroup measurements in `HANDOVER.md` are made of. Nothing
-//! here simulates memory, and no global allocator is installed — this crate is
+//! and the same one the cgroup measurements above are made of. Nothing here
+//! simulates memory, and no global allocator is installed — this crate is
 //! `#![forbid(unsafe_code)]` and a counting allocator needs `unsafe impl`.
 //!
 //! Two consequences, both deliberate:
@@ -34,14 +35,14 @@
 //!   own. A new memory claim about B2 gets a new file.
 //! * **It is Linux-only.** `/proc` is where the number lives. The three gates run
 //!   on Linux; on any other platform this file compiles to nothing and the claim
-//!   rests on the live measurement in `HANDOVER.md` §25, which is where it rested
-//!   entirely before this file existed.
+//!   rests on the live cgroup measurement against a real bucket, which is where
+//!   it rested entirely before this file existed.
 //!
 //! The measurement is bounded on **both** sides. An upper bound alone would be
 //! satisfied by a test that never uploaded anything — `VmHWM` would not move and
 //! the assertion would pass — so the lower bound asserts the part buffer was
 //! visible in the number at all. An instrument that cannot fail is the fault this
-//! project keeps finding in its own harnesses (`HANDOVER.md` §23.10).
+//! project keeps finding in its own harnesses.
 
 #![cfg(target_os = "linux")]
 

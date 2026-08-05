@@ -1,17 +1,18 @@
 //! `chunk_size` at the far end: the number a remote sets, read back out of the
 //! object it sealed.
 //!
-//! §11.3 item 8's remaining half, and the **second** of the two ends that item
-//! insists on. The resolver's end — that `chunk_size = 262144` on a `vault`
-//! remote parses, is refused when it is nonsense, and is carried rather than
+//! The remaining half of `chunk_size`'s wiring, and the **second** of the two
+//! ends a wired setting insists on. The resolver's end — that
+//! `chunk_size = 262144` on a `vault` remote parses, is refused when it is
+//! nonsense, and is carried rather than
 //! dropped — is asserted in `dctl_cli::remote::resolve`. This is the other one:
 //! that the number then reaches the sealer and changes the framing of the bytes
 //! that are actually stored.
 //!
 //! Between the two ends is the middle, and the middle is where this project has
-//! lost a setting before — §21.7, a meter installed in one arm of
-//! `registry::build` and silently dropped in the other four, and §13's eleven
-//! flags that parsed, documented themselves, and reached nothing. A setting is
+//! lost a setting before — a meter installed in one arm of `registry::build`
+//! and silently dropped in the other four, and the eleven flags that parsed,
+//! documented themselves, and reached nothing. A setting is
 //! wired when both ends are pinned, not when either is.
 //!
 //! Every assertion below reads the framing out of the **stored object's own
@@ -90,7 +91,8 @@ async fn sealed_head(backend: &Arc<dyn Backend>) -> dctl_crypto::object::Head {
 /// `put_file` builds the object in memory and `put_file_from_path` streams it
 /// into the backend's pipe. A `chunk_size` that reached one and not the other is
 /// exactly the half-wired state this file exists to refuse, and it is not a
-/// hypothetical shape — it is §13's, arriving in a new place.
+/// hypothetical shape — it is the one that already happened, arriving in a new
+/// place.
 async fn seal_both_ways(
     data: &[u8],
     requested: Option<u64>,

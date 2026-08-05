@@ -5,7 +5,7 @@
 //! back
 //!
 //! A write records the source's own last-modified time as the user-metadata key
-//! `x-amz-meta-mtime`, spelled the way `rclone` spells it (float seconds), so a
+//! `x-amz-meta-mtime`, spelled the way rclone spells it (float seconds), so a
 //! bucket written by DCTL keeps its timestamps when read by rclone and the other
 //! way round. [`head`](S3Client::head) reads it back, which is what
 //! `dctl cat`/`dctl stat` see.
@@ -17,11 +17,11 @@
 //! unchanged tree, exactly as they did before. The time is written and is not
 //! lost; what is missing is a way to read it back a page at a time.
 //!
-//! Closing it means one `HEAD` per listed object, which is what rclone does
-//! (`readMetaData`) — a per-object request against a provider that bills them,
-//! and therefore a cost decision to make deliberately rather than a line to slip
-//! in here. Until that decision is made, this module reports what it can and this
-//! paragraph is the whole of the claim.
+//! Closing it means one `HEAD` per listed object, which is what rclone does — a
+//! per-object request against a provider that bills them, and therefore a cost
+//! decision to make deliberately rather than a line to slip in here. Until that
+//! decision is made, this module reports what it can and this paragraph is the
+//! whole of the claim.
 //!
 //! `list_page` deliberately keeps answering `None` for the time rather than
 //! substituting the object's `LastModified`. That value is when the provider
@@ -254,10 +254,10 @@ impl S3Client {
     /// layer classifies.
     ///
     /// The rendering is unchanged — `s3 error 503: SlowDown` — because
-    /// `HANDOVER.md` quotes it and scripts grep for it. What is new is that the
-    /// status, the code and any `Retry-After` survive as *fields*, so a `503
-    /// SlowDown` is retried because it is a 503 and not because somebody matched
-    /// on the message.
+    /// `tests/s3_mock.rs` asserts on it and scripts grep for it. What is new is
+    /// that the status, the code and any `Retry-After` survive as *fields*, so a
+    /// `503 SlowDown` is retried because it is a 503 and not because somebody
+    /// matched on the message.
     async fn error(resp: Answered) -> StoreError {
         let status = resp.status().as_u16();
         let retry_after_secs = resp
@@ -575,8 +575,8 @@ impl S3Client {
             // One allocation per part, given away to the request as an owned
             // `Bytes`. The reusable buffer this replaces was live at the same time
             // as the copy the request needed and cost exactly double the part size
-            // — the defect measured on B2 in `HANDOVER.md` §25, in the sibling that
-            // shares this shape.
+            // — the defect measured on B2, in the sibling that shares this shape,
+            // where it cost 213 MiB of RSS under a 512 MiB cap.
             let mut part = vec![0u8; want];
             let n = streaming::fill_buf(&mut file, &mut part).await?;
             if n != want {
@@ -1244,9 +1244,9 @@ mod tests {
 
     #[test]
     fn a_source_time_is_written_in_the_spelling_rclone_reads() {
-        // Borrowed on purpose (`backend/s3/s3.go`, `metaMtime`): a private format
-        // would make every object DCTL wrote look, to rclone, like a file
-        // modified when it was uploaded — and the other way round.
+        // Borrowed on purpose: a private format would make every object DCTL
+        // wrote look, to rclone, like a file modified when it was uploaded —
+        // and the other way round.
         assert_eq!(
             render_src_modified(SourceModified::at(1_577_836_800)).as_deref(),
             Some("1577836800.000000000")
@@ -1261,7 +1261,7 @@ mod tests {
     /// it at all. Every S3 write goes through this one function, and no S3
     /// credentials exist in this environment — `tests/s3_live.rs` has never run —
     /// so this is the only thing standing between the sync fix and a silent
-    /// regression on S3 and R2 (`HANDOVER.md` §11.2).
+    /// regression on S3 and R2.
     #[test]
     fn a_write_carries_the_source_time_as_the_user_metadata_header() {
         assert_eq!(

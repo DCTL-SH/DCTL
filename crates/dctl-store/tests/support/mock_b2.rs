@@ -28,8 +28,8 @@
 //!
 //! It proves nothing about Backblaze's own behaviour — its pod rotation, its
 //! consistency, its error catalogue, its throughput. `b2_live.rs` and the cgroup
-//! measurements in `HANDOVER.md` §25 are what cover those, and this file is not a
-//! substitute for either.
+//! measurements taken against the live service are what cover those, and this
+//! file is not a substitute for either.
 //!
 //! ## Large bodies are counted and hashed, never kept
 //!
@@ -184,8 +184,8 @@ pub struct State {
     start_time_millis: i64,
     /// Accept the connection, read the request, and never answer.
     ///
-    /// The **black hole**, and it is the fault `HANDOVER.md` §32.9 measured
-    /// against live B2 with `iptables`. Not a refusal and not a reset: a
+    /// The **black hole**, and it is the fault behind the 943.6 s overrun,
+    /// measured against live B2 with `iptables`. Not a refusal and not a reset: a
     /// refusal is an answer and a reset is an error, and both are noticed by
     /// any layer at all. This is a route that swallows packets — the socket is
     /// open, the request is on the wire, and nothing ever comes back — which is

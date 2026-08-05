@@ -61,9 +61,9 @@
 //! URL, or re-authorize after `401 expired_auth_token`, before trying again. An
 //! error it has already exhausted arrives here marked
 //! [`Retried`](crate::StoreError::Retried), and [`classify::verdict`] refuses to
-//! retry it a second time — the same idea as rclone's
-//! `NoLowLevelRetryError` (`fs/fserrors/error.go:218`), and the reason a six-
-//! attempt inner budget under a six-attempt outer one does not become
+//! retry it a second time — the same idea as the "already exhausted, do not
+//! retry me again" marker rclone attaches to such an error, and the reason a
+//! six-attempt inner budget under a six-attempt outer one does not become
 //! thirty-six.
 //!
 //! # What this does not do
@@ -73,9 +73,9 @@
 //! I/O error, and it cannot help a run whose multiplexed `ssh` session has died,
 //! because nothing below it can re-dial one. That case is classified as terminal
 //! and says so rather than being retried five times into the same dead socket:
-//! rclone re-dials from a connection pool (`backend/sftp/sftp.go`), DCTL does
-//! not, and pretending otherwise by spending the budget on it would be the same
-//! false claim in a new place.
+//! rclone re-dials out of its own SFTP connection pool, DCTL does not, and
+//! pretending otherwise by spending the budget on it would be the same false
+//! claim in a new place.
 
 pub mod backend;
 pub mod backoff;

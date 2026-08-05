@@ -169,8 +169,8 @@ pub async fn run(ctx: &Ctx, args: &RecoverArgs) -> Result<()> {
     // there is a vault at this location at all is answerable without any secret,
     // so it is answered first. Asking for twenty-four transcribed words and then
     // reporting "wrong password or corrupted envelope" — which is what a plain
-    // remote used to get (`docs/HANDOVER.md` §16.2) — is the single most
-    // expensive wrong diagnosis this binary can produce.
+    // remote used to get — is the single most expensive wrong diagnosis this
+    // binary can produce.
     prepared
         .require_vault(ctx, &spec, Some(NOT_A_VAULT))
         .await?;

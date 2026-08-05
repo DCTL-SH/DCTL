@@ -20,20 +20,18 @@ use crate::error::{Result, StoreError};
 ///
 /// `--contimeout` belongs to the client because establishing a connection is the
 /// client's own affair: `connect_timeout` bounds the TCP connect **and** the TLS
-/// handshake, which together are what rclone bounds with the same number
-/// (`fs/fshttp/http.go:236` sets `TLSHandshakeTimeout` from `ci.ConnectTimeout`,
-/// and `fs/fshttp/dialer.go:30` sets the dialer's own from it too).
+/// handshake, which together are what rclone bounds with a single number too:
+/// one value covers its TLS handshake limit and its dialer's own.
 ///
 /// `--timeout` is deliberately **not** set here, and the omission is the whole
 /// design. reqwest offers two client-level knobs and both are the wrong shape:
 /// `timeout` is documented as "a total deadline", and `read_timeout` is armed
 /// once per request and never re-armed until the response headers arrive
 /// (`reqwest-0.12.28/src/async_impl/client.rs:2637`). Either would kill a large
-/// upload that was succeeding. rclone does not set a client deadline either —
-/// `NewClientCustom` at `fs/fshttp/http.go:319-321` builds an `http.Client` with
-/// no `Timeout` field at all — and instead re-arms a deadline on the socket as
-/// bytes move. `crate::deadline` is where DCTL does the equivalent, at the
-/// closest seam reqwest leaves open.
+/// upload that was succeeding. rclone does not set a client deadline either — it
+/// builds its HTTP client with no total timeout at all — and instead re-arms a
+/// deadline on the socket as bytes move. `crate::deadline` is where DCTL does
+/// the equivalent, at the closest seam reqwest leaves open.
 pub(crate) fn post_quantum_client(deadlines: &Deadlines) -> Result<reqwest::Client> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());

@@ -6,7 +6,7 @@
 //! `lsd`, `tree`, `check` and `size`. The palette existed, the flag was parsed,
 //! and `about` really did colour two sequences' worth — so the flag was
 //! *measurably* honoured on the one command nobody reaches for and inert on
-//! every command an operator reads (`HANDOVER.md` §11.2, §11.3 item 8).
+//! every command an operator reads.
 //!
 //! The reason it stayed that way is that each renderer would have had to reach
 //! for the palette, pick a [`Style`], and remember the `{style:#}` reset — six

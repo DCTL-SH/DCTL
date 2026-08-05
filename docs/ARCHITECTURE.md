@@ -285,11 +285,10 @@ they upload straight to the final key.
 #### What a walk does with a fifo, a socket or a device node
 
 Skips it, and says so. None of them has bytes a transfer can carry, which is also
-where rclone settled — `Storable` matches
-`os.ModeNamedPipe|os.ModeSocket|os.ModeDevice` and returns false
-(`backend/local/local.go:1299`) — but the very next line logs `Can't transfer non
-file/directory` (`:1301`), and DCTL cited the first half as its authority while
-omitting the second. A tree holding one file and one named pipe copied as
+where rclone settled — it classifies named pipes, sockets and device nodes as not
+storable — but it also *names* each one it skips, logging `Can't transfer non
+file/directory`, and DCTL cited the first half of that behaviour as its authority
+while omitting the second. A tree holding one file and one named pipe copied as
 `Files: 1 / 1, Errors: 0`, exit 0, with the pipe named nowhere at any verbosity.
 
 Four walks meet these — the `local:` and `sftp:` backends', the transfer

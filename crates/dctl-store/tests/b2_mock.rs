@@ -5,8 +5,8 @@
 //! about *where* B2 cuts an object, *what* it sends for a retried part, and
 //! whether a configured part size reaches the wire rested either on reading the
 //! code or on uploading gigabytes into a real bucket. Reading the code is how
-//! four claims in `HANDOVER.md` §11.4 turned out false, and uploading gigabytes
-//! is not something a gate can do on every commit.
+//! four documented claims about this backend turned out false, and uploading
+//! gigabytes is not something a gate can do on every commit.
 //!
 //! What runs here is the **real** [`B2Backend`], unchanged, pointed at
 //! [`support::mock_b2`] — a loopback listener that verifies the SHA-1 of every
@@ -729,7 +729,7 @@ async fn abandon_one(mock: &MockB2, b2: &B2Backend, key: &str) {
 
 #[tokio::test]
 async fn an_upload_no_object_listing_shows_is_enumerated_and_cancelled() {
-    // §11.3 item 12, closed. A killed multipart upload leaves parts that are
+    // The defect this closes. A killed multipart upload leaves parts that are
     // stored and billed and that `b2_list_file_names` does not return, so until
     // `b2_list_unfinished_large_files` was wired the only honest thing `cleanup`
     // could say was `unsupported`.
@@ -848,7 +848,7 @@ async fn the_upload_listing_is_scoped_by_prefix_and_paged_by_id() {
 // The two deadlines, against a route that swallows packets
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// `HANDOVER.md` §32.9's worst row was measured here, against live B2 with the
+// The worst timing ever measured was recorded here, against live B2 with the
 // provider's own /22 black-holed by `iptables`: a 160 MiB upload under
 // `--timeout 30 --retries 1` reported its first failure at **30 s**, to the
 // second — and **had not ended 943.6 s after the cut**. Both halves of that
@@ -904,7 +904,7 @@ async fn a_black_holed_request_ends_at_the_idle_timeout_and_names_it() {
 
 #[tokio::test]
 async fn a_black_holed_run_ends_at_its_own_deadline_rather_than_at_the_schedule() {
-    // §32.9's 160 MiB row, in miniature and in-process. `--timeout` is set far
+    // The 160 MiB row, in miniature and in-process. `--timeout` is set far
     // longer than the run's window on purpose: the only thing that can end this
     // is `--max-duration`, so the assertion cannot be satisfied by the flag that
     // was already working.
@@ -934,8 +934,8 @@ async fn a_black_holed_run_ends_at_its_own_deadline_rather_than_at_the_schedule(
     assert!(
         took < RUN_WINDOW * 8,
         "the run outlived its own --max-duration: {took:?} for a {RUN_WINDOW:?} \
-         window. This is the §32.9 measurement, and the number that made it a \
-         defect was 943.6 s against a 30 s deadline."
+         window. This reproduces the original measurement, whose number made \
+         it a defect: 943.6 s against a 30 s deadline."
     );
     // And terminal, so nothing above spends a second schedule on it — which is
     // what turned six attempts into fifteen minutes.

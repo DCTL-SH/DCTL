@@ -1,21 +1,21 @@
 //! The two numbers an operator sets when a backup window is not theirs to
 //! choose, and the one number that decides how finely progress is observed.
 //!
-//! Both defaults are rclone's, taken from `fs/config.go` rather than invented,
-//! because rclone's observable behaviour is the bar this tool is measured
-//! against and an operator migrating a script should not find that the same
-//! flag means a different length of patience.
+//! Both defaults are rclone's rather than invented, because rclone's observable
+//! behaviour is the bar this tool is measured against and an operator migrating
+//! a script should not find that the same flag means a different length of
+//! patience.
 
 use std::time::Duration;
 
 /// How long a transfer may move **no bytes at all** before it is given up on.
 ///
-/// Five minutes, which is rclone's `--timeout` default — `fs/config.go:120-123`,
-/// `Default: 5 * 60 * time.Second`, `Help: "IO idle timeout"`. The word *idle*
-/// in that help string is the whole of the semantics and is worth stating twice:
-/// this is time **since the last byte moved**, not time since the transfer
-/// started. A 4 GiB object over a slow uplink takes hours and is never once
-/// close to this deadline, because every frame that leaves resets it.
+/// Five minutes, which is rclone's `--timeout` default, and which rclone's own
+/// help calls an *IO idle timeout*. The word *idle* there is the whole of the
+/// semantics and is worth stating twice: this is time **since the last byte
+/// moved**, not time since the transfer started. A 4 GiB object over a slow
+/// uplink takes hours and is never once close to this deadline, because every
+/// frame that leaves resets it.
 ///
 /// Five minutes rather than something brisk because the failure it exists to
 /// bound is a link that has died silently, and the cost of being wrong in the
@@ -30,8 +30,8 @@ pub const DEFAULT_IDLE: Duration = Duration::from_secs(5 * 60);
 
 /// How long establishing a connection may take before it is given up on.
 ///
-/// Sixty seconds, rclone's `--contimeout` default (`fs/config.go:115-118`,
-/// `Default: 60 * time.Second`, `Help: "Connect timeout"`).
+/// Sixty seconds, which is rclone's `--contimeout` default — its connect
+/// timeout, as distinct from the idle one above.
 ///
 /// Separate from [`DEFAULT_IDLE`] because the two bound different failures and
 /// want different numbers. A connection that has not been established is a
@@ -50,10 +50,9 @@ pub const DEFAULT_CONNECT: Duration = Duration::from_secs(60);
 /// The value of `--timeout` or `--contimeout` that means *wait as long as it
 /// takes*.
 ///
-/// Zero, matching rclone, where the deadline is only armed at all when the
-/// configured duration is positive (`fs/fshttp/dialer.go:102`,
-/// `if c.timeout > 0`, and again at `:113` and `:123` before each nudge; a Go
-/// `net.Dialer` with `Timeout: 0` likewise does not bound the dial).
+/// Zero, matching rclone, which arms the deadline only when the configured
+/// duration is positive and re-checks that before every nudge of it; a Go
+/// `net.Dialer` with a zero timeout likewise does not bound the dial.
 ///
 /// It is a supported answer rather than a degenerate one. An operator restoring
 /// a hundred terabytes over a link that stalls for twenty minutes at a time has
@@ -67,12 +66,12 @@ pub const DISABLED_SECONDS: u64 = 0;
 /// This is the **grain of the upload's progress signal**, and it is the reason
 /// this constant is not merely a buffer size. DCTL cannot see the socket:
 /// `reqwest` owns the connector and its `Conn` type is `pub(crate)`, so the
-/// per-`Read`/`Write` deadline rclone sets on the connection itself
-/// (`fs/fshttp/dialer.go:101-127`) has no equivalent here. What DCTL can see is
-/// hyper *asking for the next frame*, and hyper only asks while its write buffer
-/// has room — `can_buffer` in `hyper/src/proto/h1/io.rs:152` — which it only has
-/// once the socket has accepted what was already queued. So "a frame was taken"
-/// is a statement about the connection, one buffer upstream of the wire.
+/// per-`Read`/`Write` deadline rclone sets on the connection itself has no
+/// equivalent here. What DCTL can see is hyper *asking for the next frame*, and
+/// hyper only asks while its write buffer has room — `can_buffer`, in hyper's
+/// HTTP/1 write path — which it only has once the socket has accepted what was
+/// already queued. So "a frame was taken" is a statement about the connection,
+/// one buffer upstream of the wire.
 ///
 /// 64 KiB is chosen against both ends of that. It is the same order as a tuned
 /// TCP send buffer, so a frame is roughly a window's worth rather than an
@@ -95,11 +94,10 @@ pub const UPLOAD_FRAME_LEN: usize = 64 * 1024;
 /// Nothing that works today can begin to fail because of it, because six
 /// consecutive attempts that got nothing back is a dead link by any reading.
 ///
-/// This is the factor `HANDOVER.md` §36.5 measured and could not state. The cost
-/// of a black-holed link used to be
+/// This is what bounds the cost of a black-holed link. That cost used to be
 /// `--timeout × attempts × distinct requests × --retries`, and the third factor
-/// is unbounded: a copy makes as many requests as it makes, and each of them ran
-/// a full schedule against a link that had already proved silent. The same
+/// is unbounded: a copy makes as many requests as it makes, and each of them
+/// ran a full schedule against a link that had already proved silent. The same
 /// command against the same fault measured **46.3 s**, **136.6 s** and
 /// **288.7 s** on three runs for exactly that reason. Counting the run's
 /// unanswered attempts rather than each request's removes the factor, and what

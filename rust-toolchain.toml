@@ -1,0 +1,6 @@
+# Pinned so that a clone builds with the toolchain the gates were run against.
+# `rust-version` in Cargo.toml (1.85) is the *minimum* the crates claim; this is
+# what CI and the maintainer actually use.
+[toolchain]
+channel = "1.97.1"
+components = ["rustfmt", "clippy"]

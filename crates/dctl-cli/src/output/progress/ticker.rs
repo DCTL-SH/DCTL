@@ -200,7 +200,7 @@ mod tests {
     /// A redirected three-minute copy without it writes three status records and
     /// with it writes a hundred and eighty. Before this, the flag produced the
     /// same output in every environment — a "guarantee" nobody could observe,
-    /// which is what HANDOVER §11.2 called out.
+    /// and therefore not a guarantee.
     #[test]
     fn forcing_progress_selects_the_live_cadence() {
         let ordinary = interval(false, DEFAULT_STATS_INTERVAL_SECS).expect("a default cadence");

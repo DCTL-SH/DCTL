@@ -46,7 +46,7 @@ pub(super) const H_RANGE: &str = "Range";
 /// epoch milliseconds.
 ///
 /// Not a name invented here: it is the key Backblaze documents for exactly this
-/// purpose and the one `rclone` reads and writes, so a bucket written by DCTL
+/// purpose and the one rclone reads and writes, so a bucket written by DCTL
 /// keeps its timestamps when read by rclone and the other way round. Choosing a
 /// private spelling would have made every object DCTL wrote look, to every other
 /// tool, like a file last modified when it was uploaded.
@@ -65,9 +65,8 @@ pub(super) const FILE_INFO_SRC_MODIFIED: &str = "src_last_modified_millis";
 /// is what makes it possible to induce, on a live provider, the exact state rot
 /// produces.
 ///
-/// The name is not DCTL's: it is the one rclone writes
-/// (`backend/b2/b2.go:51`, `sha1Key = "large_file_sha1"`), so a large object
-/// uploaded by rclone is verifiable here.
+/// The name is not DCTL's: it is the one rclone writes for exactly this, so a
+/// large object uploaded by rclone is verifiable here.
 pub(super) const FILE_INFO_LARGE_FILE_SHA1: &str = "large_file_sha1";
 
 /// What B2 puts in `contentSha1` when it has no single digest for the object.
@@ -140,11 +139,10 @@ pub(super) const CONTENT_TYPE_AUTO: &str = "b2/x-auto";
 /// bytes on the account this was measured against — and it is deliberately **not**
 /// used as the default. It is advisory, it is per-account, and it arrives from the
 /// network: taking it would make DCTL's peak memory whatever the provider said
-/// that morning, which is not a contract anybody can hold the tool to. `rclone`
-/// makes the same call — it parses `recommendedPartSize` into
-/// `api.AuthorizeAccountResponse` (`backend/b2/api/types.go:150`) and never sizes
-/// an upload with it, using its own `defaultChunkSize = 96 * fs.Mebi`
-/// (`backend/b2/b2.go:67`) instead.
+/// that morning, which is not a contract anybody can hold the tool to. rclone
+/// makes the same call and treats the answer the same way: it parses
+/// `recommendedPartSize` out of the authorize response, never sizes an upload
+/// with it, and uses a fixed 96 MiB default instead.
 ///
 /// 100 MiB is the same number as the S3 client's own `DEFAULT_PART_SIZE`, so the
 /// two object-store families state one memory figure rather than two, and it is
@@ -158,10 +156,10 @@ pub(super) const DEFAULT_PART_SIZE: u64 = 100 * 1024 * 1024;
 /// One. It is a named constant rather than an unwritten property of a `for` loop
 /// because it is the second factor in the contract above: uploading four parts
 /// concurrently would quadruple the peak, and the change that did it would be a
-/// change to a loop with no obvious connection to a memory figure recorded in
-/// `HANDOVER.md`. The memory test in `tests/b2_upload_memory.rs` computes its
-/// ceiling from this constant, so raising the concurrency without raising this
-/// fails a test that names the reason.
+/// change to a loop with no obvious connection to the memory figure recorded
+/// above. The memory test in `tests/b2_upload_memory.rs` computes its ceiling
+/// from this constant, so raising the concurrency without raising this fails a
+/// test that names the reason.
 pub(super) const UPLOAD_PARTS_IN_FLIGHT: u64 = 1;
 
 /// B2's absolute minimum part size (bytes) for large files.

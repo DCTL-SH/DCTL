@@ -63,12 +63,12 @@ pub(super) async fn list_page(fs: &LocalFs, prefix: &str, cursor: Option<String>
     let (items, next_cursor) = paginate(fs, keys, cursor.as_deref()).await?;
 
     // The report describes the *walk*, and one listing is now one walk — held
-    // across its pages rather than repeated for each (`HANDOVER.md` §9.3 item
-    // 10, which is what this closes). Attaching it to every page would multiply
-    // one tree's links by the number of pages and tell the operator a number
-    // that is simply wrong, so it rides on the first page — the one request
-    // every listing makes — and continuations carry an empty report, which
-    // merges into the total without changing it.
+    // across its pages rather than repeated for each. Repeating it per page is
+    // the defect this closes: attaching it to every page would multiply one
+    // tree's links by the number of pages and tell the operator a number that
+    // is simply wrong, so it rides on the first page — the one request every
+    // listing makes — and continuations carry an empty report, which merges
+    // into the total without changing it.
     let (links, specials) = match walked {
         Some(walked) if cursor.is_none() => (walked.links, walked.specials),
         _ => (LinkReport::default(), SpecialReport::default()),

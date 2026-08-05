@@ -16,7 +16,7 @@
 //! the suite said two S3 round trips had passed. They had not run at all — no S3
 //! credentials have ever existed in this environment — so every line of the S3
 //! backend, including the modification-time write the `sync` fix added, was
-//! covered by a green tick and nothing else (`HANDOVER.md` §11.2, §15.4).
+//! covered by a green tick and nothing else.
 //!
 //! A test that skips and prints `ok` is a lie in the exact place a buyer looks
 //! for assurance, and it is the forbidden class of `PLAN.md` §6 — reporting

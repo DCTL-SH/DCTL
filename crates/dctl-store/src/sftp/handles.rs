@@ -6,7 +6,7 @@
 //! a mount reading a film fetches one chunk after another from the *same*
 //! object and paid for a fresh handle every time. On a link where a round trip
 //! is milliseconds rather than microseconds that is the dominant per-request
-//! cost, and `HANDOVER.md` §40.5 names it as the next thing to fix.
+//! cost, and it was the next thing worth fixing.
 //!
 //! So a handle is kept, keyed by remote path, and the next read of the same
 //! object reuses it — one `SSH_FXP_READ` and nothing else.

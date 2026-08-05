@@ -20,12 +20,11 @@
 //! through. Forking a dependency to add one is a larger and worse change than
 //! the fallback.
 //!
-//! The fallback is rclone's own, for exactly this question: `About` prefers
-//! `statvfs@openssh.com` and otherwise runs a shell command over the same
-//! session (`backend/sftp/sftp.go:1880` for the extension,
-//! `:1910-1955` for the shell). DCTL has the same `openssh::Session` in hand —
-//! it is held open beside the SFTP channel for the lifetime of the conversation
-//! — so the probe costs no new connection.
+//! The fallback is rclone's own, for exactly this question: its free-space
+//! probe prefers `statvfs@openssh.com` and otherwise runs a shell command over
+//! the same session. DCTL has the same `openssh::Session` in hand — it is held
+//! open beside the SFTP channel for the lifetime of the conversation — so the
+//! probe costs no new connection.
 //!
 //! ## What it is allowed to conclude
 //!
@@ -41,8 +40,8 @@
 //! * [`FreeSpace::Unknown`] — the question could not be asked or the answer
 //!   could not be read. An SFTP-only account has no shell and this is the
 //!   ordinary case for one; a conversation running over a plain byte-stream pair
-//!   has no session at all. Saying so is the honest sentence `HANDOVER.md`
-//!   §11.3 item 6 asks for, and it is still strictly better than `Failure`.
+//!   has no session at all. Saying so is the honest answer, and it is still
+//!   strictly better than `Failure`.
 //!
 //! The probe runs **only on the failure path**, so a healthy transfer pays
 //! nothing for it.
@@ -271,9 +270,9 @@ mod tests {
     #[test]
     fn a_line_that_is_not_the_layout_that_was_asked_for_is_not_read_as_one() {
         // `df -P` is specified to print six columns, and the field count is the
-        // only thing that says a line *is* one of them. Relaxing it left the
-        // whole gate green (`HANDOVER.md` §35.5), because every case above has
-        // six fields and every case below has one.
+        // only thing that says a line *is* one of them. Relaxing it left `cargo
+        // test --workspace` entirely green, because every case above has six
+        // fields and every case below has one.
         //
         // The line that makes the difference is a **wrapped device name**: GNU
         // `df` puts a long `/dev/mapper/...` on a line of its own and the six

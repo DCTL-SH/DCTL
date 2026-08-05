@@ -69,16 +69,16 @@
 //! back*. See [`Assurance`](crate::source::Assurance).
 //!
 //! **And there is a second axis, which is about the objects the run never had a
-//! name for.** A vault is verified by walking its index — a row per object, kept
-//! outside the remote — so an object the backend no longer has is reported
+//! name for.** A vault is verified by walking its index — a row per object,
+//! kept outside the remote — so an object the backend no longer has is reported
 //! missing and the run exits 4. A plain remote is verified by walking the
 //! remote's own listing and then re-reading the keys it just reported, so both
 //! sides of that comparison are one source: a deleted object is not missing
-//! there, it is simply not enumerated, and `OK  2 objects examined` over a store
-//! that used to hold three is exit 0. Measured, on the shipped binary, under the
-//! flag whose `--help` said this was exactly what it caught
-//! (`HANDOVER.md` §36). Both axes are refused by default now and both are
-//! published in the report. See [`Inventory`](crate::source::Inventory).
+//! there, it is simply not enumerated, and `OK  2 objects examined` over a
+//! store that used to hold three is exit 0. Measured, on the shipped binary,
+//! under the flag whose `--help` said this was exactly what it caught. Both axes
+//! are refused by default now and both are published in the report. See
+//! [`Inventory`](crate::source::Inventory).
 //!
 //! **The report says which one it is**, and that is newer than it looks. The
 //! value was computed here and spent on a single stderr warning — one that fires

@@ -411,9 +411,9 @@ pub trait Source: Send + Sync {
     /// `--checksum` into a plain destination used to work exactly once. The
     /// first run into an empty destination exited 0 because there was nothing to
     /// compare; every run after it exited **7** with
-    /// `--checksum: no content hash for '<file>'` (`HANDOVER.md` §11.2). A
-    /// nightly job that succeeds on the first night and fails every night after
-    /// is worse than one that never worked.
+    /// `--checksum: no content hash for '<file>'`. A nightly job that succeeds
+    /// on the first night and fails every night after is worse than one that
+    /// never worked.
     ///
     /// Reading to answer is not a new cost model, it is the *existing* one:
     /// `--checksum` already reads and hashes every file on the local side, and
@@ -428,7 +428,7 @@ pub trait Source: Send + Sync {
     /// option on the table and is the weaker one: it makes a nightly
     /// `--checksum sync` to a plain remote work zero times instead of once, and
     /// rclone answers the same question by negotiating a hash both sides can
-    /// produce (`fs/operations/operations.go:60-66`) rather than by refusing.
+    /// produce rather than by refusing.
     ///
     /// # Errors
     /// Whatever reading the object reported. A `--checksum` run that cannot read
@@ -550,7 +550,7 @@ pub trait Source: Send + Sync {
     /// digest at write time, and [`Inventory::SelfReported`], because the only
     /// list of what it holds is the list it just produced. A gate that read the
     /// first and assumed the second let a **deleted** object exit 0 on every
-    /// plain remote there is (`HANDOVER.md` §36).
+    /// plain remote there is.
     ///
     /// **Deliberately not given a default implementation.** A default of
     /// [`Inventory::Recorded`] would let a source added later claim to detect a

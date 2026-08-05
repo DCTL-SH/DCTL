@@ -316,7 +316,8 @@ count and exits **6** when it is not zero.
 
 ### Local store — **PASS**
 
-Run 2026-07-27, Linux x86-64, `dctl` at `cc05f90` plus the two fixes below.
+Run 2026-07-27, Linux x86-64, against the build current on that date plus the two
+fixes below.
 
 ```
 restore drill (local directory)

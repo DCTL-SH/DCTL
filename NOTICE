@@ -1,46 +1,75 @@
 DCTL
-Copyright 2026 KONG GROUP LLC
 
-This product is source-available, not open source. Two licences apply, and
-which one covers a file depends on what that file is for.
+DCTL is a product of KONG GROUP LLC, a United States limited liability company,
+which owns it and licenses it. https://www.dctl.sh
 
-------------------------------------------------------------------------------
-The tool — PolyForm Noncommercial License 1.0.0 (see LICENSE.md)
-------------------------------------------------------------------------------
+Copyright 2026 KONG GROUP LLC. All rights reserved.
 
-Everything in this repository except the files listed in the next section is
-licensed under the PolyForm Noncommercial License 1.0.0. In short: you may read
-it, run it, study it and modify it for any noncommercial purpose. Commercial use
-requires a separate licence from KONG GROUP LLC.
-
-Personal use, research, study and hobby projects are permitted purposes, as are
-charitable, educational, research, safety, health, environmental and government
-organisations. See LICENSE.md for the terms that actually govern; this paragraph
-is a summary and the licence is not.
+DCTL is source-available, not open source. Three grants apply, and which one
+covers you depends on who you are and what the file is for. These paragraphs
+summarise; the licence files govern.
 
 ------------------------------------------------------------------------------
-The format and its reference decoder — Apache License 2.0 (see LICENSE-Apache-2.0.txt)
+1. Noncommercial use — PolyForm Noncommercial License 1.0.0 (LICENSE.md)
+------------------------------------------------------------------------------
+
+Free to use, modify and self-host for any noncommercial purpose: personal
+study, private entertainment, hobby projects, amateur pursuits, research and
+experiment without anticipated commercial application.
+
+Use by a charitable organization, educational institution, public research
+organization, public safety or health organization, environmental protection
+organization, or government institution is also a permitted purpose under this
+licence, regardless of how that organization is funded.
+
+Any commercial use requires a commercial licence. That includes use by a
+business of any size, however small — there is no small-company exemption.
+
+------------------------------------------------------------------------------
+2. Evaluating it — PolyForm Free Trial License 1.0.0 (LICENSE-FREE-TRIAL.md)
+------------------------------------------------------------------------------
+
+Anyone, of any size, may use DCTL to evaluate whether it suits a particular
+application for less than 32 consecutive calendar days.
+
+This grant exists because deciding whether a tool is right for you should not
+require a purchase order first. Past the trial window, commercial use needs a
+commercial licence.
+
+------------------------------------------------------------------------------
+3. Commercial use — a licence from KONG GROUP LLC
+------------------------------------------------------------------------------
+
+Any use for or on behalf of a business, of any size, beyond the trial window in
+(2), requires a commercial licence.
+
+Commercial licensing, and any question about whether a particular use needs one,
+goes to KONG GROUP LLC.
+
+------------------------------------------------------------------------------
+The format and its reference decoder — Apache License 2.0
+(LICENSE-Apache-2.0.txt)
 ------------------------------------------------------------------------------
 
   docs/FORMAT.md
   crates/dctl-decode/reference/
 
-These are licensed under the Apache License, Version 2.0, deliberately and
-separately from the tool.
+These are Apache 2.0, deliberately and separately from everything above, and
+that grant is not limited by size, sector, purpose or time.
 
 The reason is the promise the format makes. DCTL claims its objects will still
 be readable in twenty years, and that claim is hollow if reading them requires
 this tool, this company, or this company continuing to exist. The specification
-and a working decoder therefore carry a permissive licence that anyone may
-implement against, sell, or fork, with no obligation to KONG GROUP LLC and no
-permission needed from it.
+and a working decoder therefore carry a permissive licence with an express
+patent grant, so anyone may implement against the format, sell what they build,
+fork it, and never ask permission.
 
-If those two licences ever appear to conflict over one of these files, the
-Apache 2.0 grant is the one that governs them.
+If the grants above ever appear to conflict over one of these files, Apache 2.0
+is the one that governs them.
 
 ------------------------------------------------------------------------------
 Third-party components
 ------------------------------------------------------------------------------
 
-Dependencies retain their own licences. See Cargo.toml files for the dependency
-set and `cargo license` for the resolved list.
+Dependencies retain their own licences. See the Cargo.toml files for the
+dependency set and `cargo license` for the resolved list.

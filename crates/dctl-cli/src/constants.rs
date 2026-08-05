@@ -759,27 +759,26 @@ pub const CONFIG_FILE_MODE: u32 = 0o600;
 
 /// Minimum length of a remote name a **config file** may declare.
 ///
-/// **One.** rclone's `configNameRe` — `fs/fspath/path.go:16`, the `+` quantifier
-/// on the leading character class — accepts a one-character name, and
-/// `CheckConfigName` (`:45`) applies that pattern on every platform. A remote
-/// called `r` is therefore something an rclone user can already have, and a
-/// migration that refused to import it would fail on the config file rather than
-/// on any data.
+/// **One.** rclone's remote-name pattern accepts a one-character name — the
+/// quantifier on its leading character class is `+`, not `{2,}` — and the check
+/// that applies it runs on every platform. A remote called `r` is therefore
+/// something an rclone user can already have, and a migration that refused to
+/// import it would fail on the config file rather than on any data.
 ///
 /// This used to be two, on the argument that `c:\data` must never read as a
 /// remote called `c`. That property is real and is still enforced — but by
 /// [`DRIVE_LETTERS_EXIST`] at *classification* time, which is where rclone
-/// enforces it too (`driveletter.IsDriveLetter`, consulted in `Parse` at
-/// `fs/fspath/path.go:163`). Enforcing it a second time at *declaration* time
-/// bought nothing and cost a name rclone allows: on Windows `c:` is a drive
-/// before the config is ever consulted, and off Windows there is no drive to be
-/// confused with.
+/// enforces it too: in its path parser, as a name is read, rather than in its
+/// config loader. Enforcing it a second time at *declaration* time bought
+/// nothing and cost a name rclone allows: on Windows `c:` is a drive before the
+/// config is ever consulted, and off Windows there is no drive to be confused
+/// with.
 ///
 /// The rule that remains at declaration time is platform-independent, so one
 /// config file still means one thing everywhere: any name of one character or
 /// more may be written down. What a *Windows* machine additionally refuses is
 /// **creating** a name that a drive letter would shadow — see
-/// [`crate::config::drive_letter_conflict`], which is rclone's `ui.go:577` rule.
+/// [`crate::config::drive_letter_conflict`], which is rclone's own rule.
 pub const MIN_REMOTE_NAME_LEN: usize = 1;
 
 /// Whether this platform has drive letters, and therefore whether `r:` is a
@@ -789,9 +788,9 @@ pub const MIN_REMOTE_NAME_LEN: usize = 1;
 /// exception because the alternative was measured and is worse. Applying the
 /// drive rule everywhere made `dctl copy /srv/data r:` create a local directory
 /// literally named `r:` on Linux and exit **0** — a backup landing somewhere
-/// nobody named, with nothing on either stream to say so. rclone's
-/// `driveletter.IsDriveLetter` returns `false` off Windows for the same reason,
-/// so on Linux `r:` is a remote reference there too.
+/// nobody named, with nothing on either stream to say so. rclone's own
+/// drive-letter test returns `false` off Windows for the same reason, so on
+/// Linux `r:` is a remote reference there too.
 ///
 /// The usual objection to a `cfg`-gated rule — that one command line then means
 /// two things depending on where it runs — is answered where rclone answers it,
@@ -1031,13 +1030,12 @@ pub const DUMP_UNSUPPORTED_REASON: &str = "The protocol tracing layer this selec
 /// Why a vault remote's `base_path` is refused.
 ///
 /// The capability is genuinely absent — a vault occupies the **root** of the
-/// container it wraps, and `HANDOVER.md` §11.2 has said so since the first
-/// verdict — but the refusal only existed at one of the two doors.
-/// `dctl init --base local:/srv/v/sub` said no in a sentence; `dctl config
-/// create v vault base=store base_path=sub` said yes, wrote the key, printed it
-/// back from `dctl config show`, and addressed `/srv/v` anyway. An operator who
-/// configured a vault the second way had a setting they could see, could not
-/// remove by observation, and that moved no data.
+/// container it wraps, and always has — but the refusal only existed at one of
+/// the two doors. `dctl init --base local:/srv/v/sub` said no in a sentence;
+/// `dctl config create v vault base=store base_path=sub` said yes, wrote the
+/// key, printed it back from `dctl config show`, and addressed `/srv/v` anyway.
+/// An operator who configured a vault the second way had a setting they could
+/// see, could not remove by observation, and that moved no data.
 ///
 /// Stated as what the tool does instead, not as "unimplemented": the answer to
 /// "I want two vaults on one bucket" is two containers, and the sentence says so.
@@ -1826,11 +1824,11 @@ pub const CONFIG_KEY_PATH: &str = "path";
 /// Setting naming the SSH destination an `sftp` remote connects to.
 ///
 /// A destination `ssh` itself understands — a `Host` alias from `~/.ssh/config`
-/// (e.g. `lsx-001`) or a full `user@host[:port]`. It is not a credential: user,
-/// port, identity file and any `ProxyCommand` are resolved by `ssh` from the
-/// user's own config, which is what lets a cloudflared-proxied host connect with
-/// nothing secret stored in DCTL. The remote directory objects live under is the
-/// shared [`CONFIG_KEY_BASE`].
+/// (e.g. `backup.example.com`) or a full `user@host[:port]`. It is not a
+/// credential: user, port, identity file and any `ProxyCommand` are resolved by
+/// `ssh` from the user's own config, which is what lets a cloudflared-proxied
+/// host connect with nothing secret stored in DCTL. The remote directory
+/// objects live under is the shared [`CONFIG_KEY_BASE`].
 pub const CONFIG_KEY_HOST: &str = "host";
 
 /// Environment settings carrying provider credentials, never read from the
@@ -2766,9 +2764,8 @@ pub const CHECKSUM_STREAM_BUFFER_BYTES: usize = 128 * 1024;
 /// plaintext at write time; a local file is read and hashed; and a plain object
 /// store is read and hashed too, because a plain store holds the plaintext and
 /// the hash of what it is holding *is* the digest the comparison needs. That
-/// last one is the fix in `HANDOVER.md` §11.2 — before it, a `--checksum sync`
-/// into a plain remote succeeded on the first night and exited 7 on every night
-/// after.
+/// last one was itself a fix: before it, a `--checksum sync` into a plain remote
+/// succeeded on the first night and exited 7 on every night after.
 ///
 /// What is left, and what this hint is now for, is an object nobody has read: a
 /// vault index row written by `dctl index rebuild` carries an empty digest, and
@@ -2788,8 +2785,7 @@ pub const CHECKSUM_UNAVAILABLE_HINT: &str = "One side has no recorded content ha
 /// A warning rather than a note, and therefore visible without `-v`, because it
 /// is a cost paid on **every** run of a scheduled job and one an operator would
 /// otherwise meet on an invoice. rclone announces its own `--checksum`
-/// degradation exactly once per run for the same reason
-/// (`fs/operations/operations.go:274-278`).
+/// degradation exactly once per run for the same reason.
 pub const CHECKSUM_READS_DESTINATION_NOTE: &str = "--checksum has to read this side to hash it: a plain store keeps no plaintext \
      digest of its own. That is a full pass over the objects being compared, and \
      on a metered provider it is egress. `--size-only`, or the default \
@@ -3221,8 +3217,9 @@ pub const AUDIT_PROVES_LENGTH: &str = "length";
 /// [`AUDIT_WITHOUT_ANCHOR_NOTE`] fires only without one. It is still an
 /// [`crate::output::Out::info`] and therefore still shown at `-v` and above, like
 /// its sibling: a caveat printed on every successful run at default verbosity
-/// would be read once and filtered forever, which is §14.2's argument about exit
-/// 26 in a different place. The claim a consumer must not be able to miss is
+/// would be read once and filtered forever, which is the same argument made
+/// about exit 26 in a different place. The claim a consumer must not be able
+/// to miss is
 /// carried by `--json`'s `proves` list, which no verbosity setting removes. The chain is unkeyed: its hash
 /// is plain BLAKE3 over the canonical string, computed from values anyone can
 /// read, so any process that can append a line to the file can append a
@@ -5451,10 +5448,11 @@ pub const FILTER_FLAG_MAX_DEPTH: &str = "--max-depth";
 /// Age suffixes accepted by `--min-age` and `--max-age`, and what each is worth
 /// in seconds.
 ///
-/// rclone's table verbatim (`fs/parseduration.go:39` and `time.ParseDuration`):
-/// a month is thirty days and a year is 365, neither being a calendar month or a
-/// leap-aware year, because an age filter is a rolling window rather than a date
-/// and an operator writing `--max-age 1M` means "the last month or so".
+/// rclone's table verbatim — Go's duration parser, widened with the larger
+/// units: a month is thirty days and a year is 365, neither being a calendar
+/// month or a leap-aware year, because an age filter is a rolling window rather
+/// than a date and an operator writing `--max-age 1M` means "the last month or
+/// so".
 ///
 /// Ordered longest-suffix-first so `ms` is matched before `m`; the parser walks
 /// this table in order and a shorter suffix listed first would swallow the longer
@@ -5475,7 +5473,7 @@ pub const AGE_SUFFIX_SECONDS: &[(&str, f64)] = &[
 ];
 
 /// The spelling that turns an age limit off, matching [`SIZE_LIMIT_OFF`] and
-/// rclone's `fs.DurationOff`.
+/// rclone's own "off" duration.
 pub const AGE_LIMIT_OFF: &str = "off";
 
 /// Examples shown when an age cannot be parsed.
@@ -5523,10 +5521,10 @@ mod tests {
 
     #[test]
     fn a_one_character_remote_name_is_declarable_as_rclone_declares_one() {
-        // rclone's `configNameRe` accepts a single character (`fs/fspath/path.go:16`)
-        // and `CheckConfigName` applies it on every platform. The `c:\data`
-        // ambiguity is settled at classification time by DRIVE_LETTERS_EXIST,
-        // which is where rclone settles it too — not by forbidding the name.
+        // rclone's remote-name pattern accepts a single character, and the
+        // check that applies it runs on every platform. The `c:\data` ambiguity
+        // is settled at classification time by DRIVE_LETTERS_EXIST, which is
+        // where rclone settles it too — not by forbidding the name.
         assert_eq!(
             MIN_REMOTE_NAME_LEN, 1,
             "a name rclone accepts must be importable"

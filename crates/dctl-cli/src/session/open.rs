@@ -92,9 +92,9 @@ pub async fn open_with(ctx: &Ctx, spec: &RemoteSpec, not_a_vault: Option<&str>) 
     // here of anywhere. Asking for a password — or for twenty-four transcribed
     // words — and *then* discovering the location was never a vault spends the
     // most expensive thing the tool asks for on a question that was answerable
-    // without it. It is also what stops the answer being "wrong password":
-    // `docs/HANDOVER.md` §16.2 is that failure, where a plain remote was told
-    // its password was wrong and its `system/envelope.bin` needed restoring.
+    // without it. It is also what stops the answer being "wrong password" —
+    // which is exactly what a plain remote used to be told, along with a remedy
+    // naming a `system/envelope.bin` that cannot exist there.
     prepared.require_vault(ctx, spec, not_a_vault).await?;
 
     // Acquired after the preparation so a typo in the remote name fails before
@@ -133,9 +133,9 @@ pub struct Prepared {
     ///
     /// Read here because this is where the configuration is in hand, and carried
     /// because [`Prepared::unlock`] is the one place a [`Vault`] is built — the
-    /// middle of a setting's journey is where this project has lost one before
-    /// (`HANDOVER.md` §21.7), and a value picked up in one function and applied in
-    /// the next has exactly one seam rather than several.
+    /// middle of a setting's journey is where this project has lost one before,
+    /// and a value picked up in one function and applied in the next has exactly
+    /// one seam rather than several.
     chunk_size: Option<u64>,
     /// Whether the configuration already says this location holds a vault.
     ///

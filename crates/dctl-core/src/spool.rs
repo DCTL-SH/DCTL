@@ -161,7 +161,7 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0
         assert_eq!(fstype_of(MOUNTS, Path::new("/tmp/dctl-123")), Some("tmpfs"));
         assert_eq!(fstype_of(MOUNTS, Path::new("/var/tmp")), Some("xfs"));
         assert_eq!(fstype_of(MOUNTS, Path::new("/mnt/bigdisk/x")), Some("ext4"));
-        assert_eq!(fstype_of(MOUNTS, Path::new("/home/mx")), Some("ext4"));
+        assert_eq!(fstype_of(MOUNTS, Path::new("/home/example")), Some("ext4"));
     }
 
     #[test]

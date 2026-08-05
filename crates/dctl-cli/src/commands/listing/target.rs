@@ -12,7 +12,7 @@
 //! every operating system; the exception is the drive letter, which is a drive
 //! only where drives exist, because that is the only arrangement in which
 //! `dctl ls r:` and `dctl copy ./x r:` can agree about what `r:` is. rclone
-//! splits it in the same place (`fs/fspath/path.go:163`).
+//! splits it in the same place.
 //!
 //! The path half is canonicalised through
 //! [`clean_logical`](crate::platform::path::clean_logical) on the way in, so

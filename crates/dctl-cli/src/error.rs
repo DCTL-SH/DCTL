@@ -194,9 +194,10 @@ impl From<StoreError> for CliError {
             // The run's own `--max-duration`, and its own exit code. Reporting
             // it as a temporary error — which is what `Transport` would have
             // made it — would tell a scheduler to back off and try again, about
-            // a run that did exactly what it was told to do. `HANDOVER.md`
-            // §32.9 is the measurement behind the flag; exit 10 is how a
-            // wrapper tells "my window ran out" from "the network broke".
+            // a run that did exactly what it was told to do. A run still going
+            // 943.6 s after a 30 s deadline had fired is the measurement behind
+            // the flag; exit 10 is how a wrapper tells "my window ran out" from
+            // "the network broke".
             StoreError::RunDeadline { .. } => {
                 Self::new(ExitCode::DurationLimitExceeded, error.to_string())
                     .with_hint(crate::constants::MAX_DURATION_HINT)
@@ -571,10 +572,10 @@ mod tests {
 
     #[test]
     fn a_failure_that_was_never_retried_makes_no_claim_about_retrying() {
-        // The defect, in one assertion. `HANDOVER.md` §11.2: "the hint still
-        // says *Retries were exhausted* on an sftp connection failure where none
-        // were attempted" — a message describing work that did not happen, which
-        // is the class `PLAN.md` §6 forbids outright.
+        // The defect, in one assertion: the hint still said *Retries were
+        // exhausted* on an sftp connection failure where none were attempted —
+        // a message describing work that did not happen, which is the class
+        // `PLAN.md` §6 forbids outright.
         let err = CliError::from(StoreError::Transport {
             backend: "sftp",
             detail: "connection reset by peer".into(),
@@ -656,7 +657,7 @@ mod tests {
 
     #[test]
     fn a_full_filesystem_is_the_disk_full_code_and_sends_the_operator_to_df() {
-        // §16.1. A full disk used to arrive as exit 2, "an error not otherwise
+        // A full disk used to arrive as exit 2, "an error not otherwise
         // categorised", with no hint — while exit 7's published definition
         // already read "Fatal error — the run cannot continue (bad config, disk
         // full)" and `transfer::pipeline::is_fatal` already said a full disk

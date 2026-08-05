@@ -12,8 +12,9 @@
 //!
 //! The identical fault on `local:` reports `io error: No space left on device
 //! (os error 28)` and exits 7 — the disk, named, and an operator who runs `df`
-//! next. `HANDOVER.md` §11.2 recorded the SFTP line as undiagnosable and §11.3
-//! item 6 as the work; this module and [`super::space`] are that work.
+//! next. That SFTP line was recorded as undiagnosable, and making it as
+//! diagnosable as the local one was named as the work; this module and
+//! [`super::space`] are that work.
 //!
 //! ## The premise that turned out to be false
 //!
@@ -140,8 +141,8 @@ pub(super) fn classify(key: &str, kind: SftpErrorKind, message: &str) -> StoreEr
 
         // The server understood the request and does not implement it. Its own
         // kind because the remedy is a different server or a different
-        // operation, never a retry: `HANDOVER.md` §26 records `fsync` tolerated
-        // for exactly this reason and nothing else.
+        // operation, never a retry: `fsync` is tolerated for exactly this
+        // reason and nothing else.
         SftpErrorKind::OpUnsupported => StoreError::Io(io::Error::new(
             io::ErrorKind::Unsupported,
             detail("the server does not implement the operation on", key, note),
@@ -184,9 +185,9 @@ pub(super) fn classify(key: &str, kind: SftpErrorKind, message: &str) -> StoreEr
 
 /// What the catch-all means when the server added nothing to it.
 ///
-/// The honest sentence `HANDOVER.md` §11.3 item 6 asks for where the diagnosis
-/// cannot be made: it names the *protocol* as the reason the cause is missing,
-/// so an operator does not read it as DCTL having failed to look.
+/// The honest sentence for where the diagnosis cannot be made: it names the
+/// *protocol* as the reason the cause is missing, so an operator does not read
+/// it as DCTL having failed to look.
 pub(super) const REFUSED_WITHOUT_REASON: &str =
     "the server refused it and the protocol's status carries no reason";
 

@@ -11,8 +11,8 @@
 //!
 //! A FUSE read is 128 KiB. A film is a hundred thousand of them, each costing
 //! an `fsync` — the chain would become a write amplifier that made the mount
-//! unusable and buried the interesting facts under its own noise. `HANDOVER.md`
-//! §9.1 settled the shape instead:
+//! unusable and buried the interesting facts under its own noise. The shape
+//! settled on instead:
 //!
 //! * **One session record**, when the filesystem attaches: this vault, this
 //!   subtree, from now until it is unmounted. It moves nothing, so it carries

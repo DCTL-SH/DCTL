@@ -149,9 +149,9 @@ pub const COVERAGE: &[(&str, Recording)] = &[
         Recording::Exempt(
             "NOT DONE, and not a decision. `mkdir` changes stored data on the \
              one backend that has directories, so by the rule above it belongs \
-             in the chain — see HANDOVER.md. It is exempt here rather than \
-             silently absent so that the gap is visible in the table an auditor \
-             is pointed at, instead of being an absence nobody can see.",
+             in the chain. It is exempt here rather than silently absent so \
+             that the gap is visible in the table an auditor is pointed at, \
+             instead of being an absence nobody can see.",
         ),
     ),
     // Behavioural cover: none yet beyond the unit tests in `touch::engine`.

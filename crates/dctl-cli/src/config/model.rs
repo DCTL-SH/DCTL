@@ -390,7 +390,7 @@ pub struct R2Def {
 #[serde(deny_unknown_fields)]
 pub struct SftpDef {
     /// SSH destination, as `ssh` resolves it: a `~/.ssh/config` `Host` alias
-    /// (e.g. `lsx-001`) or `user@host[:port]`.
+    /// (e.g. `backup.example.com`) or `user@host[:port]`.
     ///
     /// An IPv6 literal that also names a port must bracket the address —
     /// `[fe80::1]:2222` — because an unbracketed literal ends in a colon and a
@@ -527,7 +527,7 @@ pub mod model_test_support {
                 require_vault: true,
             }),
             RemoteDef::Sftp(SftpDef {
-                host: "lsx-001".into(),
+                host: "backup.example.com".into(),
                 base: "~/dctl-store".into(),
                 chunk_size: Some(4 * 1024 * 1024),
                 verify: Some(VerifyMode::Strict),

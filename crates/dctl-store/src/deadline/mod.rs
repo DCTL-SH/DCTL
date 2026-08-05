@@ -1,11 +1,11 @@
 //! How long to wait — for a link to answer, and for one that has gone quiet.
 //!
-//! # The entry this closes
+//! # The defect this closes
 //!
-//! `HANDOVER.md` §11.2: *"Let an operator choose how long to wait for a dead
-//! network."* The retry half of that item was already done and a black-holed
-//! route already terminated — exit 5 after 200 s, with an honest attempt count.
-//! What was missing was that **200 s was nobody's choice**. `--timeout` and
+//! **An operator could not choose how long to wait for a dead network.** The
+//! retry half of the requirement was already done and a black-holed route
+//! already terminated — exit 5 after 200 s, with an honest attempt count. What
+//! was missing was that **200 s was nobody's choice**. `--timeout` and
 //! `--contimeout` were refused and no HTTP client carried a deadline, so an
 //! operator whose backup window was thirty seconds and one whose link recovers
 //! after ten minutes got the same number, and neither of them had asked for it.
@@ -26,15 +26,14 @@
 //!   The only one of the three that is a wall clock, and the only one that
 //!   bounds a whole invocation; see [`run`].
 //!
-//! The first two take rclone's defaults and rclone's meaning of zero
-//! (`fs/config.go:115-123`), because a script being migrated should not discover
-//! that the same flag means a different length of patience. The third takes
-//! rclone's default too — none (`fs/config.go:361`).
+//! The first two take rclone's defaults and rclone's meaning of zero, because a
+//! script being migrated should not discover that the same flag means a
+//! different length of patience. The third takes rclone's default too — none.
 //!
 //! **Neither of the first two bounds a run, and saying so is the point.** Each
 //! bounds *one attempt*; a run makes several distinct requests and retries each
-//! of them on a schedule, and `--retries` repeats the file on top of that. §32.9
-//! measured the product: a black-holed B2 upload under `--timeout 30 --retries
+//! of them on a schedule, and `--retries` repeats the file on top of that. The
+//! product was measured: a black-holed B2 upload under `--timeout 30 --retries
 //! 1` had not ended **943.6 s** after the cut. The remedy is not to make an
 //! inactivity deadline behave like a stopwatch — that would destroy every large
 //! transfer it was protecting — but to have a flag that is a stopwatch, and to
@@ -119,7 +118,7 @@ pub struct Deadlines {
     /// them received would be a bound only some of the run respected. It is
     /// also why this type is `Clone` and not `Copy` — see [`stall`] for the
     /// whole argument, and for why counting per request instead of per run is
-    /// the arithmetic §36.5 measured at 46.3 s, 136.6 s and 288.7 s on three
+    /// the arithmetic that came out at 46.3 s, 136.6 s and 288.7 s on three
     /// runs of one command against one fault.
     pub stall: RunStall,
 }
@@ -137,12 +136,11 @@ impl Default for Deadlines {
         Self {
             connect: Some(constants::DEFAULT_CONNECT),
             idle: Some(constants::DEFAULT_IDLE),
-            // Unbounded, and that is rclone's default too (`fs/config.go:361`,
-            // `max_duration`, `Default: time.Duration(0)`). A run-length bound
-            // nobody asked for would kill a first sync of a large dataset at
-            // whatever number this file happened to pick, and no number picked
-            // here could be right for both a nightly incremental and a
-            // ten-terabyte seed.
+            // Unbounded, and that is rclone's default too: its `--max-duration`
+            // is zero, meaning no bound at all. A run-length bound nobody asked
+            // for would kill a first sync of a large dataset at whatever number
+            // this file happened to pick, and no number picked here could be
+            // right for both a nightly incremental and a ten-terabyte seed.
             run: RunDeadline::unbounded(),
             // Derived from `idle` above rather than stated again, so the two can
             // never disagree about what `--timeout 0` meant.
@@ -215,7 +213,7 @@ impl Deadlines {
     /// operation: every watch this method hands out ends at the same instant,
     /// because that instant is a property of the run. A watch that carried a
     /// fresh copy of the window would give every request the whole of it, which
-    /// is the arithmetic §32.9 measured.
+    /// is the arithmetic behind the 943.6 s overrun.
     #[must_use]
     pub fn watch(&self) -> IdleWatch {
         IdleWatch::new(self.idle, self.run)
@@ -237,15 +235,15 @@ mod tests {
 
     #[test]
     fn the_shipped_defaults_are_rclones() {
-        // Quoted from `fs/config.go:115-123`. If either of these is ever
-        // changed, the sentence in the module documentation that claims parity
-        // with rclone stops being true and has to change with it.
+        // If either of these is ever changed, the sentence in the module
+        // documentation that claims parity with rclone stops being true and has
+        // to change with it.
         let deadlines = Deadlines::default();
         assert_eq!(deadlines.connect, Some(Duration::from_secs(60)));
         assert_eq!(deadlines.idle, Some(Duration::from_secs(5 * 60)));
         // And a run nothing asked to be bounded is not bounded — rclone's
-        // `max_duration` default is zero (`fs/config.go:361`) and a number
-        // invented here would end somebody's first sync at it.
+        // `--max-duration` default is zero, and a number invented here would
+        // end somebody's first sync at it.
         assert!(!deadlines.run.is_bounded());
     }
 
@@ -285,9 +283,9 @@ mod tests {
     fn the_run_deadline_is_attached_once_and_reaches_every_watch() {
         // The property the whole feature rests on: one instant, shared. A watch
         // that got a fresh window per operation would give the run's bound to
-        // each request separately, which is exactly the arithmetic §32.9
-        // measured — `--timeout` per attempt, multiplied by every attempt and
-        // every distinct request.
+        // each request separately, which is exactly the arithmetic behind the
+        // 943.6 s overrun — `--timeout` per attempt, multiplied by every
+        // attempt and every distinct request.
         let window = Duration::from_secs(30);
         let deadlines =
             Deadlines::from_seconds(60, 300).within(RunDeadline::starting_now(Some(window)));
@@ -323,8 +321,8 @@ mod tests {
         // `Retrying::wrap`, into `B2Backend::new`, through `within` at the top
         // of the process. If any of those hops minted a *fresh* counter, each
         // layer would have its own six and the run's bound would be six times
-        // however many layers there are, which is the arithmetic §36.5 measured
-        // wearing a different hat.
+        // however many layers there are, which is the arithmetic of the 46.3 s,
+        // 136.6 s and 288.7 s runs wearing a different hat.
         let deadlines = Deadlines::from_seconds(60, 30);
         let handed_to_a_backend = deadlines.clone();
         let inside_a_bounded_run = deadlines

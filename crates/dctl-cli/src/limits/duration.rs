@@ -29,7 +29,7 @@
 //! No limit, represented as [`None`] rather than as `Some(0)`, so "unbounded"
 //! can never be confused with "a window of zero seconds" — which would mean a
 //! run that must be over before it starts. rclone reads a zero `--max-duration`
-//! the same way (`fs/sync/sync.go:196`, `if ci.MaxDuration > 0`).
+//! the same way, arming the deadline only when the value is positive.
 
 use std::str::FromStr;
 use std::time::Duration;
@@ -161,7 +161,7 @@ mod tests {
     fn a_window_of_zero_is_unbounded_rather_than_impassable() {
         // The one reading that must not happen: a run required to be over
         // before it starts. rclone arms the deadline only when the value is
-        // positive (`fs/sync/sync.go:196`) and so does this.
+        // positive, and so does this.
         assert_eq!(TimeLimit::of(Duration::ZERO), TimeLimit::none());
         assert_eq!(
             TimeLimit::of(Duration::from_secs(1)).get(),

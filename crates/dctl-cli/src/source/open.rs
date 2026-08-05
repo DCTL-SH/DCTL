@@ -65,7 +65,7 @@ use super::vault::VaultSource;
 /// mistake because each one had a spec in hand and nothing else, and the cost is
 /// not an empty listing: an incremental `sync` reads an empty destination on
 /// every run and re-uploads the whole dataset for as long as the job is
-/// scheduled (`HANDOVER.md` §11.3 item 6).
+/// scheduled.
 ///
 /// Returning a bare `Box<dyn Source>` is what made that reachable. A caller that
 /// receives one of these has the prefix in the same value as the source, and the
@@ -384,11 +384,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_named_remotes_scope_travels_with_the_source_it_scopes() {
-        // The end-to-end half of `HANDOVER.md` §11.3 item 6, on the one provider
-        // shape a test can reach without a credential. A configured `local`
-        // remote carries its root in a setting, so the whole spec path is the
-        // prefix; the shorthands are the shape where it is not, and they are
-        // asserted in `remote::resolve` because building one needs a key pair.
+        // The end-to-end half of the defect described on `Opened` — the spec's
+        // path used where the resolver's prefix was meant, so `dctl ls
+        // b2:DCTL001` reported nothing and an incremental `sync` re-uploaded the
+        // whole dataset on every run — on the one provider shape a test can
+        // reach without a credential. A configured `local` remote carries its
+        // root in a setting, so the whole spec path is the prefix; the
+        // shorthands are the shape where it is not, and they are asserted in
+        // `remote::resolve` because building one needs a key pair.
         //
         // What this pins is the *wiring*: the number `open` hands back is the
         // number the listing is taken at, on a real directory, through the real

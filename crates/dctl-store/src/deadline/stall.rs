@@ -1,18 +1,17 @@
 //! When the run stops asking a link that never answers.
 //!
-//! # The entry this closes
+//! # The defect this closes
 //!
-//! `HANDOVER.md` §11 and §36.5: *`--timeout` does not bound a run*. The flag
-//! itself is exact — a black-holed request fails at **30 s** under
-//! `--timeout 30`, to the second — and it bounds *one attempt*, which is
-//! rclone's meaning of the same flag (`fs/config.go:122`, `Help: "IO idle
-//! timeout"`). What was missing is that nothing bounded the number of attempts
-//! a **run** could spend discovering the same silence.
+//! *`--timeout` does not bound a run.* The flag itself is exact — a black-holed
+//! request fails at **30 s** under `--timeout 30`, to the second — and it bounds
+//! *one attempt*, which is rclone's meaning of the same flag: an IO idle
+//! timeout. What was missing is that nothing bounded the number of attempts a
+//! **run** could spend discovering the same silence.
 //!
-//! §33 answered the operator's *need* with [`super::run`] and left this
-//! arithmetic where it was, stating in `--help` that the cost of a dead link is
-//! *"a product this flag does not know"*. That sentence was true, and the reason
-//! it was true is the defect: the product is
+//! [`super::run`] answered the operator's *need* and left this arithmetic where
+//! it was, stating in `--help` that the cost of a dead link is *"a product this
+//! flag does not know"*. That sentence was true, and the reason it was true is
+//! the defect: the product is
 //!
 //! ```text
 //!   --timeout  ×  attempts per request  ×  DISTINCT REQUESTS  ×  --retries
@@ -61,15 +60,16 @@
 //! the count through the same [`Activity`](super::Activity) the watchdog reads.
 //! Making `--timeout` a stopwatch would destroy a 4 GiB restore over a slow
 //! uplink at minute five while reporting a network fault that did not happen,
-//! which is a worse defect than the one being fixed and is why §33 refused it.
+//! which is a worse defect than the one being fixed, and is why that reading
+//! was refused.
 //!
 //! # `--timeout 0` is unbounded, and it has to be
 //!
-//! Zero means *wait as long as it takes* (rclone's meaning too,
-//! `fs/config.go:115-123`). An operator who has said they will wait forever for
-//! a quiet link has also said they want it asked again, so a run with no idle
-//! deadline has no stall limit either. [`RunStall::unbounded`] is how that is
-//! spelled, out loud, rather than by a limit nobody notices is absent.
+//! Zero means *wait as long as it takes*, which is rclone's meaning too. An
+//! operator who has said they will wait forever for a quiet link has also said
+//! they want it asked again, so a run with no idle deadline has no stall limit
+//! either. [`RunStall::unbounded`] is how that is spelled, out loud, rather
+//! than by a limit nobody notices is absent.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};

@@ -66,9 +66,9 @@ pub struct Ctx {
     /// context is built. That is what makes it a bound on the run rather than a
     /// bound on each thing the run does: a deadline computed wherever it was
     /// needed would give every file, every request and every retry the whole
-    /// window over again — which is precisely the arithmetic `HANDOVER.md`
-    /// §32.9 measured, in which `--timeout 30` fired exactly on time and the run
-    /// carried on for 943.6 s.
+    /// window over again — which is precisely the arithmetic behind the run in
+    /// which `--timeout 30` fired exactly on time and the command carried on for
+    /// 943.6 s.
     pub deadlines: Deadlines,
 
     /// The tamper-evident log every data-changing operation appends to

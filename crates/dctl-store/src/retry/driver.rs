@@ -39,28 +39,27 @@ use super::policy::RetryPolicy;
 /// attempt number so a caller that must do something different on a retry can
 /// see that it is one.
 ///
-/// # `deadline` is why this layer is the one §11.3 item 2 names
+/// # `deadline` is why this layer is the one that has to carry the bound
 ///
 /// `--timeout` bounds one attempt. This loop is what multiplies it: six attempts
 /// with exponential backoff, run in full by each of the several distinct
-/// requests one copy makes, and multiplied again by `--retries`. §32.9 measured
-/// the product — a black-holed 160 MiB upload under `--timeout 30 --retries 1`
-/// had **not ended 943.6 s after the cut**. Nothing in that arithmetic is a bug;
+/// requests one copy makes, and multiplied again by `--retries`. The product was
+/// measured — a black-holed 160 MiB upload under `--timeout 30 --retries 1` had
+/// **not ended 943.6 s after the cut**. Nothing in that arithmetic is a bug;
 /// what was missing was a term that could end it. `deadline` is that term, and
 /// it acts twice: a wait is never longer than what is left of the run, and an
 /// attempt is never *begun* once the window has closed.
 ///
 /// [`RunDeadline::unbounded`] restores exactly the previous behaviour, which is
-/// what a run with no `--max-duration` gets — the same default rclone has
-/// (`fs/config.go:361`).
+/// what a run with no `--max-duration` gets — the same default rclone has.
 ///
 /// # `stall` is why `--timeout` is a bound and not a factor
 ///
 /// `deadline` ends a run that is *taking too long*, which is a different
-/// question from a run that is *getting nothing back*. §36.5 measured the second
-/// one: `--timeout 30` against a black-holed B2 returned the shell after
-/// **288.7 s**, and 46.3 s and 136.6 s on two other runs of the same command
-/// against the same fault, because the cost was
+/// question from a run that is *getting nothing back*. The second one was
+/// measured too: `--timeout 30` against a black-holed B2 returned the shell
+/// after **288.7 s**, and 46.3 s and 136.6 s on two other runs of the same
+/// command against the same fault, because the cost was
 /// `--timeout × attempts × distinct requests` and the last factor depended on
 /// which request the cut landed on.
 ///
@@ -281,7 +280,7 @@ mod tests {
 
     // ── the run's own silence ────────────────────────────────────────────
     //
-    // §36.5: `--timeout 30` against a black-holed B2 returned the shell after
+    // Measured: `--timeout 30` against a black-holed B2 returned the shell after
     // **288.7 s**, and 46.3 s and 136.6 s on two other runs of the same command
     // against the same fault. The flag was exact every time and the run was not
     // bounded by it, because the cost was `--timeout × attempts × DISTINCT
@@ -449,7 +448,8 @@ mod tests {
         // six. The bound never fired on B2 at all: a black-holed 160 MiB upload
         // ran `b2_authorize_account`, `b2_list_buckets`, `b2_upload_part` and
         // `b2_list_buckets` again, each spending a whole schedule, and exited 6
-        // after 116.5 s — which is §36.5's complaint with the fix installed.
+        // after 116.5 s. That exit is the upload giving up, not this bound
+        // firing: the unbounded run reproduced with the fix installed.
         //
         // `Reach::Unknown` is the third state, and this is what it is for.
         let stall = stall();
@@ -703,7 +703,7 @@ mod tests {
 
     // ── the run's own deadline ───────────────────────────────────────────
     //
-    // §32.9 measured this loop as the multiplier: `--timeout 30` fired at
+    // This loop was measured as the multiplier: `--timeout 30` fired at
     // exactly 30 s and the run went on for 943.6 s, because six attempts of a
     // black hole is six times the flag and a copy makes several distinct
     // requests. The tests below are about the term that ends it.
@@ -712,8 +712,8 @@ mod tests {
     /// scheduler is not what decides the outcome.
     const WINDOW: Duration = Duration::from_millis(300);
 
-    /// The schedule §32.9 measured, in miniature: several attempts, each
-    /// waiting longer than the last, adding up to far more than [`WINDOW`].
+    /// The schedule behind the 943.6 s overrun, in miniature: several attempts,
+    /// each waiting longer than the last, adding up to far more than [`WINDOW`].
     fn patient() -> RetryPolicy {
         RetryPolicy {
             max_attempts: 6,
@@ -726,9 +726,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_loop_is_not_re_entered_once_the_runs_window_has_closed() {
-        // The defect, at the layer §11.3 item 2 names. Without the deadline this
-        // makes six attempts and sleeps the whole schedule between them; with it
-        // the loop stops as soon as the window is gone.
+        // The defect, at the layer that has to carry the bound. Without the
+        // deadline this makes six attempts and sleeps the whole schedule between
+        // them; with it the loop stops as soon as the window is gone.
         let calls = AtomicU32::new(0);
         let started = std::time::Instant::now();
         let error = run(
@@ -762,7 +762,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_backoff_is_never_longer_than_what_is_left_of_the_run() {
-        // A wait outliving the window it is inside is the §32.9 arithmetic in
+        // A wait outliving the window it is inside is the 943.6 s arithmetic in
         // miniature: the schedule sleeps for minutes and the run was over
         // before the first of them ended.
         let calls = AtomicU32::new(0);
@@ -847,7 +847,7 @@ mod tests {
         // Belt as well as braces. Even if a lower layer hands this loop a
         // run-deadline failure — `IdleWatch` does exactly that when a request is
         // cancelled by the window — it must be terminal. A `--max-duration`
-        // classified as transient is the §32.9 defect wearing a new error type.
+        // classified as transient is the overrun wearing a new error type.
         let calls = AtomicU32::new(0);
         let error = run(
             "test",

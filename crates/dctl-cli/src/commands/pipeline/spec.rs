@@ -24,8 +24,8 @@
 //! directory", while `dctl ls r:` listed the remote happily. `rcat` was worse: it
 //! created its staging file beside the *local* path, so a stream written to a
 //! configured remote failed on a directory the operator never named.
-//! `HANDOVER.md` §18.1 recorded this drift as closed across five command
-//! families; this one and the recovery family were not among them.
+//! This drift was recorded as closed across five command families; this one and
+//! the recovery family were not among them.
 //!
 //! The two halves are normalised differently, and that asymmetry is deliberate.
 //! A **remote** path is a logical vault path, so it is cleaned and NFC-normalised
@@ -266,9 +266,9 @@ mod tests {
         // letter` and asserted exactly that, which is why the drift survived an
         // audit that claimed to have closed it: the defective rule had a passing
         // test standing over it. rclone settles the same ambiguity at
-        // classification time (`fs/fspath/path.go:163` consults
-        // `driveletter.IsDriveLetter`, a compiled-in `false` off Windows), and
-        // `remote::spec` has agreed with that since §18.1. This family did not.
+        // classification time — its drive-letter test is compiled in as a
+        // constant `false` off Windows — and `remote::spec` has agreed with that
+        // since the drift was first closed. This family did not.
         assert!(ObjectSpec::classify("x:y", true).unwrap().is_local());
         assert_eq!(
             ObjectSpec::classify("x:y", false).unwrap().remote(),

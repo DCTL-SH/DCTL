@@ -65,8 +65,9 @@ pub struct Retrying {
     ///
     /// A required argument at both constructors rather than a builder with a
     /// default, and that is deliberate. This decorator is the layer that
-    /// multiplies `--timeout` into the 943.6 s §32.9 measured, so a construction
-    /// site that *could* forget to say what bounds the run is a site that will:
+    /// multiplies `--timeout` into the 943.6 s that was measured, so a
+    /// construction site that *could* forget to say what bounds the run is a
+    /// site that will:
     /// eleven flags reached `dctl --help` and did nothing by exactly that
     /// route. [`RunDeadline::unbounded`] is how a caller says "nothing bounds
     /// this", out loud, at the call site.
@@ -77,7 +78,7 @@ pub struct Retrying {
     /// A required argument at both constructors for exactly the reason the
     /// deadline above is one, and with one addition: this is the layer that
     /// multiplies `--timeout` by *distinct requests*, which is the factor
-    /// §36.5 measured and could not state. A construction site that could
+    /// that was measured and could not be stated. A construction site that could
     /// forget to say what stops the run asking is a site that will.
     /// [`RunStall::unbounded`] is how a caller says "nothing stops this", out
     /// loud, at the call site — and is what `--timeout 0` means.
@@ -421,7 +422,7 @@ mod tests {
         // **A wrapper that answers for the layer underneath.** Every backend in
         // this build is wrapped by both decorators before a command sees it, so
         // a `checksum_support` that stopped being forwarded would be the answer
-        // for *every* remote — and §34's whole capability is a per-backend
+        // for *every* remote — and this whole capability is a per-backend
         // question. Both directions matter and both are asserted:
         //
         //   * a wrapper reporting `None` over a provider that does record makes
@@ -429,7 +430,7 @@ mod tests {
         //     detect rot — loud, but it removes the one backend that can;
         //   * a wrapper reporting `Recorded` over a filesystem makes
         //     `dctl verify local:` print `ok` for every object while comparing a
-        //     re-read against nothing, which is §31.4's defect returning.
+        //     re-read against nothing, which is an earlier defect returning.
         //
         // Every double in `crate::testing` says `None`, so before
         // `CountingBackend::recording` existed the two were indistinguishable
@@ -566,8 +567,9 @@ mod tests {
 
     #[tokio::test]
     async fn the_wrappers_schedule_stops_at_the_runs_deadline() {
-        // The decorator is where §32.9's multiplication happens, so it is where
-        // the run's deadline has to arrive. Same failing backend, same schedule;
+        // The decorator is where the `--timeout` multiplication happens, so it
+        // is where the run's deadline has to arrive. Same failing backend, same
+        // schedule;
         // the only difference is that this run had a window and it has closed.
         let inner = Arc::new(CountingBackend::failing("get", u32::MAX, busy()));
         let counter = Arc::clone(&inner);

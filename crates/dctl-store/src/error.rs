@@ -58,7 +58,7 @@ pub enum StoreError {
     /// errno first ([`crate::durable`]); this fires only when the destination
     /// accepted every byte without complaint and then did not have them, which
     /// is a lying filesystem or a concurrent truncation. Reporting *that* as a
-    /// checksum mismatch is what `docs/HANDOVER.md` §16.1 is about.
+    /// checksum mismatch is the misdiagnosis this variant exists to prevent.
     #[error("short write: {expected} bytes were written, {actual} landed")]
     ShortWrite { expected: u64, actual: u64 },
 
@@ -159,11 +159,10 @@ pub enum StoreError {
     /// **Not** a [`StoreError::Transport`], and the distinction is the whole
     /// point of the variant. A transport failure means *nothing answered*, which
     /// is the case another attempt exists for; this means *the window you gave
-    /// me is over*, which no number of attempts can undo. `HANDOVER.md` §32.9
-    /// measured what happens when a deadline is reported as something retryable:
-    /// the flag fires at exactly its number and the run continues for another
-    /// 943.6 s, because every layer above reads "worth another attempt" and
-    /// spends its whole schedule.
+    /// me is over*, which no number of attempts can undo. Reporting a deadline
+    /// as something retryable has been measured here: the flag fires at exactly
+    /// its number and the run continues for another 943.6 s, because every
+    /// layer above reads "worth another attempt" and spends its whole schedule.
     ///
     /// It is a *store* error rather than a CLI one because the layer that
     /// notices is the one holding the request. The CLI maps it to exit **10**.
@@ -181,8 +180,8 @@ pub enum StoreError {
     /// for; this means *nothing has answered for a whole schedule of attempts,
     /// and the run has stopped asking*. Another attempt is not merely useless —
     /// classifying it as worth one is what let `--timeout × attempts` grow into
-    /// `--timeout × attempts × distinct requests`, which `HANDOVER.md` §36.5
-    /// measured at 288.7 s under `--timeout 30`.
+    /// `--timeout × attempts × distinct requests`, measured at 288.7 s under
+    /// `--timeout 30`.
     ///
     /// The message multiplies out to the number an operator can check against
     /// the flag they set. The CLI maps it to exit **5**, the same code a link
@@ -388,8 +387,8 @@ mod tests {
 
     #[test]
     fn a_provider_failure_reads_the_way_it_always_did() {
-        // The rendering is a contract: `HANDOVER.md` quotes it, `tests/s3_mock.rs`
-        // asserts on it, and an operator greps for it.
+        // The rendering is a contract: `tests/s3_mock.rs` asserts on it, and an
+        // operator greps for it.
         let error = StoreError::Provider {
             backend: "s3",
             status: 403,

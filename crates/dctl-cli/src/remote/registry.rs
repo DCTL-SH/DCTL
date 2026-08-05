@@ -161,8 +161,8 @@ pub enum Target {
         /// streaming read or write holds, so it is what an sftp transfer costs
         /// in memory and the knob a small container needs.
         ///
-        /// The last provider on §11.3 item 8's inert list. It was declared on
-        /// `SftpDef`, printed by `dctl config show`, and reached nothing.
+        /// The last of the inert settings: it was declared on `SftpDef`,
+        /// printed by `dctl config show`, and reached nothing.
         chunk_size: Option<u64>,
     },
 }
@@ -215,7 +215,9 @@ impl Target {
 /// symbolic links found there is a decision the operator makes at the command
 /// line. Only the two backends that walk a real filesystem can use it; passing
 /// it to the object stores would be offering a dial that does nothing, which is
-/// the class of defect `HANDOVER.md` §11.3 item 10 already tracks.
+/// the class of defect this project has already had to fix: a setting that
+/// parses, prints under `dctl config show`, and reaches no code at all.
+///
 /// `deadlines` is the run's `--timeout`, `--contimeout` and `--max-duration`. It
 /// is a parameter for the same reason `links` and `meter` are: it belongs to the
 /// invocation rather than to the place, and a backend that read it for itself
@@ -259,11 +261,14 @@ pub fn build(
     // The run's own deadline goes to the retry layer as well as to the
     // backends, because this is where `--timeout` is multiplied: six attempts
     // per request, several distinct requests per copy. A retry layer that did
-    // not know when the run had to be over is the whole of `HANDOVER.md` §32.9.
+    // not know when the run had to be over is the whole of a measured defect: a
+    // 160 MiB upload with `--timeout 30 --retries 1` had still not ended 943.6 s
+    // after the cut, because every layer honoured its own clock and none of them
+    // honoured the run's.
     //
     // The stall counter goes with it, and it is the *same cell* the backend
     // underneath was given — `Deadlines` clones the handle, never the count.
-    // That is the whole of the §36.5 fix: the second factor above, "several
+    // That is the whole of the stall bound: the second factor above, "several
     // distinct requests per copy", stops multiplying only if every layer that
     // retries counts into one place.
     let backend =
@@ -281,9 +286,9 @@ pub fn build(
 /// `region`, `account`. Each is one argument in one call, each is the last step
 /// of a journey `config::reach` proves the first three quarters of, and dropping
 /// one is invisible: the setting still parses, still round-trips through
-/// `config show`, and still reaches the `Target`. `HANDOVER.md` §21.7 is that
-/// defect on the meter — written into one arm of this match and silently omitted
-/// from four — and §35.3 measured it on B2's `chunk_size`: dropped at this call
+/// `config show`, and still reaches the `Target`. That defect is on record for
+/// the meter — written into one arm of this match and silently omitted from
+/// four — and it was measured again on B2's `chunk_size`: dropped at this call
 /// and `cargo test --workspace` stayed entirely green.
 ///
 /// The environment is a parameter because it was the reason there was no way in.
@@ -532,8 +537,8 @@ fn classify(variable: &str, value: std::result::Result<String, VarError>) -> Res
 /// file, resolver, `Target`, backend — can be tested at its last step without
 /// exporting a credential into the test process. The resolver's half is covered
 /// in [`super::resolve`]; this is the half where a setting that was carried all
-/// the way here can still be dropped on the floor, which is `HANDOVER.md` §21.7's
-/// defect exactly: the meter was installed in one arm of this very match and
+/// the way here can still be dropped on the floor — a defect this project has
+/// already measured: the meter was installed in one arm of this very match and
 /// silently omitted from four.
 ///
 /// On B2 the part size is the whole of an upload's peak memory, so dropping it
@@ -618,13 +623,12 @@ mod tests {
         // cuts_the_parts` below proves the *helper* keeps it. What was between
         // them was the line in each arm of `assemble` that passes the resolved
         // `Target`'s field to the constructor — and dropping it on the B2 arm
-        // left `cargo test --workspace` entirely green (`HANDOVER.md` §35.3).
+        // left `cargo test --workspace` entirely green.
         //
         // Three arms, because the setting has three copies of the same one-line
         // wiring and a test covering one leaves the other two deletable — which
-        // is `HANDOVER.md` §26.1's shape and §21.7's actual history, where the
-        // meter was written into one arm of this very match and omitted from
-        // four.
+        // is the meter's own history: it was written into one arm of this very
+        // match and omitted from four.
         //
         // What it costs is not a lost tuning hint. On every one of these the
         // part size **is** the upload's peak working set, so a dropped
@@ -821,7 +825,8 @@ mod tests {
     fn a_b2_remotes_endpoint_reaches_the_client_that_authorizes() {
         // The far end of `endpoint` on b2. `config::reach` proves the value
         // survives the resolver; this proves the arm of `build` that receives it
-        // does not drop it — which is the half §21.7 says this project loses.
+        // does not drop it — which is the half this project has been caught
+        // losing before.
         //
         // The consequence of dropping it is not cosmetic: an operator running a
         // private B2 gateway, or a test pointing at a double, silently talks to
@@ -911,7 +916,7 @@ mod tests {
         );
         assert_eq!(
             Target::Sftp {
-                host: "lsx-001".into(),
+                host: "backup.example.com".into(),
                 base: "store".into(),
                 chunk_size: None,
             }

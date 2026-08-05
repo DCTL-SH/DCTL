@@ -56,8 +56,7 @@ impl S3Backend {
     /// is: a setting that travels four layers — configuration file, resolver,
     /// `Target`, constructor — needs something observable at the far end, or the
     /// last step of the journey is a line no test can check. It was exactly that
-    /// line on B2 that `HANDOVER.md` §35.3 measured as deletable with the whole
-    /// gate staying green.
+    /// line on B2 that proved deletable with the whole gate staying green.
     #[must_use]
     pub const fn part_size(&self) -> u64 {
         self.client.part_size()

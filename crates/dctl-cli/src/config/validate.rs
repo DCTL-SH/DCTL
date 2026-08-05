@@ -41,7 +41,7 @@ use super::model::{Config, RemoteDef};
 ///
 /// The rules exist to keep `remote:path` unambiguous, in this order of
 /// importance: a name is at least [`MIN_REMOTE_NAME_LEN`] characters, which is
-/// one, as rclone's `configNameRe` is; it contains only ASCII letters, digits
+/// one, matching rclone's own minimum; it contains only ASCII letters, digits
 /// and [`REMOTE_NAME_EXTRA_CHARS`], so it can never be read as a path or need
 /// shell quoting; it starts with a letter or a digit, so it can never be read as
 /// a flag; and it is not the name of a provider type, so `b2:` cannot mean both
@@ -111,13 +111,12 @@ fn is_name_char(c: char) -> bool {
 /// Whether creating a remote called `name` on **this** machine would produce a
 /// remote nothing on this machine could address.
 ///
-/// rclone's `NewRemoteName` refuses a drive-letter name outright
-/// (`fs/config/ui.go:577`), and for the reason that matters here: on Windows
-/// `c:` is the C: drive before any configuration is consulted, so a remote
-/// called `c` could be listed and repaired by name but never reached through
-/// `c:path`. Off Windows there is no drive to be shadowed by and the name is
-/// ordinary — which is why this is asked at creation time, on the machine doing
-/// the creating, and never on load.
+/// rclone refuses a drive-letter name outright when a remote is created, and for
+/// the reason that matters here: on Windows `c:` is the C: drive before any
+/// configuration is consulted, so a remote called `c` could be listed and
+/// repaired by name but never reached through `c:path`. Off Windows there is no
+/// drive to be shadowed by and the name is ordinary — which is why this is asked
+/// at creation time, on the machine doing the creating, and never on load.
 ///
 /// A config carried from Linux to Windows may therefore contain such a name.
 /// That is rclone's position too, and `dctl config list` still shows it; what
@@ -200,7 +199,7 @@ pub fn validate(config: &Config) -> Result<()> {
 /// an earlier build still carries it — and carried it *silently*, because the
 /// value round-tripped through the file faithfully and reached nothing. So the
 /// setting is diagnosed on the way in as well, which is the same conclusion
-/// §16.3 reached about the sftp base and for the same reason: a rule enforced by
+/// reached about the sftp base and for the same reason: a rule enforced by
 /// one command is a rule the file can be hand-edited around.
 ///
 /// Table-driven, and asked of the serialised form, so the next refused setting
@@ -489,10 +488,10 @@ mod tests {
 
     #[test]
     fn a_one_character_name_is_legal_because_rclone_makes_one_legal() {
-        // rclone's `configNameRe` (`fs/fspath/path.go:16`) accepts a single
-        // character and `CheckConfigName` applies it on every platform, so a
-        // config being migrated can already contain one. Refusing it here made
-        // the import, not the data, the thing that failed.
+        // rclone accepts a single-character name and applies that rule on every
+        // platform, so a config being migrated can already contain one.
+        // Refusing it here made the import, not the data, the thing that
+        // failed.
         for name in ["r", "c", "1", "x"] {
             assert!(
                 validate_remote_name(name).is_ok(),
@@ -508,9 +507,9 @@ mod tests {
 
     #[test]
     fn a_drive_letter_name_is_refused_only_where_drives_exist() {
-        // rclone's `ui.go:577` rule, and the reason the length rule above could
-        // safely be dropped: on Windows `c:` is the C: drive before any config
-        // is read, so choosing `c` there gives you a remote your own shell hides.
+        // rclone's rule, and the reason the length rule above could safely be
+        // dropped: on Windows `c:` is the C: drive before any config is read,
+        // so choosing `c` there gives you a remote your own shell hides.
         assert!(drive_letter_conflict("c", true));
         assert!(drive_letter_conflict("Z", true));
         assert!(!drive_letter_conflict("c", false));

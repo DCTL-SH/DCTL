@@ -19,11 +19,10 @@
 //! * **10** belonged to `--max-duration`, which DCTL had no flag for at all.
 //!   That was not a missing convenience: `--timeout` bounds one attempt, so a
 //!   run that met a dead network had nothing bounding it, and one measured
-//!   against live B2 was still going 943.6 s after a 30 s deadline had fired
-//!   (`HANDOVER.md` §32.9). The flag exists now and
-//!   [`crate::ctx::Ctx::within_deadline`], `main`'s own deadline and
-//!   `dctl_store::StoreError::RunDeadline` all produce this code; `tests/cli.rs`
-//!   asserts a process really exits with it.
+//!   against live B2 was still going 943.6 s after a 30 s deadline had fired.
+//!   The flag exists now and [`crate::ctx::Ctx::within_deadline`], `main`'s own
+//!   deadline and `dctl_store::StoreError::RunDeadline` all produce this code;
+//!   `tests/cli.rs` asserts a process really exits with it.
 //! * **9** was on the list until a scrub that covered nothing needed a non-zero
 //!   status to say so, and it is now produced by [`crate::commands::scrub`].
 //! * **8** was on it too, for longer than it should have been: `--max-transfer`
@@ -164,8 +163,9 @@ pub enum ExitCode {
     /// of them in microseconds, producing a wall of errors over requests that
     /// were never made — which is the failure mode
     /// `commands::transfer::pipeline::is_fatal` documents for
-    /// [`ExitCode::DurationLimitExceeded`], and the same complaint
-    /// `HANDOVER.md` §36.5 makes about the run that would not end.
+    /// [`ExitCode::DurationLimitExceeded`], and the same complaint made about
+    /// the run that would not end, still going 943.6 s after its deadline had
+    /// fired.
     ///
     /// **Deliberately not 10.** `--max-duration` is the operator saying when
     /// the run must be over, and it did what it was told. This is the network

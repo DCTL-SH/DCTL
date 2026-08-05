@@ -101,7 +101,7 @@ pub(super) struct Observed {
     ///
     /// The second is the run's own `--max-duration` having closed while the
     /// request was in flight. A window that has shut does not re-open, and
-    /// treating that as a transport failure is exactly what §32.9 measured:
+    /// treating that as a transport failure is exactly what was measured:
     /// the deadline fires on time and the schedule spends itself anyway.
     pub settled: bool,
 }
@@ -278,7 +278,7 @@ fn backoff(attempt: u32) -> Duration {
 ///
 /// # Why `deadline` and `stall` are here as well as in [`crate::retry::driver`]
 ///
-/// Because this loop is a *second* multiplier and §32.9 caught it being one.
+/// Because this loop is a *second* multiplier and was caught being one.
 /// The 160 MiB upload that had not ended 943.6 s after the route was cut spent
 /// that time in `b2_upload_part`, `b2_cancel_large_file` and `b2_list_buckets`
 /// — three distinct requests, each running this schedule in full, underneath
@@ -559,8 +559,8 @@ mod tests {
 
     // ── the run's own silence ────────────────────────────────────────────
     //
-    // This loop is where B2 multiplies `--timeout`. §32.9 read the log of the
-    // 160 MiB upload that had not ended 943.6 s after the cut: `b2_upload_part`,
+    // This loop is where B2 multiplies `--timeout`. The log of the 160 MiB
+    // upload that had not ended 943.6 s after the cut showed `b2_upload_part`,
     // `b2_cancel_large_file` and `b2_list_buckets`, each running this schedule in
     // full against a link that had already proved silent. The counter is shared
     // with `crate::retry::driver` precisely so those are one budget and not
@@ -770,7 +770,7 @@ mod tests {
 
     #[tokio::test]
     async fn no_b2_request_is_made_once_the_runs_window_has_closed() {
-        // §32.9's 160 MiB row spent its 943.6 s in three distinct B2 requests,
+        // The 160 MiB row spent its 943.6 s in three distinct B2 requests,
         // each running this schedule in full. A run-level bound the layer above
         // enforced alone would have been a bound this loop could outlast.
         use std::sync::atomic::{AtomicU32, Ordering};

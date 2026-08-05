@@ -205,12 +205,12 @@ fn deserialize(table: toml::Table) -> Result<RemoteDef> {
 /// Two providers need something here, for two different reasons.
 ///
 /// **sftp `base`.** Written as a bare relative path it meant `$HOME/…` here and
-/// `/…` through `dctl init --base sftp:HOST/…` (`docs/HANDOVER.md` §16.3), so
-/// the one rule ([`crate::remote::sftp_base`]) is applied at the moment the
-/// value is written rather than at the moment it is used. Two things follow: the
-/// file always says which of the two it means, and a remote that cannot say is
-/// refused *before* it exists instead of after somebody has pointed a backup at
-/// it.
+/// `/…` through `dctl init --base sftp:HOST/…` — one spelling, two different
+/// destinations — so the one rule ([`crate::remote::sftp_base`]) is applied at
+/// the moment the value is written rather than at the moment it is used. Two
+/// things follow: the file always says which of the two it means, and a remote
+/// that cannot say is refused *before* it exists instead of after somebody has
+/// pointed a backup at it.
 ///
 /// **vault `base_path`.** A vault occupies the root of the store it wraps, and
 /// `dctl init --base local:/srv/v/sub` has always said so. This door did not:
@@ -629,7 +629,7 @@ mod tests {
         // the two required settings, and both must survive flatten → build
         // unchanged, with require_vault riding along so a store declares itself.
         let remote = RemoteDef::Sftp(crate::config::SftpDef {
-            host: "lsx-001".into(),
+            host: "backup.example.com".into(),
             base: "~/dctl-store".into(),
             chunk_size: None,
             verify: None,
@@ -637,7 +637,7 @@ mod tests {
         });
         let settings = flatten(&remote);
         assert!(settings.contains(&("type".to_string(), "sftp".to_string())));
-        assert!(settings.contains(&("host".to_string(), "lsx-001".to_string())));
+        assert!(settings.contains(&("host".to_string(), "backup.example.com".to_string())));
         assert!(settings.contains(&("base".to_string(), "~/dctl-store".to_string())));
 
         let rebuilt = build(
@@ -658,7 +658,11 @@ mod tests {
         // loader then refuses.
         let error = build(
             constants::PROVIDER_SFTP,
-            &assignments(&[("host", "lsx-001"), ("base", "store"), ("bucket", "nope")]),
+            &assignments(&[
+                ("host", "backup.example.com"),
+                ("base", "store"),
+                ("bucket", "nope"),
+            ]),
         )
         .unwrap_err();
         assert_eq!(error.code(), ExitCode::Usage);
@@ -691,12 +695,12 @@ mod tests {
 
     #[test]
     fn a_vault_subdirectory_is_refused_at_the_door_that_used_to_accept_it() {
-        // `HANDOVER.md` §11.2 has always said a vault occupies the root of the
-        // store it wraps, and `dctl init --base local:/srv/v/sub` has always said
-        // so out loud. This door did not: it took the key, wrote it to the file,
-        // showed it back through `dctl config show`, and addressed the root — a
-        // setting the operator could see, could not remove by observing anything,
-        // and that moved no data.
+        // The documented rule has always been that a vault occupies the root of
+        // the store it wraps, and `dctl init --base local:/srv/v/sub` has always
+        // said so out loud. This door did not: it took the key, wrote it to the
+        // file, showed it back through `dctl config show`, and addressed the
+        // root — a setting the operator could see, could not remove by observing
+        // anything, and that moved no data.
         let error = build(
             constants::PROVIDER_VAULT,
             &assignments(&[("base", "b2prod"), ("base_path", "vaults/a")]),

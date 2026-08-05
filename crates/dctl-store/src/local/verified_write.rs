@@ -21,7 +21,7 @@
 //!
 //! Every step below that can fail is asked what went wrong, in the order the
 //! steps happen, and the read-back verification is *last*. That ordering is the
-//! fix for `docs/HANDOVER.md` §16.1, where it was the other way round: the
+//! fix for a misdiagnosis that shipped, where it was the other way round: the
 //! `tokio::fs::File` write path swallowed an `ENOSPC` (see [`crate::durable`]),
 //! the read-back found a file that was empty, and DCTL told the operator
 //! **`checksum mismatch: expected … got …`** with a hint blaming the provider or

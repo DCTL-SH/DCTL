@@ -16,8 +16,8 @@
 //! Exit 0, and not one object in a vault. `create_dir_all` re-created the store
 //! path, every write landed in the new empty directory, and the post-write
 //! read-back passed because it re-read the same wrong place. That was fixed for
-//! `local:` and for `local:` only, which `HANDOVER.md` §11.2 records: *"A deleted
-//! bucket or a removed SFTP base mid-run is unguarded and untested."*
+//! `local:` and for `local:` only: a deleted bucket or a removed SFTP base
+//! mid-run stayed unguarded and untested.
 //!
 //! It is reproducible on SFTP. Twenty-five files, the base renamed away at three
 //! seconds: **seventeen objects landed in a directory the backend re-created**,

@@ -84,7 +84,7 @@ pub(super) async fn head(b2: &B2Backend, key: &ObjectKey) -> Result<ObjectMeta> 
 ///
 /// A function of its own because it is the whole of the decision and neither
 /// caller can be driven to it without a provider — deleting the name comparison
-/// from both left `cargo test --workspace` entirely green (`HANDOVER.md` §35.5).
+/// from both left `cargo test --workspace` entirely green.
 fn exactly(files: Vec<super::api::FileItem>, key: &ObjectKey) -> Option<super::api::FileItem> {
     files
         .into_iter()

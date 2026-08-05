@@ -3,10 +3,10 @@
 //! ## The defect this module exists to make impossible
 //!
 //! `crate::cli::reach` asks one question of every global *flag*: does anything
-//! read it? Eleven did not. `HANDOVER.md` §11.3 item 9 is the same question
-//! asked of the *configuration file*, and it was raised because `chunk_size` had
-//! to be found by needing it rather than by looking — it was declared on five
-//! provider definitions, printed by `dctl config show`, documented in
+//! read it? Eleven did not. This module asks the same question of the
+//! *configuration file*, and it was raised because `chunk_size` had to be found
+//! by needing it rather than by looking — it was declared on five provider
+//! definitions, printed by `dctl config show`, documented in
 //! `dctl config providers`, and read by **nothing** on two of them.
 //!
 //! A setting in that state is worse than one that does not exist. An unknown key
@@ -38,7 +38,7 @@
 //!
 //! Refusing is a perfectly good answer. A silent no-op never is, and it is
 //! exactly what `base_path` on a vault did: `dctl init` refuses the subdirectory
-//! form clearly (§11.2), while `dctl config create v vault base=s base_path=x`
+//! form clearly, while `dctl config create v vault base=s base_path=x`
 //! accepted it, wrote it to the file, showed it back in `dctl config show`, and
 //! addressed the container's root anyway.
 //!
@@ -483,10 +483,10 @@ mod tests {
 
     #[test]
     fn every_honoured_setting_reaches_the_code_that_acts_on_it() {
-        // `HANDOVER.md` §11.3 item 9, as a property rather than as five examples.
-        // A sentinel goes into the file's vocabulary and has to come out of the
-        // seam that acts on it; anything else — a dropped value, a default
-        // substituted for it — fails here naming both.
+        // The question at the top of this module, as a property rather than as
+        // five examples. A sentinel goes into the file's vocabulary and has to
+        // come out of the seam that acts on it; anything else — a dropped
+        // value, a default substituted for it — fails here naming both.
         for setting in SETTINGS {
             if setting.reach != Reach::Honoured {
                 continue;

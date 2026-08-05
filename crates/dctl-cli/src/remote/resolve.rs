@@ -481,8 +481,7 @@ fn chunk_size(name: &str, entry: &RemoteEntry) -> Result<Option<u64>> {
 /// prefix from the spec instead, so `dctl ls b2:DCTL001` enumerated keys under
 /// `DCTL001/` **inside the bucket `DCTL001`** and found nothing. The consequence
 /// is not a cosmetic empty listing: a `sync` to `b2:DCTL001` reads an empty
-/// destination on every run and re-uploads the whole dataset, forever
-/// (`HANDOVER.md` §11.3 item 6).
+/// destination on every run and re-uploads the whole dataset, forever.
 ///
 /// One function rather than a rule each verb applies, because there were nine
 /// call sites and they all applied the same wrong one. [`crate::source::open`]
@@ -597,8 +596,7 @@ pub fn vault_chunk_size<C: RemoteCatalog + ?Sized>(
 /// [`RemoteDef::verify`](crate::config::RemoteDef::verify) had no caller
 /// anywhere in the crate. Every run verified at whatever the flag said, so an
 /// operator who wrote `verify = "strict"` on the one destination they cared
-/// about got `checksum`, and nothing anywhere said so. `HANDOVER.md` §11.3
-/// item 9 names it first for that reason.
+/// about got `checksum`, and nothing anywhere said so.
 ///
 /// ## The rule, in one sentence
 ///
@@ -700,8 +698,9 @@ mod tests {
     /// `chunk_size` is declared on four provider definitions in
     /// [`crate::config::model`] and was read by **nothing**: an operator could
     /// write `chunk_size = 8388608`, see it in `dctl config show`, and have every
-    /// upload cut at the compiled-in default anyway. That is the §13 defect —
-    /// a setting that parses, is documented, and reaches nothing — on the
+    /// upload cut at the compiled-in default anyway. That is the recurring
+    /// defect — a setting that parses, is documented, and reaches nothing — on
+    /// the
     /// configuration surface rather than the flag surface, where the standing
     /// guard does not look.
     ///
@@ -730,10 +729,10 @@ mod tests {
     /// `dctl_store::sftp`, which the setting does not reach. It costs less than
     /// the two that have been wired — an sftp write's peak is one window of the
     /// streaming pipe now, not one of these chunks — so it is declared inert
-    /// rather than half-wired, and it is on the pre-production list in
-    /// `HANDOVER.md` §11.3 rather than quietly left for somebody to measure.
+    /// rather than half-wired, and it is on the pre-production list rather than
+    /// quietly left for somebody to measure.
     ///
-    /// B2 left this list in §25 and the vault left it in §27. Both had to: on B2
+    /// B2 and the vault have both left this list, and both had to: on B2
     /// the part size *is* an upload's peak memory, and on a vault the chunk size
     /// is two terms of it.
     const CHUNK_SIZE_INERT: &[&str] = &[crate::constants::PROVIDER_SFTP];
@@ -788,8 +787,9 @@ mod tests {
 
     /// The resolver's end of a vault's `chunk_size` journey.
     ///
-    /// Half of §11.3 item 8, and the half that is checked here because the middle
-    /// is where this project has lost a setting before (§21.7). The other end —
+    /// Half of `chunk_size`'s wiring, and the half that is checked here because
+    /// the middle is where this project has lost a setting before. The other
+    /// end —
     /// that the number reaches the sealer and is clamped into the format's
     /// envelope — is `dctl_core::vault::chunking`, and `session::open` is the one
     /// line between them.
@@ -898,7 +898,7 @@ mod tests {
 
     #[test]
     fn a_remotes_verify_setting_is_the_default_and_the_flag_overrides_it() {
-        // `HANDOVER.md` §11.3 item 9's first named setting. `verify` was declared
+        // A setting declared everywhere and read nowhere. `verify` was declared
         // on all six providers, accepted by `config create`, printed by
         // `config show`, and `RemoteDef::verify` had no caller anywhere — so an
         // operator who wrote `verify = "strict"` on the one destination they
@@ -1031,11 +1031,12 @@ mod tests {
 
     #[test]
     fn a_read_is_scoped_by_the_resolvers_prefix_and_never_by_the_specs_path() {
-        // `HANDOVER.md` §11.3 item 6. The shorthand's first component is the
-        // *bucket*; a read that used the spec's path as its prefix looked for
-        // keys under `DCTL001/` inside the bucket `DCTL001` and found none. The
-        // cost is not an empty listing — it is a scheduled `sync` that reads an
-        // empty destination every night and re-uploads the whole dataset.
+        // `dctl ls b2:DCTL001` used to return nothing at all. The shorthand's
+        // first component is the *bucket*; a read that used the spec's path as
+        // its prefix looked for keys under `DCTL001/` inside the bucket
+        // `DCTL001` and found none. The cost is not an empty listing — it is a
+        // scheduled `sync` that reads an empty destination every night and
+        // re-uploads the whole dataset.
         for (written, expected) in [
             ("b2:DCTL001", ""),
             ("b2:DCTL001/photos", "photos"),

@@ -1,6 +1,8 @@
 # PolyForm Noncommercial License 1.0.0
 
-Required Notice: Copyright 2026 KONG GROUP LLC
+Required Notice: DCTL is a product of KONG GROUP LLC.
+Copyright 2026 KONG GROUP LLC. All rights reserved.
+https://www.dctl.sh
 
 
 <https://polyformproject.org/licenses/noncommercial/1.0.0>

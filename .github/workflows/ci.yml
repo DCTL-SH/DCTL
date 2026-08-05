@@ -1,0 +1,40 @@
+name: gates
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gates:
+    name: build, test, clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The vendored OpenSSL build needs a full perl; the slim runner image
+      # carries only part of it, and the failure it produces names a missing
+      # module rather than the package that supplies it.
+      - name: Install build prerequisites
+        run: sudo apt-get update && sudo apt-get install -y perl libfindbin-libs-perl || sudo apt-get install -y perl
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build
+        run: cargo build --workspace --all-targets
+
+      - name: Test
+        run: cargo test --workspace
+
+      # Denied rather than advisory: the lint set is part of the contract the
+      # source keeps, not a suggestion.
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

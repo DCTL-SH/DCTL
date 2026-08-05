@@ -216,7 +216,7 @@ impl Backend for CountingBackend {
     /// of the backend underneath and not one of their own, and a double that
     /// could only ever say `None` cannot tell a delegation from a hard-coded
     /// refusal. Deleting the delegation from either wrapper left
-    /// `cargo test --workspace` entirely green (`HANDOVER.md` §35.5).
+    /// `cargo test --workspace` entirely green.
     fn checksum_support(&self) -> crate::recorded::ChecksumSupport {
         self.support
     }

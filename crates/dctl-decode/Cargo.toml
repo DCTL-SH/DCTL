@@ -3,7 +3,15 @@ name = "dctl-decode"
 version = "0.0.1"
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# NOT the workspace licence. The format specification and this reference
+# decoder are Apache-2.0 on purpose: DCTL promises its objects stay readable for
+# twenty years, and that promise is hollow if reading them requires this tool,
+# this company, or this company continuing to exist. Anyone may implement
+# against the format, sell what they build, and never ask permission.
+#
+# Inheriting the workspace licence silently voided exactly that, because a
+# dependency scanner reads this field and not the NOTICE file.
+license = "Apache-2.0"
 description = "Reference decoder (dependency-free C99) + known-answer cross-validation harness"
 
 # This crate contains no production Rust — it houses the standalone C99 reference

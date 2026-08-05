@@ -8,9 +8,9 @@
 //! only be observed by connecting to a real `sshd`. It was observed there, by
 //! `tests/sftp_live.rs`; and because that test is `#[ignore]`d and needs
 //! `DCTL_SFTP_HOST`, deleting the stamp left `cargo test --workspace` entirely
-//! green (`HANDOVER.md` §15.4). A guarantee whose only witness needs credentials
-//! is a guarantee the stated gate does not hold, and the gate is what every
-//! report in this project quotes as proof.
+//! green. A guarantee whose only witness needs credentials is a guarantee the
+//! stated gate does not hold, and the gate is what every report in this project
+//! quotes as proof.
 //!
 //! So the write is expressed against these two traits and driven, in
 //! [`super::write`]'s tests, by a fake that records every call. The sequence, the
@@ -235,9 +235,9 @@ impl StagedFile for SftpStagedFile {
     /// to swallow every error the fsync could return, `tracing::debug!` them and
     /// carry on to the rename — so a server whose filesystem filled up between
     /// the last write and the flush published the object anyway and DCTL
-    /// reported a successful transfer. That is the same defect as
-    /// `HANDOVER.md` §16.1 with the failure hidden one layer further down: an
-    /// I/O error that nothing read, and a verdict reached without it.
+    /// reported a successful transfer. That is a success reported over a
+    /// swallowed error, with the failure hidden one layer further down than
+    /// usual: an I/O error that nothing read, and a verdict reached without it.
     ///
     /// "Best effort" is an honest description of doing less when the server
     /// cannot do more. It is not a licence to ignore the server saying no.

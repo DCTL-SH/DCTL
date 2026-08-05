@@ -16,7 +16,7 @@
 //! | the attempt budget is used up | **never** | the last permitted attempt is the last one |
 //! | the waiting budget is used up | **never** | the ceiling that makes the schedule statable |
 //! | nothing answered | retry | the request may never have arrived |
-//! | a reset / timed-out / `EAGAIN` I/O error | retry | rclone's list, `fs/fserrors/retriable_errors.go:9-19` |
+//! | a reset / timed-out / `EAGAIN` I/O error | retry | rclone retries the same set |
 //! | a status this provider calls temporary | retry, honouring `Retry-After` | see [`RetryPolicy::retries_status`] |
 //! | anything else | **never** | the request is wrong, and it will be equally wrong next time |
 
@@ -48,7 +48,7 @@ pub fn verdict(
     // multiplies the total wait by the inner attempt count and — the part that
     // matters more — makes the number finally reported to the operator a product
     // of two schedules rather than a fact. rclone marks the same case on the
-    // error (`fs/fserrors/error.go:218`).
+    // error itself.
     if observed.already_attempted.is_some() {
         return Verdict::Never;
     }

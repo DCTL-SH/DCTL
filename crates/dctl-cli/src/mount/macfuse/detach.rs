@@ -21,12 +21,12 @@
 //!
 //! ## Success here is still not proof
 //!
-//! `unmount(2)` returning `Ok` means the kernel accepted the request. Commit
-//! `cc05f90` — "earn the word unmounted instead of assuming it" — is the rule
-//! that such an answer is not evidence, and it holds on macOS for the same reason
-//! it holds on Linux. [`detached`](crate::mount::detached) is what actually
-//! decides, by looking at the device the mountpoint reports; this module's job
-//! ends at asking.
+//! `unmount(2)` returning `Ok` means the kernel accepted the request. The rule
+//! the Linux shutdown path was rebuilt around — earn the word "unmounted"
+//! instead of assuming it — is that such an answer is not evidence, and it
+//! holds on macOS for the same reason it holds on Linux.
+//! [`detached`](crate::mount::detached) is what actually decides, by looking at
+//! the device the mountpoint reports; this module's job ends at asking.
 //!
 //! ## What a mount left attached costs on this platform
 //!
@@ -52,7 +52,8 @@ use crate::mount::session::Detacher;
 /// [`fuser::Session::from_fd`] never learned a mountpoint — it was handed a
 /// descriptor that was already mounted — so its `unmount` has nothing to do and
 /// returns success without detaching anything. Using it would be exactly the
-/// false success `cc05f90` was written against.
+/// false success the confirmed-detach rule was written against: never print
+/// `unmounted` until the mountpoint has been observed free.
 #[derive(Debug, Clone)]
 pub struct Unmount {
     mountpoint: PathBuf,

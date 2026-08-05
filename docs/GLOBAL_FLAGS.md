@@ -541,7 +541,7 @@ difference is the whole flag. `--timeout 300` does not mean "fail after five
 minutes" — a 4 GiB restore over a domestic uplink takes hours and never comes
 close to it, because every frame that moves resets the clock. It means "fail
 after five minutes in which nothing moved". This is rclone's meaning of the same
-flag (`fs/config.go:122`: *"IO idle timeout"*) and the reason its default is
+flag — it documents it as an *"IO idle timeout"* — and the reason its default is
 generous: a deadline that fires on a transfer which is succeeding destroys work,
 where one that fires late only costs you the difference.
 
@@ -577,8 +577,8 @@ that replaced it said the product was not a number this flag could know, which
 was true and was the defect: measured against live B2 with the route
 black-holed, the *same command against the same fault* returned the shell at
 **46.3 s**, **136.6 s** and **288.7 s**, depending on which request the cut
-landed on. §32.9 measured **943.6 s** on an earlier build, and **601 s** on
-`sftp:`.
+landed on. An earlier build measured **943.6 s** against the same fault, and
+**601 s** on `sftp:`.
 
 Counting the run's unanswered attempts instead of each request's removes the
 factor. One request's own schedule is untouched — the limit is not smaller than
@@ -608,9 +608,9 @@ Where it reaches, and how closely:
 | `local:` | — | not applied; see below |
 
 The grain is coarser than rclone's, which arms the deadline on the socket itself
-and re-arms it per `read`/`write` syscall (`fs/fshttp/dialer.go:101-127`). DCTL
-cannot: `reqwest` owns its connector and the connection type it hands to hyper is
-private, so the closest seam available is hyper asking for the next body frame —
+and re-arms it per `read`/`write` syscall. DCTL cannot: `reqwest` owns its
+connector and the connection type it hands to hyper is private, so the closest
+seam available is hyper asking for the next body frame —
 which it only does once the socket has taken the previous one. The practical
 difference appears only on a link so slow that a single frame or chunk takes
 longer than the whole deadline; at the default that is under 14 KiB/s on `sftp`,
@@ -683,9 +683,9 @@ files failed" (exit 6).
 **It is a hard cutoff.** When the window closes the request in flight is
 cancelled, the retry loop is not re-entered, no further file is started, and the
 process exits with the counters showing what really completed. That is rclone's
-default for the same flag — `--cutoff-mode hard`, implemented by giving the
-transfer context a deadline (`fs/sync/sync.go:203-205`) — and it is what "be
-finished by 06:00" means. It is deliberately *not* the cautious behaviour
+default for the same flag — `--cutoff-mode hard`, which puts a deadline on the
+transfer as a whole — and it is what "be finished by 06:00" means. It is
+deliberately *not* the cautious behaviour
 `--max-transfer` uses, because there is no honest way to predict how long a file
 will take, and a flag that only stopped between files would not stop a run whose
 last object is a terabyte.
@@ -718,7 +718,7 @@ honest fix is for those paths to share the pipeline rather than for six more
 call sites to grow their own check and drift.
 
 The duration dialect is the one [`--min-age`](#--min-age-age---max-age-age)
-uses. rclone accepts a compound Go duration here (`1h30m`) and DCTL does not —
+uses. rclone accepts a compound duration here (`1h30m`) and DCTL does not —
 write `90m`. A value it cannot read is refused at the command line rather than
 silently leaving the run unbounded.
 
@@ -772,7 +772,7 @@ This is the part most worth reading before writing a filter, because the obvious
 guess is wrong in both tools.
 
 The rules are assembled **by flag kind**, not by position on the command line —
-matching rclone's `parseRules` (`fs/filter/rules.go:212`):
+matching the order rclone assembles them in:
 
 1. every `--include`, in the order given;
 2. every `--include-from` file, in file order;
@@ -789,7 +789,7 @@ So:
 ```
 
 because the inclusion is tried first. That surprises people, it is rclone's
-behaviour, and rclone's own code prints a warning recommending `--filter` when it
+behaviour, and rclone itself prints a warning recommending `--filter` when it
 sees both flags used together. Use `--filter` when the order matters:
 
 ```
@@ -844,7 +844,7 @@ position.
 
 Two differences from rclone worth knowing if you are bringing patterns across:
 
-* rclone hands the inside of `[…]` to Go's regexp engine, so it accepts
+* rclone hands the inside of `[…]` to a regular-expression engine, so it accepts
   `[[:alnum:]]`, `[\d]`, `[\s]` and `[\w]`. DCTL **refuses** those by name and
   tells you the spelling to use (`[0-9a-zA-Z]`) rather than reading them as a set
   of literal characters, which is what silently selecting the wrong files would
@@ -857,8 +857,8 @@ Two differences from rclone worth knowing if you are bringing patterns across:
 **Size syntax.** A unit is **required** for `--min-size` and `--max-size`: `100B`
 is a hundred bytes and `100K` is a hundred kibibytes, and a bare `100` is a usage
 error naming both readings. That refusal exists because rclone reads a bare
-number as *kibibytes* (`fs/sizesuffix.go:141`) while every size DCTL prints is in
-bytes — a factor of 1024 on the flag that decides which files move, and on a
+number as *kibibytes* while every size DCTL prints is in bytes — a factor of
+1024 on the flag that decides which files move, and on a
 `sync` the files in between are not merely absent from the copy but candidates
 for deletion at the destination. `off` needs no unit and removes the limit.
 
@@ -1012,9 +1012,9 @@ would store one — there are no bytes behind any of them — so there is nothin
 decide, only something to disclose. Every walk prints `skipped N special file(s)`
 on stderr and names each one at `-v` with what it is (`pipe: a named pipe`,
 `run/docker.sock: a unix socket`, `dev/sda: a block device`). It is a warning and
-never an error, which is also where rclone settled: `Storable` returns false and
-logs `Can't transfer non file/directory` (`backend/local/local.go:1301`) without
-raising an error count, so a `/var` full of sockets does not fail a nightly run.
+never an error, which is also where rclone settled: it declines to store them
+and logs `Can't transfer non file/directory` without raising an error count, so
+a `/var` full of sockets does not fail a nightly run.
 A tree with none prints nothing.
 
 **On restore, a followed link comes back as a copy.** A vault is keyed by logical

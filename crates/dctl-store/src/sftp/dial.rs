@@ -1,14 +1,14 @@
 //! Opening an SFTP conversation — the first time, and every time after that.
 //!
-//! # The entry this closes
+//! # The defect this closes
 //!
-//! `HANDOVER.md` §11.2: *"Re-dial a dead connection."* Every backend retried,
-//! on a per-provider schedule, and none of them could re-establish anything. On
-//! `sftp` that is not a small gap, because a dropped session invalidates **every
-//! open handle**: the staging file a write was streaming into, the directory
-//! handle a listing was paging, all of it. So a dead session was classified
-//! terminal and said *"run the command again to open a new one"*, which is an
-//! honest report of a thing the tool would not do.
+//! **Re-dialling a dead connection.** Every backend retried, on a per-provider
+//! schedule, and none of them could re-establish anything. On `sftp` that is
+//! not a small gap, because a dropped session invalidates **every open
+//! handle**: the staging file a write was streaming into, the directory handle
+//! a listing was paging, all of it. So a dead session was classified terminal
+//! and said *"run the command again to open a new one"*, which is an honest
+//! report of a thing the tool would not do.
 //!
 //! Retrying without re-dialling would have been worse than not retrying. It
 //! would spend five attempts into a socket that is not there and then report
@@ -17,12 +17,10 @@
 //!
 //! # The shape, which is rclone's
 //!
-//! rclone keeps a pool: `getSftpConnection` (`backend/sftp/sftp.go:804-833`)
-//! pops a connection, asks `c.closed()` whether it is still alive, **discards it
-//! if not**, and dials a new one when the pool yields nothing;
-//! `putSftpConnection` (`:843`) probes a connection that has just failed with
-//! something other than a plain protocol status and closes it if the probe
-//! fails.
+//! rclone keeps a pool: acquiring a connection pops one, asks whether it is
+//! still alive, **discards it if not**, and dials a new one when the pool
+//! yields nothing. A connection handed back after failing with something other
+//! than a plain protocol status is probed first, and closed if the probe fails.
 //!
 //! DCTL holds one connection rather than a pool — nothing here is concurrent
 //! across sessions — so the same idea is one cell that is either full or empty.
@@ -35,11 +33,11 @@
 //! # Why a trait and not a host name
 //!
 //! Because a re-dial that only works against a real `sshd` is a re-dial the
-//! stated gate cannot hold, and `HANDOVER.md` §11.3 item 10 already exists
-//! because two of this backend's guarantees were in exactly that position.
-//! [`SftpDial`] is the seam `tests/sftp_mock.rs` supplies an in-process server
-//! through, so *the real backend* re-dials *a real SFTP conversation* in
-//! `cargo test --workspace`, with no host, no credentials and nothing installed.
+//! stated gate cannot hold, and two of this backend's guarantees were already
+//! in exactly that position. [`SftpDial`] is the seam `tests/sftp_mock.rs`
+//! supplies an in-process server through, so *the real backend* re-dials *a
+//! real SFTP conversation* in `cargo test --workspace`, with no host, no
+//! credentials and nothing installed.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -73,9 +71,8 @@ pub struct Link {
     /// so — the next attempt's `create` went back into the dead session, failed,
     /// and only then discarded it. One wasted attempt out of six, silently.
     ///
-    /// rclone puts the same knowledge in the same place: `conn.closed()`
-    /// (`backend/sftp/sftp.go:698`) is a property of the connection, and the
-    /// pool merely consults it.
+    /// rclone puts the same knowledge in the same place: liveness is a property
+    /// of the connection, and the pool merely consults it.
     dead: AtomicBool,
     /// Remote files this session has open, kept between ranged reads.
     ///
@@ -132,8 +129,7 @@ impl Link {
     /// produce without an `sshd`. Without this the re-dial seam would be a trait
     /// nothing outside this crate could implement, which is the same as not
     /// having it: the guarantee's only witness would once again need a host, and
-    /// `HANDOVER.md` §11.3 item 10 exists because two other guarantees were in
-    /// exactly that position.
+    /// two other guarantees were already in exactly that position.
     ///
     /// `destination` is only for the message a failure carries.
     ///
@@ -187,10 +183,10 @@ pub struct SshDialer {
     ///
     /// The port is split off rather than passed through because OpenSSH
     /// accepts `host:port` only in its `ssh://` URI form — as a bare
-    /// destination, `lsx-002:2222` is a *hostname* containing a colon, and it
-    /// dies at DNS resolution. The configuration surface has documented
-    /// `user@host[:port]` all along, so the parse belongs here rather than in
-    /// the settings that promise it.
+    /// destination, `archive.example.com:2222` is a *hostname* containing a
+    /// colon, and it dies at DNS resolution. The configuration surface has
+    /// documented `user@host[:port]` all along, so the parse belongs here
+    /// rather than in the settings that promise it.
     host: String,
     /// The port that suffix named, given to `ssh` as `-o Port=`.
     ///
@@ -204,8 +200,7 @@ pub struct SshDialer {
     /// matters: a `ProxyCommand cloudflared access ssh` host builds a tunnel, a
     /// TLS session and an SSH handshake before DCTL sees anything, and only
     /// `ssh` is in a position to bound that whole chain. rclone hands the same
-    /// number to the same place (`backend/sftp/sftp.go:946`,
-    /// `ssh.ClientConfig.Timeout = ci.ConnectTimeout`).
+    /// number to the same place, as the ssh client's own connect timeout.
     connect: Option<Duration>,
 }
 
@@ -378,20 +373,27 @@ mod tests {
     #[test]
     fn a_port_suffix_is_split_off_rather_than_dialled_as_a_hostname() {
         // The documented `user@host[:port]` form: OpenSSH takes a bare
-        // destination as a hostname, so `lsx-002:2222` used to reach DNS as a
-        // host called "lsx-002:2222" and fail there.
+        // destination as a hostname, so `archive.example.com:2222` used to
+        // reach DNS as a host called "archive.example.com:2222" and fail there.
         assert_eq!(
-            split_port("root@lsx-002:2222"),
-            ("root@lsx-002".to_string(), Some(2222))
+            split_port("root@archive.example.com:2222"),
+            ("root@archive.example.com".to_string(), Some(2222))
         );
-        assert_eq!(split_port("lsx-002:22"), ("lsx-002".to_string(), Some(22)));
+        assert_eq!(
+            split_port("archive.example.com:22"),
+            ("archive.example.com".to_string(), Some(22))
+        );
     }
 
     #[test]
     fn a_destination_without_a_port_is_passed_through_untouched() {
         // An alias resolves through the operator's own ssh config, which is
         // the entire reason this backend drives the real binary.
-        for host in ["lsx-002", "root@lsx-002", "build.example.com"] {
+        for host in [
+            "archive.example.com",
+            "root@archive.example.com",
+            "build.example.com",
+        ] {
             assert_eq!(split_port(host), (host.to_string(), None));
         }
         // Not a port: left alone rather than half-parsed.
@@ -440,8 +442,8 @@ mod tests {
     fn the_dialer_reports_the_destination_it_will_actually_dial() {
         // What an operator reads in a connection failure has to be what was
         // attempted, not what they typed.
-        let dialer = SshDialer::new("root@lsx-002:2222", None);
-        assert_eq!(dialer.host, "root@lsx-002");
+        let dialer = SshDialer::new("root@archive.example.com:2222", None);
+        assert_eq!(dialer.host, "root@archive.example.com");
         assert_eq!(dialer.port, Some(2222));
     }
 }

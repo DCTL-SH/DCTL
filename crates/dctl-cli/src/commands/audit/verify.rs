@@ -481,11 +481,11 @@ mod tests {
 
     #[test]
     fn no_verdict_this_command_can_produce_claims_authorship() {
-        // `HANDOVER.md` §11.2's entry, pinned as a property of the code rather
-        // than as a sentence in a document nobody diffs. The chain is unkeyed —
-        // its hash is BLAKE3 over values anyone can read — so a correctly linked
-        // *append* is available to anybody who can write the file, and there is
-        // no state of this command in which that stops being so.
+        // Pinned as a property of the code rather than as a sentence in a
+        // document nobody diffs. The chain is unkeyed — its hash is BLAKE3 over
+        // values anyone can read — so a correctly linked *append* is available
+        // to anybody who can write the file, and there is no state of this
+        // command in which that stops being so.
         //
         // Two properties, and together they are what makes the claim structural
         // rather than a spot check. **The vocabulary has no authorship token**,
@@ -539,7 +539,8 @@ mod tests {
 
         // An anchor that does not hold reaches the mismatch arm, whose list is
         // the *unanchored* one — the links held, the length did not. A verdict
-        // that kept `length` here would be the §14 defect wearing a new field.
+        // that kept `length` here would be a claim to have proved something
+        // this run did not.
         let error = check(records, Some(&format!("11:{}", "ab".repeat(32)))).unwrap_err();
         assert_eq!(error.code(), ExitCode::AuditHeadMismatch);
     }

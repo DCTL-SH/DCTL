@@ -4,8 +4,8 @@
 //! read by the watchdog that decides the operation has stalled. It is the whole
 //! of what makes [`super::watch::IdleWatch`] an *inactivity* deadline rather
 //! than a stopwatch: rclone re-arms its socket deadline on every successful read
-//! and write (`fs/fshttp/dialer.go:101-127`, `nudgeDeadline`), and this is the
-//! same idea expressed where DCTL can actually observe progress.
+//! and write, and this is the same idea expressed where DCTL can actually
+//! observe progress.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};

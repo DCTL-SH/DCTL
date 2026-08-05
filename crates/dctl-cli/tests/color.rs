@@ -6,7 +6,7 @@
 //! `tree`, `check` and `size`. Only `about` coloured anything, so the flag was
 //! *measurably* honoured — two sequences against zero for `--color never` — on
 //! the one command nobody reaches for, and inert on every command an operator
-//! reads (`HANDOVER.md` §11.2, §11.3 item 8).
+//! reads.
 //!
 //! A flag that is honoured in one place and silently ignored in six is worse
 //! than one that is missing: the user has evidence it works. So the assertion

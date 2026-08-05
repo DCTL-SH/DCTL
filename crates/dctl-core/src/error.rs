@@ -20,8 +20,9 @@ pub enum CoreError {
     /// opposite places and only one of them is about a secret. A plain remote
     /// has no envelope **by definition**, so every command that opens a vault
     /// used to greet one with *"wrong password or corrupted envelope"* and a
-    /// remedy naming `system/envelope.bin` — a file that cannot exist there —
-    /// which is `docs/HANDOVER.md` §16.2.
+    /// remedy naming `system/envelope.bin` — a file that cannot exist there.
+    /// Sending a reader after a file that a plain remote can never hold is the
+    /// defect this variant closes.
     ///
     /// It leaks nothing that the constant answer above protects. There is no
     /// password to be close to: an attacker who can ask this question can
@@ -163,18 +164,18 @@ fn store_kind(e: &dctl_store::StoreError) -> ErrorKind {
         // The run's own `--max-duration`. **Permanent**, and deliberately not
         // `Transient`: an FFI consumer branching on this must not re-drive an
         // operation inside a run whose window has already closed, which is
-        // exactly the multiplication `HANDOVER.md` §32.9 measured. What is
-        // transient about it is the *next invocation*, which is the caller's
-        // decision and not this classification's.
+        // exactly the multiplication that left a 160 MiB upload still running
+        // 943.6 s after a 30 s deadline had fired. What is transient about it is
+        // the *next invocation*, which is the caller's decision and not this
+        // classification's.
         S::RunDeadline { .. } => ErrorKind::Permanent,
         // The run stopped asking a link that answered nothing for a whole
         // schedule of attempts. **Permanent**, and for the same reason as the
         // line above rather than a different one: an FFI consumer that re-drove
         // the operation would spend a second schedule on the silence this one
-        // was raised to end, which is the multiplication `HANDOVER.md` §36.5
-        // measured at 288.7 s. What is transient about it is the *next
-        // invocation*, which is the caller's decision and not this
-        // classification's.
+        // was raised to end, which is the multiplication measured at 288.7 s.
+        // What is transient about it is the *next invocation*, which is the
+        // caller's decision and not this classification's.
         S::Stalled { .. } => ErrorKind::Permanent,
         // The server received the request and refused it without naming a
         // cause. **Permanent**, following this module's own rule for anything

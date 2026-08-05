@@ -63,7 +63,7 @@ use super::target::Target;
 /// path was blanked, so `deletefile b2:DCTL001/a.txt` reached the resolver as
 /// `b2:` and answered "'b2' needs a bucket name" about a command line that had
 /// given one — and blanking it again left `cargo test --workspace` entirely
-/// green (`HANDOVER.md` §35.3).
+/// green.
 ///
 /// The whole spec, never the bare name: a name has no colon, so anything that
 /// re-parses one turns `archive:` into the *directory* `archive`. And the whole
@@ -122,12 +122,13 @@ impl Medium {
         // nobody named while reporting success.
         //
         // And the whole spec means **with its path**. Blanking it here was the
-        // §11.3 item 6 defect on the removal side: for a provider shorthand the
+        // defect on the removal side: for a provider shorthand the
         // first path component is the *bucket*, so `deletefile b2:DCTL001/a.txt`
         // resolved `b2:` with nothing after it and answered "'b2' needs a bucket
         // name" about a command line that had given one. The read family was
-        // fixed at `2e6d180`; these six verbs were not, and `purge`, `cleanup`
-        // and `deletefile` all failed the same way.
+        // fixed earlier, when `crate::source::open` began handing back the
+        // resolver's prefix alongside the source; these six verbs were not, and
+        // `purge`, `cleanup` and `deletefile` all failed the same way.
         let spec = spec_of(target);
 
         if is_sealed(&config, &target.remote) {

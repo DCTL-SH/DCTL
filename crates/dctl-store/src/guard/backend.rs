@@ -21,10 +21,9 @@
 //!
 //! Writes — `put`, `put_from_path`, `delete`. Reads are not: a read from a
 //! replaced store returns [`StoreError::NotFound`], which is honest, and the
-//! read side already has its own guard one layer up (`HANDOVER.md` §11.2, the
-//! unmounted-volume case). The failure being removed here is the *write* half,
-//! where a run reports objects as stored and verified into a container that is
-//! not the store.
+//! read side already has its own guard one layer up, for the unmounted-volume
+//! case. The failure being removed here is the *write* half, where a run reports
+//! objects as stored and verified into a container that is not the store.
 //!
 //! # How often the store is probed, and what that trade is
 //!
@@ -390,7 +389,7 @@ mod tests {
         // **A wrapper that answers for the layer underneath.** Every backend in
         // this build is wrapped by both decorators before a command sees it, so
         // a `checksum_support` that stopped being forwarded would be the answer
-        // for *every* remote — and §34's whole capability is a per-backend
+        // for *every* remote — and this whole capability is a per-backend
         // question. Both directions matter and both are asserted:
         //
         //   * a wrapper reporting `None` over a provider that does record makes
@@ -398,7 +397,7 @@ mod tests {
         //     detect rot — loud, but it removes the one backend that can;
         //   * a wrapper reporting `Recorded` over a filesystem makes
         //     `dctl verify local:` print `ok` for every object while comparing a
-        //     re-read against nothing, which is §31.4's defect returning.
+        //     re-read against nothing, which is an earlier defect returning.
         //
         // Every double in `crate::testing` says `None`, so before
         // `crate::testing::CountingBackend::recording` existed the two were indistinguishable

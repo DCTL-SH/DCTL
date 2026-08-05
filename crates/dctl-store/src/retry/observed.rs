@@ -95,8 +95,8 @@ pub struct Observed {
     /// [`None`] when nothing below has tried. B2's request-level driver fills
     /// this in, and it is what stops a six-attempt inner budget under a
     /// six-attempt outer one from becoming thirty-six — rclone marks the same
-    /// idea on the error itself (`fs/fserrors/error.go:218`,
-    /// `NoLowLevelRetryError`).
+    /// idea on the error itself, as a flag the error value carries saying no
+    /// low-level retry should be spent on it.
     pub already_attempted: Option<u32>,
 }
 
@@ -182,10 +182,10 @@ impl Observed {
 
             StoreError::Transport { .. } => Self::transport(),
 
-            // The errno decides, and the list is rclone's
-            // (`fs/fserrors/retriable_errors.go`) plus the two `io` sentinels it
-            // adds in `error.go:395`. A local filesystem rarely produces any of
-            // them; a network mount produces them exactly when retrying helps.
+            // The errno decides, and the list is rclone's: the errnos it
+            // treats as retriable, plus the two end-of-file sentinels it adds
+            // alongside them. A local filesystem rarely produces any of them;
+            // a network mount produces them exactly when retrying helps.
             //
             // `Answered`: an errno *is* an answer. `local:` has no wire to go
             // quiet, and a run that spent three `EAGAIN`s on a busy mount has
@@ -218,7 +218,7 @@ impl Observed {
             // The one failure that is terminal because of the *clock* rather
             // than because of the request. It is the flag saying the run is
             // over, so another attempt is not merely useless — it is the
-            // §32.9 defect: `--timeout` fired at exactly 30 s and the run
+            // measured defect: `--timeout` fired at exactly 30 s and the run
             // carried on for 943.6 s, because everything above it read the
             // deadline as something worth trying again.
             StoreError::RunDeadline { .. }
@@ -258,11 +258,10 @@ impl Observed {
 
 /// Whether an I/O error is one another attempt could survive.
 ///
-/// The list is rclone's, cited rather than invented: `syscall.EPIPE`,
-/// `ETIMEDOUT`, `ECONNREFUSED`, `EHOSTDOWN`, `EHOSTUNREACH`, `ECONNABORTED`,
-/// `EAGAIN`, `EWOULDBLOCK`, `ECONNRESET`
-/// (`fs/fserrors/retriable_errors.go:9-19`), plus `io.EOF` and
-/// `io.ErrUnexpectedEOF` (`fs/fserrors/error.go:395-398`).
+/// The list is rclone's, adopted rather than invented: `EPIPE`, `ETIMEDOUT`,
+/// `ECONNREFUSED`, `EHOSTDOWN`, `EHOSTUNREACH`, `ECONNABORTED`, `EAGAIN`,
+/// `EWOULDBLOCK`, `ECONNRESET`, plus the two end-of-file sentinels — a clean
+/// end of file and an unexpected one.
 ///
 /// Matched on [`std::io::ErrorKind`] where the standard library names the
 /// condition, and on the raw errno where it does not — `EAGAIN` has no stable
@@ -377,8 +376,9 @@ mod tests {
         assert!(Observed::of(&StoreError::Io(again)).transient);
 
         // ENOSPC is the counter-example that has to stay permanent: a full
-        // filesystem is not a wait, and `HANDOVER.md` §16.1 is about the last
-        // time DCTL mis-described it.
+        // filesystem is not a wait. DCTL once mis-described one — a full disk
+        // reported to the operator as `checksum mismatch` — and this is what
+        // keeps that from coming back.
         let no_space = std::io::Error::from_raw_os_error(28);
         assert!(!Observed::of(&StoreError::Io(no_space)).transient);
     }

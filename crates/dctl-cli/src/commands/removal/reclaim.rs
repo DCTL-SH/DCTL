@@ -49,9 +49,9 @@
 //! ## The staging sweep can see a filesystem backend's debris — CLOSED
 //!
 //! This section used to say the opposite, at length, and it was the only entry
-//! on `HANDOVER.md`'s pre-production list that already admitted its own defect
-//! in the source: *"that report is a false all-clear, and it is not fixed
-//! here."* Discovery went through [`Backend::list_page`](dctl_store::Backend::list_page),
+//! on the pre-production list that already admitted its own defect in the
+//! source: *"that report is a false all-clear, and it is not fixed here."*
+//! Discovery went through [`Backend::list_page`](dctl_store::Backend::list_page),
 //! and the filesystem-shaped backends **deliberately omit staging files** from
 //! their listings, because a staging file is a write that never committed and
 //! listing one would offer a half-written upload as an object. So the sweep
@@ -265,7 +265,7 @@ struct Aging {
 /// Two copies of a rule are two rules the day one is edited, and a test covering
 /// one copy leaves the other deletable with the gate staying green. That is
 /// exactly what had happened: deleting the "unknown is not old" arm from both
-/// left `cargo test --workspace` entirely green (`HANDOVER.md` §35.3).
+/// left `cargo test --workspace` entirely green.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Sweepable {
     /// Old enough that nothing living can plausibly still be using it.

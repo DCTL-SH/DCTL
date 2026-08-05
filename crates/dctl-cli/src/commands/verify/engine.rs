@@ -47,9 +47,9 @@ use super::report::{Record, Report};
 /// `DCTL001/photos` — the *spec's* path, which still carries the bucket — rather
 /// than with `photos`, the prefix the resolver produced when it turned the
 /// shorthand into a client for that bucket. The run enumerated nothing and
-/// reported a clean tree. `2e6d180` fixed the value at the call site; nothing
-/// held it there, and putting the defect back left `cargo test --workspace`
-/// entirely green (`HANDOVER.md` §35.3).
+/// reported a clean tree. An earlier fix corrected the value at that call site;
+/// nothing held it there, and putting the defect back left
+/// `cargo test --workspace` entirely green.
 ///
 /// One parameter is the fix, because the caller no longer chooses. The prefix
 /// comes out of the same value the source does, from

@@ -423,7 +423,7 @@ fn accepts(options: &ListOptions, path: &str, size: Option<u64>, modified: Optio
 /// this function's, and the difference between the two implementations is the
 /// whole of the fix: the listing itself carries one only for a vault, so reading
 /// `object.content_hash` and stopping there is what made `--checksum` into a
-/// plain remote fail on every run after the first (`HANDOVER.md` §11.2).
+/// plain remote fail on every run after the first.
 async fn remote_entry(
     ctx: &Ctx,
     source: &dyn crate::source::Source,
@@ -469,8 +469,8 @@ async fn remote_entry(
 /// is a cost the operator is about to pay on every run of a scheduled job: a
 /// full read of the destination tree, which on a metered provider is an egress
 /// bill. rclone announces its own `--checksum` degradation exactly once per run
-/// for the same reason (`fs/operations/operations.go:274-278`), and once is the
-/// right number — a line per object would be noise nobody reads.
+/// for the same reason, and once is the right number — a line per object would
+/// be noise nobody reads.
 ///
 /// Not emitted for a source that answers from an index: a vault costs nothing
 /// and a warning about it would be false.
@@ -892,8 +892,7 @@ mod tests {
         // The skip was always right and always silent: `copy` over this tree
         // reported `Files: 3 / 3, Errors: 0`, exit 0, and the pipe appeared
         // nowhere at any verbosity — while rclone, which this walk cites as its
-        // authority for skipping, logs `Can't transfer non file/directory`
-        // (`backend/local/local.go:1301`).
+        // authority for skipping, logs `Can't transfer non file/directory`.
         let dir = tree();
         make_fifo(&dir.path().join("pipe"));
         let endpoint = RemoteSpec::Local(dir.path().to_path_buf());

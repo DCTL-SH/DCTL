@@ -40,7 +40,7 @@
 //! redundant, and the next person to tidy it up deletes it. It was already
 //! written once, in the CLI's own download path, with the mechanism explained in
 //! a comment — and the storage layer, doing the same thing three functions away,
-//! did not have it. The consequence is `docs/HANDOVER.md` §16.1: a full disk was
+//! did not have it. The consequence was a wrong diagnosis: a full disk was
 //! reported to the operator as **`checksum mismatch`**, because the only thing
 //! that ever noticed the failed write was the read-back hash comparison, and a
 //! hash comparison can only ever say "these bytes are not those bytes".

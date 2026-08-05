@@ -54,9 +54,9 @@ pub(crate) const PRESIGN_TTL_SECS: u64 = 15 * 60;
 
 /// The user-metadata header carrying the source's own last-modified time.
 ///
-/// `rclone`'s spelling, not one invented here (`backend/s3/s3.go`, `metaMtime`),
-/// so the two tools read each other's buckets rather than each seeing the other's
-/// objects as modified when they were uploaded.
+/// rclone's spelling, not one invented here, so the two tools read each other's
+/// buckets rather than each seeing the other's objects as modified when they
+/// were uploaded.
 pub(crate) const H_SRC_MODIFIED: &str = "x-amz-meta-mtime";
 
 /// The S3 storage service name used in the SigV4 credential scope.

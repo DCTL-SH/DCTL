@@ -1,6 +1,6 @@
 //! `--max-transfer`: the ceiling that stops a run before the bill arrives.
 //!
-//! ## The behaviour, and which of rclone's it is
+//! ## The behaviour, and which of rclone's cutoff modes it is
 //!
 //! **Cautious.** A file is not started when moving it would take the run past
 //! the limit; the run stops there with [`ExitCode::TransferLimitExceeded`]

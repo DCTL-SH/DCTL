@@ -107,11 +107,13 @@ impl Target {
     /// removal family used the whole string as a key prefix — so every verb in
     /// it looked under `DCTL001/photos/` *inside* `DCTL001` and found nothing.
     ///
-    /// That is `HANDOVER.md` §11.3 item 6 on the write side. It was fixed for
-    /// the read family at `2e6d180` and these six verbs were missed, which is
-    /// the worse half: a listing that finds nothing is visibly empty, while
-    /// `dctl purge b2:DCTL001/2019 --force` reports `OK removed: 0 object(s)` at
-    /// exit **0** and a retention job records 2019 as reclaimed.
+    /// That is the shorthand-bucket defect on the write side. It was fixed for
+    /// the read family, where `crate::source::open` now hands back the
+    /// resolver's prefix alongside the source, and these six verbs were missed,
+    /// which is the worse half: a listing that finds nothing is visibly empty,
+    /// while `dctl purge b2:DCTL001/2019 --force` reports
+    /// `OK removed: 0 object(s)` at exit **0** and a retention job records 2019
+    /// as reclaimed.
     ///
     /// Applied once, in [`super::engine::run`], rather than at the eight places
     /// downstream that read [`Target::path`] — the same shape
@@ -125,8 +127,8 @@ impl Target {
     /// Both halves of this fix — the store opened with the typed target, the
     /// selection made with the scoped one — were a single line each, both were
     /// got wrong once already, and putting either back left
-    /// `cargo test --workspace` entirely green (`HANDOVER.md` §35.3). Two types
-    /// is what makes each of them a compile error instead.
+    /// `cargo test --workspace` entirely green. Two types is what makes each of
+    /// them a compile error instead.
     ///
     /// # Errors
     /// Whatever [`crate::remote::resolve`] reported — an unknown remote, a
@@ -224,7 +226,7 @@ mod tests {
 
     #[test]
     fn a_shorthands_bucket_is_not_part_of_the_prefix_a_removal_deletes_under() {
-        // `HANDOVER.md` §11.3 item 6, on the side that destroys rather than the
+        // The shorthand-bucket defect, on the side that destroys rather than the
         // side that merely reports nothing. `b2:DCTL001/2019` names the *bucket*
         // `DCTL001` and the prefix `2019` inside it; using the whole string as a
         // key prefix looks under `DCTL001/2019/` inside `DCTL001`, matches

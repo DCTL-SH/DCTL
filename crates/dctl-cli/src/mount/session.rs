@@ -77,8 +77,8 @@ use super::fs::VaultFs;
 /// build a [`Mounted`] in a test, and therefore no way to assert what
 /// [`Mounted::run`] *does with* the detach it performs.
 ///
-/// That gap was real. The whole of `cc05f90` — "earn the word unmounted instead
-/// of assuming it" — is [`Mounted::run`] consulting
+/// That gap was real. The whole of the fix — earning the word "unmounted"
+/// instead of assuming it — is [`Mounted::run`] consulting
 /// [`Mounted::confirm_detached`] before it reports anything, and deleting that
 /// one call restored the original defect with the entire test suite still green:
 /// the nine tests in [`super::detached`] pin the *predicate*, and nothing pinned
@@ -1353,7 +1353,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_session_that_ended_over_a_mountpoint_that_never_came_free_is_refused() {
-        // The regression `cc05f90` fixed, asserted at the level it happened:
+        // The regression the confirmed-detach fix closed, asserted at the level
+        // it happened:
         // `unmount` answers "a detach was requested", so `run` must check the
         // mountpoint before it says the word. Told that the bare device is some
         // other number, `run` can only conclude the mountpoint is still carrying

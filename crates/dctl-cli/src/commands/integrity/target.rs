@@ -11,10 +11,10 @@
 //!
 //! * a UNC path (`\\server\share`) is **local** on every platform — nothing else
 //!   begins `\\` — and a Windows drive (`C:`, `d:/data`) is local on a platform
-//!   that has drives, which is where rclone draws the same line
-//!   (`fs/fspath/path.go:163`);
+//!   that has drives, which is where rclone draws the same line;
 //! * otherwise, a colon before the first path separator introduces a remote, of
-//!   any length from one character up, exactly as rclone's `configNameRe` does;
+//!   any length from one character up, exactly as rclone's remote-name grammar
+//!   does;
 //! * everything else is a local path.
 //!
 //! All three are [`crate::remote::spec`]'s, called rather than re-implemented.
@@ -304,9 +304,9 @@ mod tests {
 
     #[test]
     fn a_one_character_name_that_is_not_a_drive_is_a_remote_on_every_platform() {
-        // Corrected against rclone: `IsDriveLetter` needs a single *ASCII
-        // letter*, so `1:` names no drive anywhere and rclone reads it as the
-        // remote `1`. Refusing it here made a legal rclone config unusable.
+        // Corrected against rclone: a drive letter is a single *ASCII letter*,
+        // so `1:` names no drive anywhere and rclone reads it as the remote `1`.
+        // Refusing it here made a legal rclone config unusable.
         let target = Target::parse("1:x").expect("a digit names no drive");
         assert_eq!(target.remote(), Some("1"));
         assert_eq!(target.path(), "x");

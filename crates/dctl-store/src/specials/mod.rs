@@ -11,13 +11,12 @@
 //! nodes are ordinary — was told `Errors: 0` over a tree the run had not wholly
 //! represented.
 //!
-//! *Skipping* them is right, and it is what rclone does: `Storable`
-//! (`backend/local/local.go:1299`) matches
-//! `os.ModeNamedPipe|os.ModeSocket|os.ModeDevice` and returns `false`. But the
-//! very next line is `fs.Logf(o, "Can't transfer non file/directory")`
-//! (`:1301`), emitted unless the operator asked for silence with
-//! `skip_specials` (`:380`). rclone tells you. DCTL's own walk cited that line
-//! as its authority for passing over them and omitted the half that speaks.
+//! *Skipping* them is right, and it is what rclone does: its local backend
+//! treats a named pipe, a socket or a device node as not storable and declines
+//! to transfer it. But the very next thing it does is log
+//! `Can't transfer non file/directory`, unless the operator has explicitly
+//! asked for silence. rclone tells you. DCTL's own walk cited that rule as its
+//! authority for passing over them and omitted the half that speaks.
 //!
 //! As with [`crate::links`], the loss was never the skipping. It was the
 //! silence. Everything here exists so that a walk which passes over a special

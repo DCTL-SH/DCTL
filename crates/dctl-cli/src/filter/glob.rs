@@ -30,12 +30,12 @@
 //!
 //! ## Where this dialect is not rclone's, exactly
 //!
-//! The anchoring and the wildcards match — checked against
-//! `fs/filter/glob.go`'s `globToRegexp`, which maps `*`, `**` and `?` to
-//! `[^/]*`, `.*` and `[^/]`, prefixes `(^|/)` for an unanchored pattern and `^`
-//! for one starting `/`, and always suffixes `$`. Three things about
-//! **character classes** do not, because rclone passes the contents of `[…]`
-//! through to Go's regexp engine verbatim rather than parsing them:
+//! The anchoring and the wildcards match — checked against rclone's own
+//! translation, which maps `*`, `**` and `?` to `[^/]*`, `.*` and `[^/]`,
+//! prefixes `(^|/)` for an unanchored pattern and `^` for one starting `/`, and
+//! always suffixes `$`. Three things about **character classes** do not, because
+//! rclone passes the contents of `[…]` through to Go's regexp engine verbatim
+//! rather than parsing them:
 //!
 //! * **`[!a-z]` negates here and does not there.** In Go's regexp a class
 //!   negates only with `^`, so rclone reads `[!a-z]` as a literal class matching
@@ -43,11 +43,11 @@
 //!   different set of files, and it is kept deliberately: `!` is what shell and
 //!   rsync users mean by negation, every DCTL pattern already assumes it, and a
 //!   class whose author wanted a literal `!` would be written `[a-z!]`. It is
-//!   recorded in `HANDOVER.md` §11.4 so a buyer meets it in the comparison
-//!   rather than in a backup.
+//!   recorded in the rclone comparison notes, so a buyer meets it in the
+//!   documentation rather than in a backup.
 //! * **Named classes are not supported.** rclone accepts `[[:alnum:]]`, `[\d]`
-//!   and `\s`/`\w` (`docs/content/filtering.md:71-77`); a pattern using one is
-//!   a pattern error here, not a silent mismatch.
+//!   and `\s`/`\w`; a pattern using one is a pattern error here, not a silent
+//!   mismatch.
 //! * **`{{regexp}}` raw sections are not supported.** Same: refused, not
 //!   misread.
 //!
@@ -122,13 +122,12 @@ pub enum PatternProblem {
     ///
     /// `[[:alnum:]]`, `[\d]`, `[\s]`, `[\w]` and their negated forms are legal
     /// in rclone, which hands the contents of `[…]` to Go's regexp engine
-    /// verbatim (`docs/content/filtering.md:71-77`). This parser reads a class
-    /// as a set of characters and ranges, so it would read `[[:alnum:]]` as the
-    /// eight characters `[`, `:`, `a`, `l`, `n`, `u`, `m`, `:` followed by a
-    /// literal `]` — a pattern that compiles, matches, and matches the wrong
-    /// files. Refusing is the only honest answer: an unsupported syntax that
-    /// silently means something else is the failure this whole module is
-    /// written to avoid.
+    /// verbatim. This parser reads a class as a set of characters and ranges, so
+    /// it would read `[[:alnum:]]` as the eight characters `[`, `:`, `a`, `l`,
+    /// `n`, `u`, `m`, `:` followed by a literal `]` — a pattern that compiles,
+    /// matches, and matches the wrong files. Refusing is the only honest answer:
+    /// an unsupported syntax that silently means something else is the failure
+    /// this whole module is written to avoid.
     UnsupportedClass { syntax: &'static str },
 }
 

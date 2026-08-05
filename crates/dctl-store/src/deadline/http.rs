@@ -3,12 +3,11 @@
 //! # Why the body is framed at all
 //!
 //! rclone arms its deadline on the socket and re-arms it inside `Read` and
-//! `Write` (`fs/fshttp/dialer.go:101-127`), so a transfer's progress is observed
-//! at the last possible moment. That seam does not exist here: `reqwest` builds
-//! its own connector and the connection type it hands to hyper —
-//! `reqwest::connect::Conn` — is `pub(crate)` inside a private module, so
-//! `ClientBuilder::connector_layer` can wrap the *act of connecting* and cannot
-//! wrap the connection.
+//! `Write`, so a transfer's progress is observed at the last possible moment.
+//! That seam does not exist here: `reqwest` builds its own connector and the
+//! connection type it hands to hyper — `reqwest::connect::Conn` — is
+//! `pub(crate)` inside a private module, so `ClientBuilder::connector_layer`
+//! can wrap the *act of connecting* and cannot wrap the connection.
 //!
 //! The next seam down that DCTL does own is the request body. hyper asks for a
 //! frame only while its write buffer has room (`can_buffer`,

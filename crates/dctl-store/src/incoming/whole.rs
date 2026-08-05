@@ -4,9 +4,9 @@
 //! part is bounded by the part size by definition, so it is drained into a single
 //! buffer and takes the same verified single-request path a buffered
 //! [`put`](crate::Backend::put) takes. B2 and S3 both have one, they were
-//! written separately, and they carried the same nine lines twice — the shape
-//! `HANDOVER.md` §26.1 keeps finding, where a guarantee with N copies is a
-//! guarantee a test covering one copy leaves deletable in the other N-1.
+//! written separately, and they carried the same nine lines twice — a shape
+//! this codebase has met before, where a guarantee with N copies is a guarantee
+//! a test covering one copy leaves deletable in the other N-1.
 //!
 //! # Why the length check here needs a seam to be reachable
 //!
@@ -23,7 +23,7 @@
 //! case one line earlier with the same
 //! [`ShortWrite`](crate::StoreError::ShortWrite) and the same two numbers. So
 //! the arm's own comparison cannot fire, and deleting it left the whole workspace
-//! gate green — measured, not argued: `HANDOVER.md` §35.2.
+//! gate green — measured, not argued.
 //!
 //! Leaving it there as unreachable code defended by a comment is what this
 //! project calls a claim nobody can check. Deleting it is worse: it is the only
@@ -195,12 +195,12 @@ mod tests {
 
     #[tokio::test]
     async fn the_seal_is_asked_before_the_length_is_compared() {
-        // The ordering `HANDOVER.md` §30.5 argued for and could not test: with
-        // both able to speak, the **seal's** refusal is the one that reaches the
-        // caller. It is the stricter of the two — it has seen the terminal
-        // message and this comparison has not — and an edit that moved it below
-        // the check would silently downgrade every one of its refusals to
-        // `ShortWrite`.
+        // The ordering the module documentation argues for, and the one this
+        // seam exists to make testable: with both able to speak, the **seal's**
+        // refusal is the one that reaches the caller. It is the stricter of the
+        // two — it has seen the terminal message and this comparison has not —
+        // and an edit that moved it below the check would silently downgrade
+        // every one of its refusals to `ShortWrite`.
         let mut source = Fake {
             supply: vec![b'i'; 512],
             seal: Some(StoreError::ChecksumMismatch {
@@ -256,8 +256,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_real_producer_that_stops_short_is_refused_by_the_seal() {
-        // And the same input through the concrete type, which is what
-        // `HANDOVER.md` §30.5's arithmetic says: the seal gets there first, with
+        // And the same input through the concrete type, which is the case the
+        // module documentation works through: the seal gets there first, with
         // the whole object's declaration and what really arrived.
         let (mut writer, mut stream) = super::super::object_stream(4096, HashAlgo::Blake3);
         let producing = tokio::task::spawn_blocking(move || {

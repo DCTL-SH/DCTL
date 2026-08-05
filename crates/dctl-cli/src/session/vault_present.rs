@@ -3,7 +3,7 @@
 //! One question, asked once, before any secret is: **is there a vault here at
 //! all?** It is separate from [`super::open`] because it is a fact about the
 //! *location*, not about the password, and conflating the two is what produced
-//! `docs/HANDOVER.md` §16.2:
+//! this:
 //!
 //! ```text
 //! $ dctl index rebuild plainstore:

@@ -1,4 +1,19 @@
 /*
+ * DCTL reference decoder.
+ *
+ * Copyright 2026 KONG GROUP LLC
+ * SPDX-License-Identifier: Apache-2.0
+ *
+ * Licensed under the Apache License, Version 2.0. You may obtain a copy at
+ * http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * This file is deliberately licensed apart from the rest of DCTL, which is
+ * source-available and not open source. The format this decodes promises its
+ * objects will still be readable in twenty years, and that promise would be
+ * worthless if reading them required permission from anyone. Implement it,
+ * sell what you build, fork it, ask nobody.
+ */
+/*
  * dctl-decode.c — dependency-free C99 reference decoder for the DCTL v1 format.
  *
  * Build:  cc -O2 -std=c99 -Wall -Wextra -Werror -o dctl-decode dctl-decode.c
