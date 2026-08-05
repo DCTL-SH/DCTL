@@ -167,23 +167,28 @@ fn two_files_that_normalise_to_one_path_are_refused_by_every_verb_that_reads_a_l
     );
 }
 
-/// Objects in the store, asked of the object view, which needs no password.
-fn store_objects(sandbox: &Sandbox, backend: &Backend) -> u64 {
-    let outcome = sandbox
-        .run(
-            backend,
-            &[
-                "size",
-                &format!("{VAULT_REMOTE}-store:"),
-                "--json",
-                "--no-ask-password",
-            ],
-        )
-        .expect_success("counting the objects in the store");
-    let document: serde_json::Value =
-        serde_json::from_str(&outcome.stdout).expect("size --json is a document");
-    document
-        .get("count")
-        .and_then(serde_json::Value::as_u64)
-        .unwrap_or_else(|| panic!("no count in: {}", outcome.stdout))
+/// Objects in the store, counted on the filesystem.
+///
+/// Not asked of the tool: this test's whole claim is about what the store
+/// holds after a refusal, and the store is the authority on that. (A plain
+/// read of a vault's object store is also refused now — a listing of
+/// ciphertext keys wearing the meaning of a file listing is what that refusal
+/// exists to stop.)
+fn store_objects(sandbox: &Sandbox, _backend: &Backend) -> u64 {
+    let mut count = 0;
+    let mut stack = vec![sandbox.path("store")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                count += 1;
+            }
+        }
+    }
+    count
 }
