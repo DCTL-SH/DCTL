@@ -226,12 +226,16 @@ two remotes appear, sometimes one, depending on what the file happened to
 contain, and a reader of the command could not tell which. To wrap a remote that
 is already configured, use `dctl config create NAME vault base=EXISTING`.
 
-**An sftp base says where on the server it is.** `--base sftp:HOST/PATH` splits
-at the first `/`, and that slash belongs to `PATH` — so
-`--base sftp:lsx-001/srv/dctl-store` is the **absolute** directory
-`/srv/dctl-store`, exactly as `dctl config create NAME sftp host=lsx-001
-base=/srv/dctl-store` writes it. A directory under the SSH login directory is
-`--base sftp:lsx-001/~/dctl-store`, which writes `base = "~/dctl-store"`. Every
+**An sftp base says where on the server it is.** `--base sftp:HOST/PATH`
+splits at the first `/`, and what follows reads exactly as `scp` and rclone
+read it: **one** slash is the SSH login directory, **two** is the filesystem
+root. So `--base sftp:lsx-001/dctl-store` is `~/dctl-store`,
+`--base sftp:lsx-001//srv/dctl-store` is the absolute `/srv/dctl-store` —
+exactly as `dctl config create NAME sftp host=lsx-001 base=/srv/dctl-store`
+writes it — and `--base sftp:lsx-001/~/dctl-store` spells the login-relative
+form explicitly. A single slash used to mean the absolute path, which put
+1.6 GiB of a benchmark's ciphertext on a server's OS disk while every
+convention said it would land under the home directory. Every
 base is stored in one of those two self-describing spellings, so
 `dctl config show` always says which one you have.
 

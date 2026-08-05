@@ -19,10 +19,29 @@
 //! the other way after a rebuild pointed their backups at a directory nobody had
 //! named.
 //!
-//! [`from_spec`] therefore splits the host off at the first `/` and keeps that
-//! slash on the base. What follows the host in the spec is exactly what `base=`
-//! takes, character for character, which is what
-//! `both_entry_points_agree_on_every_base` asserts.
+//! [`from_spec`] therefore splits the host off at the first `/` and what
+//! follows is exactly what `base=` takes, character for character — which is
+//! what `both_entry_points_agree_on_every_base` asserts.
+//!
+//! ## And then the fix for that drift had a hazard of its own
+//!
+//! Keeping the split separator made every bare `sftp:HOST/dir` **absolute**,
+//! which is not what anyone types it expecting: `scp host:dir`, rclone's sftp
+//! backend and an operator's own ssh habits all read that as the login
+//! directory. Measured cost of the mismatch — `sftp:lsx-002/dctl-bench-store`
+//! put 1.6 GiB of a benchmark's ciphertext at the server's filesystem **root**,
+//! on the OS disk, while the operator was reading the number of free terabytes
+//! on the data volume they thought they had named.
+//!
+//! So the rule is rclone's now: one slash is the login directory, two is the
+//! root (`sftp:HOST//srv/vault`), and `~` may still be spelled explicitly. The
+//! doubled separator survives canonicalisation because
+//! [`RemoteSpec`](crate::remote::RemoteSpec) splits this provider's host off
+//! before cleaning the tail — collapsing `//` is what had made the absolute
+//! spelling unspellable and forced the single slash to carry that meaning.
+//! Stored configs are untouched: the file always holds the self-describing
+//! canonical form, so this changes what *typing* means and nothing about what
+//! an existing remote resolves to.
 
 use dctl_store::SftpBase;
 
@@ -59,15 +78,33 @@ pub fn from_setting(base: &str) -> Result<String> {
 /// canonical base.
 ///
 /// `path` is the whole remainder after `sftp:`, as
-/// [`RemoteSpec`](crate::remote::RemoteSpec) canonicalised it. The base is
-/// everything from the first separator **inclusive**, so the operator's
-/// `/srv/vault` survives as `/srv/vault` rather than becoming `srv/vault` and
-/// being read as login-relative.
+/// [`RemoteSpec`](crate::remote::RemoteSpec) canonicalised it — which for this
+/// provider preserves a doubled separator, because that is what tells the two
+/// meanings apart.
+///
+/// The rule is rclone's, and it is the one an operator typing an ssh
+/// destination already has in their fingers:
+///
+/// | spelling | base | same as `base=` |
+/// |---|---|---|
+/// | `sftp:host/vault` | `~/vault`, under the SSH login directory | `~/vault` |
+/// | `sftp:host//srv/vault` | `/srv/vault`, from the filesystem root | `/srv/vault` |
+/// | `sftp:host/~/vault` | `~/vault` | `~/vault` |
+///
+/// **The single slash used to mean absolute**, and that was a measured
+/// hazard rather than a preference: `sftp:host/dctl-store` put 1.6 GiB of a
+/// benchmark's ciphertext at the server's filesystem root, on the OS disk,
+/// while every convention the operator had — rclone's, scp's, their own ssh
+/// config — said it would land under their home directory. Nothing in a
+/// stored config changes: the file always holds the self-describing
+/// canonical form (`/abs` or `~/rel`), so this is a change to what typing
+/// means, not to what any existing remote resolves to.
 ///
 /// # Errors
-/// [`ExitCode::Usage`] for a missing host, a missing base, or a base that
-/// declares neither form — which in this spelling can only be a `~`-less
-/// remainder, and the hint says so.
+/// [`ExitCode::Usage`] for a missing host, a missing base, or a `/~name`
+/// tail — the one spelling whose meaning genuinely changed and whose two
+/// readings are both plausible, so it is refused with both explicit forms
+/// rather than silently picking one.
 pub fn from_spec(spec: &str, path: &str) -> Result<(String, String)> {
     let (host, tail) = match path.find(PATH_SEPARATOR) {
         // Keep the separator: it is the leading slash of an absolute path, and
@@ -88,33 +125,60 @@ pub fn from_spec(spec: &str, path: &str) -> Result<(String, String)> {
             ),
         );
     }
-    if tail.is_empty() || tail == "/" {
+    if tail.is_empty() || tail == "/" || tail == "//" {
         return Err(CliError::new(
             ExitCode::Usage,
             format!("'{spec}' names no base directory on '{host}'"),
         )
         .with_hint(format!(
             "Write it as \
-             '{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}/srv/dctl-store' for an \
-             absolute directory, or \
-             '{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}/~/dctl-store' for one under \
-             the SSH login directory. That is the directory the ciphertext \
-             objects go under."
+             '{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}/dctl-store' for a \
+             directory under the SSH login directory, or \
+             '{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}//srv/dctl-store' for an \
+             absolute one. That is the directory the ciphertext objects go \
+             under."
         )));
     }
 
-    // A `~` in this spelling arrives as `/~/…`; strip the separator back off so
-    // the shared rule sees the same text `base=~/…` would give it.
-    let written = tail.strip_prefix("/~").map_or(tail, |rest| {
+    // Everything after `HOST/` is character-for-character what `base=` takes,
+    // which is the invariant that keeps one rule instead of two: `//x` is the
+    // absolute `/x`, `/~/x` is the home-relative `~/x`, and a bare `/x` is the
+    // home-relative `~/x` this provider now defaults to.
+    let written = if let Some(rest) = tail.strip_prefix("//") {
+        // Absolute: hand on the single leading separator.
+        format!("/{rest}")
+    } else if let Some(rest) = tail.strip_prefix("/~") {
         if rest.is_empty() || rest.starts_with(PATH_SEPARATOR) {
-            // Reconstruct `~` / `~/rest` without allocating a second string.
-            &tail[1..]
+            // `~` / `~/rest`, spelled explicitly.
+            tail[1..].to_string()
         } else {
-            tail
+            // `/~name`: under the old absolute-by-default rule this was a
+            // literal directory called `~name` at the root; under the new one
+            // the tilde would be read as another user's home. Both readings
+            // are plausible and they address different machines' worth of
+            // data, so neither is guessed.
+            return Err(CliError::new(
+                ExitCode::Usage,
+                format!("'{spec}' is ambiguous: '~{}' could name a home directory or a literal directory", &rest[..rest.find(PATH_SEPARATOR).unwrap_or(rest.len())]),
+            )
+            .with_hint(format!(
+                "Say which: \
+                 '{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}/{tail}' as an \
+                 absolute path is \
+                 '{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}/{tail}' written with \
+                 two leading slashes, and a directory under your own login \
+                 directory is \
+                 '{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}/~{}'.",
+                rest
+            )));
         }
-    });
+    } else {
+        // The default, and the one this spelling exists for: a directory
+        // under the SSH login directory, exactly as `scp host:dir` means.
+        format!("~{tail}")
+    };
 
-    let base = SftpBase::parse(written)
+    let base = SftpBase::parse(&written)
         .map(|b| b.canonical())
         .ok_or_else(|| {
             CliError::new(
@@ -122,10 +186,10 @@ pub fn from_spec(spec: &str, path: &str) -> Result<(String, String)> {
                 format!("'{spec}' does not say where on '{host}' the base is"),
             )
             .with_hint(format!(
-                "Write '{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}/srv/dctl-store' \
-                 for an absolute directory or \
-                 '{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}/~/dctl-store' for one \
-                 under the SSH login directory."
+                "Write '{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}/dctl-store' for \
+                 a directory under the SSH login directory or \
+                 '{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}//srv/dctl-store' for \
+                 an absolute one."
             ))
         })?;
 
@@ -168,21 +232,24 @@ mod tests {
     /// An absolute base already carries its own separator; a `~` one needs the
     /// separator that divides host from path. Either way the text after the host
     /// is the text `base=` takes, which is the property being asserted.
+    /// The shorthand that names exactly what `base=written` names.
+    ///
+    /// Everything after `HOST/` is character-for-character what `base=` takes,
+    /// which is the invariant that keeps one rule instead of two: an absolute
+    /// `/x` is written `HOST//x`, and anything else is appended as-is.
     fn spec_for(host: &str, written: &str) -> String {
-        if written.starts_with(PATH_SEPARATOR) {
-            format!("{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}{written}")
-        } else {
-            format!("{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}{PATH_SEPARATOR}{written}")
-        }
+        format!("{PROVIDER_SFTP}{REMOTE_SEPARATOR}{host}{PATH_SEPARATOR}{written}")
     }
 
     #[test]
     fn both_entry_points_agree_on_every_base() {
         // The defect, as a property rather than an example. For every directory
-        // an operator can name, `dctl config create NAME sftp host=H base=X` and
-        // `dctl init --base sftp:H…X` name the same directory and store the
-        // same string. Before this, `base=/srv/vault` was `/srv/vault` and
-        // `sftp:HOST/srv/vault` was `$HOME/srv/vault`.
+        // an operator can name, `dctl config create NAME sftp host=H base=X`
+        // and `dctl init --base sftp:H/X` name the same directory and store the
+        // same string — the tail after `HOST/` being character-for-character
+        // what `base=` takes. Before this, `base=/srv/vault` was `/srv/vault`
+        // while `sftp:HOST/srv/vault` was a *different* directory, and now the
+        // absolute one is spelled `sftp:HOST//srv/vault` and means the same.
         for written in ["/srv/vault", "/srv//vault/", "~/dctl-store", "~", "/data"] {
             let through_setting = from_setting(written)
                 .unwrap_or_else(|e| panic!("base={written} was refused: {}", e.message()));
@@ -198,12 +265,20 @@ mod tests {
     }
 
     #[test]
-    fn the_shorthand_keeps_the_slash_it_split_on() {
-        // §16.3 in one assertion. `sftp:h/srv/vault` used to yield the base
-        // `srv/vault`, which the backend resolved against the login directory —
-        // so the vault landed in `$HOME/srv/vault` while every message said
-        // `/srv/vault`.
-        let (host, base) = via_spec("sftp:h/srv/vault").unwrap();
+    fn one_slash_is_the_login_directory_and_two_is_the_root() {
+        // The rule an operator already has in their fingers, from scp, from
+        // rclone, from their own ssh config — and the measured reason it is
+        // this way round: under the old absolute-by-default rule
+        // `sftp:h/dctl-store` put 1.6 GiB of benchmark ciphertext at the
+        // server's filesystem root, on the OS disk, while every convention
+        // said it would land under the home directory.
+        let (host, base) = via_spec("sftp:h/dctl-store").unwrap();
+        assert_eq!(host, "h");
+        assert_eq!(base, "~/dctl-store");
+
+        // And the absolute spelling, which the canonicalisation used to
+        // collapse and therefore made unspellable.
+        let (host, base) = via_spec("sftp:h//srv/vault").unwrap();
         assert_eq!(host, "h");
         assert_eq!(base, "/srv/vault");
     }
@@ -245,11 +320,26 @@ mod tests {
     }
 
     #[test]
-    fn a_tilde_that_starts_a_directory_name_is_not_a_home_reference() {
-        // `~backups` is a directory called `~backups`, not user `backups`'s
-        // home: SFTP cannot expand the second and inventing it would create the
-        // first under a name nobody typed.
-        let (_, base) = via_spec("sftp:h/~backups/store").unwrap();
-        assert_eq!(base, "/~backups/store");
+    fn a_tilde_that_starts_a_directory_name_is_refused_rather_than_guessed() {
+        // `~backups` is the one spelling whose meaning genuinely changed:
+        // under absolute-by-default it was a literal directory called
+        // `~backups` at the root, and under the home-relative default the
+        // tilde reads as another user's home — which SFTP cannot expand
+        // anyway. Two plausible readings addressing different machines' worth
+        // of data, so neither is guessed.
+        let error = via_spec("sftp:h/~backups/store").unwrap_err();
+        assert_eq!(error.code(), ExitCode::Usage);
+        assert!(
+            error.hint().is_some_and(|hint| hint.contains("//")),
+            "the hint must name the explicit absolute spelling"
+        );
+
+        // Both explicit spellings still work, which is what makes the refusal
+        // actionable rather than a dead end.
+        assert_eq!(
+            via_spec("sftp:h//~backups/store").unwrap().1,
+            "/~backups/store"
+        );
+        assert_eq!(via_spec("sftp:h/~/~backups").unwrap().1, "~/~backups");
     }
 }
