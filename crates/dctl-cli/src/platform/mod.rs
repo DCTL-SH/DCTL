@@ -33,6 +33,7 @@
 //!    clean exit code. [`collision`] finds them and the run refuses.
 
 pub mod collision;
+pub mod home;
 pub mod names;
 pub mod path;
 pub mod resolve;

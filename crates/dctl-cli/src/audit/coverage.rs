@@ -217,6 +217,16 @@ pub const COVERAGE: &[(&str, Recording)] = &[
         Recording::Exempt("Reports usage and capabilities. No object body is read."),
     ),
     (
+        "home",
+        Recording::Exempt(
+            "Reports where this machine keeps its configuration, index, audit \
+             chain and logs, and whether each is owner-only. Reads metadata \
+             only — no remote, no vault, no object body — and is run precisely \
+             when something is already wrong, so it must not be able to make \
+             anything worse.",
+        ),
+    ),
+    (
         "version",
         Recording::Exempt("Prints build information. Touches no remote at all."),
     ),

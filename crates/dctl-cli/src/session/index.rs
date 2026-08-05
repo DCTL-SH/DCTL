@@ -67,9 +67,19 @@ pub fn path(ctx: &Ctx) -> PathBuf {
 /// [`From<std::io::Error>`](crate::error::CliError) — a read-only home, a
 /// permission the user does not have, or a parent that exists and is a file.
 pub fn ensure_directory(index: &Path) -> Result<()> {
-    if let Some(parent) = index.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent)?;
-    }
+    let Some(parent) = index.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+
+    // Which of these we create is what decides whether we may harden them.
+    // Chmodding a directory the operator already had — `--index
+    // /srv/shared/dctl.redb` — to owner-only would be a surprising side effect
+    // of opening a database, so only the ones this call brings into existence
+    // are closed. The audit writer draws the line in the same place, for the
+    // same reason.
+    let created = crate::platform::home::missing_ancestors(parent);
+    std::fs::create_dir_all(parent)?;
+    crate::platform::home::harden_all(&created)?;
     Ok(())
 }
 

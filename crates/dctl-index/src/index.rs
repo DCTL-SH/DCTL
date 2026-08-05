@@ -46,6 +46,31 @@ pub struct Index {
     enc_key: Zeroizing<[u8; 32]>,
 }
 
+/// Mode for a freshly-created index file: owner read/write, nobody else.
+///
+/// The records are encrypted, so this is not what protects them — but a
+/// world-readable index publishes its size and modification time, which is how
+/// many objects this machine tracks and when it last ran. The directory around
+/// it carries `dctl_meta::paths::HOME_DIR_MODE` for the same reason.
+#[cfg(unix)]
+const INDEX_FILE_MODE: u32 = 0o600;
+
+/// Close a freshly-created index file to everyone but its owner.
+///
+/// Best-effort and deliberately not fatal: a filesystem with no Unix modes —
+/// a mounted share, an exotic target — must not stop a vault from opening,
+/// and the encryption is what protects the records either way.
+#[cfg(unix)]
+fn harden_file(path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(INDEX_FILE_MODE));
+}
+
+/// See the Unix definition.
+#[cfg(not(unix))]
+fn harden_file(_path: &std::path::Path) {}
+
 impl Index {
     /// Open (or create) an index database at `path`.
     ///
@@ -63,7 +88,17 @@ impl Index {
         let db_key =
             derive_subkey(index_subkey, b"index-sqlcipher-v1").map_err(|_| IndexError::Crypto)?;
 
+        let is_new = !path.exists();
         let conn = Connection::open(path)?;
+        if is_new {
+            // Owner-only, like the configuration and the audit chain beside
+            // it. The contents are encrypted, so this is not what protects the
+            // records — but an index left world-readable publishes its *size*
+            // and its modification time, which is how many objects this
+            // machine tracks and when it last backed up, and there is no
+            // reason to hand that to every account on the box.
+            harden_file(path);
+        }
 
         // `PRAGMA key` MUST be the first statement on the connection. The raw-key form
         // `"x'<hex>'"` makes SQLCipher use the 32 bytes directly and skip its PBKDF2 —

@@ -73,7 +73,7 @@ pub fn init(config: &LogConfig) -> Result<(), LogInitError> {
     // permissions problem surfaces as a clean error, not a half-configured
     // subscriber.
     let file_writer = match &config.file {
-        Some(path) => Some(open_log_file(path)?),
+        Some(path) => Some(open_log_file(&resolve_log_path(path))?),
         None => None,
     };
 
@@ -167,6 +167,24 @@ pub fn init(config: &LogConfig) -> Result<(), LogInitError> {
 }
 
 /// Open a log file for appending, creating parent directories as needed.
+/// Where a `--log-file` value actually writes.
+///
+/// A bare file name goes to `~/.dctl/logs`, the directory `dctl_meta::paths`
+/// declares for exactly this and which nothing used — so logs had no home and
+/// a user who wanted one had to invent a path. Anything with a separator, or
+/// an absolute path, is honoured as typed: `--log-file ./run.log` means the
+/// working directory, and saying otherwise would be a surprise.
+fn resolve_log_path(path: &Path) -> std::path::PathBuf {
+    let bare = path
+        .parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty());
+    if bare {
+        dctl_meta::paths::logs_dir().join(path)
+    } else {
+        path.to_path_buf()
+    }
+}
+
 fn open_log_file(path: &Path) -> Result<std::fs::File, LogInitError> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
