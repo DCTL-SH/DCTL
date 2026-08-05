@@ -505,15 +505,44 @@ impl ChunkCache {
         Ok((reader.plaintext_len(), reader.content_blake3().copied()))
     }
 
-    /// The reader for `path`, opening one if the cache does not hold it.
+    /// The reader for `path`, opening one if the cache does not hold one that
+    /// still addresses the object that path currently names.
+    ///
+    /// **The identity check is not optional.** A reader holds a resolved object
+    /// key, its authenticated geometry and its unwrapped DEK, and this cache is
+    /// keyed by *path* — so after a rewrite the same path names a different
+    /// object while the cached reader still addresses the old one. Measured
+    /// against a live B2 vault: a file replaced through the CLI was served
+    /// through an open mount as the **old bytes under the new size**, because
+    /// `getattr` reads the length from the index while the read came from the
+    /// superseded object. That is a corrupt read, not a stale one, and it is
+    /// precisely the failure this module's own documentation says a path-keyed
+    /// cache would have — the chunk map avoids it by keying on `file_id`, and
+    /// the reader map has to earn the same property by asking.
+    ///
+    /// The question is answered by the local index, so it costs no round trip:
+    /// one keyed lookup against redb, against the header read and DEK unwrap a
+    /// re-open would cost. A path that has vanished falls through to the open,
+    /// which reports the absence properly.
     ///
     /// Two callers racing on the same missing path will both open a reader and the second
     /// store wins. That costs one redundant header read and is otherwise harmless — both
     /// readers address the same object — whereas holding the lock across the open would
     /// serialise every first read in the process behind one network round trip.
     async fn reader(&self, vault: &Vault, path: &str) -> Result<Arc<RangeReader>> {
-        if let Some(reader) = self.state().take_reader(path) {
-            return Ok(reader);
+        // Bound first, so the lock guard is released before the await below:
+        // this mutex is never held across one.
+        let cached = self.state().take_reader(path);
+        if let Some(reader) = cached {
+            match vault.object_key_of(path).await? {
+                // Still the same object: the cached reader is exactly right.
+                Some(current) if current == reader.object_key() => return Ok(reader),
+                // The path now names something else — or nothing. Either way
+                // this reader is no longer an answer about `path`, and the
+                // chunks it produced are keyed by the old object's `file_id`,
+                // so they cannot be served for the new one either.
+                _ => self.state().forget_reader(path),
+            }
         }
         let reader = Arc::new(vault.open_range_reader(path).await?);
         self.state()
@@ -600,6 +629,26 @@ impl State {
         let held = self.readers.get_mut(path)?;
         held.used = tick;
         Some(Arc::clone(&held.value))
+    }
+
+    /// Forget the reader for `path`, and every chunk it produced.
+    ///
+    /// Called when a path stops resolving to the object its cached reader
+    /// addresses. The chunks go too: they are keyed by the old object's
+    /// `file_id`, so they could never be served for the new object, and
+    /// holding them would only spend the budget on bytes nothing can ask for.
+    fn forget_reader(&mut self, path: &str) {
+        let Some(stale) = self.readers.remove(path) else {
+            return;
+        };
+        let file_id = *stale.value.file_id();
+        self.chunks.retain(|(object, _), chunk| {
+            let keep = *object != file_id;
+            if !keep {
+                self.bytes = self.bytes.saturating_sub(chunk.value.len());
+            }
+            keep
+        });
     }
 
     /// Store an open reader, evicting the least recently used if the map is full.
@@ -994,6 +1043,48 @@ mod flight_tests {
             &won[..],
             &fx.plaintext[..],
             "the waiter's read is byte-exact"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_rewritten_object_is_never_served_from_the_readers_cached_for_its_old_one() {
+        // Measured against a live B2 vault, and the reason this check exists:
+        // a file replaced through the CLI was served through an open mount as
+        // the OLD bytes under the NEW size — `getattr` takes the length from
+        // the index while the read came from the superseded object. A corrupt
+        // read, not a stale one. The chunk map avoids this by keying on
+        // `file_id`; the reader map is keyed by path and has to earn the same
+        // property by asking the index whether the path still names the object
+        // its reader holds.
+        let fx = fixture(4, Duration::ZERO).await;
+        let cache = ChunkCache::new();
+
+        let first = cache
+            .read_range(&fx.vault, "big.bin", 0, None)
+            .await
+            .expect("the first read succeeds");
+        assert_eq!(&first[..], &fx.plaintext[..]);
+
+        // Replace the object behind the same logical path, exactly as a second
+        // process writing to the vault would.
+        let replacement: Vec<u8> = (0..fx.plaintext.len())
+            .map(|i| ((i + 13) % 251) as u8)
+            .collect();
+        let source = fx._index.path().join("replacement.bin");
+        std::fs::write(&source, &replacement).expect("a source file");
+        fx.vault
+            .put_file_from_path("big.bin", &source, Modified::At(1_700_000_100))
+            .await
+            .expect("the rewrite stores");
+
+        let after = cache
+            .read_range(&fx.vault, "big.bin", 0, None)
+            .await
+            .expect("the read after the rewrite succeeds");
+        assert_eq!(
+            &after[..],
+            &replacement[..],
+            "a cached reader must not keep serving the object the path used to name"
         );
     }
 

@@ -49,6 +49,22 @@ impl Vault {
         }
     }
 
+    /// The backend object key `path` currently resolves to, if any.
+    ///
+    /// The identity a cached reader must be checked against. A reader holds a
+    /// resolved object key, its authenticated geometry and its unwrapped DEK;
+    /// a rewrite gives the same logical path a **different** object, so a
+    /// reader cached by path alone keeps serving the superseded one. Asking
+    /// the index is local and costs no round trip, which is what makes
+    /// checking on every use affordable.
+    ///
+    /// # Errors
+    /// Whatever the index or the name-record lookup reported.
+    pub async fn object_key_of(&self, path: &str) -> Result<Option<String>> {
+        let normalized = path::normalize(path)?;
+        self.lookup_object_key(&normalized).await
+    }
+
     /// Whether the stored object behind `path` is actually in the backend.
     ///
     /// The index answers what *should* be there; this asks the store. One

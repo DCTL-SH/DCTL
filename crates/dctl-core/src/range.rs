@@ -119,6 +119,16 @@ impl RangeReader {
         }
     }
 
+    /// The backend object this reader was opened on.
+    ///
+    /// Read by a cache that holds readers by logical path, so it can notice
+    /// that the path now resolves somewhere else — see
+    /// [`Vault::object_key_of`](crate::Vault::object_key_of).
+    #[must_use]
+    pub fn object_key(&self) -> &str {
+        self.key.as_str()
+    }
+
     /// The object's plaintext length, from its authenticated head.
     ///
     /// Established, not guessed: the DEK unwrap folds the whole 68-byte head into its
