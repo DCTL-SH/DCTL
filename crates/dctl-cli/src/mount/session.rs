@@ -216,6 +216,7 @@ pub fn mount(
     config: MountConfig,
     mountpoint: &Path,
     runtime: tokio::runtime::Handle,
+    audit: Arc<super::audit::MountAudit>,
 ) -> Result<Mounted> {
     // Size the source's cache for the read-ahead this mount schedules: the
     // windows in flight plus the one being consumed. Stated here, where the
@@ -237,7 +238,7 @@ pub fn mount(
         source.tune_cache(bytes, bytes / per_entry);
     }
 
-    let filesystem = VaultFs::new(source, config.clone(), mountpoint, runtime);
+    let filesystem = VaultFs::new(source, config.clone(), mountpoint, runtime, audit);
     let session_config = session_config(&config);
 
     // Taken before the attach, because afterwards the mountpoint reports the

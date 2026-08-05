@@ -104,6 +104,7 @@
 //! listing complete while a fifty-gigabyte read is in flight.
 
 pub mod attr;
+pub mod audit;
 pub mod config;
 pub mod detached;
 pub mod errno;

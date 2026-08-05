@@ -278,12 +278,26 @@ async fn serve(ctx: &Ctx, args: &MountArgs, source: &Source) -> Result<()> {
     let opened: Arc<dyn crate::source::Source> =
         Arc::from(crate::source::open(ctx, &spec).await?.into_source());
 
+    // Built before the mount so the filesystem and the session record share
+    // one recorder, and so the vault being served is named in both.
+    let audit = Arc::new(crate::mount::audit::MountAudit::new(
+        Arc::clone(&ctx.audit),
+        source.remote.as_str(),
+        source.path.as_str(),
+    ));
+
     let mounted = crate::mount::mount(
         opened,
         config,
         &args.mountpoint,
         tokio::runtime::Handle::current(),
+        Arc::clone(&audit),
     )?;
+
+    // After the attach and before a single byte is served: a failure here
+    // drops `mounted`, whose `Drop` detaches the filesystem, so no window is
+    // ever served under a session the chain does not record.
+    audit.record_session()?;
 
     tracing::info!(
         { fields::OP } = VERB,

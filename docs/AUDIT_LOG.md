@@ -705,15 +705,31 @@ shell plumbing in the evidence file.
 so a record for it would describe work that did not happen — and would be
 indistinguishable from a real record forever afterwards.
 
-**Known gaps, stated rather than left to be discovered.** Two commands fall under
-the rule above and do not yet implement it:
+**`mount` records two kinds of thing, and only two.** A mounted vault hands
+decrypted plaintext to anything that can read a filesystem, which is the widest
+door in the tool, and for a release it appended nothing at all. It now appends:
 
-* **`mount`** — a mounted vault serves plaintext to whoever reads the filesystem,
-  and none of those reads is recorded. Per-read records are not the answer (a
-  128 KiB kernel read is not an event anyone wants a line for); the design is a
-  session record plus a first-read record per object. **This is the largest
-  remaining hole in the audit story.** A log covering a period in which a vault
-  was mounted does not account for what was read through it.
+* a **session record** when the filesystem attaches — this vault, this subtree,
+  no direction and no bytes, because nothing has moved yet;
+* one **first-read record per object**, direction `out`, carrying the length of
+  the window that triggered it — the same shape `cat` uses for a ranged read.
+
+Per-read records were rejected: a 128 KiB kernel read is not an event anyone
+wants a line for, and an `fsync` per window would make the mount unusable and
+bury the interesting facts. The consequence is stated rather than hidden — for
+a mount, `bytes` is a **floor**, not the session's egress. A reader that streams
+a whole film after its first window is recorded once, for one window. What the
+records do answer completely is *which objects left*, which is the question
+this log exists to answer.
+
+The record is appended **before** the window is served, so a chain that cannot
+be written fails the read (`EIO`) rather than serving plaintext it could not
+account for. There is no unmount record: an unmount moves no content, and a
+totals-bearing end record would double-count against the first-read records.
+
+**Known gap, stated rather than left to be discovered.** One command falls
+under the rule above and does not yet implement it:
+
 * **`mkdir`** — changes stored data on the one backend that has directories.
 
 `verify`, `scrub`, `hashsum` and `check --checksum` read object bodies back and

@@ -4196,6 +4196,21 @@ pub const MOUNT_DIRECTORY_MODE: u16 = 0o555;
 /// has finished with them, so eviction can never produce a stale inode number.
 pub const MOUNT_INODE_CACHE_MAX: usize = 65_536;
 
+/// Objects a mount remembers having recorded a first read for.
+///
+/// The dedup set behind `mount/audit.rs`: one record per object per session,
+/// so this bounds what "per session" can cost in memory. The same figure as
+/// [`MOUNT_INODE_CACHE_MAX`] and for the same reason — a path and a counter
+/// each, so sixty-five thousand of them is a few megabytes, and a mount that
+/// walks more objects than that is a `find` over a dataset rather than a
+/// reader.
+///
+/// Forgetting is safe in one direction only, which is why it is allowed:
+/// evicting an object means a later read of it is recorded a second time,
+/// which overcounts a total the log already publishes as a floor. It can
+/// never produce a read that went unrecorded.
+pub const MOUNT_AUDIT_SEEN_MAX: usize = 65_536;
+
 /// How many directory listings the mount holds decrypted at once.
 ///
 /// A listing is the unit `--dir-cache-time` ages out; this is the second bound on
