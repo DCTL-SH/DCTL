@@ -61,7 +61,12 @@ pub fn resolve_path(globals: &GlobalArgs, explicit: Option<&Path>) -> PathBuf {
     if let Some(parent) = globals.index.as_deref().and_then(Path::parent) {
         return parent.join(AUDIT_LOG_FILE_NAME);
     }
-    dctl_meta::paths::data_dir().join(AUDIT_LOG_FILE_NAME)
+
+    // `~/.dctl/audit/`, which is what `dctl_meta::paths::audit_dir()` declares
+    // and what nothing used: the chain was being written beside the index
+    // instead, putting the one file that must survive inside the one directory
+    // a user may reasonably delete and rebuild.
+    dctl_meta::paths::audit_dir().join(AUDIT_LOG_FILE_NAME)
 }
 
 /// Read and parse the log.
@@ -167,10 +172,23 @@ mod tests {
     }
 
     #[test]
-    fn without_an_index_the_log_falls_back_to_the_data_directory() {
+    fn without_an_index_the_log_lives_in_the_audit_directory() {
+        // Not beside the index, which is where it used to go: that put the one
+        // file that must survive inside the one directory a user may
+        // reasonably delete and rebuild, and left `audit_dir()` declared with
+        // no caller at all.
         let path = resolve_path(&globals(&[]), None);
         assert!(path.ends_with(AUDIT_LOG_FILE_NAME));
-        assert!(path.starts_with(dctl_meta::paths::data_dir()));
+        assert!(
+            path.starts_with(dctl_meta::paths::audit_dir()),
+            "the chain belongs in {}, not {}",
+            dctl_meta::paths::audit_dir().display(),
+            path.display()
+        );
+        assert!(
+            !path.starts_with(dctl_meta::paths::data_dir()),
+            "and never inside the index directory"
+        );
     }
 
     #[test]

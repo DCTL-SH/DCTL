@@ -1668,6 +1668,54 @@ pub const CONFIG_TEMP_NAME_SEPARATOR: char = '.';
 pub const CONFIG_DIR_MODE: u32 = 0o700;
 
 // ─────────────────────────────────────────────────────────────────────────────
+// `dctl home` — the report of what this machine keeps
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// Column headings and row labels, named here for the reason every other
+// command's are: the report is a published surface a script may grep, and a
+// heading spelled inline is a heading nobody can find when it has to change.
+
+/// Column naming the thing a row describes.
+pub const HOME_COLUMN_WHAT: &str = "What";
+/// Column carrying where it resolves on this machine.
+pub const HOME_COLUMN_PATH: &str = "Path";
+/// Column saying whether it is there and the right shape.
+pub const HOME_COLUMN_STATE: &str = "State";
+/// Column carrying the mode, and whether it lets anyone else in.
+pub const HOME_COLUMN_ACCESS: &str = "Access";
+/// Column carrying the size, or what a missing entry means.
+pub const HOME_COLUMN_DETAIL: &str = "Detail";
+
+/// Row label: the root of everything DCTL writes.
+pub const HOME_ROW_HOME: &str = "home";
+/// Row label: the configuration file.
+pub const HOME_ROW_CONFIG: &str = "config";
+/// Row label: the encrypted index this run would open.
+pub const HOME_ROW_INDEX: &str = "index";
+/// Row label: the tamper-evident audit chain.
+pub const HOME_ROW_AUDIT: &str = "audit chain";
+/// Row label: the chunk cache directory.
+pub const HOME_ROW_CACHE: &str = "cache";
+/// Row label: where `--log-file` keeps logs.
+pub const HOME_ROW_LOGS: &str = "logs";
+
+/// What a path that is not there yet reports.
+///
+/// Absence is ordinary on a fresh machine, and the wording says so: a
+/// diagnostic whose first run looks like a fault is a diagnostic nobody trusts.
+pub const HOME_STATE_ABSENT: &str = "not created yet";
+/// What a path that is there reports.
+pub const HOME_STATE_PRESENT: &str = "present";
+/// What a path of the wrong kind reports — a file where a directory belongs.
+pub const HOME_STATE_WRONG_KIND: &str = "wrong kind";
+/// The detail shown beside an absent entry.
+pub const HOME_DETAIL_ON_FIRST_USE: &str = "created on first use";
+/// Suffix marking a mode that admits only its owner.
+pub const HOME_ACCESS_OWNER_ONLY: &str = "owner-only";
+/// Suffix marking a mode that admits anybody on the machine.
+pub const HOME_ACCESS_OPEN: &str = "world-readable";
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Remote specs & the backend registry (`crate::remote`)
 // ─────────────────────────────────────────────────────────────────────────────
 //

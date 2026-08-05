@@ -208,6 +208,9 @@ pub enum Command {
     /// Show remote usage, quota and capability information.
     About(commands::about::AboutArgs),
 
+    /// Show where DCTL keeps everything on this machine, and whether it is well.
+    Home(commands::home::HomeArgs),
+
     /// Show version and build information.
     Version(commands::version::VersionArgs),
 
@@ -271,6 +274,7 @@ impl Command {
             Self::Restore(_) => "restore",
             Self::Mount(_) => "mount",
             Self::About(_) => "about",
+            Self::Home(_) => "home",
             Self::Version(_) => "version",
             Self::Completion(_) => "completion",
             Self::Put(_) => "put",
@@ -335,7 +339,11 @@ impl Command {
     pub const fn requires_vault(&self) -> bool {
         !matches!(
             self,
-            Self::Config(_) | Self::Version(_) | Self::Completion(_) | Self::Replicate(_)
+            Self::Config(_)
+                | Self::Home(_)
+                | Self::Version(_)
+                | Self::Completion(_)
+                | Self::Replicate(_)
         )
     }
 

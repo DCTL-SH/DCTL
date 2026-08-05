@@ -704,6 +704,12 @@ pub struct GlobalArgs {
     pub log_format: LogFormat,
 
     /// Append logs to this file in addition to stderr.
+    ///
+    /// A bare name — `--log-file today.log` — lands in `~/.dctl/logs`, which
+    /// is where this build keeps them and what makes a log easy to find again
+    /// when something has gone wrong. A path with a separator in it is used
+    /// exactly as written, so `--log-file ./run.log` still means the working
+    /// directory.
     #[arg(
         long,
         global = true,

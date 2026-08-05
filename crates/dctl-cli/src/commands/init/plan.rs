@@ -177,9 +177,17 @@ impl InitPlan {
     /// Any filesystem failure, classified by
     /// [`From<std::io::Error>`](crate::error::CliError).
     pub fn ensure_index_directory(&self) -> Result<()> {
-        if let Some(parent) = self.index.parent().filter(|p| !p.as_os_str().is_empty()) {
-            std::fs::create_dir_all(parent)?;
-        }
+        let Some(parent) = self.index.parent().filter(|p| !p.as_os_str().is_empty()) else {
+            return Ok(());
+        };
+        // The same rule `session::index::ensure_directory` follows, and it has
+        // to be followed here too: `init` is the FIRST thing a fresh machine
+        // runs, so this is usually the call that brings `~/.dctl` into
+        // existence, and a bare `create_dir_all` left it at the process umask.
+        // Only the directories this creates are closed.
+        let created = crate::platform::home::missing_ancestors(parent);
+        std::fs::create_dir_all(parent)?;
+        crate::platform::home::harden_all(&created)?;
         Ok(())
     }
 }

@@ -88,6 +88,7 @@ async fn run_inner(ctx: &Ctx, command: &Command) -> Result<()> {
 
         // ── Utility ──────────────────────────────────────────────────────
         Command::About(args) => commands::about::run(ctx, args).await,
+        Command::Home(args) => commands::home::run(ctx, args),
         Command::Version(args) => commands::version::run(ctx, args).await,
         Command::Completion(args) => commands::completion::run(ctx, args).await,
     }
