@@ -707,3 +707,143 @@ async fn a_root_that_did_not_exist_yet_is_still_created_by_the_first_write() {
     .expect("the first write creates the root");
     assert_eq!(fs.get(&key).await.unwrap(), data);
 }
+
+#[tokio::test]
+async fn a_paged_listing_is_one_walk_and_therefore_one_snapshot() {
+    // This backend has no server to page for it, so a listing is a tree walk
+    // sliced into pages — and it used to re-walk and re-sort the whole tree for
+    // every page. At `PAGE_SIZE` 1000 a store of 200,001 objects walked it 201
+    // times, which is quadratic: `dctl check` took 885 ms over 10,000 files and
+    // 30.1 s over 100,000.
+    //
+    // Cost is not what this asserts, because a timing is a flaky test. What it
+    // asserts is the property that comes with fixing it, and which is not
+    // otherwise reachable: a listing that re-walks between pages can hand back a
+    // page sequence *no single walk ever saw*. Writing into the store between
+    // page one and page two used to change what page two contained; a snapshot
+    // cannot, so a listing is now a consistent view of one moment.
+    let dir = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+
+    // Enough to page: `PAGE_SIZE` is 1000.
+    for i in 0..1_500 {
+        let key = ObjectKey::new(format!("o/{i:05}.bin"));
+        fs.put(&key, Bytes::from_static(b"x"), &blake3(b"x"), SourceModified::unknown())
+            .await
+            .unwrap();
+    }
+
+    let first = fs.list_page("o/", None).await.unwrap();
+    assert_eq!(first.items.len(), 1_000, "a full first page");
+    let cursor = first.next_cursor.clone().expect("more to come");
+
+    // The tree changes underneath the listing, in both directions.
+    for i in 1_500..1_600 {
+        let key = ObjectKey::new(format!("o/{i:05}.bin"));
+        fs.put(&key, Bytes::from_static(b"x"), &blake3(b"x"), SourceModified::unknown())
+            .await
+            .unwrap();
+    }
+    fs.delete(&ObjectKey::new("o/01400.bin")).await.unwrap();
+
+    let second = fs.list_page("o/", Some(cursor)).await.unwrap();
+
+    // 1,500 objects existed when the listing began, so the walk left 500 keys
+    // after the first page. The hundred added since are not among them — they
+    // belong to a later walk. The one *deleted* since is, and drops out at the
+    // `stat`, which is the existing and correct rule: a key that has vanished
+    // between the walk and the read is genuinely gone, and reporting it would be
+    // the lie. So the snapshot fixes which keys a listing considers, not whether
+    // they still exist when it reaches them.
+    assert_eq!(
+        second.items.len(),
+        499,
+        "the continuation must serve the walk the listing began with, less what has since gone"
+    );
+    assert!(
+        !second
+            .items
+            .iter()
+            .any(|item| item.key.as_str() == "o/01400.bin"),
+        "a key deleted mid-listing must not be reported as present"
+    );
+    assert!(
+        second.next_cursor.is_none(),
+        "and the listing must end where that walk ended"
+    );
+
+    let seen: Vec<String> = first
+        .items
+        .iter()
+        .chain(second.items.iter())
+        .map(|item| item.key.as_str().to_string())
+        .collect();
+    let mut unique = seen.clone();
+    unique.sort();
+    unique.dedup();
+    assert_eq!(seen.len(), unique.len(), "no key may be reported twice");
+    assert!(
+        seen.iter().all(|key| key.as_str() < "o/01500.bin"),
+        "and none added after the listing began may appear"
+    );
+}
+
+#[tokio::test]
+async fn a_fresh_listing_sees_what_the_last_one_missed() {
+    // The other half: the snapshot is held for *continuations* only. A listing
+    // that starts again walks again, or the cache would be a stale answer to a
+    // new question — which is a far worse defect than the cost it saves.
+    let dir = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+    for i in 0..1_100 {
+        let key = ObjectKey::new(format!("o/{i:05}.bin"));
+        fs.put(&key, Bytes::from_static(b"x"), &blake3(b"x"), SourceModified::unknown())
+            .await
+            .unwrap();
+    }
+
+    let first = fs.list_page("o/", None).await.unwrap();
+    let _ = fs
+        .list_page("o/", first.next_cursor.clone())
+        .await
+        .unwrap();
+
+    fs.put(
+        &ObjectKey::new("o/99999.bin"),
+        Bytes::from_static(b"x"),
+        &blake3(b"x"),
+        SourceModified::unknown(),
+    )
+    .await
+    .unwrap();
+
+    let restarted = fs.list_page("o/", None).await.unwrap();
+    let later = fs
+        .list_page("o/", restarted.next_cursor.clone())
+        .await
+        .unwrap();
+    let total = restarted.items.len() + later.items.len();
+    assert_eq!(total, 1_101,
+        "a new listing must see the new object; page1={} cursor={:?} page2={} last2={:?}",
+        restarted.items.len(), restarted.next_cursor, later.items.len(),
+        later.items.last().map(|i| i.key.as_str().to_string()));
+}
+
+#[tokio::test]
+async fn a_high_sorting_key_is_listed_like_any_other() {
+    // Discriminator: does the walk see a key that sorts past every other, or is
+    // the shortfall in the paging?
+    let dir = TempDir::new().unwrap();
+    let fs = LocalFs::new(dir.path());
+    for i in 0..1_100 {
+        let key = ObjectKey::new(format!("o/{i:05}.bin"));
+        fs.put(&key, Bytes::from_static(b"x"), &blake3(b"x"), SourceModified::unknown()).await.unwrap();
+    }
+    fs.put(&ObjectKey::new("o/99999.bin"), Bytes::from_static(b"x"), &blake3(b"x"), SourceModified::unknown()).await.unwrap();
+
+    let p1 = fs.list_page("o/", None).await.unwrap();
+    let p2 = fs.list_page("o/", p1.next_cursor.clone()).await.unwrap();
+    assert_eq!(p1.items.len() + p2.items.len(), 1_101,
+        "walk must see every key; p1={} p2={} last={:?}",
+        p1.items.len(), p2.items.len(), p2.items.last().map(|i| i.key.as_str().to_string()));
+}

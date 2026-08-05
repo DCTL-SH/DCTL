@@ -94,7 +94,7 @@ use crate::session::{self, Session};
 
 use super::chunk_cache::ChunkCache;
 use super::entry::Entry;
-use super::{Assurance, Entries, Inventory, Sizes, Source};
+use super::{Assurance, Children, Entries, Inventory, Sizes, Source, Totals};
 
 /// A vault, unlocked, presented as a readable source.
 pub struct VaultSource {
@@ -179,6 +179,40 @@ impl Source for VaultSource {
             .collect();
 
         Ok(Box::new(Buffered { entries }))
+    }
+
+    /// One directory, at the cost of one directory.
+    ///
+    /// The override the trait's default exists for. `enumerate` above reads the
+    /// whole index however narrow the prefix — the key is a keyed hash, so there
+    /// is no range to seek and no point to stop at — and a `readdir` that paid
+    /// that made a tree walk quadratic. Both halves here are indexed lookups on
+    /// the directory's own hash: the files from the records, the subdirectories
+    /// from the rows that count what lives under them.
+    ///
+    /// No component-prefix filter is needed, and its absence is the point:
+    /// `enumerate` has to correct a byte-wise `starts_with` so that listing
+    /// `photos` does not report `photos-backup`, but a parent hash cannot make
+    /// that mistake — the two are different keys, not adjacent bytes.
+    async fn children(&self, dir: &str) -> Result<Option<Children>> {
+        let vault = &self.session.vault;
+        Ok(Some(Children {
+            files: vault.children(dir)?.into_iter().map(from_record).collect(),
+            dirs: vault.child_dirs(dir)?,
+        }))
+    }
+
+    /// The vault's own running totals, for `statfs`.
+    ///
+    /// Maintained by the index as files arrive and leave, so this costs one row
+    /// read rather than the whole-vault listing a `df` used to inherit from the
+    /// mount root.
+    async fn totals(&self) -> Result<Option<Totals>> {
+        let totals = self.session.vault.totals()?;
+        Ok(Some(Totals {
+            objects: totals.objects,
+            bytes: totals.measured_bytes(),
+        }))
     }
 
     async fn enumerate_destination(&self, prefix: &str) -> Result<Box<dyn Entries>> {
@@ -468,8 +502,13 @@ pub fn from_record(record: Record) -> Entry {
 /// the entry no longer carries a zero to inspect: [`from_record`] is the one
 /// place that decides, and it decides from the only data that can tell the two
 /// apart.
+///
+/// The rule itself now lives on the record, in the crate that owns it: the index
+/// keeps running totals and has to make the same distinction to keep them, and
+/// two spellings of "was this ever measured" is exactly the drift this comment
+/// spends so long warning about.
 fn unmeasured(record: &Record) -> bool {
-    record.size == 0 && record.content_hash.is_empty()
+    record.unmeasured()
 }
 
 // The window arithmetic that used to live here — slice a buffer the caller had

@@ -16,28 +16,39 @@
 //! [`Entry::parent_components`] answers, and which is the same function
 //! [`Aggregator`] itself consults — is a file sitting directly here.
 //!
-//! ## Why the totals are kept
+//! ## Where the totals went
 //!
-//! [`Aggregator`] computes each subdirectory's recursive byte count and object
-//! count on the pass it was making anyway, and the mount needs them for exactly
-//! one thing: `statfs`. A filesystem has to be able to say how large it is, and
-//! for a mounted vault the only true answer is the total of what is under the
-//! mount root — which is this listing's totals, at the root. Nothing else reads
-//! them, and in particular a directory's own `st_size` does *not*: see
+//! This module used to compute each subdirectory's recursive byte and object
+//! count on the same pass, for exactly one caller: `statfs`. A filesystem has to
+//! say how large it is, and for a mounted vault the only true answer is the total
+//! under the mount root.
+//!
+//! Computing it *here* meant a listing could not be answered without visiting
+//! everything beneath it — so `readdir` of the mount root read the whole vault,
+//! and every `df` did it again. The totals are now maintained by the index as
+//! files arrive and leave and read through
+//! [`Source::totals`](crate::source::Source::totals), which costs one row.
+//! A directory's own `st_size` never read them and still does not: see
 //! [`MOUNT_DIRECTORY_APPARENT_SIZE`](crate::constants::MOUNT_DIRECTORY_APPARENT_SIZE)
 //! for why summing a POSIX size field across a tree is a different, wrong
 //! question.
 //!
 //! ## The cost, stated rather than hidden
 //!
-//! Listing a subdirectory costs the subtree under it, because
-//! [`Vault::list`](dctl_core::Vault::list) matches an index prefix. Listing the
-//! **mount root** therefore costs the whole vault: every record is materialised,
-//! grouped and dropped, and only the top level is kept. That is the core's
-//! buffering, documented in [`crate::source::vault`], and the mount inherits it
-//! rather than working around it — a `readdir` of the top of a ten-million-object
-//! vault is a ten-million-record read. `--dir-cache-time` is the dial that
-//! decides how often it is paid; [`super::state`] is where the caching lives.
+//! A listing costs the directory it names. That is new, and it is the reason
+//! this module was rewritten: [`Vault::list`](dctl_core::Vault::list) matches an
+//! index prefix, and because the index keys rows by a *keyed hash* of the path,
+//! matching a prefix means decrypting every row in the index — whatever the
+//! prefix is. Measured on a 100,000-file vault, a listing matching no files cost
+//! 755 ms, the same as one matching all of them, and a full `find` over the
+//! mount took **417 seconds** against 4 seconds at 10,000 files: quadratic,
+//! because a walk performs one `readdir` per directory.
+//!
+//! [`Source::children`](crate::source::Source::children) is the direct question,
+//! answered by the index's parent column, and a source that cannot answer it
+//! falls back to [`group`], which is the old grouping pass and still costs the
+//! subtree. `--dir-cache-time` decides how often either is paid;
+//! [`super::state`] is where the caching lives.
 
 use crate::commands::listing::Entry as ListEntry;
 use crate::commands::listing::dirs::{Aggregator, Directory};
@@ -80,21 +91,20 @@ pub struct Child {
 }
 
 /// The contents of one directory, as of the moment it was read.
+///
+/// Deliberately *only* the children. This used to carry the recursive byte and
+/// object totals of the subtree as well, computed on the same pass, and exactly
+/// one caller read them: `statfs`, at the mount root. That made every `df` a
+/// whole-vault walk — and, worse, it meant a directory listing could not be
+/// answered without visiting everything beneath it, which is the cost that made
+/// a tree walk quadratic. The totals now come from
+/// [`Source::totals`](crate::source::Source::totals), which the vault maintains
+/// as files arrive and leave.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Listing {
     /// Children in ascending name order, which is the order `readdir` reports
     /// and the order a `find` walks.
     pub children: Vec<Child>,
-    /// Total plaintext bytes under this directory at every depth, or [`None`]
-    /// when any object beneath it has never been measured.
-    ///
-    /// Absorbing rather than skipping, exactly as `dctl lsd`'s column is: a
-    /// subtree holding one unmeasured object has no known total, and reporting
-    /// the sum of the rest as though it were the whole is the same misreport a
-    /// zero would be — just harder to notice.
-    pub subtree_bytes: Option<u64>,
-    /// Objects under this directory at every depth.
-    pub subtree_objects: u64,
 }
 
 impl Listing {
@@ -121,16 +131,54 @@ impl Listing {
 /// error and never a short listing — a directory that silently lost half its
 /// entries is how a mount tells a backup tool that files were deleted.
 pub async fn list(source: &dyn Source, dir: &str) -> Result<Listing> {
+    // The direct answer, when the source has one. A vault does: its index keys
+    // every row by the directory holding it, so this is two indexed lookups
+    // rather than a pass over everything stored.
+    if let Some(children) = source.children(dir).await? {
+        return Ok(assemble(children));
+    }
+    group(source, dir).await
+}
+
+/// Turn a source's own answer into a listing.
+fn assemble(children: crate::source::Children) -> Listing {
+    let mut out: Vec<Child> = Vec::with_capacity(children.files.len() + children.dirs.len());
+    for entry in children.files {
+        out.push(Child {
+            name: path::file_name(&entry.path).to_string(),
+            size: entry.size,
+            modified_unix: entry.modified_unix,
+            path: entry.path,
+            kind: Kind::File,
+        });
+    }
+    for directory in children.dirs {
+        out.push(Child {
+            name: path::file_name(&directory).to_string(),
+            path: directory,
+            kind: Kind::Directory,
+            size: None,
+            modified_unix: None,
+        });
+    }
+    // Files and directories arrive as two sequences and have to come out as one,
+    // or two `ls` runs of the same vault disagree.
+    out.sort_by(|left, right| left.name.cmp(&right.name));
+    Listing { children: out }
+}
+
+/// Infer one directory by grouping every path beneath it.
+///
+/// The fallback for a source that cannot answer directly — a plain object store
+/// has no directories and no question cheaper than "every key under this
+/// prefix". It costs the subtree, which is why a source that can do better
+/// should, and [`Source::children`](crate::source::Source::children) is how.
+async fn group(source: &dyn Source, dir: &str) -> Result<Listing> {
     let mut cursor = source.enumerate(dir).await?;
 
     let mut children: Vec<Child> = Vec::new();
     let mut aggregator = Aggregator::new(dir, Some(IMMEDIATE_CHILDREN));
     let mut directories: Vec<Directory> = Vec::new();
-
-    // Totals start at a *known* zero: an empty directory genuinely holds zero
-    // bytes. They become unknown the moment an unmeasured object lands in them.
-    let mut bytes: Option<u64> = Some(0);
-    let mut objects: u64 = 0;
 
     while let Some(entry) = cursor.next().await? {
         let entry = ListEntry::from_source(entry, dir);
@@ -140,10 +188,6 @@ pub async fn list(source: &dyn Source, dir: &str) -> Result<Listing> {
         // directories a path implies, so the two cannot disagree about where the
         // boundary is.
         if entry.parent_components().is_empty() {
-            bytes = bytes
-                .zip(entry.size())
-                .map(|(total, size)| total.saturating_add(size));
-            objects = objects.saturating_add(1);
             children.push(Child {
                 name: entry.name().to_string(),
                 path: entry.path().to_string(),
@@ -164,11 +208,6 @@ pub async fn list(source: &dyn Source, dir: &str) -> Result<Listing> {
     })?;
 
     for directory in directories {
-        bytes = bytes
-            .zip(directory.bytes())
-            .map(|(total, size)| total.saturating_add(size));
-        objects = objects.saturating_add(directory.objects());
-
         let full = directory.to_entry().path().to_string();
         children.push(Child {
             name: path::file_name(&full).to_string(),
@@ -185,11 +224,7 @@ pub async fn list(source: &dyn Source, dir: &str) -> Result<Listing> {
     // test — and a user comparing two `ls` runs — is entitled to.
     children.sort_by(|left, right| left.name.cmp(&right.name));
 
-    Ok(Listing {
-        children,
-        subtree_bytes: bytes,
-        subtree_objects: objects,
-    })
+    Ok(Listing { children })
 }
 
 #[cfg(test)]
@@ -354,13 +389,14 @@ mod tests {
         let source = Fixture::new(&[("photos-backup/a.jpg", Some(2)), ("photos/a.jpg", Some(1))]);
         let listing = list(&source, "photos").await.unwrap();
         assert_eq!(names(&listing), vec![("a.jpg", Kind::File)]);
-        assert_eq!(listing.subtree_objects, 1);
     }
 
     #[tokio::test]
-    async fn the_totals_cover_the_whole_subtree() {
-        // What `statfs` reports for the mount: everything under the root, not
-        // just what is directly in it.
+    async fn a_listing_reports_one_level_of_a_deep_tree() {
+        // What `readdir` owes: the top level, whatever is stacked beneath it.
+        // The recursive byte and object totals this used to assert have moved to
+        // `Source::totals`, which the vault maintains rather than walking for —
+        // computing them here is what made a listing cost its whole subtree.
         let source = Fixture::new(&[
             ("docs/a.txt", Some(10)),
             ("photos/2024/a.jpg", Some(100)),
@@ -368,19 +404,14 @@ mod tests {
             ("top.txt", Some(1)),
         ]);
         let listing = list(&source, "").await.unwrap();
-        assert_eq!(listing.subtree_bytes, Some(311));
-        assert_eq!(listing.subtree_objects, 4);
-    }
-
-    #[tokio::test]
-    async fn one_unmeasured_object_makes_the_total_unknown_rather_than_smaller() {
-        // A partial total presented as a total is the same misreport a zero
-        // would be, and harder to spot.
-        let source = Fixture::new(&[("a.txt", Some(10)), ("b.txt", None)]);
-        let listing = list(&source, "").await.unwrap();
-        assert_eq!(listing.subtree_bytes, None);
-        // …and the object is still counted, so the row says something is there.
-        assert_eq!(listing.subtree_objects, 2);
+        assert_eq!(
+            names(&listing),
+            vec![
+                ("docs", Kind::Directory),
+                ("photos", Kind::Directory),
+                ("top.txt", Kind::File)
+            ]
+        );
     }
 
     #[tokio::test]
@@ -393,14 +424,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_unmeasured_object_inside_a_subtree_only_clouds_the_total() {
-        // The absorbing rule has to survive the aggregator's own totals, which
-        // is where the two halves of this function meet.
+    async fn an_unmeasured_object_still_appears_in_the_listing() {
+        // Whether anyone has measured a file has nothing to do with whether it
+        // is there, and a `readdir` that hid it would be the worse error.
         let source = Fixture::new(&[("photos/a.jpg", None), ("top.txt", Some(5))]);
         let listing = list(&source, "").await.unwrap();
-        assert_eq!(listing.subtree_bytes, None);
-        assert_eq!(listing.subtree_objects, 2);
-        assert_eq!(names(&listing).len(), 2);
+        assert_eq!(
+            names(&listing),
+            vec![("photos", Kind::Directory), ("top.txt", Kind::File)]
+        );
     }
 
     #[tokio::test]
@@ -426,13 +458,167 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_vault_lists_nothing_and_totals_a_known_zero() {
-        // Known zero, not unknown: there is nothing unmeasured in an empty tree.
+    async fn an_empty_vault_lists_nothing() {
         let source = Fixture::new(&[]);
         let listing = list(&source, "").await.unwrap();
         assert!(listing.children.is_empty());
-        assert_eq!(listing.subtree_bytes, Some(0));
-        assert_eq!(listing.subtree_objects, 0);
+    }
+
+    /// A source that answers `children` directly and counts every time anyone
+    /// falls back to walking it instead.
+    ///
+    /// The count is the whole point. A `readdir` served by grouping a subtree
+    /// scan looks identical from the outside to one served by an indexed lookup
+    /// — same names, same order, same everything — and differs only in costing
+    /// the vault rather than the directory. Nothing but the call itself can tell
+    /// them apart, so this asserts on the call.
+    struct Direct {
+        inner: Fixture,
+        walked: std::sync::atomic::AtomicUsize,
+    }
+
+    impl Direct {
+        fn new(paths: &[(&str, Option<u64>)]) -> Self {
+            Self {
+                inner: Fixture::new(paths),
+                walked: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn walks(&self) -> usize {
+            self.walked.load(std::sync::atomic::Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl Source for Direct {
+        async fn enumerate(&self, prefix: &str) -> Result<Box<dyn Entries>> {
+            self.walked
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.inner.enumerate(prefix).await
+        }
+
+        async fn children(&self, dir: &str) -> Result<Option<crate::source::Children>> {
+            // What the vault's index answers: the files whose parent is this
+            // directory, and the directories whose parent is this directory.
+            let mut files = Vec::new();
+            let mut dirs = std::collections::BTreeSet::new();
+            for entry in &self.inner.entries {
+                if !path::is_under(dir, &entry.path) {
+                    continue;
+                }
+                let rest = entry.path[if dir.is_empty() { 0 } else { dir.len() + 1 }..].to_string();
+                match rest.split_once('/') {
+                    None => files.push(entry.clone()),
+                    Some((head, _)) => {
+                        dirs.insert(if dir.is_empty() {
+                            head.to_string()
+                        } else {
+                            format!("{dir}/{head}")
+                        });
+                    }
+                }
+            }
+            Ok(Some(crate::source::Children {
+                files,
+                dirs: dirs.into_iter().collect(),
+            }))
+        }
+
+        async fn content_hash(&self, path: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.content_hash(path).await
+        }
+        async fn stream_to(
+            &self,
+            path: &str,
+            out: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+        ) -> Result<u64> {
+            self.inner.stream_to(path, out).await
+        }
+        fn sizes(&self) -> Sizes {
+            self.inner.sizes()
+        }
+        async fn read(&self, path: &str) -> Result<Zeroizing<Vec<u8>>> {
+            self.inner.read(path).await
+        }
+        async fn read_range(
+            &self,
+            path: &str,
+            offset: u64,
+            length: Option<u64>,
+        ) -> Result<Zeroizing<Vec<u8>>> {
+            self.inner.read_range(path, offset, length).await
+        }
+        async fn prefetch(&self, path: &str, offset: u64, length: u64) {
+            self.inner.prefetch(path, offset, length).await;
+        }
+        fn tune_cache(&self, bytes: usize, max_chunks: usize) {
+            self.inner.tune_cache(bytes, max_chunks);
+        }
+        async fn exists(&self, path: &str) -> Result<bool> {
+            self.inner.exists(path).await
+        }
+        async fn stat(&self, path: &str) -> Result<Option<Entry>> {
+            self.inner.stat(path).await
+        }
+        async fn verify(&self, path: &str) -> Result<()> {
+            self.inner.verify(path).await
+        }
+        fn assurance(&self) -> Assurance {
+            self.inner.assurance()
+        }
+        fn inventory(&self) -> Inventory {
+            self.inner.inventory()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_source_that_can_answer_directly_is_never_walked() {
+        // The guard on the whole optimisation. Grouping a subtree scan produces
+        // the same listing, so only the absence of the scan distinguishes a
+        // `readdir` that costs its directory from one that costs the vault —
+        // and it was the vault: 417 seconds to walk 100,000 files, against 4
+        // seconds for 10,000.
+        let source = Direct::new(&[
+            ("photos/2024/a.jpg", Some(1)),
+            ("photos/b.jpg", Some(2)),
+            ("top.txt", Some(3)),
+        ]);
+
+        let root = list(&source, "").await.unwrap();
+        assert_eq!(
+            names(&root),
+            vec![("photos", Kind::Directory), ("top.txt", Kind::File)]
+        );
+
+        let inner = list(&source, "photos").await.unwrap();
+        assert_eq!(
+            names(&inner),
+            vec![("2024", Kind::Directory), ("b.jpg", Kind::File)]
+        );
+
+        assert_eq!(
+            source.walks(),
+            0,
+            "a listing must not fall back to enumerating the subtree"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_that_cannot_answer_directly_is_still_served() {
+        // The default is `None`, and a plain object store means it: it has no
+        // directories and no question cheaper than every key under a prefix.
+        // That path has to keep working, or the fast path would be the only one.
+        let source = Fixture::new(&[("photos/a.jpg", Some(1)), ("top.txt", Some(2))]);
+        assert!(
+            source.children("").await.unwrap().is_none(),
+            "the fixture takes the trait's default"
+        );
+        let listing = list(&source, "").await.unwrap();
+        assert_eq!(
+            names(&listing),
+            vec![("photos", Kind::Directory), ("top.txt", Kind::File)]
+        );
     }
 
     #[tokio::test]

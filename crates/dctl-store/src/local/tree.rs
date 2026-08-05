@@ -48,7 +48,7 @@ use crate::staging::Want;
 
 /// One walk's findings: the keys it produced, and what it passed over.
 #[derive(Debug, Default)]
-pub(super) struct Walked {
+pub(crate) struct Walked {
     /// Forward-slash-relative keys of every file the walk kept.
     pub keys: Vec<String>,
     /// Every symbolic link met, counted, with a bounded sample named.

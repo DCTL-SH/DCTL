@@ -430,15 +430,18 @@ async fn run_stages<D: StageDriver>(
             Stage::Uploading => {
                 moved = driver.upload(entry).await?;
                 reporter.advance(moved);
-                // The budget is charged here, with the *measured* count: it is a
-                // ceiling on the run's total, so a file is the natural unit and
-                // the check that stops the run happens between files anyway.
+                // The budget is settled here, against the claim `afford` took
+                // before this file started: the planned size was reserved so
+                // that concurrent lanes could not each decide they fit, and this
+                // replaces it with the *measured* count.
                 //
-                // A retried attempt charges again, deliberately: it used the
-                // link and it is on the invoice, and a cost control that
-                // discounted failed attempts would under-report exactly the
+                // A retried attempt claims and settles again, deliberately: it
+                // used the link and it is on the invoice, and a cost control
+                // that discounted failed attempts would under-report exactly the
                 // runs that cost the most.
-                ctx.limits.budget.spend(moved);
+                ctx.limits
+                    .budget
+                    .settle(entry.size.unwrap_or_default(), moved);
                 // Bandwidth is *not* charged here, and that is the fix rather
                 // than an omission. It is charged inside the storage layer's
                 // copy loops, window by window, through `dctl_store::Meter` —
