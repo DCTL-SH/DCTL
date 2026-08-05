@@ -391,6 +391,11 @@ pub struct R2Def {
 pub struct SftpDef {
     /// SSH destination, as `ssh` resolves it: a `~/.ssh/config` `Host` alias
     /// (e.g. `lsx-001`) or `user@host[:port]`.
+    ///
+    /// An IPv6 literal that also names a port must bracket the address —
+    /// `[fe80::1]:2222` — because an unbracketed literal ends in a colon and a
+    /// number of its own. Written without a port it is passed to `ssh`
+    /// untouched, brackets or not.
     pub host: String,
 
     /// Remote base directory the objects live under. `~/…` is home-relative and

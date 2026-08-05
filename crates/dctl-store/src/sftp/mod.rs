@@ -160,6 +160,11 @@ const PAGE_SIZE: usize = 1000;
 pub struct SftpConfig {
     /// SSH destination as `ssh` resolves it: a `~/.ssh/config` `Host` alias or
     /// `user@host[:port]`. All other connection parameters come from ssh config.
+    ///
+    /// A `:port` suffix is split off and given to `ssh` as `-o Port=`, because
+    /// OpenSSH reads a bare `host:port` as a hostname and fails at DNS. An
+    /// IPv6 literal with a port therefore needs brackets — `[fe80::1]:2222` —
+    /// while a bare literal passes through whole.
     pub host: String,
     /// Remote base directory for objects. `~/…` is home-relative; `/…` is absolute.
     pub base: String,
