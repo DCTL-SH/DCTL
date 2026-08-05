@@ -80,14 +80,18 @@ pub struct Ctx {
     /// the same reason the counters do: a million-file run must pay the open
     /// once, and a command that had to remember to construct one is a command
     /// that can forget.
-    pub audit: Sink,
+    /// `Arc` so the mount can share it: the session record is appended by the
+    /// command and the first-read records by the filesystem, which outlives
+    /// the call that started it. Every other call site reaches it by method
+    /// syntax and is unaffected.
+    pub audit: Arc<Sink>,
 }
 
 impl Ctx {
     /// Build a context from parsed globals.
     #[must_use]
     pub fn new(globals: GlobalArgs) -> Self {
-        let audit = Sink::new(&globals);
+        let audit = Arc::new(Sink::new(&globals));
         let limits = Limits::resolve(&globals);
         let deadlines = Deadlines::from_seconds(globals.contimeout, globals.timeout).within(
             dctl_store::RunDeadline::starting_now(globals.max_duration.unwrap_or_default().get()),
@@ -255,21 +259,24 @@ impl Ctx {
         self.finish_with(show_summary, Ran::Completed);
     }
 
-    /// Emit the end-of-run summary, unless the run failed having done nothing.
+    /// Emit the end-of-run summary, unless the run failed having landed
+    /// nothing.
     ///
     /// The exception is narrow on purpose. A `copy` that moved nine hundred of a
     /// thousand files and then failed needs its summary — that is the only
-    /// record of what did land. A run that refused before it started has no such
-    /// record, and printing one anyway put `Errors: 0` in a table directly above
+    /// record of what did land. A run that refused has no such record — even
+    /// when the planner had already listed the source and counted its skips
+    /// before the refusal fired, as every remote-to-remote transfer does —
+    /// and printing one anyway put `Errors: 0` in a table directly above
     /// `error: …`, which is not noise but a contradiction. See
-    /// [`Snapshot::attempted_nothing`](crate::output::stats::Snapshot::attempted_nothing).
+    /// [`Snapshot::nothing_landed`](crate::output::stats::Snapshot::nothing_landed).
     pub fn finish_with(&self, show_summary: bool, ran: Ran) {
         self.progress.finish();
         if !show_summary {
             return;
         }
         let snapshot = self.stats.snapshot();
-        if ran == Ran::Failed && snapshot.attempted_nothing() {
+        if ran == Ran::Failed && snapshot.nothing_landed() {
             return;
         }
         self.out.summary(&snapshot);

@@ -84,10 +84,11 @@ impl VaultFs {
         config: MountConfig,
         mountpoint: &Path,
         runtime: tokio::runtime::Handle,
+        audit: Arc<super::audit::MountAudit>,
     ) -> Self {
         let identity = Identity::capture(mountpoint, config.no_modtime);
         Self {
-            state: Arc::new(MountState::new(source, config, identity)),
+            state: Arc::new(MountState::new(source, config, identity, audit)),
             runtime,
         }
     }

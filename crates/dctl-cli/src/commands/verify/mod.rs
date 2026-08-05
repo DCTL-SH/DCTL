@@ -176,9 +176,10 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     let requested = ctx.verify_mode_for(&target.spec())?;
     if !mode::proves_whole_plaintext(requested) {
         ctx.out.warn(format!(
-            "--verify={} asks for a cheaper check than `{command}` can perform in this \
-             build: dctl-core exposes no stored-object checksum, and no sampling \
-             strategy is defined, so every selected object is read back in full",
+            "--verify={} asks for a cheaper check than `{command}` performs: this \
+             command certifies whole objects, so every selected object is read \
+             back in full (the sampled read is a transfer read-back check, not \
+             a certification)",
             mode::slug(requested)
         ));
     }
@@ -227,6 +228,10 @@ pub async fn run(ctx: &Ctx, args: &VerifyArgs) -> Result<()> {
     // why there is no dry-run branch here at all: the command simply runs.
     let mut report = Report::new(target.to_string(), mode::slug(performed), claims);
     report.filters_restricted(filter.is_restricting());
+    // A non-tree target names one object, and an empty walk under that exact
+    // name proves it absent — which must exit as a missing object, not as an
+    // empty run. See `Report::outcome`.
+    report.named_object(!target.is_tree());
     engine::verify(ctx, &opened, &filter, args.fail_fast, &mut report).await?;
 
     report.emit(&ctx.out)?;
@@ -497,10 +502,11 @@ mod tests {
 
         // The control, and the reason the assertion above means anything: with
         // the weaker check asked for, the same target reaches the walk and
-        // reports what the walk found.
+        // reports what the walk found. Tree spelling, so the empty walk stays
+        // "nothing verified" rather than "named object missing".
         let (ctx, args) = parse(&[
             "verify",
-            "store:nowhere",
+            "store:nowhere/",
             "--config",
             &config,
             "--allow-read-back",
@@ -588,7 +594,7 @@ mod tests {
         let (_dir, config) = plain_remote(&[("kept.txt", b"payload")]);
         let (ctx, args) = parse(&[
             "verify",
-            "store:nowhere",
+            "store:nowhere/",
             "--config",
             &config,
             "--allow-read-back",
@@ -604,6 +610,38 @@ mod tests {
             error.message().contains("nothing was verified"),
             "the message must say no verification happened: {}",
             error.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_named_object_that_is_absent_is_missing_rather_than_nothing_verified() {
+        // `verify store:gone.bin` names ONE object, and an empty walk under
+        // that exact name proves it absent. Exit 9's "the run did no work"
+        // told a cron job nothing about a run that discovered a loss; the
+        // published missing-object code is 4, and this is a missing object.
+        let (_dir, config) = plain_remote(&[("kept.txt", b"payload")]);
+        let (ctx, args) = parse(&[
+            "verify",
+            "store:gone.bin",
+            "--config",
+            &config,
+            "--allow-read-back",
+            "--allow-listing-as-inventory",
+        ]);
+
+        let error = run(&ctx, &args)
+            .await
+            .expect_err("a named absence is not a pass");
+        assert_eq!(error.code(), ExitCode::FileNotFound);
+        assert_eq!(error.code().as_i32(), 4);
+        assert!(
+            error.message().contains("gone.bin"),
+            "the missing object must be named: {}",
+            error.message()
+        );
+        assert!(
+            error.hint().is_some(),
+            "the trailing-slash misreading deserves its hint"
         );
     }
 

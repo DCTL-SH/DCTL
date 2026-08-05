@@ -1499,3 +1499,78 @@ async fn a_denial_arrives_as_a_permission_error_the_retry_layer_can_read() {
         "the operator has to be able to read what happened: {error}"
     );
 }
+
+#[tokio::test]
+async fn chunk_fetches_of_one_object_reuse_the_handle_they_opened() {
+    // The mount's hot path: chunk after chunk of the same object. Each fetch
+    // used to OPEN, FSTAT, read and CLOSE — two extra protocol round trips per
+    // chunk, which on a real link is the dominant per-request cost
+    // (`HANDOVER.md` §40.5). The handle is kept now, so N reads cost one open.
+    let (mock, sftp) = backend("/srv", &["srv"]).await;
+    let key = ObjectKey::new("o/film");
+    let data: Vec<u8> = (0..4096).map(|i| (i % 251) as u8).collect();
+    sftp.put(
+        &key,
+        bytes::Bytes::from(data.clone()),
+        &blake3(&data),
+        SourceModified::at(AGED),
+    )
+    .await
+    .expect("the write succeeds");
+
+    let opens_before = mock
+        .seen()
+        .iter()
+        .filter(
+            |seen| matches!(seen, support::mock_sftp::Seen::Open(path) if path.contains("film")),
+        )
+        .count();
+
+    for offset in [0u64, 512, 1024, 1536, 2048] {
+        let window = sftp
+            .get_range(&key, dctl_store::ByteRange::new(offset, Some(64)))
+            .await
+            .expect("a window reads back");
+        let at = offset as usize;
+        assert_eq!(
+            window.as_ref(),
+            &data[at..at + 64],
+            "reuse must not disturb what a window reads"
+        );
+    }
+
+    let opens_after = mock
+        .seen()
+        .iter()
+        .filter(
+            |seen| matches!(seen, support::mock_sftp::Seen::Open(path) if path.contains("film")),
+        )
+        .count();
+    assert_eq!(
+        opens_after - opens_before,
+        1,
+        "five ranged reads of one object must open it once, not five times"
+    );
+
+    // A write to the same key gives it a new inode, so the kept handle names a
+    // superseded file and must not survive.
+    let replacement: Vec<u8> = (0..4096).map(|i| ((i + 7) % 251) as u8).collect();
+    sftp.put(
+        &key,
+        bytes::Bytes::from(replacement.clone()),
+        &blake3(&replacement),
+        SourceModified::at(AGED),
+    )
+    .await
+    .expect("the rewrite succeeds");
+
+    let window = sftp
+        .get_range(&key, dctl_store::ByteRange::new(0, Some(64)))
+        .await
+        .expect("a window reads back");
+    assert_eq!(
+        window.as_ref(),
+        &replacement[..64],
+        "a rewritten object must be read from its new inode, not a cached handle"
+    );
+}

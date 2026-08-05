@@ -77,6 +77,13 @@ pub struct Link {
     /// (`backend/sftp/sftp.go:698`) is a property of the connection, and the
     /// pool merely consults it.
     dead: AtomicBool,
+    /// Remote files this session has open, kept between ranged reads.
+    ///
+    /// On the connection rather than on the backend so that invalidation is
+    /// structural: a session that dies takes its handles with it, and the
+    /// fresh `Link` the next operation dials starts empty. See
+    /// [`super::handles`].
+    pub(crate) handles: super::handles::HandleCache,
 }
 
 impl Link {
@@ -87,6 +94,7 @@ impl Link {
             session,
             sftp,
             dead: AtomicBool::new(false),
+            handles: super::handles::HandleCache::default(),
         }
     }
 
@@ -174,8 +182,22 @@ pub trait SftpDial: Send + Sync {
 /// which is the whole reason this backend drives the real binary rather than
 /// linking a pure-Rust SSH client.
 pub struct SshDialer {
-    /// SSH destination: a `~/.ssh/config` alias or `user@host[:port]`.
+    /// SSH destination, with any `:port` suffix removed: a `~/.ssh/config`
+    /// alias, `user@host`, or a bare IPv6 literal.
+    ///
+    /// The port is split off rather than passed through because OpenSSH
+    /// accepts `host:port` only in its `ssh://` URI form — as a bare
+    /// destination, `lsx-002:2222` is a *hostname* containing a colon, and it
+    /// dies at DNS resolution. The configuration surface has documented
+    /// `user@host[:port]` all along, so the parse belongs here rather than in
+    /// the settings that promise it.
     host: String,
+    /// The port that suffix named, given to `ssh` as `-o Port=`.
+    ///
+    /// [`None`] leaves the choice to `ssh`, which is what makes a `Port`
+    /// directive in `~/.ssh/config` still apply — the reason this backend
+    /// drives the real binary at all.
+    port: Option<u16>,
     /// `--contimeout`, as `ssh -o ConnectTimeout`.
     ///
     /// Given to `ssh` rather than imposed from outside, and the difference
@@ -189,13 +211,66 @@ pub struct SshDialer {
 
 impl SshDialer {
     /// A dialer for `host`, giving up on a connection after `connect`.
+    ///
+    /// `host` may carry a `:port` suffix — see [`split_port`] for how the one
+    /// spelling that genuinely collides with it, a bare IPv6 literal, is kept
+    /// whole.
     #[must_use]
     pub fn new(host: impl Into<String>, connect: Option<Duration>) -> Self {
+        let (host, port) = split_port(&host.into());
         Self {
-            host: host.into(),
+            host,
+            port,
             connect,
         }
     }
+}
+
+/// Split an ssh destination into what `ssh` should be given and the port it
+/// named, if any.
+///
+/// Three rules, and the second is the whole difficulty:
+///
+/// 1. The suffix after the last `:` must parse as a port, or there is none.
+/// 2. A bare IPv6 literal is *full of* colons — `user@fe80::1` ends in `:1`,
+///    which parses perfectly as port 1 and would leave `ssh` dialling
+///    `user@fe80:`. So an unbracketed host part containing another colon is
+///    taken whole, exactly as `ssh` itself takes it.
+/// 3. `[addr]:port` is therefore how an IPv6 literal names a port, and the
+///    brackets are stripped: OpenSSH accepts them only inside an `ssh://`
+///    URI, and `-o Port=` carries the number separately anyway.
+///
+/// Deliberately not delegated to the `openssh` crate's `ssh://` parser, whose
+/// `rfind`-based split has exactly the rule-2 defect on unbracketed literals.
+fn split_port(host: &str) -> (String, Option<u16>) {
+    let whole = || (host.to_string(), None);
+
+    let Some(colon) = host.rfind(':') else {
+        return whole();
+    };
+    let Ok(port) = host[colon + 1..].parse::<u16>() else {
+        return whole();
+    };
+    if port == 0 {
+        return whole();
+    }
+
+    let host_part = &host[..colon];
+    let user_len = host_part.rfind('@').map_or(0, |at| at + 1);
+    let host_only = &host_part[user_len..];
+
+    if host_only.starts_with('[') && host_only.ends_with(']') && host_only.len() > 2 {
+        // `[::1]:2222` — the bracketed form exists precisely to disambiguate,
+        // so the brackets have done their job and come off.
+        let inner = &host_only[1..host_only.len() - 1];
+        return (format!("{}{inner}", &host_part[..user_len]), Some(port));
+    }
+    if host_only.contains(':') {
+        // Rule 2: an unbracketed IPv6 literal. Taken whole, or its last group
+        // is eaten as a port number.
+        return whole();
+    }
+    (host_part.to_string(), Some(port))
 }
 
 #[async_trait]
@@ -209,6 +284,11 @@ impl SftpDial for SshDialer {
         builder.known_hosts_check(KnownHosts::Accept);
         if let Some(connect) = self.connect {
             builder.connect_timeout(connect);
+        }
+        // Only when the destination named one: leaving it unset is what keeps
+        // a `Port` directive in the operator's own ssh config in force.
+        if let Some(port) = self.port {
+            builder.port(port);
         }
         let session = builder
             .connect_mux(&self.host)
@@ -288,5 +368,80 @@ impl SftpDial for StreamDialer {
 
     fn destination(&self) -> &str {
         &self.destination
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SshDialer, split_port};
+
+    #[test]
+    fn a_port_suffix_is_split_off_rather_than_dialled_as_a_hostname() {
+        // The documented `user@host[:port]` form: OpenSSH takes a bare
+        // destination as a hostname, so `lsx-002:2222` used to reach DNS as a
+        // host called "lsx-002:2222" and fail there.
+        assert_eq!(
+            split_port("root@lsx-002:2222"),
+            ("root@lsx-002".to_string(), Some(2222))
+        );
+        assert_eq!(split_port("lsx-002:22"), ("lsx-002".to_string(), Some(22)));
+    }
+
+    #[test]
+    fn a_destination_without_a_port_is_passed_through_untouched() {
+        // An alias resolves through the operator's own ssh config, which is
+        // the entire reason this backend drives the real binary.
+        for host in ["lsx-002", "root@lsx-002", "build.example.com"] {
+            assert_eq!(split_port(host), (host.to_string(), None));
+        }
+        // Not a port: left alone rather than half-parsed.
+        assert_eq!(
+            split_port("host:notaport"),
+            ("host:notaport".to_string(), None)
+        );
+        assert_eq!(split_port("host:0"), ("host:0".to_string(), None));
+        assert_eq!(
+            split_port("host:99999"),
+            ("host:99999".to_string(), None),
+            "a number outside the port range is not a port"
+        );
+    }
+
+    #[test]
+    fn a_bare_ipv6_literal_keeps_its_last_group() {
+        // The collision this parse exists to survive: `fe80::1` ends in `:1`,
+        // which parses as port 1 — and dialling `user@fe80:` reaches nothing.
+        // A bare literal is taken whole, exactly as `ssh` takes it.
+        for host in ["fe80::1", "user@fe80::1", "::1", "2001:db8::dead:beef"] {
+            assert_eq!(
+                split_port(host),
+                (host.to_string(), None),
+                "{host} must survive intact"
+            );
+        }
+    }
+
+    #[test]
+    fn brackets_are_how_an_ipv6_literal_names_a_port_and_they_come_off() {
+        // The bracketed form is the disambiguation, so once it has done its
+        // job the brackets go: OpenSSH accepts them only inside an ssh:// URI,
+        // and the port travels separately as `-o Port=`.
+        assert_eq!(split_port("[::1]:2222"), ("::1".to_string(), Some(2222)));
+        assert_eq!(
+            split_port("root@[fe80::1]:2222"),
+            ("root@fe80::1".to_string(), Some(2222))
+        );
+        // Bracketed with no port: still unwrapped by ssh itself, so left as
+        // typed rather than half-processed here.
+        assert_eq!(split_port("[::1]"), ("[::1]".to_string(), None));
+    }
+
+    #[test]
+    fn the_dialer_reports_the_destination_it_will_actually_dial() {
+        // What an operator reads in a connection failure has to be what was
+        // attempted, not what they typed.
+        let dialer = SshDialer::new("root@lsx-002:2222", None);
+        assert_eq!(dialer.host, "root@lsx-002");
+        assert_eq!(dialer.port, Some(2222));
     }
 }

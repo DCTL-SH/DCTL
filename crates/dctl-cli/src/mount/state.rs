@@ -84,18 +84,27 @@ pub struct MountState {
     source: Arc<dyn Source>,
     config: MountConfig,
     identity: Identity,
+    /// Where a read of an object first says so. See [`super::audit`] for the
+    /// two records a mount writes and why there are only two.
+    audit: Arc<super::audit::MountAudit>,
     interior: Mutex<Interior>,
 }
 
 impl MountState {
     /// Build the state for a mount of `config.root` through `source`.
     #[must_use]
-    pub fn new(source: Arc<dyn Source>, config: MountConfig, identity: Identity) -> Self {
+    pub fn new(
+        source: Arc<dyn Source>,
+        config: MountConfig,
+        identity: Identity,
+        audit: Arc<super::audit::MountAudit>,
+    ) -> Self {
         let root = config.root.clone();
         Self {
             source,
             config,
             identity,
+            audit,
             interior: Mutex::new(Interior {
                 inodes: InodeTable::new(root),
                 handles: HandleTable::new(),
@@ -234,6 +243,15 @@ impl MountState {
         let bytes = self
             .source
             .read_range(&path, offset, Some(u64::from(size)))
+            .await?;
+
+        // Before the window is handed back, not after: a mount that cannot
+        // account for the plaintext it is about to serve serves none. The
+        // record is one per object per session — see `super::audit` for why
+        // per-read records were rejected and what the byte totals therefore
+        // do and do not claim.
+        self.audit
+            .record_first_read(&path, bytes.len() as u64)
             .await?;
 
         self.schedule_read_ahead(handle, &path, offset, u64::from(size));
@@ -714,6 +732,10 @@ mod tests {
             // The fixture holds no cache; what the tests observe is the calls.
         }
 
+        async fn exists(&self, path: &str) -> Result<bool> {
+            Ok(self.entries.iter().any(|entry| entry.path == path))
+        }
+
         async fn stat(&self, path: &str) -> Result<Option<Entry>> {
             Ok(self
                 .entries
@@ -757,12 +779,140 @@ mod tests {
         }
     }
 
+    /// A recorder over a scratch chain, for the tests that do not inspect it.
+    ///
+    /// `Sink::new` is TempDir-backed under `cfg(test)`, so every state built
+    /// here records into a chain of its own and none of them touch a real log.
+    fn recorder() -> Arc<super::super::audit::MountAudit> {
+        use clap::Parser as _;
+
+        #[derive(clap::Parser, Debug)]
+        struct Harness {
+            #[command(flatten)]
+            globals: crate::cli::globals::GlobalArgs,
+        }
+
+        Arc::new(super::super::audit::MountAudit::new(
+            Arc::new(crate::audit::sink::Sink::new(
+                &Harness::parse_from(["dctl"]).globals,
+            )),
+            "archive",
+            "",
+        ))
+    }
+
     fn state(source: Arc<Fixture>, root: &str, read_ahead: u64) -> MountState {
         MountState::new(
             source,
             config(root, read_ahead),
             Identity::capture(Path::new("."), false),
+            recorder(),
         )
+    }
+
+    /// A state plus the sink its records land in, for the tests that read the
+    /// chain back.
+    fn state_with_chain(source: Arc<Fixture>) -> (MountState, Arc<crate::audit::sink::Sink>) {
+        use clap::Parser as _;
+
+        #[derive(clap::Parser, Debug)]
+        struct Harness {
+            #[command(flatten)]
+            globals: crate::cli::globals::GlobalArgs,
+        }
+
+        let sink = Arc::new(crate::audit::sink::Sink::new(
+            &Harness::parse_from(["dctl"]).globals,
+        ));
+        let audit = Arc::new(super::super::audit::MountAudit::new(
+            Arc::clone(&sink),
+            "archive",
+            "",
+        ));
+        let state = MountState::new(
+            source,
+            config("", 0),
+            Identity::capture(Path::new("."), false),
+            audit,
+        );
+        (state, sink)
+    }
+
+    #[tokio::test]
+    async fn the_first_read_through_the_mount_lands_in_the_audit_chain_and_says_out() {
+        // The wiring, at the level the defect lived: a mounted vault served
+        // decrypted plaintext to anything that could read a filesystem and
+        // appended nothing at all — `audit/coverage.rs` called it the largest
+        // remaining hole in the audit story. This is the call that closes it,
+        // and deleting it is what makes this test red.
+        let source = Fixture::new(&[("film.mkv", Some(4096)), ("note.txt", Some(10))]);
+        let (state, sink) = state_with_chain(Arc::clone(&source));
+
+        let film = state
+            .lookup(INodeNo::ROOT, "film.mkv")
+            .await
+            .unwrap()
+            .expect("the film is there");
+        let (film_handle, _) = state.open(film.ino).unwrap();
+        state.read(film_handle, 0, 100).await.unwrap();
+        // A second window of the SAME object: no second record.
+        state.read(film_handle, 100, 100).await.unwrap();
+
+        let note = state
+            .lookup(INodeNo::ROOT, "note.txt")
+            .await
+            .unwrap()
+            .expect("the note is there");
+        let (note_handle, _) = state.open(note.ino).unwrap();
+        state.read(note_handle, 0, 10).await.unwrap();
+
+        let text = std::fs::read_to_string(sink.path()).expect("the chain reads");
+        let records: Vec<serde_json::Value> = text
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .map(|line| serde_json::from_str(line).expect("a record"))
+            .collect();
+
+        assert_eq!(
+            records.len(),
+            2,
+            "one record per object read, not one per window and not none:\n{text}"
+        );
+        for record in &records {
+            assert_eq!(record["op"], "mount");
+            assert_eq!(
+                record["direction"], "out",
+                "plaintext leaving the vault is an egress"
+            );
+            assert_eq!(record["objects"], 1);
+        }
+        assert_eq!(records[0]["path"], "film.mkv");
+        assert_eq!(records[0]["bytes"], 100);
+        assert_eq!(records[1]["path"], "note.txt");
+        assert_eq!(records[1]["bytes"], 10);
+    }
+
+    #[tokio::test]
+    async fn a_read_that_cannot_be_recorded_serves_no_bytes() {
+        // The sink's own policy — if the log cannot be written, the command
+        // fails — reaching the one verb that had been exempt from it. A mount
+        // that cannot account for the plaintext it is about to serve serves
+        // none of it, and the kernel sees EIO rather than unaccounted bytes.
+        let source = Fixture::new(&[("secret.bin", Some(64))]);
+        let (state, sink) = state_with_chain(Arc::clone(&source));
+        std::fs::write(sink.path(), "{ not a record\n").expect("the corruption lands");
+
+        let entry = state
+            .lookup(INodeNo::ROOT, "secret.bin")
+            .await
+            .unwrap()
+            .expect("the object is there");
+        let (handle, _) = state.open(entry.ino).unwrap();
+
+        state
+            .read(handle, 0, 64)
+            .await
+            .expect_err("an unwritable chain fails the read");
     }
 
     fn mounted(paths: &[(&str, Option<u64>)]) -> (Arc<Fixture>, MountState) {
@@ -1028,6 +1178,7 @@ mod tests {
             Arc::clone(&source) as Arc<dyn Source>,
             config,
             Identity::capture(Path::new("."), false),
+            recorder(),
         );
 
         state.lookup(INodeNo::ROOT, "a.txt").await.unwrap();
@@ -1198,6 +1349,7 @@ mod tests {
                 source,
                 config("", 0),
                 Identity::capture(Path::new("."), false),
+                recorder(),
             );
             (root, state)
         }

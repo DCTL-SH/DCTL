@@ -1283,7 +1283,9 @@ fn sync_into_a_plain_remote_is_incremental_and_check_agrees_with_it() {
         .arg(format!("{PLAIN_REMOTE}:"))
         .assert()
         .success()
-        .stderr(predicates::str::contains("all match"));
+        // A metadata run no longer says "all match" — that is a content claim
+        // it has not earned. The clean verdict it does make is pinned instead.
+        .stderr(predicates::str::contains("metadata matches"));
 
     // One file, moved well outside the modify window.
     sandbox.age("src/b.txt", A_DAY * 30);
@@ -2865,16 +2867,24 @@ fn a_mistyped_phrase_says_so_instead_of_blaming_the_vault() {
     // remedies. Reporting the first as `unlock failed` sends someone holding a
     // correct sheet of paper looking for a damaged envelope.
     let sandbox = Sandbox::new();
-    let phrase = vault_with_a_file_and_its_phrase(&sandbox, b"x");
+    let _phrase = vault_with_a_file_and_its_phrase(&sandbox, b"x");
 
-    let mut words: Vec<&str> = phrase.split_whitespace().collect();
-    words[0] = "zoo";
-    let mangled = words.join(" ");
+    // Every word is a real BIP-39 word, so only the checksum can reject it.
+    // Derived from the canonical all-`abandon` vector (valid final word `art`)
+    // with word 0 mistyped to `ability` — the same fixture dctl-crypto's own
+    // mnemonic tests use, for the same reason: a *generated* phrase mangled at
+    // random still passes the 8-bit checksum ~1/256 times, which made this
+    // test flaky.
+    const MISTYPED: &str = "ability abandon abandon abandon abandon abandon abandon abandon \
+                            abandon abandon abandon abandon abandon abandon abandon abandon \
+                            abandon abandon abandon abandon abandon abandon abandon art";
+    dctl_core::validate_recovery_phrase(MISTYPED)
+        .expect_err("fixture must fail the BIP-39 checksum, or this test proves nothing");
 
     sandbox
         .dctl()
         .arg("--no-ask-password")
-        .args(["--recovery-phrase", &mangled])
+        .args(["--recovery-phrase", MISTYPED])
         .arg("cat")
         .arg(format!("{VAULT_NAME}:secret.txt"))
         .assert()
@@ -3284,6 +3294,54 @@ fn a_run_that_failed_partway_still_prints_what_it_moved() {
         stderr.contains("Files:"),
         "the file counters are the record of what landed:\n{stderr}"
     );
+}
+
+#[test]
+fn a_remote_to_remote_refusal_prints_no_counter_lines() {
+    // The harder case of the rule above: `moveto` between two remotes LISTS
+    // its source and accounts its skips before `Engine::connect` refuses, so
+    // planning-side counters have moved even though nothing landed. The old
+    // every-counter predicate took that accounting as work and printed
+    // `Checks: 1 / 1` and `Errors: 0` in a table above a refusal saying
+    // nothing was done. Planning is an intention, not a record.
+    let sandbox = Sandbox::new();
+    sandbox.write("one/render.mov", b"frames");
+    sandbox.dir("two");
+    for (name, dir) in [("pl", "one"), ("p2", "two")] {
+        sandbox
+            .dctl()
+            .args(["config", "create", name, "local"])
+            .arg(format!("path={}", sandbox.path(dir).display()))
+            .assert()
+            .success();
+    }
+
+    let refused = sandbox
+        .dctl()
+        .arg("--force")
+        .args(["moveto", "pl:render.mov", "p2:final.mov"])
+        // 7 = fatal_error (docs/EXIT_CODES.md).
+        .assert()
+        .code(7);
+    let output = refused.get_output();
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert!(
+        stderr.contains("not implemented in this build"),
+        "the refusal itself must still be reported:\n{stderr}"
+    );
+    assert!(
+        sandbox.path("one/render.mov").exists(),
+        "a refused moveto must leave the source in place"
+    );
+    for row in ["Transferred:", "Files:", "Checks:", "Errors:", "Elapsed:"] {
+        assert!(
+            !stderr.contains(row) && !stdout.contains(row),
+            "a refusal is the whole report; '{row}' must not appear above \
+             it:\nstderr:\n{stderr}\nstdout:\n{stdout}"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -3791,12 +3849,13 @@ fn every_inert_flag_is_now_refused_by_name_before_anything_runs() {
     //
     // It was seven. `--timeout` and `--contimeout` left this list because they
     // are honoured now, and the test directly below is the other half of that
-    // move: a flag may only leave here by arriving there.
+    // move: a flag may only leave here by arriving there. `--verify-samples`
+    // left the same way when the sampled read-back became real — its arrival
+    // half is `a_sampled_read_back_is_accepted_and_the_file_arrives`.
     let cases: &[(&[&str], &str)] = &[
         (&["--transfers", "8"], "--transfers"),
         (&["--checkers", "16"], "--checkers"),
         (&["--low-level-retries", "5"], "--low-level-retries"),
-        (&["--verify-samples", "4"], "--verify-samples"),
         (&["--dump", "headers"], "--dump"),
     ];
 
@@ -3856,6 +3915,125 @@ fn the_two_deadlines_are_accepted_and_a_healthy_transfer_is_untouched() {
         assert!(
             sandbox.exists("dst/a.txt"),
             "{flag:?} must transfer the file, not merely be accepted"
+        );
+    }
+}
+
+#[test]
+fn a_sampled_read_back_is_accepted_and_the_file_arrives() {
+    // `--verify-samples` left the refused list when the sampled read-back
+    // became real. Accepted has to mean two things at once — the run is
+    // accepted, and the data arrives having survived the sampled
+    // authentication. Driven against a real vault so the sampled arm is the
+    // code that actually runs, not merely parses.
+    let sandbox = Sandbox::new();
+    let _phrase = vault_with_a_file_and_its_phrase(&sandbox, b"seed");
+    sandbox.write("src/a.txt", b"data worth spot checking");
+
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--verify", "sample", "--verify-samples", "4"])
+        .args(["copy", "src", &format!("{VAULT_NAME}:sampled/")])
+        .assert()
+        .success();
+
+    let out = sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("cat")
+        .arg(format!("{VAULT_NAME}:sampled/a.txt"))
+        .assert()
+        .success();
+    assert_eq!(
+        out.get_output().stdout,
+        b"data worth spot checking",
+        "the sampled write must land the same bytes"
+    );
+
+    // Zero is not a legal depth: head and tail are mandatory, and a depth of
+    // nothing is a contradiction the parser refuses rather than reinterprets.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .args(["--verify", "sample", "--verify-samples", "0"])
+        .args(["copy", "src", &format!("{VAULT_NAME}:again/")])
+        .assert()
+        .failure();
+}
+
+#[test]
+fn a_nightly_copy_repairs_a_destination_that_lost_an_object() {
+    // BENCHMARKS §7.2 defect 1, High: delete one stored object behind the
+    // tool's back and the nightly copy reported `Checks: 150/150, Skipped:
+    // 150, Errors: 0` — the index rows still described the lost bytes as
+    // live, nothing consulted the store, and the loss surfaced at restore.
+    // The destination reconciliation makes the same run repair instead.
+    let sandbox = Sandbox::new();
+    sandbox.write("src/a.txt", b"alpha");
+    sandbox.write("src/b.txt", b"bravo");
+    sandbox.write("src/c.txt", b"charlie");
+    sandbox.dir("vault");
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("init")
+        .args(["--name", VAULT_NAME, "--base"])
+        .arg(sandbox.path("vault"))
+        .assert()
+        .success();
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+
+    // The damage, exactly as the benchmark inflicted it.
+    let objects: Vec<_> = std::fs::read_dir(sandbox.path("vault/o"))
+        .expect("the object namespace exists")
+        .map(|entry| entry.expect("a store entry").path())
+        .collect();
+    assert_eq!(objects.len(), 3, "three sealed objects before the damage");
+    std::fs::remove_file(&objects[0]).expect("the damage lands");
+
+    // The nightly. Success is required — but so is the repair.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(sandbox.path("src"))
+        .arg(format!("{VAULT_NAME}:"))
+        .assert()
+        .success();
+    let after = std::fs::read_dir(sandbox.path("vault/o"))
+        .expect("the object namespace exists")
+        .count();
+    assert_eq!(
+        after, 3,
+        "the nightly must re-upload the lost object, not skip it as identical"
+    );
+
+    // The proof that matters: every byte restores.
+    sandbox
+        .dctl()
+        .env("DCTL_PASSWORD", GOOD_PASSWORD)
+        .arg("copy")
+        .arg(format!("{VAULT_NAME}:"))
+        .arg(sandbox.path("out"))
+        .assert()
+        .success();
+    for (name, bytes) in [
+        ("a.txt", &b"alpha"[..]),
+        ("b.txt", &b"bravo"[..]),
+        ("c.txt", &b"charlie"[..]),
+    ] {
+        assert_eq!(
+            std::fs::read(sandbox.path(&format!("out/{name}"))).expect("the file restores"),
+            bytes,
+            "{name} must restore byte-identical after the repair"
         );
     }
 }

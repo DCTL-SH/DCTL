@@ -23,6 +23,23 @@ pub enum StoreError {
     #[error("object not found: {0}")]
     NotFound(String),
 
+    /// The named bucket is not listed by this account's credentials.
+    ///
+    /// Deliberately not [`StoreError::NotFound`], and the separation is the
+    /// fix for a measured defect: a bucket-level miss minted as `NotFound`
+    /// rode the object-absence rails — `init --force` against an existing
+    /// empty bucket died "object not found: bucket X" exit 4, and the
+    /// envelope probe's `NotFound → Absent` arm could read an *unlistable*
+    /// store as an *empty* one, which is the exact "absence is a claim"
+    /// violation that module documents. A bucket that cannot be listed is a
+    /// fact about credentials and configuration, answered by the provider,
+    /// never retried and never conflated with a missing object.
+    #[error(
+        "bucket {bucket} is not listed by this account's credentials; \
+         nothing was read or written"
+    )]
+    BucketNotFound { bucket: String },
+
     /// The stored bytes did not match the expected content hash — a verified
     /// write refused to (or a verified read refused to accept) commit corruption.
     #[error("checksum mismatch: expected {expected}, got {actual}")]
@@ -230,6 +247,7 @@ impl StoreError {
             StoreError::RunDeadline { .. } => 2011,
             StoreError::Refused { .. } => 2012,
             StoreError::Stalled { .. } => 2013,
+            StoreError::BucketNotFound { .. } => 2014,
             // Delegated, never its own number. A retry record describes how
             // often something was attempted, not what went wrong, and a script
             // branching on the exit code must see the same number whether or not

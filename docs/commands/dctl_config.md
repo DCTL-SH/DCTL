@@ -347,10 +347,11 @@ through `dctl config create` it was `$HOME/dctl-store`, and through
 read as `/dctl-store` in every message while the objects went to `$HOME`. Both
 commands now take the same text and write the same canonical value, and a
 configuration still carrying the old spelling fails loudly with the
-one-character fix rather than quietly picking one. `dctl init --base
-sftp:HOST/PATH` keeps the separating slash, so
-`--base sftp:lsx-001/srv/dctl-store` is `/srv/dctl-store` and
-`--base sftp:lsx-001/~/dctl-store` is `~/dctl-store`.
+one-character fix rather than quietly picking one. `dctl init --base sftp:HOST/PATH` reads one slash as the SSH login
+directory and two as the filesystem root, exactly as `scp` and rclone do:
+`--base sftp:lsx-001/dctl-store` is `~/dctl-store`,
+`--base sftp:lsx-001//srv/dctl-store` is `/srv/dctl-store`, and
+`--base sftp:lsx-001/~/dctl-store` is `~/dctl-store` spelled explicitly.
 
 `host` is a destination `ssh` itself understands — a `Host` alias from
 `~/.ssh/config`, or `user@host[:port]`. It is not a credential: the user, port,

@@ -82,8 +82,8 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use crate::constants::{
-    DRIVE_LETTERS_EXIST, PATH_SEPARATOR, PROVIDER_LOCAL, RELATIVE_PATH_MARKER, REMOTE_SEPARATOR,
-    WINDOWS_PATH_SEPARATOR,
+    DRIVE_LETTERS_EXIST, LOGICAL_PATH_SEPARATORS, PATH_SEPARATOR, PROVIDER_LOCAL, PROVIDER_SFTP,
+    RELATIVE_PATH_MARKER, REMOTE_SEPARATOR, WINDOWS_PATH_SEPARATOR,
 };
 use crate::error::{CliError, Result};
 use crate::platform::path::{
@@ -164,10 +164,43 @@ impl RemoteSpec {
             return Ok(Self::Local(PathBuf::from(rest)));
         }
 
-        let path = clean_logical(rest).ok_or_else(|| {
-            let (reason, hint) = parent_dir_refusal(input, candidate, rest, REMOTE_SEPARATOR);
-            CliError::usage(reason).with_hint(hint)
-        })?;
+        // The `sftp:` shorthand carries a *server* path, and the difference
+        // between `HOST/dir` and `HOST//dir` is the difference between the SSH
+        // login directory and the filesystem root. Canonicalising the whole
+        // tail collapses `//` and made the absolute spelling unspellable —
+        // which is why every bare shorthand became absolute, and why a
+        // benchmark's 1.6 GiB of ciphertext landed on an OS disk instead of
+        // under the home directory the operator meant. So the host is split
+        // off first and only the directory part is canonicalised, with one
+        // leading separator preserved when the operator wrote two. Safe to
+        // special-case: provider names are reserved as remote names, so
+        // `sftp:` is always this shorthand.
+        let path = if candidate == PROVIDER_SFTP {
+            let (host, dir) = match rest.find(|c: char| LOGICAL_PATH_SEPARATORS.contains(&c)) {
+                Some(at) => (&rest[..at], &rest[at..]),
+                None => (rest, ""),
+            };
+            let cleaned = clean_logical(dir).ok_or_else(|| {
+                let (reason, hint) = parent_dir_refusal(input, candidate, rest, REMOTE_SEPARATOR);
+                CliError::usage(reason).with_hint(hint)
+            })?;
+            let absolute = dir
+                .strip_prefix(|c: char| LOGICAL_PATH_SEPARATORS.contains(&c))
+                .is_some_and(|after| {
+                    after.starts_with(|c: char| LOGICAL_PATH_SEPARATORS.contains(&c))
+                });
+            let host = normalize_unicode(host);
+            match (cleaned.is_empty(), absolute) {
+                (true, _) => host,
+                (false, true) => format!("{host}//{cleaned}"),
+                (false, false) => format!("{host}/{cleaned}"),
+            }
+        } else {
+            clean_logical(rest).ok_or_else(|| {
+                let (reason, hint) = parent_dir_refusal(input, candidate, rest, REMOTE_SEPARATOR);
+                CliError::usage(reason).with_hint(hint)
+            })?
+        };
 
         Ok(Self::Named {
             // Normalised for the same reason the path is: a remote whose name

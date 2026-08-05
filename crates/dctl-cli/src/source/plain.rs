@@ -204,6 +204,16 @@ impl Source for PlainSource {
         // absence reads as the decision it is.
     }
 
+    async fn exists(&self, _path: &str) -> Result<bool> {
+        // This listing IS the store — every entry came from the provider's own
+        // enumeration moments ago — so presence in it is presence, and a probe
+        // would re-ask the same authority the same question. A `SelfReported`
+        // inventory can still have lost an object *since* the listing; that
+        // race exists for every filesystem and is not a claim this method can
+        // close.
+        Ok(true)
+    }
+
     async fn stat(&self, path: &str) -> Result<Option<Entry>> {
         match self.backend.head(&ObjectKey::new(path)).await {
             Ok(meta) => Ok(Some(from_meta(meta))),

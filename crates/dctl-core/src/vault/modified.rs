@@ -74,6 +74,19 @@ impl Modified {
     /// and not a failure. Only a value that will not fit in the record's `i64`
     /// becomes [`Modified::Unknown`], which is the honest answer for a clock this
     /// index cannot represent.
+    ///
+    /// **Sub-second precision is truncated here, deliberately and
+    /// permanently for this format version.** A restored file therefore
+    /// carries a whole-second mtime where the source had nanoseconds, which
+    /// rclone preserves on a local backend and DCTL does not (measured:
+    /// `1785520229.0` against rclone's `1785520532.540123`). It is not a
+    /// boundary that can be widened in isolation — whole seconds are the
+    /// index record's type, the sealed object header's field, the
+    /// `SourceModified` contract every backend implements, and the reason
+    /// `--modify-window` refuses anything under a second. All four agree, and
+    /// changing them is a format change; over SFTP the protocol truncates
+    /// anyway. Stated where the truncation happens rather than left to be
+    /// discovered by a comparison against another tool.
     #[must_use]
     pub fn at(time: SystemTime) -> Self {
         let seconds = match time.duration_since(UNIX_EPOCH) {

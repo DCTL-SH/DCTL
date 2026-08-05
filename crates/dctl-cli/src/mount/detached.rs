@@ -99,6 +99,63 @@ pub fn is_detached(mountpoint: &Path, bare: Option<u64>) -> bool {
     detached(bare, &device_of(mountpoint))
 }
 
+/// Whether `mountinfo` still lists ANY attachment of the filesystem whose
+/// device is `mount_device`.
+///
+/// The path check above asks about one path, and one path is not the whole
+/// question: where a directory is visible at two places — bind mounts under
+/// shared propagation, which is the ordinary layout of a machine with an
+/// aliased data volume — attaching a filesystem at one attaches it at both,
+/// and `umount` of one leaves the other. Measured on such a host: DCTL
+/// reported `unmounted`, latched, and left a live attachment behind at the
+/// alias, which is exactly the stale mount this module exists to prevent,
+/// reached by the one route the device comparison cannot see.
+///
+/// Pure, over the text, so the parse is testable without a bind mount. Each
+/// `/proc/self/mountinfo` line's third field is the mount's device as
+/// `major:minor` (proc(5)); this formats the recorded `st_dev` the same way
+/// and looks for it. A `None` device is permissive — the same direction the
+/// `bare: None` case takes, and for the same reason: a measurement that was
+/// never taken must not invent a stale mount.
+#[must_use]
+pub fn attached_anywhere(mountinfo: &str, mount_device: Option<u64>) -> bool {
+    let Some(device) = mount_device else {
+        return false;
+    };
+    // The Linux dev_t encoding proc(5) prints: 12 low bits and 20 high bits of
+    // major, 8 low and 12 high of minor.
+    let major = ((device >> 8) & 0xfff) | ((device >> 32) & !0xfff);
+    let minor = (device & 0xff) | ((device >> 12) & !0xff);
+    let wanted = format!("{major}:{minor}");
+    mountinfo
+        .lines()
+        .filter_map(|line| line.split_whitespace().nth(2))
+        .any(|field| field == wanted)
+}
+
+/// Whether the kernel still lists any attachment of this filesystem.
+///
+/// The real reader behind [`attached_anywhere`]. An unreadable mountinfo is
+/// permissive for the reason the parser's `None` case is: this check exists to
+/// catch an attachment the path comparison missed, never to manufacture one.
+#[must_use]
+pub fn any_attachment(mount_device: Option<u64>) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/self/mountinfo")
+            .map(|mountinfo| attached_anywhere(&mountinfo, mount_device))
+            .unwrap_or(false)
+    }
+    // No mountinfo, and no bind-mount aliasing of this shape to find with it:
+    // macOS mounts are not propagated between namespaces the way Linux's are,
+    // so the path comparison is the whole question there.
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = mount_device;
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +240,67 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let bare = device_of(dir.path()).unwrap();
         assert!(!is_detached(dir.path(), Some(bare.wrapping_add(1))));
+    }
+
+    /// The device a FUSE mount reported on the host where this was measured,
+    /// and the `major:minor` proc(5) prints for it.
+    const FUSE_DEVICE: u64 = 0x4b; // major 0, minor 75
+    const FUSE_FIELD: &str = "0:75";
+
+    /// One mountinfo line carrying `device` in its third field.
+    fn line(id: u32, device: &str, at: &str) -> String {
+        format!("{id} 25 {device} / {at} rw,nosuid,nodev,noexec,relatime shared:1 - fuse dctl rw")
+    }
+
+    #[test]
+    fn a_filesystem_listed_at_two_paths_is_attached_at_both() {
+        // The defect's arrangement: one filesystem, two attachments, because
+        // the directory is visible at two paths.
+        let mountinfo = format!(
+            "{}\n{}\n",
+            line(90, FUSE_FIELD, "/mnt/sxd/bench/mnt"),
+            line(91, FUSE_FIELD, "/mnt/SXD001/bench/mnt")
+        );
+        assert!(attached_anywhere(&mountinfo, Some(FUSE_DEVICE)));
+
+        // Unmounting ONE alias leaves the other — and this is the whole point:
+        // the recorded path now stats free while the filesystem is still up.
+        let after_one = format!("{}\n", line(91, FUSE_FIELD, "/mnt/SXD001/bench/mnt"));
+        assert!(
+            attached_anywhere(&after_one, Some(FUSE_DEVICE)),
+            "the surviving alias is exactly the stale mount"
+        );
+    }
+
+    #[test]
+    fn a_filesystem_no_longer_listed_is_detached() {
+        let mountinfo = format!("{}\n", line(25, "259:2", "/"));
+        assert!(!attached_anywhere(&mountinfo, Some(FUSE_DEVICE)));
+    }
+
+    #[test]
+    fn an_unmeasured_device_never_invents_an_attachment() {
+        // Permissive, exactly as `detached`'s `bare: None` case is: this check
+        // exists to catch an attachment the path comparison missed, never to
+        // manufacture one out of a measurement nobody took.
+        let mountinfo = format!("{}\n", line(90, FUSE_FIELD, "/mnt/sxd/bench/mnt"));
+        assert!(!attached_anywhere(&mountinfo, None));
+    }
+
+    #[test]
+    fn malformed_lines_are_passed_over_rather_than_matched() {
+        let mountinfo = format!("\n90\n90 25\n{}\n", line(90, FUSE_FIELD, "/mnt/a"));
+        assert!(attached_anywhere(&mountinfo, Some(FUSE_DEVICE)));
+        assert!(!attached_anywhere("\n90\n90 25\n", Some(FUSE_DEVICE)));
+    }
+
+    #[test]
+    fn a_large_device_number_encodes_the_way_proc_prints_it() {
+        // proc(5)'s dev_t split is not a plain two-byte pair: major takes 12
+        // low bits and 20 high, minor 8 low and 12 high. A device above the
+        // 8-bit minor range is where a naive split silently stops matching.
+        let device: u64 = (259 << 8) | 130; // major 259, minor 130
+        let mountinfo = format!("{}\n", line(25, "259:130", "/data"));
+        assert!(attached_anywhere(&mountinfo, Some(device)));
     }
 }

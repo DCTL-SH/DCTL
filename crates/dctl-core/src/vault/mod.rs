@@ -21,6 +21,7 @@ mod rekey;
 mod restore;
 mod share;
 mod unlock;
+mod verify_sample;
 
 use std::sync::Arc;
 
@@ -36,6 +37,7 @@ pub use init::NewVault;
 pub use modified::Modified;
 pub use restore::Rebuilt;
 pub use unlock::UnlockKey;
+pub use verify_sample::{SamplePlan, SampledVerify, sample_indices};
 
 /// An unlocked vault over a storage backend.
 pub struct Vault {

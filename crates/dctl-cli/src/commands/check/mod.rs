@@ -164,11 +164,15 @@ pub async fn run(ctx: &Ctx, args: &CheckArgs) -> Result<()> {
         }
     ));
     if !comparison.proves_contents() {
-        // Worth saying plainly: a metadata comparison can call two files equal
-        // when their contents are not, and someone using `check` to validate a
-        // backup usually wants the stronger claim.
-        ctx.out
-            .info("comparing metadata only — pass --checksum to prove the contents match");
+        // A warning rather than an info, deliberately: a metadata comparison
+        // can call two files equal when their contents are not, someone using
+        // `check` to validate a backup usually wants the stronger claim, and
+        // an info line vanishes at the default verbosity — which left the
+        // caveat unread by exactly the cron log that needed it.
+        ctx.out.warn(
+            "comparing metadata only — contents are not verified; pass \
+             --checksum to prove them",
+        );
     }
 
     // Writing the verdict files is this command's only mutation, so it is the
@@ -270,7 +274,24 @@ async fn compare(
     pair: &walk::Pair,
     comparison: Comparison,
 ) -> Difference {
-    match (&pair.source, &pair.dest) {
+    // A recorded listing can hold a ghost: a path whose stored object was
+    // deleted behind the tool's back, still wearing the size, mtime and hash
+    // of bytes that are gone. Every comparison mode — including --checksum,
+    // whose vault-side digest is the same index row — would call that a
+    // Match, which is BENCHMARKS §7.2's "all match" over a lost object.
+    // Confirm each recorded half against the store first, so a loss
+    // classifies as missing. Costs one existence probe per entry on recorded
+    // sides only; a self-reported listing already is the store's answer.
+    let source_found = match confirmed(ctx, source, pair.source.as_ref()).await {
+        Ok(found) => found,
+        Err(()) => return Difference::Error,
+    };
+    let dest_found = match confirmed(ctx, dest, pair.dest.as_ref()).await {
+        Ok(found) => found,
+        Err(()) => return Difference::Error,
+    };
+
+    match (source_found, dest_found) {
         (Some(found_source), Some(found_dest)) if comparison.proves_contents() => {
             match (
                 hashed(ctx, source, found_source).await,
@@ -281,10 +302,47 @@ async fn compare(
             }
         }
         (source_found, dest_found) => classify(
-            source_found.as_ref().map(|found| &found.entry),
-            dest_found.as_ref().map(|found| &found.entry),
+            source_found.map(|found| &found.entry),
+            dest_found.map(|found| &found.entry),
             comparison,
         ),
+    }
+}
+
+/// One half of a pair, with a recorded side's ghost rows resolved to absences.
+///
+/// `Err(())` means the probe itself failed — "could not ask" is a third
+/// answer, reported on stderr and classified as an error for the path, never
+/// rolled into either verdict.
+async fn confirmed<'pair>(
+    ctx: &Ctx,
+    side: &Side,
+    found: Option<&'pair Found>,
+) -> std::result::Result<Option<&'pair Found>, ()> {
+    let Some(present) = found else {
+        return Ok(None);
+    };
+    if !side.recorded() {
+        return Ok(Some(present));
+    }
+    match side.confirm(present).await {
+        Ok(true) => Ok(Some(present)),
+        Ok(false) => {
+            ctx.out.warn(format!(
+                "the index records '{}' but the store no longer holds its \
+                 object — counted as missing; `dctl verify` reports the full \
+                 damage",
+                present.path()
+            ));
+            Ok(None)
+        }
+        Err(error) => {
+            ctx.out.warn(format!(
+                "could not confirm '{}' against the store: {error}",
+                present.path()
+            ));
+            Err(())
+        }
     }
 }
 
@@ -618,5 +676,108 @@ mod tests {
                 .await
                 .expect("the format must not change the outcome");
         }
+    }
+
+    #[tokio::test]
+    async fn a_ghost_index_row_is_reported_missing_never_matched() {
+        // BENCHMARKS §7.2 / §12 defect 2, High: delete one stored object
+        // behind the tool's back and `check` said "all match" and exited 0 —
+        // the vault side listed the index row, whose size, mtime and recorded
+        // hash all still described the lost bytes, so every mode matched it,
+        // --checksum included. The confirmation probe makes the same run
+        // report the loss. Everything below is real: a sealed vault, a config
+        // naming the init pair, the ordinary unlock ladder.
+        use std::sync::Arc;
+
+        let dir = tempfile::TempDir::new().unwrap();
+        let store = dir.path().join("store");
+        std::fs::create_dir_all(&store).unwrap();
+        let index = dir.path().join("index.redb");
+        let tree = dir.path().join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+
+        {
+            let backend: Arc<dyn dctl_store::Backend> = Arc::new(dctl_store::LocalFs::new(&store));
+            let vault = dctl_core::Vault::init(backend, &index, "correct horse battery")
+                .await
+                .unwrap()
+                .vault;
+            for (name, bytes) in [
+                ("a.txt", &b"alpha"[..]),
+                ("b.txt", &b"bravo"[..]),
+                ("c.txt", &b"charlie"[..]),
+            ] {
+                std::fs::write(tree.join(name), bytes).unwrap();
+                let modified = std::fs::metadata(tree.join(name))
+                    .unwrap()
+                    .modified()
+                    .unwrap()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64;
+                vault
+                    .put_file(name, bytes, dctl_core::Modified::At(modified))
+                    .await
+                    .unwrap();
+            }
+        }
+
+        let config = dir.path().join("config.toml");
+        std::fs::write(
+            &config,
+            format!(
+                "[remotes.archive-store]\ntype = \"local\"\npath = {:?}\nrequire_vault = true\n\n\
+                 [remotes.archive]\ntype = \"vault\"\nbase = \"archive-store\"\n",
+                store.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let tree_arg = tree.to_string_lossy().into_owned();
+        let config_arg = config.to_string_lossy().into_owned();
+        let index_arg = index.to_string_lossy().into_owned();
+        let run_check = |extra: &'static [&'static str]| {
+            let mut argv = vec![
+                "check",
+                &tree_arg,
+                "archive:",
+                "--config",
+                &config_arg,
+                "--index",
+                &index_arg,
+                "--password",
+                "correct horse battery",
+            ];
+            argv.extend_from_slice(extra);
+            let (ctx, args) = parse(&argv);
+            async move { run(&ctx, &args).await }
+        };
+
+        // The control: before any damage, a clean pair is clean — proving the
+        // probe manufactures no findings.
+        run_check(&[])
+            .await
+            .expect("an undamaged pair compares clean");
+
+        // The damage, exactly as benchmarked.
+        let mut objects: Vec<_> = std::fs::read_dir(store.join("o"))
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        objects.sort();
+        std::fs::remove_file(&objects[0]).unwrap();
+
+        // The default comparison must find the loss…
+        let error = run_check(&[])
+            .await
+            .expect_err("a lost object is never a match");
+        assert_eq!(error.code(), ExitCode::PartialFailure);
+
+        // …and so must --checksum, whose vault-side digest is the same index
+        // row that outlived the object.
+        let error = run_check(&["--checksum"])
+            .await
+            .expect_err("a recorded hash must not vouch for a lost object");
+        assert_eq!(error.code(), ExitCode::PartialFailure);
     }
 }

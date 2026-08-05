@@ -42,7 +42,10 @@ pub use dctl_index::Record;
 pub use dctl_crypto::kdf::Cost as KdfCost;
 pub use error::{CoreError, Result};
 pub use streamed::Streamed;
-pub use vault::{MIN_CHUNK_SIZE, Modified, NewVault, Rebuilt, UnlockKey, Vault, clamp_chunk_size};
+pub use vault::{
+    MIN_CHUNK_SIZE, Modified, NewVault, Rebuilt, SamplePlan, SampledVerify, UnlockKey, Vault,
+    clamp_chunk_size, sample_indices,
+};
 
 /// Check a typed recovery phrase against BIP-39 without attempting an unlock.
 ///

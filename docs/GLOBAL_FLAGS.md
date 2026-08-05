@@ -221,7 +221,7 @@ before it has tried.
 | Flag | Value | Default | Environment |
 |------|-------|---------|-------------|
 | `--verify` | `checksum` \| `sample` \| `strict` | `checksum` | — |
-| `--verify-samples` | `N` | **refused** | — |
+| `--verify-samples` | `N` | `8` | — |
 | `--checksum` | — | off | — |
 | `--size-only` | — | off | — |
 | `--modify-window` | `SECONDS` | `1` | — |
@@ -244,12 +244,19 @@ just uploaded: a 50 GB video costs 50 GB up and 50 GB back down, and on a metere
 bucket that is a doubled bill for the run, not a rounding error. Aimed at a
 *tree* rather than a single object it is worse still — `--verify strict` over a
 50 TB vault is a 50 TB download, so the integrity commands warn before starting
-whenever a byte-reading mode meets a prefix. `sample` is the middle setting: it
-pays for `--verify-samples` chunks per object instead of all of them, which
-catches wholesale corruption without buying a second copy of the data — **which
-is what `sample` is meant to be and is not yet**. In this build it reads the whole
-object, so on a vault it costs the same egress as `strict` while proving less;
-`--verify-samples` is refused rather than accepted into that gap.
+whenever a byte-reading mode meets a prefix. `sample` is the middle setting: on a
+sealed upload it reads back the object's first and last chunks plus
+`--verify-samples` seeded interior ones, authenticating each chunk's tag, which
+catches wholesale corruption and seam damage without buying a second copy of
+the data. **Be equally clear about what a sample cannot prove**: no subset of
+chunks can evaluate the whole-plaintext BLAKE3 or the object's footer, so a
+corrupt chunk outside the sample is not detected — `sample` is a spot check
+against rot, and `strict` remains the only whole-object statement. Anyone who
+configured `verify = "sample"` before this build was silently getting strict
+(at strict's full egress); they now get what the word says, at the price the
+word implies. On the non-sealed directions (downloads and plain stores) sample
+still reads in full — the honest sampling exists on the sealed upload
+read-back, where the chunk geometry gives a sample meaning.
 
 **Why `checksum` is still a strong default.** It is not "no verification" — step 4
 of the write pipeline is mandatory and runs whatever `--verify` says: the provider
@@ -277,13 +284,14 @@ overrides the configured value.
 
 ### `--verify-samples N`
 
-**Refused** (exit 7). There is no sampled read to set a depth on: the vault read
-path reads and authenticates the whole object, so `--verify sample` costs a full
-egress and this number would describe nothing. Use `--verify checksum` for the
-metadata comparison, or `--verify strict`, which is what `sample` currently does.
+Interior chunks a `--verify sample` read-back draws per object, on top of the
+always-read first and last. Default `8`; `0` is a usage error, because head and
+tail are mandatory and a depth of nothing is a contradiction. Each run logs the
+seed its picks derived from, so a reported failure can be replayed.
 
-It was previously accepted with a default of `8`, which published a sampling
-depth this build has never applied.
+The flag was refused for a release, because accepting it while `sample` secretly
+read every chunk would have published a sampling depth nothing applied. The
+sampled read is real now, and so is the number.
 
 ### `--checksum`
 
@@ -1372,9 +1380,6 @@ instead. Nothing here is silently ignored.
 * `--key-file` — the key-encryption key is derived from the password alone; there
   is no parameter through which a second factor could be mixed in. See
   [`--key-file PATH`](#--key-file-path).
-* `--verify-samples` — there is no sampled read to set a depth on. `--verify
-  sample` reads and authenticates the *whole* object on the vault path, so it
-  costs a full egress and a depth would describe nothing.
 * `--low-level-retries` — request-level retries exist on every backend, but on
   a per-provider schedule of four numbers that one `N` cannot set.
 * `--dump` — the protocol tracing layer these select from is not installed, so

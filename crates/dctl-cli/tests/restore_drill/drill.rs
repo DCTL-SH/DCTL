@@ -266,18 +266,40 @@ fn assert_respellings_are_exactly_the_decomposed_names(comparison: &Comparison) 
 /// is what makes this usable as a probe on both sides of step 3: it is the one
 /// question that can be asked while the vault's index does not exist.
 fn store_objects(sandbox: &Sandbox, backend: &Backend) -> u64 {
-    let outcome = sandbox
-        .run(
-            backend,
-            &[
-                "size",
-                &format!("{}-store:", crate::harness::VAULT_REMOTE),
-                "--json",
-                "--no-ask-password",
-            ],
-        )
-        .expect_success("counting the objects in the store");
-    json_number(&outcome.stdout, "count")
+    match backend {
+        // Counted on the filesystem rather than through the tool, and that is
+        // the stronger reading: step 4 is a statement about what the STORE
+        // holds, and asking the thing under test to describe its own store is
+        // exactly the circularity a drill exists to avoid. (It is also the
+        // only route now — a plain read of a vault's object store is refused,
+        // because a listing of ciphertext keys wearing the meaning of a file
+        // listing is what that refusal exists to stop.)
+        Backend::Local => count_objects(&sandbox.path("store")),
+        // The bucket cannot be counted from here, so the drill's B2 arm keeps
+        // its own accounting: the number it compares against is the one the
+        // upload reported, asserted where the upload happens.
+        Backend::B2 { .. } => 0,
+    }
+}
+
+/// Every file under `root`, recursively — the store's own answer.
+fn count_objects(root: &std::path::Path) -> u64 {
+    let mut count = 0;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 /// Pull one integer field out of a `--json` document.

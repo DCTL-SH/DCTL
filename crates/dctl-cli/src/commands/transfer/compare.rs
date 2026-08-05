@@ -60,8 +60,9 @@ use std::time::Duration;
 use crate::cli::GlobalArgs;
 use crate::constants::{
     CHECKSUM_UNAVAILABLE_HINT, DEFAULT_MODIFY_WINDOW_SECS, PLAN_REASON_CHECKSUM,
-    PLAN_REASON_DESTINATION_NEWER, PLAN_REASON_EXISTS, PLAN_REASON_IDENTICAL, PLAN_REASON_MISSING,
-    PLAN_REASON_MODIFIED, PLAN_REASON_SIZE, PLAN_REASON_SIZE_UNRECORDED,
+    PLAN_REASON_DESTINATION_LOST, PLAN_REASON_DESTINATION_NEWER, PLAN_REASON_EXISTS,
+    PLAN_REASON_IDENTICAL, PLAN_REASON_MISSING, PLAN_REASON_MODIFIED, PLAN_REASON_SIZE,
+    PLAN_REASON_SIZE_UNRECORDED,
 };
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -170,6 +171,15 @@ pub fn decide(source: &Entry, dest: Option<&Entry>, policy: &ComparePolicy) -> R
         return Ok(Action::Copy(PLAN_REASON_MISSING));
     };
 
+    // Rule 1's sibling, for rule 1's reason: a destination row whose stored
+    // object is gone describes bytes that are not restorable, and any flag
+    // that skipped it — ignore-existing, update, size-only, checksum — would
+    // silently lose data while the summary reported a clean run. The nightly
+    // that did exactly that is BENCHMARKS §7.2 defect 1.
+    if dest.object_missing {
+        return Ok(Action::Copy(PLAN_REASON_DESTINATION_LOST));
+    }
+
     if policy.ignore_existing {
         return Ok(Action::Skip(PLAN_REASON_EXISTS));
     }
@@ -276,6 +286,58 @@ mod tests {
             decide(&source, Some(&dest), &policy).unwrap(),
             Action::Skip(PLAN_REASON_EXISTS)
         );
+    }
+
+    #[test]
+    fn a_lost_destination_object_is_a_copy_no_flag_can_skip() {
+        // The nightly false success: a destination row whose stored object is
+        // gone carries a live-looking size, mtime and hash — every comparison
+        // below would skip it, and each skip is silent data loss reported as
+        // `Errors: 0`. Rule 1's rationale applies to every arm: nothing may
+        // override a destination with nothing restorable behind it.
+        let source = hashed("a", 10, "same").with_modified(at(1000));
+        let dest = Entry {
+            object_missing: true,
+            ..hashed("a", 10, "same").with_modified(at(2000))
+        };
+
+        for (name, policy) in [
+            ("default", policy()),
+            (
+                "ignore-existing",
+                ComparePolicy {
+                    ignore_existing: true,
+                    ..policy()
+                },
+            ),
+            (
+                "update",
+                ComparePolicy {
+                    update: true,
+                    ..policy()
+                },
+            ),
+            (
+                "size-only",
+                ComparePolicy {
+                    size_only: true,
+                    ..policy()
+                },
+            ),
+            (
+                "checksum",
+                ComparePolicy {
+                    checksum: true,
+                    ..policy()
+                },
+            ),
+        ] {
+            assert_eq!(
+                decide(&source, Some(&dest), &policy).unwrap(),
+                Action::Copy(PLAN_REASON_DESTINATION_LOST),
+                "--{name} must not skip a destination whose object is gone"
+            );
+        }
     }
 
     #[test]

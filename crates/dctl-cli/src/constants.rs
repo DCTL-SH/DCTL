@@ -985,21 +985,22 @@ pub const DEFAULT_CONTIMEOUT_SECS: u64 = dctl_store::deadline::constants::DEFAUL
 /// the parser there is no way to distinguish *"the operator asked for
 /// `checksum`"* from *"the operator asked for nothing"*, so a configured
 /// `strict` would be silently overridden by a value nobody typed. The same
-/// argument `VERIFY_SAMPLES_UNSUPPORTED_REASON`'s flag makes for being an
-/// `Option`. `dctl --help` states this default in prose instead.
+/// argument keeps `--verify-samples` an `Option` (its applied default is
+/// [`DEFAULT_VERIFY_SAMPLES`]). `dctl --help` states this default in prose
+/// instead.
 pub const DEFAULT_VERIFY_MODE: crate::cli::globals::VerifyMode =
     crate::cli::globals::VerifyMode::Checksum;
 
-/// Why `--verify-samples` is refused.
+/// Interior chunks a `--verify sample` upload check reads when
+/// `--verify-samples` is not given, on top of the always-read first and last.
 ///
-/// Worth stating plainly rather than as "not wired": on the vault path
-/// `--verify sample` reads *every* chunk, so a sample depth is not merely
-/// unhonoured, it has nothing to describe.
-pub const VERIFY_SAMPLES_UNSUPPORTED_REASON: &str = "There is no sampled read to set a depth on: \
-     dctl_core::Vault::verify_file reads and authenticates the whole object, so \
-     --verify sample costs a full egress and this number would describe \
-     nothing. Use --verify checksum for the metadata comparison, or --verify \
-     strict, which is what sample currently does.";
+/// Eight is small enough that a sampled verify of any object costs a bounded
+/// handful of ranged reads — the entire point of the mode — and large enough
+/// that scattered bit rot has a real chance of landing in the sample on the
+/// multi-hundred-chunk objects the mode exists for. The honest limit stands
+/// regardless of the number and is stated wherever the mode is described: a
+/// sample authenticates the chunks it read and makes no whole-object claim.
+pub const DEFAULT_VERIFY_SAMPLES: u32 = 8;
 
 /// Why `--dump` is refused.
 pub const DUMP_UNSUPPORTED_REASON: &str = "The protocol tracing layer this selects from is not installed: \
@@ -2006,6 +2007,16 @@ pub const VERIFY_NOTHING_VERIFIED_HINT: &str = "Check the prefix with `dctl ls R
      machine's index has not seen it (`dctl index rebuild REMOTE:`). \
      `--include`, `--exclude` and `--files-from` also narrow what a run covers.";
 
+/// What to do about a `verify` whose explicitly named object is not there.
+///
+/// The absence is the finding, so the hint's job is only to catch the one
+/// honest misreading: an operator who meant a directory and spelled it without
+/// the trailing slash. See
+/// [`named_target_missing`](crate::commands::integrity::failure::named_target_missing)
+/// for why this is exit 4 and not exit 9's "the run did no work".
+pub const VERIFY_NAMED_TARGET_MISSING_HINT: &str = "If you meant a prefix rather than one object, add a trailing '/'; \
+     `dctl ls REMOTE:` shows what the remote holds.";
+
 /// What a restore says when it wrote no file at all.
 ///
 /// The counterpart of [`INTEGRITY_NOTHING_VERIFIED`], and it travels with the
@@ -2387,6 +2398,11 @@ pub const PLAN_REASON_EXISTS: &str = "exists";
 pub const PLAN_REASON_DESTINATION_NEWER: &str = "destination-newer";
 /// See [`PLAN_REASON_MISSING`]. At the destination only — a `sync` extra.
 pub const PLAN_REASON_EXTRA: &str = "not-at-source";
+/// See [`PLAN_REASON_MISSING`]. The destination's index claims the path but
+/// the store no longer holds its object — a loss discovered by the
+/// destination reconciliation, repaired by a fresh upload. No flag may skip
+/// it, for rule 1's reason: what the row describes is not restorable.
+pub const PLAN_REASON_DESTINATION_LOST: &str = "destination-object-missing";
 /// See [`PLAN_REASON_MISSING`]. An empty source directory
 /// (`--create-empty-src-dirs`).
 pub const PLAN_REASON_EMPTY_SOURCE_DIR: &str = "empty-source-dir";
@@ -4179,6 +4195,21 @@ pub const MOUNT_DIRECTORY_MODE: u16 = 0o555;
 /// path it walked past for the life of the mount. Reached only after the kernel
 /// has finished with them, so eviction can never produce a stale inode number.
 pub const MOUNT_INODE_CACHE_MAX: usize = 65_536;
+
+/// Objects a mount remembers having recorded a first read for.
+///
+/// The dedup set behind `mount/audit.rs`: one record per object per session,
+/// so this bounds what "per session" can cost in memory. The same figure as
+/// [`MOUNT_INODE_CACHE_MAX`] and for the same reason — a path and a counter
+/// each, so sixty-five thousand of them is a few megabytes, and a mount that
+/// walks more objects than that is a `find` over a dataset rather than a
+/// reader.
+///
+/// Forgetting is safe in one direction only, which is why it is allowed:
+/// evicting an object means a later read of it is recorded a second time,
+/// which overcounts a total the log already publishes as a floor. It can
+/// never produce a read that went unrecorded.
+pub const MOUNT_AUDIT_SEEN_MAX: usize = 65_536;
 
 /// How many directory listings the mount holds decrypted at once.
 ///

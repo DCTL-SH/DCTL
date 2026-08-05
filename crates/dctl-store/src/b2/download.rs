@@ -68,7 +68,7 @@ async fn send_download(b2: &B2Backend, key: &ObjectKey, range: Option<String>) -
         b2.deadlines.run,
         &b2.deadlines.stall,
         |_| async {
-            let auth = b2.auth().await.map_err(Attempt::transport)?;
+            let auth = b2.auth().await.map_err(Attempt::auth)?;
             let url = format!(
                 "{}/{}/{}/{}",
                 auth.download_url,

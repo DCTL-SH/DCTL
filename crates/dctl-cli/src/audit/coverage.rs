@@ -203,18 +203,14 @@ pub const COVERAGE: &[(&str, Recording)] = &[
     ("backup", Recording::Through("commands/backup/store.rs")),
     ("restore", Recording::Through("commands/restore/mod.rs")),
     // ── Mount ────────────────────────────────────────────────────────────
-    (
-        "mount",
-        Recording::Exempt(
-            "NOT DONE, and the largest remaining hole in the audit story. A \
-             mounted vault serves plaintext to whoever reads the filesystem, and \
-             none of those reads is recorded. Per-read records are not the \
-             answer — a 128 KiB kernel read is not an event anybody wants a line \
-             for — so the design is a session record plus a first-read record \
-             per object, which is real work rather than wiring. Stated here so \
-             the gap is in the table rather than in nobody's head.",
-        ),
-    ),
+    // Behavioural cover:
+    // `mount::state::tests::the_first_read_through_the_mount_lands_in_the_audit_chain_and_says_out`
+    // and `mount::state::tests::a_read_that_cannot_be_recorded_serves_no_bytes`.
+    // A session record when the filesystem attaches, and one first-read record
+    // per object — per-read records were rejected, because a 128 KiB kernel
+    // read is not an event anybody wants a line for. See `mount/audit.rs` for
+    // what the byte totals therefore do and do not claim.
+    ("mount", Recording::Through("mount/audit.rs")),
     // ── Utility ──────────────────────────────────────────────────────────
     (
         "about",
@@ -357,6 +353,10 @@ mod tests {
             "replicate",
             "put",
             "get",
+            // A mounted vault hands decrypted plaintext to anything that can
+            // read a filesystem, which is object content leaving by the widest
+            // door the tool has. It was exempt from this list for a release.
+            "mount",
         ] {
             let row = COVERAGE
                 .iter()

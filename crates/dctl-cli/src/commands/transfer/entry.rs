@@ -60,6 +60,12 @@ pub struct Entry {
     pub hash: Option<String>,
     /// Whether this is a file or an empty directory.
     pub kind: Kind,
+    /// Whether the stored object behind this row is known to be gone.
+    ///
+    /// Set only on destination rows built from a reconciled vault listing
+    /// ([`crate::source::Entry::object_missing`]); the planner turns it into a
+    /// fresh upload that no comparison flag can override.
+    pub object_missing: bool,
 }
 
 impl Entry {
@@ -72,6 +78,7 @@ impl Entry {
             modified: None,
             hash: None,
             kind: Kind::File,
+            object_missing: false,
         }
     }
 
@@ -89,6 +96,7 @@ impl Entry {
             modified: None,
             hash: None,
             kind: Kind::File,
+            object_missing: false,
         }
     }
 
@@ -102,6 +110,7 @@ impl Entry {
             modified: None,
             hash: None,
             kind: Kind::EmptyDir,
+            object_missing: false,
         }
     }
 

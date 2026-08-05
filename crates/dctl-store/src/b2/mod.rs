@@ -250,7 +250,25 @@ impl B2Backend {
         );
 
         let bucket_id = match parsed.allowed.bucket_id.clone() {
-            Some(id) => id,
+            Some(id) => {
+                // A restricted key carries its bucket's name beside the id.
+                // Accepting the id while the name differs from the configured
+                // bucket would silently swap every operation onto the KEY's
+                // bucket — the probable author of a stray half-initialised
+                // bucket on a shared account. The command named a bucket; a
+                // key that cannot reach it is a refusal, not a substitution.
+                if let Some(allowed_name) = &parsed.allowed.bucket_name
+                    && !allowed_name.eq_ignore_ascii_case(&self.bucket_name)
+                {
+                    return Err(StoreError::BucketNotFound {
+                        bucket: format!(
+                            "{} (this key is restricted to bucket '{allowed_name}')",
+                            self.bucket_name
+                        ),
+                    });
+                }
+                id
+            }
             None => {
                 self.resolve_bucket_id(
                     &parsed.api_url,
@@ -305,16 +323,29 @@ impl B2Backend {
             },
         )
         .await?;
-        listed
-            .buckets
-            .into_iter()
-            .find(|b| b.bucket_name == self.bucket_name)
-            .map(|b| b.bucket_id)
-            // `NotFound`, not `Backend`: a bucket that is not there is an
-            // absence and the caller decides what it means. `store_identity`
-            // reads it as "nothing to lose"; an operation that needed the id
-            // reports it as the missing bucket it is.
-            .ok_or_else(|| StoreError::NotFound(format!("bucket {}", self.bucket_name)))
+        // The request already named the bucket, so the server's own filter has
+        // done the matching; a reply holding exactly one bucket IS the answer,
+        // and re-imposing a stricter client-side comparison on top of it was
+        // the measured defect — a case difference between the configured name
+        // and the account's spelling turned an existing empty bucket into
+        // "object not found: bucket X", exit 4, on `init --force`. Multiple
+        // entries are disambiguated case-insensitively, which is how B2 itself
+        // treats bucket-name uniqueness.
+        let mut buckets = listed.buckets;
+        let found = match buckets.len() {
+            1 => Some(buckets.remove(0)),
+            _ => buckets
+                .into_iter()
+                .find(|b| b.bucket_name.eq_ignore_ascii_case(&self.bucket_name)),
+        };
+        found.map(|b| b.bucket_id).ok_or_else(|| {
+            // Its own variant, never `NotFound`: a bucket-level miss on the
+            // object-absence rails is how an unlistable store got read as an
+            // empty one. See `StoreError::BucketNotFound`.
+            StoreError::BucketNotFound {
+                bucket: self.bucket_name.clone(),
+            }
+        })
     }
 
     /// Authenticated POST of a JSON body to a `b2api/v2` endpoint, parsed into
@@ -336,7 +367,7 @@ impl B2Backend {
             self.deadlines.run,
             &self.deadlines.stall,
             |_| async {
-                let auth = self.auth().await.map_err(Attempt::transport)?;
+                let auth = self.auth().await.map_err(Attempt::auth)?;
                 self.post_json_once(&auth, endpoint, body.clone()).await
             },
         )
@@ -522,7 +553,8 @@ impl Backend for B2Backend {
             .await
         {
             Ok(id) => Ok(Some(crate::guard::StoreIdentity::distinguishing(id))),
-            Err(StoreError::NotFound(_)) => Ok(None),
+            // A bucket nobody has created yet is exactly "nothing to lose".
+            Err(StoreError::BucketNotFound { .. } | StoreError::NotFound(_)) => Ok(None),
             Err(other) => Err(other),
         }
     }

@@ -201,6 +201,49 @@ pub trait Source: Send + Sync {
     /// Whatever the index or provider reported while opening the listing.
     async fn enumerate(&self, prefix: &str) -> Result<Box<dyn Entries>>;
 
+    /// Enumerate as the **destination of a transfer**: every entry must
+    /// describe what is restorably there, not what a local record believes.
+    ///
+    /// The default is [`enumerate`](Source::enumerate), which is correct for
+    /// every source whose listing already *is* the store — a plain remote pages
+    /// the provider's own listing, and a deleted key simply is not in it. The
+    /// sealed source overrides this: its ordinary listing answers from the
+    /// local index, and an index row whose stored object was deleted behind
+    /// the tool's back looks exactly like a live file — size, mtime, hash, all
+    /// describing bytes that are no longer restorable. A nightly that compared
+    /// against those rows reported `Checks: 150/150, Errors: 0` over a
+    /// destination that had lost data, and the loss surfaced at restore. The
+    /// override reconciles the rows against the backend's own object listing
+    /// and marks the casualties ([`Entry::object_missing`]), so the planner
+    /// re-uploads them.
+    ///
+    /// A separate method rather than a flag on `enumerate` so the price — one
+    /// paginated backend listing — is paid exactly where the honesty is owed:
+    /// `ls`, `tree`, `size` and source-side walks keep the index's speed.
+    ///
+    /// # Errors
+    /// As [`enumerate`](Source::enumerate), plus whatever the backend's
+    /// listing reported.
+    async fn enumerate_destination(&self, prefix: &str) -> Result<Box<dyn Entries>> {
+        self.enumerate(prefix).await
+    }
+
+    /// Whether the object behind `path` is actually there — in the *store*,
+    /// not merely in a record of it.
+    ///
+    /// For a source whose listing is the store, presence in the listing IS
+    /// presence, and the honest implementation is a constant `true`. For the
+    /// sealed source the two can disagree — an index row survives the deletion
+    /// of its object — and this is the probe that tells them apart. Required
+    /// rather than defaulted: a source added later must say which kind it is,
+    /// because a default `true` on a recorded listing is exactly the ghost-row
+    /// `Match` this method exists to prevent.
+    ///
+    /// # Errors
+    /// Whatever the probe reported. "Could not ask" must surface as an error,
+    /// never as either answer.
+    async fn exists(&self, path: &str) -> Result<bool>;
+
     /// What the `size` on every [`Entry`] this source yields measures.
     ///
     /// Not a way to ask which implementation is in hand — see [`sizes`] — but

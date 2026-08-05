@@ -52,7 +52,7 @@
 use crate::constants::{
     CHECKERS_PERFORMED, CHECKERS_UNSUPPORTED_REASON, DUMP_UNSUPPORTED_REASON,
     KEY_FILE_UNSUPPORTED_REASON, LOW_LEVEL_RETRIES_UNSUPPORTED_REASON, TRANSFERS_PERFORMED,
-    TRANSFERS_UNSUPPORTED_REASON, VERIFY_SAMPLES_UNSUPPORTED_REASON,
+    TRANSFERS_UNSUPPORTED_REASON,
 };
 
 use super::GlobalArgs;
@@ -163,12 +163,7 @@ pub const FLAGS: &[Flag] = &[
     Flag::honoured("--no-ask-password", "no_ask_password"),
     // ── Durability ───────────────────────────────────────────────────────
     Flag::honoured("--verify", "verify"),
-    Flag::refused(
-        "--verify-samples",
-        "verify_samples",
-        VERIFY_SAMPLES_UNSUPPORTED_REASON,
-        |globals| globals.verify_samples.is_some(),
-    ),
+    Flag::honoured("--verify-samples", "verify_samples"),
     Flag::honoured("--checksum", "checksum"),
     Flag::honoured("--size-only", "size_only"),
     Flag::honoured("--modify-window", "modify_window"),

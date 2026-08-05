@@ -181,6 +181,32 @@ impl Source for VaultSource {
         Ok(Box::new(Buffered { entries }))
     }
 
+    async fn enumerate_destination(&self, prefix: &str) -> Result<Box<dyn Entries>> {
+        // The ordinary listing answers from the index; a transfer destination
+        // must answer for the store. One paginated listing of the object
+        // namespace tells the two apart, and a row whose object is gone is
+        // MARKED rather than dropped: the planner re-uploads a marked row,
+        // while a dropped one would leave the stale index row invisible to
+        // `sync --delete` and still visible to `ls` — a phantom.
+        let present = self.session.vault.stored_object_keys().await?;
+        let records = self.session.vault.list(prefix)?;
+
+        let entries = records
+            .into_iter()
+            .filter(|record| path::is_under(prefix, &record.path))
+            .map(|record| {
+                // Read before `from_record` deliberately drops the object key
+                // from the entry a renderer could leak.
+                let missing = !present.contains(&record.object_key);
+                let mut entry = from_record(record);
+                entry.object_missing = missing;
+                entry
+            })
+            .collect();
+
+        Ok(Box::new(Buffered { entries }))
+    }
+
     fn sizes(&self) -> Sizes {
         // `Record::size` is the length of the file that was sealed, never of the
         // object holding it: the index is written from the plaintext, and the
@@ -247,6 +273,12 @@ impl Source for VaultSource {
         // shrink is the cache's own — see
         // [`ChunkCache::set_budget`](super::chunk_cache::ChunkCache::set_budget).
         self.chunks.set_budget(bytes, max_chunks);
+    }
+
+    async fn exists(&self, path: &str) -> Result<bool> {
+        // The sealed listing is a record, and a record can outlive its object.
+        // This asks the store itself — one existence probe, no payload bytes.
+        Ok(self.session.vault.object_exists(path).await?)
     }
 
     async fn stat(&self, path: &str) -> Result<Option<Entry>> {

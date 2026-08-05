@@ -45,3 +45,26 @@ pub const STREAM_WINDOW_CHUNKS: u64 = 8;
 /// per-call overhead has stopped mattering on every filesystem tested and well
 /// below any figure that would show up next to the chunk window.
 pub const STREAM_BUF_LEN: usize = 128 * 1024;
+
+/// Domain-separation context for the sampled-verify chunk selector.
+///
+/// Keyed exactly the way the CLI's scrub selector keys its path buckets: the
+/// BLAKE3 of this context, XORed with the run's seed, keys the draw hashes.
+/// A distinct context string is what guarantees this selector can never
+/// collide with any other keyed hash the tool derives from the same seed.
+pub const VERIFY_SAMPLE_KEY_CONTEXT: &str = "dctl-core verify-sample chunk selector v1";
+
+/// Draw budget per requested sample for the sampled-verify selector.
+///
+/// Draws land by counter-mod over the chunk count, so a draw can repeat an
+/// index already picked; the loop stops when it has enough distinct picks or
+/// when the budget runs out. Eight draws per requested sample (plus
+/// [`VERIFY_SAMPLE_DRAW_SLACK`]) makes exhausting the budget before filling
+/// the sample astronomically unlikely at any real chunk count, while a
+/// pathological one — every draw colliding — still terminates instead of
+/// spinning, the same bounded-probe stance `MAX_HEADER_PROBES` takes.
+pub const VERIFY_SAMPLE_DRAW_FACTOR: u64 = 8;
+
+/// Flat draw slack on top of [`VERIFY_SAMPLE_DRAW_FACTOR`], so a request for
+/// very few samples still gets enough draws to dodge small-count collisions.
+pub const VERIFY_SAMPLE_DRAW_SLACK: u64 = 16;

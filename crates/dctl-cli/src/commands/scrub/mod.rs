@@ -224,9 +224,10 @@ pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
     let requested = ctx.verify_mode_for(&target.spec())?;
     if !mode::proves_whole_plaintext(requested) {
         ctx.out.warn(format!(
-            "--verify={} asks for a cheaper check than a scrub can perform in this \
-             build: there is no provider-checksum comparison behind `{command}`, so \
-             every selected object is read back in full",
+            "--verify={} asks for a cheaper check than a scrub performs: a scrub \
+             certifies whole objects, so every selected object is read back in \
+             full (`--sample-percent` is the dial that narrows which objects a \
+             scrub reads, not how much of each)",
             mode::slug(requested)
         ));
     }

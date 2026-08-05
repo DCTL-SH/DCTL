@@ -63,6 +63,7 @@
 
 pub mod base;
 pub mod dial;
+mod handles;
 mod ops;
 mod path;
 mod space;
@@ -96,6 +97,17 @@ use path::{chunk_spans, join, normalize_base, prefix_dir, remote_path, temp_path
 /// This backend's name, as [`Backend::name`] spells it and as a lost session or
 /// a stalled request is attributed.
 pub(crate) const SFTP_BACKEND_NAME: &str = "sftp";
+
+/// Open remote read handles one session keeps between ranged reads.
+///
+/// Each is one open descriptor in the remote `sftp-server`. The protocol sets
+/// no limit; the practical ceiling is the server's `RLIMIT_NOFILE`, whose
+/// commonest soft default is 1024 — so sixteen sits two orders of magnitude
+/// under it while covering what a mount actually does: a handful of concurrent
+/// readers, each with `MOUNT_READ_AHEAD_DEPTH` windows in flight, all of them
+/// inside a few distinct objects. See [`handles`] for what a kept handle
+/// serves and why that is safe here.
+pub(crate) const CACHED_READ_HANDLES: usize = 16;
 
 /// Default transfer-chunk size for the streaming upload/download paths. Peak
 /// memory on those paths is `O(chunk)`, independent of object size.
@@ -160,6 +172,11 @@ const PAGE_SIZE: usize = 1000;
 pub struct SftpConfig {
     /// SSH destination as `ssh` resolves it: a `~/.ssh/config` `Host` alias or
     /// `user@host[:port]`. All other connection parameters come from ssh config.
+    ///
+    /// A `:port` suffix is split off and given to `ssh` as `-o Port=`, because
+    /// OpenSSH reads a bare `host:port` as a hostname and fails at DNS. An
+    /// IPv6 literal with a port therefore needs brackets — `[fe80::1]:2222` —
+    /// while a bare literal passes through whole.
     pub host: String,
     /// Remote base directory for objects. `~/…` is home-relative; `/…` is absolute.
     pub base: String,
@@ -456,6 +473,19 @@ impl SftpBackend {
     /// second must not discard the *replacement* the first one's retry has
     /// already dialled — which would turn one dead connection into an unbounded
     /// sequence of them, each killed by the previous failure's bookkeeping.
+    /// Forget any open read handle for `remote` on the live session.
+    ///
+    /// Called by every path that replaces or removes an object, so a cached
+    /// handle can never serve the bytes of a file this backend itself has
+    /// just written over. DCTL writes by staging and renaming, so the old
+    /// handle would name a superseded inode — correct POSIX behaviour, and
+    /// the wrong answer to "read the object at this key".
+    pub(crate) async fn forget_handle(&self, remote: &str) {
+        if let Some(link) = self.link.read().await.as_ref() {
+            link.handles.evict(remote);
+        }
+    }
+
     pub(crate) async fn discard(&self, dead: &Arc<Link>) {
         // Marked first, so anything already holding this connection — a staging
         // file being written to, a listing being paged — sees it even if the
@@ -605,6 +635,9 @@ impl Backend for SftpBackend {
         let remote = remote_path(&self.base, key)?;
         let moved = data.len() as u64;
         let outcome = write::put_bytes(self, &remote, &data, expected, modified).await?;
+        // The rename gave this key a new inode; any handle still open names
+        // the superseded one.
+        self.forget_handle(&remote).await;
         // One window, because the whole object was one window — the buffered
         // write is the path a small object takes.
         meter::charge(self.meter.as_ref(), moved).await;
@@ -623,7 +656,7 @@ impl Backend for SftpBackend {
         let remote = remote_path(&self.base, key)?;
         let mut src = tokio::fs::File::open(source).await?;
         let total = src.metadata().await?.len();
-        write::put_stream(
+        let outcome = write::put_stream(
             self,
             &remote,
             &mut src,
@@ -635,7 +668,9 @@ impl Backend for SftpBackend {
             },
             self.meter.as_ref(),
         )
-        .await
+        .await;
+        self.forget_handle(&remote).await;
+        outcome
     }
 
     /// The same staged write, fed by a producer instead of by a file.
@@ -652,7 +687,11 @@ impl Backend for SftpBackend {
         modified: SourceModified,
     ) -> Result<PutOutcome> {
         let remote = remote_path(&self.base, key)?;
-        write::put_object_stream(self, &remote, &mut source, modified, self.meter.as_ref()).await
+        let outcome =
+            write::put_object_stream(self, &remote, &mut source, modified, self.meter.as_ref())
+                .await;
+        self.forget_handle(&remote).await;
+        outcome
     }
 
     async fn get(&self, key: &ObjectKey) -> Result<Bytes> {
@@ -755,19 +794,31 @@ impl Backend for SftpBackend {
         let remote = remote_path(&self.base, key)?;
         let bytes = self
             .on_link(|link| async move {
-                let mut file = link
-                    .sftp
-                    .open(&remote)
-                    .await
-                    .map_err(|e| map_sftp_err(&remote, e))?;
-                let size = file
-                    .metadata()
-                    .await
-                    .map_err(|e| map_sftp_err(&remote, e))?
-                    .len()
-                    .ok_or_else(|| {
-                        StoreError::Backend("sftp server did not return file size".into())
-                    })?;
+                // The handle this session already holds, if it has one. A
+                // mount fetches chunk after chunk of the same object, and
+                // re-opening for each cost an OPEN and an FSTAT round trip on
+                // top of the READ — the dominant per-request cost on a real
+                // link. See `handles` for what a kept handle serves.
+                let (mut file, size) = match link.handles.get(&remote) {
+                    Some(open) => open,
+                    None => {
+                        let mut file = link
+                            .sftp
+                            .open(&remote)
+                            .await
+                            .map_err(|e| map_sftp_err(&remote, e))?;
+                        let size = file
+                            .metadata()
+                            .await
+                            .map_err(|e| map_sftp_err(&remote, e))?
+                            .len()
+                            .ok_or_else(|| {
+                                StoreError::Backend("sftp server did not return file size".into())
+                            })?;
+                        link.handles.put(remote.clone(), file.clone(), size);
+                        (file, size)
+                    }
+                };
 
                 if range.offset > size {
                     return Err(StoreError::RangeOutOfBounds { size });
@@ -777,13 +828,24 @@ impl Backend for SftpBackend {
 
                 // Streaming seek: read exactly the requested window at `offset`,
                 // never the whole object. `read_all` internally chunks to the
-                // sftp v3 max read length.
-                file.seek(std::io::SeekFrom::Start(range.offset)).await?;
-                let buf = file
+                // sftp v3 max read length. Seeking is local — the position
+                // rides on this clone of the handle, not on the server — so a
+                // shared handle cannot have its offset moved underneath it.
+                if let Err(error) = file.seek(std::io::SeekFrom::Start(range.offset)).await {
+                    // A handle that failed is a handle nothing should reuse.
+                    link.handles.evict(&remote);
+                    return Err(error.into());
+                }
+                let read = file
                     .read_all(to_read as usize, BytesMut::with_capacity(to_read as usize))
-                    .await
-                    .map_err(|e| map_sftp_err(&remote, e))?;
-                Ok(buf.freeze())
+                    .await;
+                match read {
+                    Ok(buf) => Ok(buf.freeze()),
+                    Err(error) => {
+                        link.handles.evict(&remote);
+                        Err(map_sftp_err(&remote, error))
+                    }
+                }
             })
             .await?;
         meter::charge(self.meter.as_ref(), bytes.len() as u64).await;
@@ -854,6 +916,9 @@ impl Backend for SftpBackend {
     async fn delete(&self, key: &ObjectKey) -> Result<()> {
         let remote = remote_path(&self.base, key)?;
         self.on_link(|link| async move {
+            // Before the removal, so no window between the unlink and the
+            // forget can hand a caller a handle to a deleted object.
+            link.handles.evict(&remote);
             match link.sftp.fs().remove_file(&remote).await {
                 Ok(()) => Ok(()),
                 // Deleting a missing object is a no-op success (idempotent).

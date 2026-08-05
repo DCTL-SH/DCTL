@@ -19,7 +19,7 @@ use serde::Serialize;
 use crate::commands::integrity::failure::{self, Verdict};
 use crate::constants::{
     INTEGRITY_COLUMN_DETAIL, INTEGRITY_COLUMN_PATH, INTEGRITY_COLUMN_SIZE, INTEGRITY_COLUMN_STATUS,
-    UNKNOWN_VALUE, VERIFY_NOTHING_VERIFIED_HINT,
+    UNKNOWN_VALUE, VERIFY_NAMED_TARGET_MISSING_HINT, VERIFY_NOTHING_VERIFIED_HINT,
 };
 use crate::error::{CliError, Result};
 use crate::exit::ExitCode;
@@ -165,6 +165,14 @@ pub struct Report {
     /// nothing about what was verified, which is what the document is for.
     #[serde(skip)]
     filters_restricted: bool,
+    /// Whether the target named one object rather than a tree.
+    ///
+    /// Read only when the run examined nothing, to tell "the object you named
+    /// is not there" (a missing object, exit 4) apart from "the enumeration
+    /// matched nothing" (an empty run, exit 9). Not serialised for the same
+    /// reason as `filters_restricted`.
+    #[serde(skip)]
+    named_object: bool,
 }
 
 impl Report {
@@ -189,6 +197,7 @@ impl Report {
             summary: Summary::default(),
             worst: Verdict::Ok,
             filters_restricted: false,
+            named_object: false,
         }
     }
 
@@ -196,6 +205,12 @@ impl Report {
     /// which kind of nothing it found.
     pub const fn filters_restricted(&mut self, restricted: bool) {
         self.filters_restricted = restricted;
+    }
+
+    /// Record that the target named one object, so a run that examined nothing
+    /// can report a missing object instead of an empty walk.
+    pub const fn named_object(&mut self, named: bool) {
+        self.named_object = named;
     }
 
     /// Note that the run stopped at the first failure.
@@ -276,6 +291,16 @@ impl Report {
         }
 
         if self.summary.examined == 0 {
+            // A named object that resolved nowhere is a discovered absence,
+            // not an empty run — unless the operator's own filters could have
+            // hidden it, in which case the filters are the cause worth naming
+            // and the object's existence was never established either way.
+            if self.named_object && !self.filters_restricted {
+                return Some(failure::named_target_missing(
+                    &self.target,
+                    VERIFY_NAMED_TARGET_MISSING_HINT,
+                ));
+            }
             return Some(failure::nothing_examined(
                 &self.nothing_verified_cause(),
                 VERIFY_NOTHING_VERIFIED_HINT,
