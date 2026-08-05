@@ -77,6 +77,13 @@ pub struct Link {
     /// (`backend/sftp/sftp.go:698`) is a property of the connection, and the
     /// pool merely consults it.
     dead: AtomicBool,
+    /// Remote files this session has open, kept between ranged reads.
+    ///
+    /// On the connection rather than on the backend so that invalidation is
+    /// structural: a session that dies takes its handles with it, and the
+    /// fresh `Link` the next operation dials starts empty. See
+    /// [`super::handles`].
+    pub(crate) handles: super::handles::HandleCache,
 }
 
 impl Link {
@@ -87,6 +94,7 @@ impl Link {
             session,
             sftp,
             dead: AtomicBool::new(false),
+            handles: super::handles::HandleCache::default(),
         }
     }
 
