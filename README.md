@@ -1,5 +1,36 @@
 # DCTL
 
+> ## ⚠️ Not ready for production
+>
+> **DCTL is under active development and is pre-1.0. Do not use it as the only
+> copy of data you cannot afford to lose.**
+>
+> This is not a disclaimer of the ordinary kind. The specific things you should
+> know before trusting it with anything:
+>
+> - **The cryptography has had no independent audit.** The design is documented
+>   in full and the implementation is open to inspection, but nobody outside
+>   this project has reviewed it. Until someone has, treat the security
+>   properties as claimed rather than verified.
+> - **Mounted vaults are read-only.** Every write operation through a mount is
+>   refused explicitly; the read-write path is not implemented yet.
+> - **Windows has never been executed.** The code exists and compiles in CI, but
+>   no release has been run on Windows by anyone.
+> - **Interfaces will change.** Commands, flags and output formats are not
+>   stable before 1.0.
+>
+> **What is stable is the on-disk format.** It is frozen, specified in full in
+> [`docs/FORMAT.md`](docs/FORMAT.md), and licensed under Apache 2.0 together
+> with a standalone C reference decoder — so data written today stays readable
+> with or without this tool, and with or without the company behind it. That
+> separation is deliberate: the format is a promise, the tool is still software
+> being written.
+>
+> Keep independent backups. Verify restores before you rely on them —
+> `dctl restore` and `dctl verify` exist for exactly that, and
+> [`docs/RESTORE_DRILL.md`](docs/RESTORE_DRILL.md) is the drill.
+
+
 **An rclone-style, streaming-first, post-quantum-ready encrypted multi-cloud transfer, backup, and streaming tool — written in Rust, built so that nothing is ever reported stored until it is provably, durably stored.**
 
 > The name **DCTL** is a working title, centralized in one crate (`dctl-meta`) so
