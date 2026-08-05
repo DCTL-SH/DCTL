@@ -1,8 +1,9 @@
 //! Reading and writing the timestamps `dctl touch` accepts.
 //!
 //! DCTL converts calendar dates itself rather than taking a datetime dependency.
-//! The reason is `PLAN.md` §13.1: a 20-year restorability promise is a promise
-//! about the *smallest possible* dependency surface, and a proleptic Gregorian
+//! The reason is [the plan](https://doc.dctl.sh/project/plan) §13.1: a 20-year
+//! restorability promise is a promise about the *smallest possible* dependency
+//! surface, and a proleptic Gregorian
 //! calendar has not changed since 1582 and will not change again. Sixty lines of
 //! arithmetic that a reader can check against a wall calendar are a better bet
 //! than a crate that may not build on a compiler released in 2045.

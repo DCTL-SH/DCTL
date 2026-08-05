@@ -50,7 +50,8 @@ pub enum CoreError {
 
 /// Stable, FFI-safe classification of an error for host retry/UX decisions.
 ///
-/// This is a coarse, **stable** signal (`docs/ERROR_CODES.md`): the GUI/Tauri
+/// This is a coarse, **stable** signal ([the error-code
+/// reference](https://doc.dctl.sh/reference/error-codes)): the GUI/Tauri
 /// and iOS FFI layers branch on it instead of parsing message strings. The set
 /// is intentionally small and additive-only — like the numeric [`CoreError::code`]
 /// scheme, existing meanings never change.
@@ -74,10 +75,11 @@ pub enum ErrorKind {
 impl CoreError {
     /// Stable, FFI-safe numeric error code for this error.
     ///
-    /// Codes are **FROZEN** (`docs/ERROR_CODES.md`): a number is never
-    /// renumbered or reused, and new variants only ever take new, unused
-    /// numbers — a one-way door like `docs/FORMAT.md` §8. `0` is reserved for
-    /// success/none and is never returned here.
+    /// Codes are **FROZEN** ([the error-code
+    /// reference](https://doc.dctl.sh/reference/error-codes)): a number is
+    /// never renumbered or reused, and new variants only ever take new, unused
+    /// numbers — a one-way door like `crates/dctl-decode/FORMAT.md` §8. `0` is
+    /// reserved for success/none and is never returned here.
     ///
     /// `CoreError`'s own variants occupy the `4xxx` range; the wrapper variants
     /// **delegate** to the wrapped sub-error's `code()`, so a single call on the
@@ -99,7 +101,8 @@ impl CoreError {
     ///
     /// Own variants map directly; wrapper variants classify the underlying
     /// sub-error (honoring `StoreError`'s transient-vs-permanent split). Stable
-    /// and additive-only — see [`ErrorKind`] and `docs/ERROR_CODES.md`.
+    /// and additive-only — see [`ErrorKind`] and [the error-code
+    /// reference](https://doc.dctl.sh/reference/error-codes).
     pub fn kind(&self) -> ErrorKind {
         match self {
             CoreError::Unlock => ErrorKind::Auth,

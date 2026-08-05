@@ -226,11 +226,12 @@ pub enum StoreError {
 impl StoreError {
     /// Stable, FFI-safe numeric error code for this variant.
     ///
-    /// Codes are **FROZEN** (`docs/ERROR_CODES.md`): a number is never
-    /// renumbered or reused, and new variants only ever take new, unused
-    /// numbers — a one-way door like `docs/FORMAT.md` §8. The `2xxx` range is
-    /// reserved for the store layer. `0` is reserved for success/none and is
-    /// never returned here.
+    /// Codes are **FROZEN** ([the error-code
+    /// reference](https://doc.dctl.sh/reference/error-codes)): a number is
+    /// never renumbered or reused, and new variants only ever take new, unused
+    /// numbers — a one-way door like `crates/dctl-decode/FORMAT.md` §8. The
+    /// `2xxx` range is reserved for the store layer. `0` is reserved for
+    /// success/none and is never returned here.
     pub fn code(&self) -> u32 {
         match self {
             StoreError::NotFound(_) => 2001,

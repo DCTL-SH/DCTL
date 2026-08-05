@@ -13,7 +13,8 @@
 //! A plain local file knows nothing, so it has to be read. That is expensive —
 //! `--checksum` over two local trees costs a full pass over both — and it is
 //! exactly the cost the flag exists to buy: the user asked for content equality
-//! rather than a metadata guess, and `PLAN.md` §6 forbids answering a cheaper
+//! rather than a metadata guess, and
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids answering a cheaper
 //! question and calling it the one that was asked.
 //!
 //! ## Why BLAKE3, and why hex
@@ -27,10 +28,11 @@
 //!
 //! ## Memory
 //!
-//! The file is streamed through a fixed buffer, never read whole. `PLAN.md`
-//! §16.2 caps memory at O(concurrency), and a `--checksum` that materialised a
-//! fifty-gigabyte file in order to *decide whether to copy it* would be the most
-//! absurd possible way to break that rule.
+//! The file is streamed through a fixed buffer, never read whole.
+//! [The plan](https://doc.dctl.sh/project/plan) §16.2 caps memory at
+//! O(concurrency), and a `--checksum` that materialised a fifty-gigabyte file
+//! in order to *decide whether to copy it* would be the most absurd possible
+//! way to break that rule.
 
 use std::fs::File;
 use std::io::Read as _;

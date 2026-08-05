@@ -1,7 +1,7 @@
 //! Where entries come from, one page at a time.
 //!
 //! The listing family is written against [`Pages`] and never against a `Vec`,
-//! because `PLAN.md` §16.2 is explicit that the full file set is **never** held
+//! because [the plan](https://doc.dctl.sh/project/plan) §16.2 is explicit that the full file set is **never** held
 //! in RAM: memory stays O(page), not O(files). A renderer that took a slice
 //! would work perfectly on a developer's ten-file test vault and fall over on
 //! the ten-million-file dataset the tool is designed for, and the fix at that
@@ -54,7 +54,7 @@ pub trait Pages: Send {
     /// Whatever the underlying index or provider reported. A failure part-way
     /// through a listing is an error, never a short read — a truncated listing
     /// that looked complete would be the worst possible output of a tool whose
-    /// central promise is not to misreport (`PLAN.md` §6).
+    /// central promise is not to misreport ([the plan](https://doc.dctl.sh/project/plan) §6).
     async fn next_page(&mut self) -> Result<Option<Vec<Entry>>>;
 
     /// What the sizes on this listing's entries measure.
@@ -259,7 +259,7 @@ impl Pages for Pager {
 /// Whatever [`crate::source::open`] reported: an unresolvable remote or an
 /// unreadable configuration ([`ExitCode::FatalError`]), or a vault that will not
 /// unlock ([`ExitCode::VaultLocked`]). Never an empty listing — reporting "no
-/// objects" for something that was never read is the misreport `PLAN.md` §6
+/// objects" for something that was never read is the misreport [the plan](https://doc.dctl.sh/project/plan) §6
 /// forbids, and a script that branched on it would delete a backup it believed
 /// had already been superseded.
 ///
@@ -682,7 +682,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unresolvable_remote_errors_rather_than_reporting_empty() {
-        // `PLAN.md` §6: never report an outcome that did not happen. An empty
+        // [The plan](https://doc.dctl.sh/project/plan) §6: never report an outcome that did not happen. An empty
         // listing here would read as "the vault holds nothing".
         let target = Target::parse(Some("nosuchremote:photos"), None).unwrap();
         let error = open(&ctx(&["--no-ask-password"]), &target)

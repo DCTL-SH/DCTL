@@ -4,7 +4,7 @@
 //! stored object. Path keys are keyed-hashed and record values are AEAD-encrypted,
 //! so the on-disk database reveals neither paths nor metadata at rest. The index is
 //! a fast local cache — it is rebuildable by scanning object headers, so losing it
-//! never means losing data (`PLAN.md` §13).
+//! never means losing data ([the plan](https://doc.dctl.sh/project/plan) §13).
 #![forbid(unsafe_code)]
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 

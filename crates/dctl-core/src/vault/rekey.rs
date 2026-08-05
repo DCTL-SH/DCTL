@@ -9,9 +9,10 @@
 //! re-create the envelope from the new password. That produces a vault with one
 //! way in again, silently destroying the paper backup the owner is relying on;
 //! nobody discovers it until the day the phrase is needed, which is the one day
-//! it cannot be tested. `PLAN.md` §13.2 is explicit that the paths are
-//! independent, and independence is a property of *this* function more than of
-//! `init` — creating several paths is easy, keeping them is not.
+//! it cannot be tested. [The plan](https://doc.dctl.sh/project/plan) §13.2 is
+//! explicit that the paths are independent, and independence is a property of
+//! *this* function more than of `init` — creating several paths is easy,
+//! keeping them is not.
 //!
 //! ## What "leaving the others alone" means precisely
 //!

@@ -3,9 +3,10 @@
 //! Every argument is *pre-flighted* before a single byte reaches stdout: the
 //! object is located, its size is read, and the requested span is resolved
 //! against that size. Only when every argument has survived does the command
-//! start writing. That ordering is deliberate — `dctl cat a.bin archive:b.bin >
-//! out` must not emit half a stream and then fail, because a truncated file that
-//! *looks* complete is exactly the false success `PLAN.md` §6 exists to prevent.
+//! start writing. That ordering is deliberate —
+//! `dctl cat a.bin archive:b.bin > out` must not emit half a stream and then
+//! fail, because a truncated file that *looks* complete is exactly the false
+//! success [the plan](https://doc.dctl.sh/project/plan) §6 exists to prevent.
 //!
 //! ## Two origins, one pre-flight
 //!
@@ -31,11 +32,12 @@
 //! It used to be much worse against a sealed vault, and this is where the
 //! difference showed. `dctl-core` exposed only a whole-object read, so a vault
 //! served `--count 4` against a 40 GB film by moving 40 GB — a transfer that
-//! returned four bytes, exited 0, and appeared on a bill with nothing linking it
-//! back to the command. This file warned about it at pre-flight because that was
-//! the only honest thing available. It no longer needs to: a vault computes the
-//! chunks covering a window and fetches exactly those (`docs/FORMAT.md` §3), so
-//! both sources are O(window) and the warning is gone rather than dormant.
+//! returned four bytes, exited 0, and appeared on a bill with nothing linking
+//! it back to the command. This file warned about it at pre-flight because that
+//! was the only honest thing available. It no longer needs to: a vault computes
+//! the chunks covering a window and fetches exactly those
+//! (`crates/dctl-decode/FORMAT.md` §3), so both sources are O(window) and the
+//! warning is gone rather than dormant.
 //!
 //! `dctl cat archive:film.mkv` with no range flags still needs room for the film,
 //! because that asks for the film. [`Reader`] gains a streaming variant the day
@@ -229,9 +231,9 @@ pub enum Reader {
     /// Bytes already fetched. See the module documentation for what this costs
     /// and why the alternative does not exist yet.
     ///
-    /// [`Zeroizing`] because these may be a vault's plaintext, and `PLAN.md` §7
-    /// wants it gone from memory when the reader dies rather than left in a
-    /// freed page.
+    /// [`Zeroizing`] because these may be a vault's plaintext, and
+    /// [the plan](https://doc.dctl.sh/project/plan) §7 wants it gone from
+    /// memory when the reader dies rather than left in a freed page.
     Buffered {
         bytes: Zeroizing<Vec<u8>>,
         position: usize,

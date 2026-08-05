@@ -52,7 +52,8 @@ the truth.*
 
 > The name **DCTL** is a working title, centralized in one crate (`dctl-meta`) so
 > it can be changed later. On-disk **format identifiers are deliberately
-> brand-neutral and frozen** (see [`docs/FORMAT.md`](docs/FORMAT.md)) — renaming
+> brand-neutral and frozen** (see
+> [`crates/dctl-decode/FORMAT.md`](crates/dctl-decode/FORMAT.md)) — renaming
 > the product never touches the format, and a vault written today stays readable
 > whatever the tool ends up called.
 
@@ -100,7 +101,7 @@ under active refactor, `Planned` means specified but not built.
 | Area | What it is | Status |
 |------|-----------|--------|
 | **Crypto core** (`dctl-crypto`) | Argon2id (RFC 9106, calibrated), XChaCha20-Poly1305, HKDF-SHA512, BLAKE3, key-committing AEAD | Done (`#![forbid(unsafe_code)]`, unit + property tested) |
-| **Frozen v1 format** | DKE1 envelope, DSF1 streaming object, §5 name records — design-locked | Done — see [`docs/FORMAT.md`](docs/FORMAT.md) |
+| **Frozen v1 format** | DKE1 envelope, DSF1 streaming object, §5 name records — design-locked | Done — see [`crates/dctl-decode/FORMAT.md`](crates/dctl-decode/FORMAT.md) |
 | **Local backend** | `LocalFs` provider, verified writes | Done (fully exercised) |
 | **B2 / S3 / R2 backends** | `Backend` trait, constant-memory multipart, presigned uploads | Implemented — **live end-to-end NOT yet verified** (integration tests are `#[ignore]` + env-gated) |
 | **Encrypted index** (`dctl-index`) | SQLCipher (bundled), metadata-private, WAL, multi-process | Done |
@@ -111,8 +112,8 @@ under active refactor, `Planned` means specified but not built.
 | **`mount`** | Read-only FUSE mount of a vault: chunk-ranged reads, inferred directories, `EROFS` on every write | Implemented on Linux (FUSE3) and macOS (macFUSE); Windows refuses by name (needs WinFSP). **Attached against a live kernel on macOS**: macFUSE 5.3.3 / macOS 27, mounted, listed, read byte-for-byte including a mid-file seek, writes refused, and unmounted with the mountpoint confirmed free. The Linux path is unit-tested end to end over a real backend |
 | **Reference decoder + KAT** (`dctl-decode`) | Dependency-free C99 decoder + cross-validation | Done |
 
-See [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) for the current per-area
-detail and the full list of known caveats.
+See [the project status](https://doc.dctl.sh/project/status) for the current
+per-area detail and the full list of known caveats.
 
 ## Quick start
 
@@ -161,7 +162,7 @@ diff "$D/hello.txt" "$D/restored.txt" && echo "byte-exact restore OK"
 For unattended jobs, add `--no-ask-password` so a missing credential fails fast
 instead of hanging on an invisible prompt. Every global flag (auth sources,
 verify modes, filters, output) is documented in
-[`docs/GLOBAL_FLAGS.md`](docs/GLOBAL_FLAGS.md).
+[the global-flag reference](https://doc.dctl.sh/reference/global-flags).
 
 ## Architecture at a glance
 
@@ -170,7 +171,7 @@ format stays independent of any single backend or CLI.
 
 | Crate | Role |
 |-------|------|
-| [`dctl-crypto`](docs/CRATES.md) | Frozen v1 format + all primitives; `#![forbid(unsafe_code)]` |
+| [`dctl-crypto`](https://doc.dctl.sh/reference/crates) | Frozen v1 format + all primitives; `#![forbid(unsafe_code)]` |
 | `dctl-secmem` | The **one** audited home for `unsafe` FFI (mlock/madvise, `LockedSecret`) |
 | `dctl-meta` | Single renameable source of app name, paths, and env prefix |
 | `dctl-store` | Provider-neutral `Backend` trait + `LocalFs`, `B2`, `S3`, `R2` |
@@ -202,27 +203,28 @@ graph TD
     DECODE -. validates .-> CRYPTO
 ```
 
-See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full picture and
-[`docs/CRATES.md`](docs/CRATES.md) for the per-crate API surface.
+See [the architecture reference](https://doc.dctl.sh/reference/architecture) for
+the full picture and [the crate reference](https://doc.dctl.sh/reference/crates)
+for the per-crate API surface.
 
 ## Documentation
 
 | Doc | What it covers |
 |-----|----------------|
-| [`docs/README.md`](docs/README.md) | Documentation index / map |
-| [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | How the crates fit together |
-| [`docs/SECURITY.md`](docs/SECURITY.md) | Threat model, guarantees, and honest limits |
-| [`docs/GUIDE.md`](docs/GUIDE.md) | Task-oriented user guide |
-| [`docs/CRATES.md`](docs/CRATES.md) | Per-crate roles and APIs |
-| [`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md) | Building, testing, contributing |
-| [`docs/FORMAT.md`](docs/FORMAT.md) | Normative, frozen on-disk format spec |
-| [`docs/GLOBAL_FLAGS.md`](docs/GLOBAL_FLAGS.md) | Every global flag and env var |
-| [`docs/commands/README.md`](docs/commands/README.md) | Per-command reference pages |
-| [`docs/EXIT_CODES.md`](docs/EXIT_CODES.md) | Exit-code contract |
-| [`docs/ERROR_CODES.md`](docs/ERROR_CODES.md) | FFI-stable error codes |
-| [`docs/AUDIT_LOG.md`](docs/AUDIT_LOG.md) | Audit-log format |
-| [`docs/PROJECT_STATUS.md`](docs/PROJECT_STATUS.md) | Current status and caveats |
-| [`PLAN.md`](PLAN.md) | Vision, locked decisions, roadmap |
+| [doc.dctl.sh](https://doc.dctl.sh) | Documentation index / map |
+| [Architecture](https://doc.dctl.sh/reference/architecture) | How the crates fit together |
+| [Threat model](https://doc.dctl.sh/security/threat-model) | Threat model, guarantees, and honest limits |
+| [Guide](https://doc.dctl.sh/guide) | Task-oriented user guide |
+| [Crates](https://doc.dctl.sh/reference/crates) | Per-crate roles and APIs |
+| [Development](https://doc.dctl.sh/project/development) | Building, testing, contributing |
+| [`crates/dctl-decode/FORMAT.md`](crates/dctl-decode/FORMAT.md) | Normative, frozen on-disk format spec |
+| [Global flags](https://doc.dctl.sh/reference/global-flags) | Every global flag and env var |
+| [Commands](https://doc.dctl.sh/commands) | Per-command reference pages |
+| [Exit codes](https://doc.dctl.sh/reference/exit-codes) | Exit-code contract |
+| [Error codes](https://doc.dctl.sh/reference/error-codes) | FFI-stable error codes |
+| [Audit log](https://doc.dctl.sh/reference/audit-log) | Audit-log format |
+| [Project status](https://doc.dctl.sh/project/status) | Current status and caveats |
+| [Plan](https://doc.dctl.sh/project/plan) | Vision, locked decisions, roadmap |
 
 ## Security summary
 
@@ -237,7 +239,8 @@ root-/recipient-key compromise (static-recipient at-rest, by design); **no sende
 authentication** in v1 (confidentiality + integrity, not origin auth); the
 sharing graph and object sizes are **metadata surfaces** visible to the backend;
 `--key-file` (second factor) is **not yet supported** and is refused rather than
-silently ignored. Full threat model in [`docs/SECURITY.md`](docs/SECURITY.md).
+silently ignored. Full threat model in the
+[threat-model page](https://doc.dctl.sh/security/threat-model).
 
 ## Build & test
 

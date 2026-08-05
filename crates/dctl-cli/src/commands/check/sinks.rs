@@ -224,7 +224,7 @@ impl Sinks {
     /// Explicit rather than left to `Drop`, because a buffered write that fails
     /// while the value is being dropped has nowhere to report the failure — and
     /// a truncated verdict file that nobody was told about is precisely the
-    /// silent partial success `PLAN.md` §6 forbids.
+    /// silent partial success [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
     ///
     /// # Errors
     /// Any flush failure, named with the file it happened on.

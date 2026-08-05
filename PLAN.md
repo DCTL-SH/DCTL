@@ -45,7 +45,8 @@
   *repairable* (not just detectable), providers are replaceable (§13).
 - **D9 — brand-neutral frozen format + latest deps:** the product name is
   centralized (a `dctl-meta` crate) and freely renameable; on-disk format
-  identifiers are brand-neutral and frozen forever (`docs/FORMAT.md`). Toolchain =
+  identifiers are brand-neutral and frozen forever (`crates/dctl-decode/FORMAT.md`).
+  Toolchain =
   Rust **edition 2024**, latest stable crates, kept current via `cargo update` +
   `cargo deny`.
 - **D10 — enterprise scale (millions of files):** every operation is streaming and
@@ -248,7 +249,8 @@ encrypted to the remote. Lets you *prove* what happened and detect log tampering
 - **Permanent** (auth, quota exhausted, **checksum-mismatch**, decrypt/AEAD
   failure, corruption) → **hard fail, never swallowed**, source preserved.
 - **Fatal** (config, disk full on cache) → stop with a clear message.
-- Stable **error codes** + remediation hints (`docs/ERROR_CODES.md`), deterministic
+- Stable **error codes** + remediation hints
+  ([the error-code reference](https://doc.dctl.sh/reference/error-codes)), deterministic
   process **exit codes** for scripting.
 - **Never** report partial/unverified work as success (this is enforced by §6).
 
@@ -379,7 +381,8 @@ makes **key loss** and **format/software obsolescence** the real long-term enemi
 not the algorithms (AES/ChaCha/SHA/Argon2 will still decode in 2046). Four pillars:
 
 ### 13.1 The data outlives DCTL (format independence)
-- **Open, versioned, formally documented on-disk spec** (`docs/FORMAT.md`) — the
+- **Open, versioned, formally documented on-disk spec**
+  (`crates/dctl-decode/FORMAT.md`) — the
   data is reconstructable from documentation alone, with no DCTL binary.
 - **Self-describing objects:** each object header carries magic, format version,
   algo ids, KDF params, chunk layout **and its own encrypted metadata** (original
@@ -406,7 +409,8 @@ not the algorithms (AES/ChaCha/SHA/Argon2 will still decode in 2046). Four pilla
   const-time tag compare. KATs pass: Argon2id vs the official RFC 9106 vector
   (independent of both implementations), full-chain vs Rust across boundary sizes,
   and negative vectors rejected. TODO for maximum rigor: commit *frozen* DCTL
-  vectors (not regenerated at test time) + one vector hand-derived from FORMAT.md.
+  vectors (not regenerated at test time) + one vector hand-derived from
+  `crates/dctl-decode/FORMAT.md`.
 - **Standardized primitives only** (RFC/FIPS): AES-256-GCM (FIPS), ChaCha20/
   XChaCha20-Poly1305 (RFC 8439), SHA-256/512, HKDF (RFC 5869), Argon2id (RFC 9106),
   ML-KEM (FIPS 203) — many independent implementations will exist in 20 years, so
@@ -615,8 +619,9 @@ counters/metrics (bytes, files, retries, throughput); the hash-chained audit log
 
 ### 16.5 Professional error handling
 `thiserror` typed errors per crate, `anyhow` context at the app edge; stable error
-codes + remediation (`docs/ERROR_CODES.md`); **zero `unwrap`/`panic`/`expect` in
-library code**, enforced by `#![deny(clippy::unwrap_used, clippy::expect_used,
+codes + remediation
+([the error-code reference](https://doc.dctl.sh/reference/error-codes)); **zero
+`unwrap`/`panic`/`expect` in library code**, enforced by `#![deny(clippy::unwrap_used, clippy::expect_used,
 clippy::panic)]`. Partial-batch failures are reported precisely (which file, which
 stage) and never rolled up into a false success.
 

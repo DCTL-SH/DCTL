@@ -12,7 +12,7 @@
 //!
 //! And it **writes the no-secrets header**, which is the one place a user
 //! reliably reads the rule: they are looking at it at the exact moment they are
-//! about to paste an application key in (`PLAN.md` §14).
+//! about to paste an application key in ([the plan](https://doc.dctl.sh/project/plan) §14).
 //!
 //! Idempotent. An existing file is never rewritten, because doing so would
 //! discard comments and formatting that a human put there deliberately.

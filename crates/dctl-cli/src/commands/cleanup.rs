@@ -10,8 +10,8 @@
 //!   this litter is a *consequence* of the durability guarantee, not a bug.
 //! * **Orphaned content objects.** A sealed object stored by a write that never
 //!   reached its index commit — which is exactly what a verified write that
-//!   aborts leaves behind (`PLAN.md` §6 step 6). This is the command that cleans
-//!   up after that contract.
+//!   aborts leaves behind ([the plan](https://doc.dctl.sh/project/plan) §6 step
+//!   6). This is the command that cleans up after that contract.
 //! * **Abandoned multipart uploads.** A crash between parts leaves one open. The
 //!   parts already stored are charged for and no *object* listing shows them —
 //!   which is why they have a listing of their own.
@@ -45,11 +45,12 @@
 //!
 //! [`dctl_store::Backend`] exposes no way to list an object's superseded
 //! versions. A sweep reporting "0 reclaimed" for a class it was never able to
-//! *look* at would be the misreport `PLAN.md` §6 forbids, so it emits an explicit
-//! `unsupported` record naming the missing capability — and counts as an error
-//! only when the user asked for it by name. See [`super::removal::reclaim`],
-//! which also explains why the orphan sweep proves the index is complete before
-//! it trusts an absence.
+//! *look* at would be the misreport
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids, so it emits an
+//! explicit `unsupported` record naming the missing capability — and counts as
+//! an error only when the user asked for it by name. See
+//! [`super::removal::reclaim`], which also explains why the orphan sweep proves
+//! the index is complete before it trusts an absence.
 //!
 //! `multipart` used to be the second and is not: the trait now carries
 //! [`list_incomplete_uploads`](dctl_store::Backend::list_incomplete_uploads) and

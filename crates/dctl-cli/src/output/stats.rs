@@ -6,11 +6,11 @@
 //! a consistent-enough snapshot ~10×/second without ever blocking a transfer.
 //!
 //! The rows are deliberately DCTL-specific. A generic copier reports "bytes
-//! moved"; DCTL's contract (`PLAN.md` §6) is that bytes are *encrypted*, then
-//! *verified against the provider's checksum*, then *committed to the index*, so
-//! the display separates those stages. "Transferred" going up while "Verified"
-//! lags is meaningful information — it means data is in flight but not yet
-//! provably durable.
+//! moved"; DCTL's contract ([the plan](https://doc.dctl.sh/project/plan) §6) is
+//! that bytes are *encrypted*, then *verified against the provider's checksum*,
+//! then *committed to the index*, so the display separates those stages.
+//! "Transferred" going up while "Verified" lags is meaningful information — it
+//! means data is in flight but not yet provably durable.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,8 +18,8 @@ use std::time::Instant;
 
 /// Which stage of the verified-write pipeline a file is currently in.
 ///
-/// Mirrors the numbered steps of `PLAN.md` §6 so the display and the spec use
-/// the same vocabulary.
+/// Mirrors the numbered steps of [the plan](https://doc.dctl.sh/project/plan)
+/// §6 so the display and the spec use the same vocabulary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Stage {
     /// Step 1 — streaming the source and hashing the plaintext.

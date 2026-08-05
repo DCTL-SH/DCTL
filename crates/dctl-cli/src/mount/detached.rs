@@ -20,8 +20,8 @@
 //! started with `--allow-other` or `--allow-root` left the mountpoint attached
 //! and dead, and the command reported `unmounted '<path>' on request` and exited
 //! 25 anyway. An operator reading that walks away from a directory on which every
-//! subsequent access fails. That is `PLAN.md` §6's misreport, and this module is
-//! the check that ends it.
+//! subsequent access fails. That is [the plan](https://doc.dctl.sh/project/plan)
+//! §6's misreport, and this module is the check that ends it.
 //!
 //! ## Why the device number, and not an errno
 //!

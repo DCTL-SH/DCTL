@@ -17,9 +17,10 @@
 //!    and removes it.
 //!
 //! Sharing the sequence is not tidiness. Steps 1 to 3 are the safety contract
-//! (`PLAN.md` §6), and six copies of a safety contract is six chances for one of
-//! them to be subtly wrong — a `delete` that forgot to honour `--dry-run` would
-//! destroy data on a run whose entire purpose was to destroy nothing.
+//! ([the plan](https://doc.dctl.sh/project/plan) §6), and six copies of a safety
+//! contract is six chances for one of them to be subtly wrong — a `delete` that
+//! forgot to honour `--dry-run` would destroy data on a run whose entire purpose
+//! was to destroy nothing.
 //!
 //! ## The gate is ahead of the unlock, deliberately
 //!

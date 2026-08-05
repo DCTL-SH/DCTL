@@ -56,8 +56,8 @@ pub enum AgeProblem {
     ///
     /// `--min-age 30d --max-age 7d` asks for files both older than a month and
     /// younger than a week. rclone refuses the same pair, and for the reason
-    /// `PLAN.md` §6 cares about: a run that can only ever move nothing must not
-    /// report success.
+    /// [the plan](https://doc.dctl.sh/project/plan) §6 cares about: a run that
+    /// can only ever move nothing must not report success.
     Crossed { min: i64, max: i64 },
 }
 

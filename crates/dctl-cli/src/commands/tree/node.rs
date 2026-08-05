@@ -2,8 +2,9 @@
 //!
 //! ## Why this one command holds a structure in memory
 //!
-//! Every other listing verb streams in constant memory, and `PLAN.md` §16.2 is
-//! why. `tree` cannot, and the reason is inherent to the output rather than to
+//! Every other listing verb streams in constant memory, and
+//! [the plan](https://doc.dctl.sh/project/plan) §16.2 is why. `tree` cannot, and
+//! the reason is inherent to the output rather than to
 //! the implementation: the connector drawn beside a node depends on whether that
 //! node has any **later siblings**, and a directory's later siblings are only
 //! known once its entire subtree has been read. Drawing `├──` where `└──`

@@ -3,7 +3,8 @@
 //!
 //! Two categories, kept strictly separate:
 //!
-//! * **FROZEN FORMAT IDENTIFIERS** — part of the on-disk format (`docs/FORMAT.md`).
+//! * **FROZEN FORMAT IDENTIFIERS** — part of the on-disk format
+//!   (`crates/dctl-decode/FORMAT.md`).
 //!   They are intentionally **independent of the product/app name** (which may be
 //!   rebranded freely) and **MUST NEVER CHANGE**, or previously written data
 //!   becomes permanently unreadable. Do not derive these from the app name.
@@ -39,18 +40,18 @@ pub const FLAG_FOOTER: u8 = 0x01;
 pub const INFO_INDEX: &[u8] = b"index-key-v1";
 pub const INFO_CACHE: &[u8] = b"cache-key-v1";
 /// **Reserved, and consumed by nothing in this build.** The label is frozen in
-/// `docs/FORMAT.md` §1 so a future keyed audit profile has a name already
-/// allocated to it, but the shipped audit log is *unkeyed*: `docs/AUDIT_LOG.md`
-/// §3's chain hash is plain BLAKE3 over public values, which is what lets §8's
-/// standalone verifiers be twenty lines and no key.
+/// `crates/dctl-decode/FORMAT.md` §1 so a future keyed audit profile has a name already
+/// allocated to it, but the shipped audit log is *unkeyed*:
+/// [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §3's chain hash is
+/// plain BLAKE3 over public values, which is what lets §8's standalone verifiers be twenty
+/// lines and no key.
 ///
 /// Deriving it and keying the chain with it would **not** buy authorship, and
-/// `docs/AUDIT_LOG.md` §11.2 is the argument: DCTL appends a record on every
-/// operation unattended, so it must be able to reach whatever it signs with —
-/// and on the deployment it has, every attacker who can write the log can reach
-/// the root key's derivation path too. Wiring this up would turn "no claim"
-/// into a false one. It is here so that the label stays allocated, not because
-/// it is nearly used.
+/// [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §11.2 is the argument:
+/// DCTL appends a record on every operation unattended, so it must be able to reach whatever
+/// it signs with — and on the deployment it has, every attacker who can write the log can
+/// reach the root key's derivation path too. Wiring this up would turn "no claim" into a
+/// false one. It is here so that the label stays allocated, not because it is nearly used.
 pub const INFO_AUDIT: &[u8] = b"audit-key-v1";
 /// Name-layer sub-key labels (§1). `name-hash-key` keys the public path hash;
 /// `name-value-key` encrypts the record value — split so publishing `n/*` keys never
@@ -59,7 +60,7 @@ pub const INFO_NAME_HASH: &[u8] = b"name-hash-key-v1";
 pub const INFO_NAME_VALUE: &[u8] = b"name-value-key-v1";
 pub const INFO_OBJECT_KEYING: &[u8] = b"object-keying-v1";
 
-// ── Envelope `DKE1` slot-list — FROZEN (docs/FORMAT.md §2) ──
+// ── Envelope `DKE1` slot-list — FROZEN (`crates/dctl-decode/FORMAT.md` §2) ──
 /// Envelope `vault_id` length (bytes).
 pub const VAULT_ID_LEN: usize = 16;
 /// Maximum slots in an envelope (`slot_count` is bounded `1..=64`).
@@ -86,7 +87,7 @@ pub const SLOT_COMMIT_INFO: &[u8] = b"dctl-slot-commit-v1";
 /// Slot wrap-AAD domain prefix. Frozen.
 pub const SLOT_AAD_PREFIX: &[u8] = b"dctl-slot-v1::";
 
-// ── Object `DSF1` self-describing — FROZEN (docs/FORMAT.md §3-§4) ──
+// ── Object `DSF1` self-describing — FROZEN (`crates/dctl-decode/FORMAT.md` §3-§4) ──
 /// Fixed head length (bytes) — also folded into every object AAD.
 pub const OBJECT_HEAD_LEN: usize = 68;
 /// KEM ids: 0 root-wrapped DEK · 1 recipient hybrid (X25519+ML-KEM-768, §12).
@@ -350,11 +351,11 @@ const _: () = assert!(
         == (RECOVERY_MNEMONIC_ENTROPY_BYTES * 8 + RECOVERY_MNEMONIC_ENTROPY_BYTES * 8 / 32) / 11
 );
 
-// Mandatory Argon2id parameter ceilings (FORMAT.md §2). Because envelope KDF
-// params are read from untrusted storage *before* the wrapped-root tag can be
-// checked, decoders MUST reject out-of-range params before ever running the KDF —
-// otherwise a corrupt slot can demand terabytes of RAM or hours of CPU just to
-// attempt an unlock. Frozen constants so all decoders agree.
+// Mandatory Argon2id parameter ceilings (`crates/dctl-decode/FORMAT.md` §2). Because
+// envelope KDF params are read from untrusted storage *before* the wrapped-root tag can be
+// checked, decoders MUST reject out-of-range params before ever running the KDF — otherwise
+// a corrupt slot can demand terabytes of RAM or hours of CPU just to attempt an unlock.
+// Frozen constants so all decoders agree.
 /// Minimum Argon2id memory cost (KiB).
 pub const ARGON2_MIN_M_COST: u32 = 8;
 /// Maximum Argon2id memory cost (KiB) — 1 GiB.
@@ -393,8 +394,9 @@ pub const TEST_ARGON2_T_COST: u32 = 1;
 /// and the §2 floor of 8 KiB satisfies that for exactly one lane.
 pub const TEST_ARGON2_P_LANES: u32 = 1;
 
-/// Default chunk size for the media/streaming profile (1 MiB — FORMAT.md §7:
-/// keeps player probes/seeks cheap and per-chunk memory low for FUSE/File-Provider).
+/// Default chunk size for the media/streaming profile (1 MiB —
+/// `crates/dctl-decode/FORMAT.md` §7: keeps player probes/seeks cheap and per-chunk memory
+/// low for FUSE/File-Provider).
 pub const DEFAULT_CHUNK_SIZE: u32 = 1024 * 1024;
 /// Hard upper bound on `chunk_size` (16 MiB); objects outside `(0, MAX]` are rejected.
 pub const MAX_CHUNK_SIZE: u32 = 16 * 1024 * 1024;

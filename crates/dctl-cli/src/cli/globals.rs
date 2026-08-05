@@ -1,11 +1,13 @@
 //! Global flags — available on every subcommand.
 //!
 //! Grouped by `help_heading` so `dctl --help` reads as a set of related dials
-//! rather than one 60-line wall. The groups mirror the structure of `PLAN.md`:
-//! durability (§6), observability (§7), scale (§16.2), and safety.
+//! rather than one 60-line wall. The groups mirror the structure of
+//! [the plan](https://doc.dctl.sh/project/plan): durability (§6),
+//! observability (§7), scale (§16.2), and safety.
 //!
 //! Every flag has an environment-variable equivalent so DCTL runs headless on a
-//! server with no interactive configuration step (`PLAN.md` §14).
+//! server with no interactive configuration step
+//! ([the plan](https://doc.dctl.sh/project/plan) §14).
 
 use std::path::PathBuf;
 
@@ -18,16 +20,18 @@ use crate::limits::{ByteLimit, TimeLimit};
 use crate::logging::{LogFormat, LogLevel};
 use crate::output::{ColorChoice, Format, Units};
 
-/// Strength of the post-transfer verification (`PLAN.md` §6 step 5).
+/// Strength of the post-transfer verification
+/// ([the plan](https://doc.dctl.sh/project/plan) §6 step 5).
 ///
 /// The cost/assurance dial the plan requires to be explicit: full read-back on a
 /// 50 GB video doubles egress, so the default is the provider-checksum
 /// comparison — still strong, because a mismatch hard-aborts and commits
 /// nothing — and the deeper modes are opt-in.
 ///
-/// Derives serde as well as [`clap::ValueEnum`] because `PLAN.md` §14 makes the
-/// verification strength a **per-remote** setting in `config.toml` as well as a
-/// flag: the trade-off belongs to the destination (a read-back is free against a
+/// Derives serde as well as [`clap::ValueEnum`] because
+/// [the plan](https://doc.dctl.sh/project/plan) §14 makes the verification
+/// strength a **per-remote** setting in `config.toml` as well as a flag: the
+/// trade-off belongs to the destination (a read-back is free against a
 /// local disk and doubles egress against a bucket). Both spellings are lower
 /// case so `--verify strict` and `verify = "strict"` are the same word, and a
 /// test in `crate::config::model` holds the two renames together.
@@ -178,9 +182,10 @@ pub struct GlobalArgs {
     )]
     pub recovery_phrase_file: Option<PathBuf>,
 
-    /// Second-factor keyfile (PLAN.md §8): 'know' plus 'have'. REFUSED in this
-    /// build — the engine derives the key from the password alone, so a run
-    /// that passes this fails rather than silently using one factor.
+    /// Second-factor keyfile (<https://doc.dctl.sh/project/plan> §8): 'know'
+    /// plus 'have'. REFUSED in this build — the engine derives the key from the
+    /// password alone, so a run that passes this fails rather than silently
+    /// using one factor.
     #[arg(
         long,
         global = true,

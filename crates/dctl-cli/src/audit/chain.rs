@@ -1,10 +1,11 @@
 //! The hash-chain rule: how an entry's hash is computed, and how a chain is
 //! walked and verified.
 //!
-//! This is the evidence half of `PLAN.md` §7, and the only place in DCTL that
-//! decides what a record's hash *means*. The writer seals a record here and the
-//! reader checks it here, against the same function — two implementations of a
-//! rule that must round-trip is how a log becomes unverifiable.
+//! This is the evidence half of [the plan](https://doc.dctl.sh/project/plan) §7,
+//! and the only place in DCTL that decides what a record's hash *means*. The
+//! writer seals a record here and the reader checks it here, against the same
+//! function — two implementations of a rule that must round-trip is how a log
+//! becomes unverifiable.
 //!
 //! ## The canonical form is the contract
 //!
@@ -60,10 +61,11 @@
 //!
 //! A hash-chained log cannot be rewritten in place: changing one record's bytes
 //! changes its hash and orphans everything after it. So when the record schema
-//! grew a direction and a real byte count (`docs/AUDIT_LOG.md` §2.1), the
-//! records already on disk stayed exactly as they were, and [`canonical`] became
-//! a function of the record's **own** version rather than of the file's. A log
-//! written across an upgrade holds v1 records followed by v2 records, links
+//! grew a direction and a real byte count
+//! ([the audit-log reference](https://doc.dctl.sh/reference/audit-log) §2.1),
+//! the records already on disk stayed exactly as they were, and [`canonical`]
+//! became a function of the record's **own** version rather than of the file's.
+//! A log written across an upgrade holds v1 records followed by v2 records, links
 //! across the boundary, and verifies end to end — which is the only acceptable
 //! answer, because the alternative is a product that invalidates its customers'
 //! evidence at every release.
@@ -113,9 +115,10 @@ const FIELD_HASH: &str = "hash";
 /// attacker who edits one entry has to re-derive every entry after it.
 ///
 /// Both field orders are a **frozen wire contract** — they are specified in
-/// `docs/AUDIT_LOG.md` §3 so that a chain can be verified in twenty years with a
-/// short script and no DCTL binary. Reordering either, or inserting a field into
-/// either, would invalidate every chain ever written.
+/// [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §3 so that
+/// a chain can be verified in twenty years with a short script and no DCTL
+/// binary. Reordering either, or inserting a field into either, would invalidate
+/// every chain ever written.
 ///
 /// The v2 form is the v1 form with the version in front of it and the three new
 /// values behind it:
@@ -524,8 +527,9 @@ mod tests {
         let canonical = canonical(&record());
         let fields: Vec<&str> = canonical.split(AUDIT_HASH_FIELD_SEPARATOR).collect();
         assert_eq!(fields.len(), 14, "version + prev + 12 record fields");
-        // This order is documented in docs/AUDIT_LOG.md §3 and is frozen:
-        // changing it invalidates every chain ever written.
+        // This order is documented in the audit-log reference
+        // (https://doc.dctl.sh/reference/audit-log) §3 and is frozen: changing
+        // it invalidates every chain ever written.
         assert_eq!(
             fields,
             vec![
@@ -562,8 +566,9 @@ mod tests {
         assert_eq!(v1.split(AUDIT_HASH_FIELD_SEPARATOR).count(), 10);
     }
 
-    /// The four records of the worked example in `docs/AUDIT_LOG.md` §7 — two
-    /// written by a v1 build, two by a v2 build, in one chain.
+    /// The four records of the worked example in
+    /// [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §7 —
+    /// two written by a v1 build, two by a v2 build, in one chain.
     ///
     /// The mixed chain is the specification's central claim, so it is the
     /// specification's example: a log that spans an upgrade must keep verifying,
@@ -641,8 +646,9 @@ mod tests {
 
     #[test]
     fn the_worked_example_in_the_specification_is_the_one_this_code_produces() {
-        // `docs/AUDIT_LOG.md` promises a chain can be verified with a short
-        // script and no DCTL binary. That promise is only worth something if the
+        // The audit-log reference (https://doc.dctl.sh/reference/audit-log)
+        // promises a chain can be verified with a short script and no DCTL
+        // binary. That promise is only worth something if the
         // numbers printed in it are the numbers this function computes, so they
         // are pinned here: a change to either canonical form fails this test
         // before it silently invalidates the specification.
@@ -651,7 +657,7 @@ mod tests {
             assert_eq!(
                 compute_hash(record),
                 record.hash,
-                "docs/AUDIT_LOG.md and chain::canonical have drifted at index {}",
+                "the audit-log reference and chain::canonical have drifted at index {}",
                 record.index
             );
         }

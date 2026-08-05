@@ -42,7 +42,7 @@
 //!
 //! Two `u64`s, whatever the vault holds. This is the command that proves the
 //! streaming pipeline is real: counting ten million objects must not need ten
-//! million anything (`PLAN.md` §16.2).
+//! million anything ([the plan](https://doc.dctl.sh/project/plan) §16.2).
 //!
 //! ## Where the objects come from
 //!
@@ -96,12 +96,13 @@ pub struct Totals {
     /// when any object in scope had no recorded size at all.
     ///
     /// Null rather than a partial sum, and emphatically rather than a zero. This
-    /// is the field a capacity monitor reads, and after a disaster-recovery
-    /// `dctl index rebuild` every row in the vault is temporarily unmeasured:
-    /// the old behaviour reported a forty-terabyte vault as `"bytes": 0`, which
-    /// a monitor cannot distinguish from an empty one. A null breaks that
-    /// monitor's arithmetic loudly, at the moment it would otherwise have
-    /// reported a fiction, which is the trade `PLAN.md` §6 asks for.
+    /// is the field a capacity monitor reads, and after a disaster-recovery `dctl
+    /// index rebuild` every row in the vault is temporarily unmeasured: the old
+    /// behaviour reported a forty-terabyte vault as `"bytes": 0`, which a monitor
+    /// cannot distinguish from an empty one. A null breaks that monitor's
+    /// arithmetic loudly, at the moment it would otherwise have reported a
+    /// fiction, which is the trade [the plan](https://doc.dctl.sh/project/plan)
+    /// §6 asks for.
     pub bytes: Option<u64>,
     /// Sum of the objects that *did* have a recorded size.
     ///

@@ -9,7 +9,7 @@
 //! key the vault derived for it. Take a subset and what remains is not a smaller
 //! vault: it is a vault with dangling references, and nothing detects that until
 //! a restore asks for one of the objects the filter dropped — which is to say,
-//! on the worst possible day. `PLAN.md` §13.3 asks for a provider-to-provider
+//! on the worst possible day. [The plan](https://doc.dctl.sh/project/plan) §13.3 asks for a provider-to-provider
 //! replica of a vault's object tree, and "of the object tree" is the load-bearing
 //! phrase.
 //!

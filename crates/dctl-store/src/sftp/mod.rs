@@ -1113,13 +1113,13 @@ async fn dial_within(dialer: &dyn SftpDial, deadlines: &Deadlines) -> Result<Lin
 ///   attempt now genuinely differs: [`SftpBackend::on_link`] discards the dead
 ///   conversation and the next one dials a fresh session.
 ///
-///   This arm used to say the opposite — terminal, *"run the command again to
-///   open a new one"* — and that was the honest classification for a backend
-///   that could not re-dial: spending five attempts into a socket that is not
-///   there and then reporting that five attempts were made is the shape of
-///   claim `PLAN.md` §6 forbids. What changed is not the wording but the
-///   capability, which is the only thing that makes the new answer true. rclone
-///   reaches the same place from a connection pool.
+///   This arm used to say the opposite — terminal, *"run the command again to open a
+///   new one"* — and that was the honest classification for a backend that could not
+///   re-dial: spending five attempts into a socket that is not there and then
+///   reporting that five attempts were made is the shape of claim
+///   [the plan](https://doc.dctl.sh/project/plan) §6 forbids. What changed is not
+///   the wording but the capability, which is the only thing that makes the new
+///   answer true. rclone reaches the same place from a connection pool.
 ///
 /// The protocol's other server-side codes — `PermDenied`, `Failure`,
 /// `BadMessage`, `OpUnsupported` — are statements about the request and are

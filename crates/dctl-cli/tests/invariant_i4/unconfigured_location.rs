@@ -39,9 +39,9 @@ fn sandbox_with_a_stranger() -> Sandbox {
     sandbox.init_vault(VAULT_REMOTE, "configured-vault");
 
     // A second, real vault, created against a configuration this sandbox's
-    // commands never read. This is exactly what an operator has after restoring
-    // a drive, or after their config.toml was lost: the data is fine, the names
-    // are gone (`PLAN.md` §13.1).
+    // commands never read. This is exactly what an operator has after restoring a
+    // drive, or after their config.toml was lost: the data is fine, the names are
+    // gone ([the plan](https://doc.dctl.sh/project/plan) §13.1).
     sandbox.dir("stranger");
     sandbox
         .dctl_using("elsewhere.toml", "elsewhere.redb")

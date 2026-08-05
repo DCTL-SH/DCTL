@@ -35,11 +35,12 @@ impl std::fmt::Debug for Session {
     /// Written by hand, and deliberately omitting the vault.
     ///
     /// An unlocked [`Vault`] holds the root key and every derived sub-key. A
-    /// derived `Debug` would put that reach one `{:?}` away from any struct that
-    /// ever contains a `Session` — including a panic message or a `tracing`
-    /// field, neither of which is reviewed as carefully as this line is.
-    /// `PLAN.md` §7 makes redaction mandatory; the cheapest way to honour it is
-    /// to make the unsafe rendering impossible to write by accident.
+    /// derived `Debug` would put that reach one `{:?}` away from any struct
+    /// that ever contains a `Session` — including a panic message or a
+    /// `tracing` field, neither of which is reviewed as carefully as this line
+    /// is. [The plan](https://doc.dctl.sh/project/plan) §7 makes redaction
+    /// mandatory; the cheapest way to honour it is to make the unsafe rendering
+    /// impossible to write by accident.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Session")
             .field("remote", &self.remote)
@@ -271,13 +272,13 @@ impl Prepared {
 /// does not work is worse than one that just refuses.
 ///
 /// A missing config is not fatal: `load_or_default` yields an empty one, which
-/// is the headless case `PLAN.md` §14 requires to keep working from environment
-/// variables alone.
-/// Returns the backend, whether the configuration *declares* this location a
-/// vault's object store, and the vault remote's own `chunk_size`. All three are
-/// read here because this is the only place the configuration is loaded, and
-/// re-loading it to answer one of them is how two answers to the same question
-/// start to disagree.
+/// is the headless case [the plan](https://doc.dctl.sh/project/plan) §14
+/// requires to keep working from environment variables alone. Returns the
+/// backend, whether the configuration *declares* this location a vault's object
+/// store, and the vault remote's own `chunk_size`. All three are read here
+/// because this is the only place the configuration is loaded, and re-loading
+/// it to answer one of them is how two answers to the same question start to
+/// disagree.
 fn build_backend(ctx: &Ctx, spec: &RemoteSpec) -> Result<(Arc<dyn Backend>, bool, Option<u64>)> {
     let path = crate::config::resolve_path(ctx.globals.config.as_deref());
     let config = crate::config::load_or_default(&path)?;
@@ -383,7 +384,8 @@ mod tests {
         // The regression this guards: `--key-file` was accepted and never read,
         // so a vault the user believed was two-factor was unlocked by the
         // password alone. Weaker protection than was asked for, reported as
-        // success, is the failure `PLAN.md` §6 forbids.
+        // success, is the failure [the plan](https://doc.dctl.sh/project/plan)
+        // §6 forbids.
         let ctx = ctx(&["--key-file", "/dev/null", "--no-ask-password"]);
         let error = open(&ctx, &spec("local:/srv/v")).await.unwrap_err();
         assert_eq!(error.code(), crate::exit::ExitCode::FatalError);

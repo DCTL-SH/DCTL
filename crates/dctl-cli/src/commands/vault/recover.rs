@@ -22,8 +22,9 @@
 //! will destroy their backup on the way to the filing cabinet.
 //!
 //! `--keep-password` covers the other real use: a **restore drill**
-//! (`PLAN.md` §13.6). Proving the phrase opens the vault is something to do
-//! every year, and it must not be a change to the vault, or nobody will do it.
+//! ([the plan](https://doc.dctl.sh/project/plan) §13.6). Proving the phrase
+//! opens the vault is something to do every year, and it must not be a change
+//! to the vault, or nobody will do it.
 //!
 //! ## What it deliberately does not do
 //!
@@ -79,8 +80,9 @@ pub struct RecoverArgs {
 
     /// Only prove the phrase opens the vault; leave the password alone.
     ///
-    /// The restore-drill mode (`PLAN.md` §13.6). A yearly "does my paper backup
-    /// still work?" must not change the vault, or it will not be run yearly.
+    /// The restore-drill mode (<https://doc.dctl.sh/project/plan> §13.6). A
+    /// yearly "does my paper backup still work?" must not change the vault, or
+    /// it will not be run yearly.
     #[arg(long)]
     pub keep_password: bool,
 }

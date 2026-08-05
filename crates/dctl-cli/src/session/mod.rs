@@ -26,8 +26,9 @@
 //! ## Two ways in, resolved once
 //!
 //! A vault has two independent unlock paths — the password and the recovery
-//! phrase (`docs/FORMAT.md` §2) — and [`secret`] is the single place that
-//! decides which one a run uses. That matters more than it looks: the value of a
+//! phrase (`crates/dctl-decode/FORMAT.md` §2) — and [`secret`] is the single
+//! place that decides which one a run uses. That matters more than it looks: the
+//! value of a
 //! second key is that it opens *everything*, so `ls`, `cat`, `copy` and
 //! `restore` must all accept a phrase without any of them being taught about it.
 //! They are, because they all arrive here.

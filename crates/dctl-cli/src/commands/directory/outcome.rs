@@ -15,9 +15,10 @@
 //!   there, which is exactly what `touch -c` promises to do.
 //! * [`Outcome::Stamped`] — an existing object's modification time was rewritten.
 //!
-//! Collapsing those into one word would be the misreport `PLAN.md` §6 forbids in
-//! its quietest form: a script that checks `status == "created"` must not be told
-//! a directory was created when the command decided there was nothing to create.
+//! Collapsing those into one word would be the misreport
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids in its quietest
+//! form: a script that checks `status == "created"` must not be told a
+//! directory was created when the command decided there was nothing to create.
 //! So the distinction is carried in a stable slug, in every format, and the
 //! human sentence is derived from the same value rather than written beside it.
 //!

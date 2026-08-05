@@ -89,7 +89,7 @@ pub enum Medium {
         /// every `Medium`, including a plain one that has no vault at all, would
         /// otherwise have to be sized for. The indirection also keeps that key
         /// material at one address rather than being memcpy'd around the stack
-        /// on every move, which is what `PLAN.md` §7 wants of anything
+        /// on every move, which is what [the plan](https://doc.dctl.sh/project/plan) §7 wants of anything
         /// key-adjacent.
         session: Box<Session>,
         /// The remote at the end of the vault chain — the one whose backend
@@ -230,7 +230,7 @@ impl Medium {
                 // removed anything, so existence is established first. Two round
                 // trips buys the difference between "removed" and "was already
                 // gone", and reporting the second as the first is exactly the
-                // claim `PLAN.md` §6 forbids.
+                // claim [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
                 let existed = backend.exists(&key).await?;
                 backend.delete(&key).await?;
                 Ok(existed)
@@ -246,7 +246,7 @@ impl Medium {
     /// membership by `cleanup`'s orphan sweep and are never joined to a
     /// plaintext path. [`crate::source::Entry`] drops the field precisely so no
     /// renderer can print the mapping the metadata-privacy design exists to
-    /// withhold (`PLAN.md` §2, §7); an orphan, by definition, has no plaintext
+    /// withhold ([the plan](https://doc.dctl.sh/project/plan) §2, §7); an orphan, by definition, has no plaintext
     /// path to be printed beside, so naming one leaks nothing.
     ///
     /// One entry per row, not a set, because the *count* is what proves the
@@ -312,7 +312,7 @@ impl Medium {
 /// The configuration this invocation is governed by.
 ///
 /// `load_or_default`, because a machine that has never run `dctl config` is a
-/// supported machine (`PLAN.md` §14): it simply defines no vaults, so every
+/// supported machine ([the plan](https://doc.dctl.sh/project/plan) §14): it simply defines no vaults, so every
 /// remote is plain, which is the truth about that machine.
 fn load(ctx: &Ctx) -> Result<Config> {
     let path = config::resolve_path(ctx.globals.config.as_deref());

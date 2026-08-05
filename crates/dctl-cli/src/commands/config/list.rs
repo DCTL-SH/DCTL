@@ -120,8 +120,9 @@ base = \"b2prod\"
 
     #[tokio::test]
     async fn an_absent_configuration_lists_nothing_and_succeeds() {
-        // A fresh machine has no config file. PLAN.md §14 makes that supported,
-        // not broken.
+        // A fresh machine has no config file. The plan
+        // (https://doc.dctl.sh/project/plan) §14 makes that supported, not
+        // broken.
         let dir = tempfile::tempdir().unwrap();
         let ctx = ctx(&dir.path().join("absent.toml"), &[]);
         assert!(run(&ctx).await.is_ok());

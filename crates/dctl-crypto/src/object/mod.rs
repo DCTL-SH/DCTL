@@ -1,4 +1,4 @@
-//! DSF1 self-describing encrypted object (`docs/FORMAT.md` §3–§4).
+//! DSF1 self-describing encrypted object (`crates/dctl-decode/FORMAT.md` §3–§4).
 //!
 //! Each object embeds its own root-wrapped DEK + encrypted per-item metadata +
 //! chunked, seekable payload, so it decodes standalone from `{root key, object}` with

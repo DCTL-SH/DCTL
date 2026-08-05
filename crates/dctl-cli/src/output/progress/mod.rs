@@ -179,9 +179,10 @@ impl Progress {
     /// Move a file to a new pipeline stage.
     ///
     /// This is the row that makes DCTL's guarantee visible: a file sitting at
-    /// `verify` has been uploaded but is not yet provably durable, and a file at
-    /// `commit` is being written into the index — the step that actually makes
-    /// it count as stored (`PLAN.md` §6 step 6).
+    /// `verify` has been uploaded but is not yet provably durable, and a file
+    /// at `commit` is being written into the index — the step that actually
+    /// makes it count as stored ([the plan](https://doc.dctl.sh/project/plan)
+    /// §6 step 6).
     pub fn set_stage(&self, handle: &FileHandle, stage: Stage) {
         if let Ok(files) = self.files.lock() {
             if let Some(bar) = files.get(&handle.id) {

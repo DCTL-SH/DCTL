@@ -1,10 +1,11 @@
 //! The read-only wall: every operation that would change something, refused.
 //!
-//! `PLAN.md` §15 makes v1 read-first — a random-write encrypted mount means
-//! re-chunking and journalling, and is a scoped phase of its own — so this
-//! filesystem has no write path. What it must not have instead is a *silent*
-//! write path. A filesystem that accepts a `write`, returns the byte count and
-//! drops the data is the misreport `PLAN.md` §6 forbids, with a filesystem's
+//! [The plan](https://doc.dctl.sh/project/plan) §15 makes v1 read-first — a
+//! random-write encrypted mount means re-chunking and journalling, and is a
+//! scoped phase of its own — so this filesystem has no write path. What it must
+//! not have instead is a *silent* write path. A filesystem that accepts a
+//! `write`, returns the byte count and drops the data is the misreport
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids, with a filesystem's
 //! authority behind it: the program that wrote saw success, its own error
 //! handling never ran, and the data does not exist. That failure is worse than
 //! refusing, and it is much worse than not offering the mount at all.

@@ -24,8 +24,9 @@
 //!
 //! Asking whether a newer release exists needs a release feed to ask, and DCTL
 //! has none in this build. Rather than printing "you are up to date" — a claim
-//! about work that never happened, which `PLAN.md` §6 forbids outright — the
-//! flag returns [`CliError::unimplemented`] and a real exit code.
+//! about work that never happened, which
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids outright — the flag
+//! returns [`CliError::unimplemented`] and a real exit code.
 //!
 //! The build report is still printed first, and deliberately so: `--check` is
 //! typed by someone whose machine is already misbehaving, and swallowing the one

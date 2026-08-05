@@ -62,7 +62,8 @@ impl Record {
     ///
     /// Nothing in this build calls it, and that is the honest state of affairs
     /// rather than an oversight: `--repair` is refused because no redundancy is
-    /// written for it to read (`PLAN.md` §13.3). The `repaired` field is still
+    /// written for it to read ([the plan](https://doc.dctl.sh/project/plan)
+    /// §13.3). The `repaired` field is still
     /// published on every finding, so a consumer can depend on the key existing
     /// and read `false`; this is the setter that will make it `true`, and the
     /// grading logic that turns it into `degraded` is tested through it below.
@@ -150,7 +151,7 @@ pub struct Report {
     /// was read*; this says *what the reading could prove*. A full read of a
     /// remote that records no hashes is still only a retrievability check, and
     /// `healthy` over one of those must not be mistaken for `healthy` over a
-    /// vault (`PLAN.md` §6).
+    /// vault ([the plan](https://doc.dctl.sh/project/plan) §6).
     pub assurance: &'static str,
     /// Where the list of objects this run read came from: `recorded` or
     /// `self-reported`.
@@ -302,8 +303,8 @@ impl Report {
     /// a cron entry could verify nothing every night and stay green for years —
     /// and the first time anyone found out would be a restore. Health is a claim
     /// about objects that were read; over zero objects there is no claim to
-    /// make, and reporting `healthy` for it is the misreport `PLAN.md` §6
-    /// forbids.
+    /// make, and reporting `healthy` for it is the misreport
+    /// [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
     ///
     /// Code 9 rather than a new one: it is already published as "succeeded, but
     /// nothing was transferred", it is already the code scripts branch on for

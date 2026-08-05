@@ -4,7 +4,7 @@
 //! executor will consume, so what a dry run prints is exactly what a real run
 //! performs — not a second implementation that reports its own opinion. When the
 //! engine lands, it walks this list; until then, the list is the honest half of
-//! the command and the execution is an error (`PLAN.md` §6: never report work
+//! the command and the execution is an error ([the plan](https://doc.dctl.sh/project/plan) §6: never report work
 //! that did not happen).
 //!
 //! One [`Entry`] per file, one action per entry. In particular

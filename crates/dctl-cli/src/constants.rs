@@ -126,7 +126,7 @@ pub const LISTING_DIR_SUFFIX: char = '/';
 /// Name under which a plaintext content hash is reported in `lsjson`'s
 /// `Hashes` map.
 ///
-/// BLAKE3 is the only digest the index records (`PLAN.md` §6 step 1). The map
+/// BLAKE3 is the only digest the index records ([the plan](https://doc.dctl.sh/project/plan) §6 step 1). The map
 /// shape — rather than a bare string — is what lets a second algorithm be added
 /// later without breaking a consumer that reads `Hashes.blake3`.
 pub const LISTING_HASH_ALGORITHM: &str = "blake3";
@@ -284,7 +284,7 @@ pub const TREE_SUMMARY_FILES: &str = "files";
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // A listing of ten million objects must not be serialised into one `Vec` before
-// the first byte reaches the pipe (`PLAN.md` §16.2), so the array brackets and
+// the first byte reaches the pipe ([the plan](https://doc.dctl.sh/project/plan) §16.2), so the array brackets and
 // separators are written by hand around individually-encoded elements rather
 // than delegating the whole document to `serde_json`.
 
@@ -650,7 +650,7 @@ pub const ERROR_PREFIX: &str = "error:";
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // The labels are part of what a user reads after every transfer, and the row
-// vocabulary deliberately mirrors `PLAN.md` §6: *transferred* and *verified* are
+// vocabulary deliberately mirrors [the plan](https://doc.dctl.sh/project/plan) §6: *transferred* and *verified* are
 // separate rows because bytes that are uploaded but not yet checksum-confirmed
 // are not yet durable, and conflating the two would be the misreporting the
 // verified-write contract exists to prevent.
@@ -710,7 +710,7 @@ pub const SUMMARY_SKIPPED_NOTE: &str = "(unchanged)";
 
 /// Qualifier on the mismatch row. The reassurance is the point: a mismatch
 /// aborts before the index commit, so nothing was recorded as stored and no
-/// source file was touched (`PLAN.md` §6 step 4).
+/// source file was touched ([the plan](https://doc.dctl.sh/project/plan) §6 step 4).
 pub const SUMMARY_MISMATCH_NOTE: &str = "(nothing committed)";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -888,12 +888,12 @@ pub const KEY_FILE_FEATURE: &str = "the --key-file second factor (missing in dct
 
 /// Why `--key-file` is refused by every command that can be handed one.
 ///
-/// `PLAN.md` §8 specifies the second factor as `KDF_input = password ‖ H(factor)`,
+/// [The plan](https://doc.dctl.sh/project/plan) §8 specifies the second factor as `KDF_input = password ‖ H(factor)`,
 /// but `dctl_core::Vault::init` and `::unlock` take a password and nothing else
 /// in this build: there is no parameter through which the CLI could mix a factor
 /// into the key-encryption key. Accepting the flag anyway would create — or
 /// open — a vault protected by one factor while the command line says two, which
-/// is the "reported as done when it did not happen" failure `PLAN.md` §6
+/// is the "reported as done when it did not happen" failure [the plan](https://doc.dctl.sh/project/plan) §6
 /// forbids, made worse by being a *security* guarantee rather than a cosmetic
 /// one.
 ///
@@ -906,7 +906,7 @@ pub const KEY_FILE_FEATURE: &str = "the --key-file second factor (missing in dct
 /// layer is `dctl-core`: `Vault::init` and `Vault::unlock` take a password and
 /// no factor, and a parameter is the only thing that could carry one — there is
 /// no arrangement of CLI code that mixes a keyfile into a KEK derived behind
-/// that signature. The phase is `PLAN.md` §8, which is Phase 0's "auth/key
+/// that signature. The phase is [the plan](https://doc.dctl.sh/project/plan) §8, which is Phase 0's "auth/key
 /// model" (§11): the password half of §8 shipped and the factor half did not, so
 /// this is an unfinished foundation rather than a future feature, and a reader
 /// deciding whether to wait deserves to know which.
@@ -995,7 +995,7 @@ pub const DEFAULT_CONTIMEOUT_SECS: u64 = dctl_store::deadline::constants::DEFAUL
 /// destination remote's `verify` setting names one.
 ///
 /// [`VerifyMode::Checksum`](crate::cli::globals::VerifyMode::Checksum) — the
-/// provider-checksum comparison `PLAN.md` §6 step 5 mandates after every write.
+/// provider-checksum comparison [the plan](https://doc.dctl.sh/project/plan) §6 step 5 mandates after every write.
 /// It costs no extra egress, which is what makes it the right thing to do
 /// without being asked.
 ///
@@ -1294,7 +1294,7 @@ pub const CONFIG_TEMP_SUFFIX: &str = ".tmp";
 ///
 /// Stating the no-secrets rule *in the file* is the only version of it a user
 /// reliably reads. Someone about to paste an application key into a section is
-/// looking at this line at that exact moment (`PLAN.md` §14).
+/// looking at this line at that exact moment ([the plan](https://doc.dctl.sh/project/plan) §14).
 pub const CONFIG_FILE_HEADER: &str = "\
 # DCTL configuration.
 #
@@ -1385,7 +1385,7 @@ pub const LOCATION_FIELD_SEPARATOR: char = '|';
 
 // ── Secret-shaped values ─────────────────────────────────────────────────────
 //
-// `PLAN.md` §14 puts no credentials in the config file at all, so in a correct
+// [The plan](https://doc.dctl.sh/project/plan) §14 puts no credentials in the config file at all, so in a correct
 // installation none of the rules below ever fire. They exist because a *wrong*
 // installation is exactly the one whose config gets pasted into a bug report:
 // someone adds `secret_key = …` by hand, and `dctl config show` must not be the
@@ -1489,7 +1489,7 @@ pub const REMOTE_PROVIDER_TYPES: &[(&str, &str)] = &[
 
 /// POSIX permission bits that mean "readable by someone other than the owner".
 ///
-/// `PLAN.md` §14 requires a warning when the config file is group- or
+/// [The plan](https://doc.dctl.sh/project/plan) §14 requires a warning when the config file is group- or
 /// world-readable: it names buckets, endpoints and regions, which is free
 /// reconnaissance for anyone who can read it.
 #[cfg(unix)]
@@ -1500,7 +1500,7 @@ pub const CONFIG_FILE_EXPOSED_MODE_MASK: u32 = 0o077;
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // The block above governs how the file is *displayed*; this one governs how it
-// is spelled, named, validated and written. `PLAN.md` §14 is the whole reason
+// is spelled, named, validated and written. [The plan](https://doc.dctl.sh/project/plan) §14 is the whole reason
 // the file has rules at all: it is deliberately a *non-secret* artefact that a
 // user is encouraged to hand-edit and even commit to version control, which
 // only works if what may appear in it is defined narrowly enough to be
@@ -1510,7 +1510,7 @@ pub const CONFIG_FILE_EXPOSED_MODE_MASK: u32 = 0o077;
 ///
 /// Deliberately absent from [`REMOTE_PROVIDER_TYPES`]: a vault remote stores
 /// nothing itself, it wraps a base remote and encrypts on the way through
-/// (`PLAN.md` §14), so `dctl config providers` must not offer it as a
+/// ([the plan](https://doc.dctl.sh/project/plan) §14), so `dctl config providers` must not offer it as a
 /// destination and `crate::remote` has no backend arm for it. It is still a
 /// legal value of [`CONFIG_REMOTE_TYPE_KEY`], which is why it is named here
 /// beside the four real providers instead of inside the table with them.
@@ -1599,7 +1599,7 @@ pub const CONFIG_KEY_BASE_PATH: &str = "base_path";
 ///
 /// Its meaning is per-provider, which is why it is one key rather than several:
 /// on a cloud remote it is the multipart part size, on a vault remote it is the
-/// AEAD chunk size that decides seek granularity (`PLAN.md` §3). Absent means
+/// AEAD chunk size that decides seek granularity ([the plan](https://doc.dctl.sh/project/plan) §3). Absent means
 /// "use the profile default", so a config written today does not freeze a
 /// tuning decision that a later release improves.
 #[allow(dead_code)]
@@ -1607,7 +1607,7 @@ pub const CONFIG_KEY_CHUNK_SIZE: &str = "chunk_size";
 
 /// Setting naming a remote's default verification strength.
 ///
-/// Per-remote because the cost/assurance trade-off in `PLAN.md` §6 step 5 is a
+/// Per-remote because the cost/assurance trade-off in [the plan](https://doc.dctl.sh/project/plan) §6 step 5 is a
 /// property of the destination: a full read-back is cheap against a local disk
 /// and doubles egress against a cloud bucket. `--verify` on the command line
 /// still overrides it.
@@ -1743,7 +1743,7 @@ pub const HOME_ACCESS_OPEN: &str = "world-readable";
 // vocabulary is the set of keys a remote's config section may carry and the
 // environment variables its credentials arrive in.
 //
-// The split between those last two is `PLAN.md` §14 in one line: a bucket, an
+// The split between those last two is [the plan](https://doc.dctl.sh/project/plan) §14 in one line: a bucket, an
 // endpoint, a region and an account id are non-secret and belong in the config
 // file, while an access key belongs only in the environment (or, later, the OS
 // keychain). Nothing that reads a secret from the config file is listed here,
@@ -1832,7 +1832,7 @@ pub const CONFIG_KEY_PATH: &str = "path";
 pub const CONFIG_KEY_HOST: &str = "host";
 
 /// Environment settings carrying provider credentials, never read from the
-/// config file (`PLAN.md` §14 — rclone's reversibly-obscured secrets are the
+/// config file ([the plan](https://doc.dctl.sh/project/plan) §14 — rclone's reversibly-obscured secrets are the
 /// specific mistake being avoided).
 ///
 /// Spelled as suffixes because `dctl_meta::env_var` prefixes each with the
@@ -1860,7 +1860,7 @@ pub const ENV_R2_SECRET_KEY: &str = "R2_SECRET_KEY";
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // These four commands are what DCTL has and a plain copier does not
-// (`PLAN.md` §6, §13.4), and the strings below are the part of them that *other
+// ([the plan](https://doc.dctl.sh/project/plan) §6, §13.4), and the strings below are the part of them that *other
 // software* reads: verdict slugs land in `--json`, the combined-file marks land
 // in a diff someone greps, and the `hashsum` separator has to satisfy
 // `sha256sum -c` byte for byte. They are a compatibility surface, not
@@ -1879,7 +1879,7 @@ pub const INTEGRITY_NOT_SERVED_NOTICE: &str = "the data was NOT served";
 /// Remediation hint attached to an integrity failure.
 ///
 /// Names the two actions that actually help: restore the object from another
-/// copy of the 3-2-1 set (`PLAN.md` §13.3), then scrub, because bit rot and a
+/// copy of the 3-2-1 set ([the plan](https://doc.dctl.sh/project/plan) §13.3), then scrub, because bit rot and a
 /// failing provider are rarely confined to the one object you happened to read
 /// (§13.4).
 pub const INTEGRITY_FAILURE_HINT: &str = "Restore the affected objects from another copy, then run `dctl scrub` to \
@@ -2156,7 +2156,7 @@ pub const ASSURANCE_REFUSED_NOTICE: &str = "records no digest a re-read could be
 /// [`crate::source::Assurance::describe`], which is written for a *report* and
 /// says what a completed run proved. A pre-flight refusal that said "every byte
 /// was re-read" would describe work that has not happened, which is the
-/// misreport `PLAN.md` §6 forbids in miniature.
+/// misreport [the plan](https://doc.dctl.sh/project/plan) §6 forbids in miniature.
 pub const ASSURANCE_REFUSED_CONSEQUENCE: &str =
     "a byte that changed here reads back exactly like one that did not";
 
@@ -2268,7 +2268,7 @@ pub const READ_BACK_WINDOW_BYTES: u64 = 8 * 1024 * 1024;
 /// Why `--repair` cannot be honoured, and what would have to exist first.
 ///
 /// Repair means rebuilding a damaged object from redundancy — the par2-style
-/// Reed-Solomon parity of `PLAN.md` §13.3. This build writes no parity, so there
+/// Reed-Solomon parity of [the plan](https://doc.dctl.sh/project/plan) §13.3. This build writes no parity, so there
 /// is nothing to rebuild from: accepting the flag and quietly doing nothing
 /// would let a run report `damaged` while the operator believed repair had been
 /// attempted and failed for some other reason.
@@ -2577,7 +2577,7 @@ pub const TRANSFER_SEALED_REMOTE_TO_REMOTE_FEATURE: &str = "a re-encrypting tran
 /// both cases, so both hints name it.
 ///
 /// The phase is stated as **absent**, which is a roadmap fact rather than an
-/// evasion: `PLAN.md` §11 lists no phase that delivers vault-to-vault transfer,
+/// evasion: [the plan](https://doc.dctl.sh/project/plan) §11 lists no phase that delivers vault-to-vault transfer,
 /// and §8 goes the other way by design — the root key is only ever *wrapped*, so
 /// the project has deliberately avoided building bulk re-encryption. A reader
 /// who is told "phase 4" would wait for something nobody has scheduled.
@@ -2599,7 +2599,7 @@ pub const TRANSFER_REMOTE_TO_REMOTE_FEATURE: &str = "a transfer that connects tw
 
 /// Remediation hint attached to [`TRANSFER_REMOTE_TO_REMOTE_FEATURE`].
 ///
-/// States the phase as absent for the same reason the sealed hint does. `PLAN.md`
+/// States the phase as absent for the same reason the sealed hint does. [The plan](https://doc.dctl.sh/project/plan)
 /// §11 phase 1 delivers `copy`/`move`/`sync` in plain and crypt modes and says
 /// nothing about two remote ends, so claiming a phase would be inventing one.
 /// What it *can* say truthfully is that the work is a `dctl-cli` change and
@@ -2619,7 +2619,7 @@ pub const TRANSFER_REMOTE_TO_REMOTE_HINT: &str = "Copy to a local path first, th
 /// theirs — a test in `commands::transfer::engine` pins the behaviour either way.
 pub const VAULT_ENVELOPE_OBJECT_KEY: &str = "system/envelope.bin";
 
-/// Key prefix of a vault's per-file content objects (`docs/FORMAT.md` §3).
+/// Key prefix of a vault's per-file content objects (`crates/dctl-decode/FORMAT.md` §3).
 ///
 /// The same narrow duplication as [`VAULT_ENVELOPE_OBJECT_KEY`], and for the
 /// same reason: `dctl cleanup` has to recognise a *content* object among the
@@ -2627,11 +2627,11 @@ pub const VAULT_ENVELOPE_OBJECT_KEY: &str = "system/envelope.bin";
 /// object — the prefix only says which keys are candidates for the orphan sweep,
 /// so that a name record or the envelope can never be mistaken for one.
 ///
-/// Frozen by the format, not by this file. `docs/FORMAT.md` §3 fixes the key as
+/// Frozen by the format, not by this file. `crates/dctl-decode/FORMAT.md` §3 fixes the key as
 /// `o/` ‖ hex(file_id), and a vault written years ago has to stay sweepable.
 pub const VAULT_OBJECT_KEY_PREFIX: &str = "o/";
 
-/// Key prefix of a vault's §5 authoritative name records (`docs/FORMAT.md` §5).
+/// Key prefix of a vault's §5 authoritative name records (`crates/dctl-decode/FORMAT.md` §5).
 ///
 /// One record per stored file, which is precisely what makes it useful here:
 /// `cleanup` counts them and compares the total against the number of rows in
@@ -2644,7 +2644,7 @@ pub const VAULT_OBJECT_KEY_PREFIX: &str = "o/";
 /// so counting is the *only* thing this prefix is used for.
 pub const VAULT_NAME_KEY_PREFIX: &str = "n/";
 
-// ── The envelope header, as `docs/FORMAT.md` §2 freezes it ───────────────────
+// ── The envelope header, as `crates/dctl-decode/FORMAT.md` §2 freezes it ─────
 //
 // Enough of the DKE1 header to answer one question — *is there a vault here?* —
 // and deliberately not one byte more. Nothing below can decrypt anything, and
@@ -2658,15 +2658,15 @@ pub const VAULT_NAME_KEY_PREFIX: &str = "n/";
 // location it is being asked to address really is a vault's store, rather than
 // writing a plausible-looking pair of remotes that point at an empty bucket.
 //
-// These are safe to state independently of `dctl-core` because `PLAN.md` D8/D9
+// These are safe to state independently of `dctl-core` because [the plan](https://doc.dctl.sh/project/plan) D8/D9
 // freeze them **forever**: a 20-year restorability promise is exactly the
 // promise that the magic, the version byte and the slot-count bound cannot be
 // revised. A field that could change would not belong here.
 
-/// Magic that opens a `DKE1` envelope (`docs/FORMAT.md` §2, offset 0).
+/// Magic that opens a `DKE1` envelope (`crates/dctl-decode/FORMAT.md` §2, offset 0).
 pub const VAULT_ENVELOPE_MAGIC: &[u8] = b"DKE1";
 
-/// Envelope format version this build recognises (`docs/FORMAT.md` §2, offset 4).
+/// Envelope format version this build recognises (`crates/dctl-decode/FORMAT.md` §2, offset 4).
 ///
 /// A *newer* version is reported as a vault DCTL cannot address rather than as
 /// "no vault here": the difference is between telling an operator to upgrade and
@@ -2674,7 +2674,7 @@ pub const VAULT_ENVELOPE_MAGIC: &[u8] = b"DKE1";
 pub const VAULT_ENVELOPE_VERSION: u8 = 1;
 
 /// Bytes of the envelope needed to recognise one: magic, version, `vault_id` and
-/// `slot_count` (`docs/FORMAT.md` §2).
+/// `slot_count` (`crates/dctl-decode/FORMAT.md` §2).
 ///
 /// Fetched as a range rather than as a whole object so recognition costs one
 /// small ranged GET against a cloud provider instead of a full download.
@@ -2683,7 +2683,7 @@ pub const VAULT_ENVELOPE_HEADER_LEN: u64 = 23;
 /// Offset of the `slot_count` field within the envelope header.
 pub const VAULT_ENVELOPE_SLOT_COUNT_OFFSET: usize = 21;
 
-/// Bounds `docs/FORMAT.md` §2 puts on `slot_count`: at least one slot, at most
+/// Bounds `crates/dctl-decode/FORMAT.md` §2 puts on `slot_count`: at least one slot, at most
 /// 64.
 ///
 /// Checked because a file that merely *starts* with four plausible bytes is not
@@ -2745,7 +2745,7 @@ pub const TRANSFER_STREAM_WINDOW_BYTES: usize = 128 * 1024;
 /// Working-buffer size for hashing a local file under `--checksum`.
 ///
 /// `--checksum` asks for content equality, which for a local file means reading
-/// it end to end. It must not mean *holding* it end to end: `PLAN.md` §16.2 caps
+/// it end to end. It must not mean *holding* it end to end: [the plan](https://doc.dctl.sh/project/plan) §16.2 caps
 /// memory at O(concurrency), and materialising a fifty-gigabyte file in order to
 /// decide whether to copy it would be the most absurd possible way to break that
 /// rule. So the file is streamed through a buffer of this size.
@@ -2771,7 +2771,7 @@ pub const CHECKSUM_STREAM_BUFFER_BYTES: usize = 128 * 1024;
 /// vault index row written by `dctl index rebuild` carries an empty digest, and
 /// an empty digest is *unknown* rather than a hash. Comparing an unknown would
 /// produce a confident wrong verdict, and silently falling back to size-and-time
-/// would answer a question the user did not ask (`PLAN.md` §6).
+/// would answer a question the user did not ask ([the plan](https://doc.dctl.sh/project/plan) §6).
 pub const CHECKSUM_UNAVAILABLE_HINT: &str = "One side has no recorded content hash for this object, which is what a vault \
      index row looks like before anything has read the file — `dctl index \
      rebuild` lists objects without hashing them. Read the object once (`dctl \
@@ -2870,7 +2870,7 @@ pub const TIME_MAX_YEAR: i64 = 9999;
 pub const TIME_PARSE_EXAMPLES: &str = "2026-07-26, 2026-07-26T14:30:00Z, 2d, @1753574400, or now";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Object replication — `dctl replicate` (`PLAN.md` §13.3)
+// Object replication — `dctl replicate` ([the plan](https://doc.dctl.sh/project/plan) §13.3)
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // The command that makes 3-2-1 real, and the only transfer verb in the tool
@@ -2919,7 +2919,7 @@ pub const REPLICATE_ACTION_REVERIFY: &str = "reverify";
 ///
 /// Recorded as an outcome rather than dropped from the report, because a
 /// replication that silently listed one object fewer than it moved is exactly
-/// the "reported as done when it did not happen" failure `PLAN.md` §6 forbids.
+/// the "reported as done when it did not happen" failure [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
 pub const REPLICATE_ACTION_FAILED: &str = "failed";
 
 /// Reason slugs an *execution* produces, as opposed to a plan.
@@ -3040,7 +3040,7 @@ pub const REPLICATE_SAME_STORE_HINT: &str = "A replica has to be somewhere else 
      names: `dctl config list` shows which location each one addresses.";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Audit log — `dctl audit` (`PLAN.md` §7)
+// Audit log — `dctl audit` ([the plan](https://doc.dctl.sh/project/plan) §7)
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // The chain is the evidence. Everything here exists so that a break is
@@ -3055,7 +3055,7 @@ pub const REPLICATE_SAME_STORE_HINT: &str = "A replica has to be somewhere else 
 /// JSON Lines, not a database. An append-only chain has to outlive the tool that
 /// wrote it: one self-describing record per line is greppable, diffable, safely
 /// appendable, and readable by any language's standard library in twenty years —
-/// the same reasoning that governs the object format (`PLAN.md` §13.1).
+/// the same reasoning that governs the object format ([the plan](https://doc.dctl.sh/project/plan) §13.1).
 pub const AUDIT_LOG_FILE_NAME: &str = "audit.jsonl";
 
 /// The `prev` value carried by the first record in a chain.
@@ -3073,7 +3073,7 @@ pub const AUDIT_CHAIN_GENESIS_PREV: &str =
 /// here, so a gap is itself evidence rather than a formatting quirk.
 pub const AUDIT_CHAIN_FIRST_INDEX: u64 = 0;
 
-/// Record-schema version this build **writes** (`docs/AUDIT_LOG.md` §2).
+/// Record-schema version this build **writes** ([the audit-log reference](https://doc.dctl.sh/reference/audit-log) §2).
 ///
 /// Version 1 recorded that an operation happened; it could not say which way the
 /// bytes went, and it recorded the object's declared size rather than what
@@ -3229,12 +3229,12 @@ pub const AUDIT_PROVES_LENGTH: &str = "length";
 /// Stated at the point the verdict is given for the same reason the length
 /// caveat is: an operator who reads one word as three claims has the belief this
 /// command must not create, and a buyer's security review that finds the limit
-/// in the manual but not in the tool has found an overclaim. `docs/AUDIT_LOG.md`
+/// in the manual but not in the tool has found an overclaim. [The audit-log reference](https://doc.dctl.sh/reference/audit-log)
 /// §11 is the argument for why DCTL cannot close this locally and what the
 /// operator does instead.
 pub const AUDIT_PROVES_AUTHORSHIP_NOTE: &str = "this attests to what the records say and to their order, never to who wrote \
      them: the chain is unkeyed, so any process that can write this file can \
-     append correctly linked records. See docs/AUDIT_LOG.md §11.";
+     append correctly linked records. See https://doc.dctl.sh/reference/audit-log §11.";
 
 /// Separator between the record count and the head hash in an audit anchor.
 ///
@@ -3261,7 +3261,7 @@ pub const POINT_IN_TIME_FEATURE: &str = "restoring a snapshot or an earlier poin
 
 /// Remediation hint attached to [`POINT_IN_TIME_FEATURE`].
 ///
-/// Names the phase and repeats the word `PLAN.md` uses for it. Phase 4 lists
+/// Names the phase and repeats the word [the plan](https://doc.dctl.sh/project/plan) uses for it. Phase 4 lists
 /// snapshots as **optional**, and the hint says so rather than promising a date:
 /// a reader planning a retention policy around point-in-time restore needs to
 /// know it is a maybe, not a when.
@@ -3275,11 +3275,11 @@ pub const POINT_IN_TIME_HINT: &str = "The index records one current version per 
 /// The mirror image of [`POINT_IN_TIME_FEATURE`], and refused for the same
 /// reason from the other end. A snapshot is only worth recording if something
 /// can later restore it, and the versioned index that would make
-/// `--snapshot nightly` restorable is `PLAN.md` §13.5 work that has not
+/// `--snapshot nightly` restorable is [the plan](https://doc.dctl.sh/project/plan) §13.5 work that has not
 /// happened. Accepting the flag and storing the files anyway would write a
 /// backup whose operator believes a named point in time exists — and they would
 /// find out it does not on the day they reached for it, which is the single
-/// worst moment (`PLAN.md` §13.6).
+/// worst moment ([the plan](https://doc.dctl.sh/project/plan) §13.6).
 ///
 /// A dry run still reports the name, because planning is not claiming.
 pub const SNAPSHOT_FEATURE: &str = "recording a backup as a named snapshot (--snapshot) (missing in \
@@ -3326,7 +3326,7 @@ pub const AUDIT_UNRECORDED_HINT: &str = "The operation this record describes is 
      than continuing unaudited.";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Audit log writer — `crate::audit::write` (`PLAN.md` §7, durability from §6)
+// Audit log writer — `crate::audit::write` ([the plan](https://doc.dctl.sh/project/plan) §7, durability from §6)
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // The reader above decides what a chain *means*; these decide how one is put on
@@ -3366,7 +3366,7 @@ pub const AUDIT_LOG_DIR_MODE: u32 = 0o700;
 /// index. Both live in the final record, so it reads backwards from the end
 /// rather than walking the file — an append must not become O(number of records
 /// ever written), or the millionth file in a transfer would cost a million
-/// times the first (`PLAN.md` §D10). Eight kilobytes comfortably spans a record
+/// times the first ([the plan](https://doc.dctl.sh/project/plan) §D10). Eight kilobytes comfortably spans a record
 /// with a long path while staying a single page-cache read.
 pub const AUDIT_TAIL_SCAN_BYTES: u64 = 8 * 1024;
 
@@ -3421,7 +3421,7 @@ pub const SNAPSHOT_NAME_MAX_LEN: usize = 64;
 pub const SNAPSHOT_NAME_EXTRA_CHARS: &[char] = &['-', '_', '.'];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Backup & restore pre-flight (`PLAN.md` §13.6)
+// Backup & restore pre-flight ([the plan](https://doc.dctl.sh/project/plan) §13.6)
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // A backup you never restored is not a backup. Everything here serves one rule:
@@ -3502,7 +3502,7 @@ pub const PREFLIGHT_PROBLEM_PATH_TOO_LONG: &str = "path-too-long";
 /// `dctl cat film.mkv | head -c 1M` should hand its consumer the first bytes
 /// immediately and be told to stop, not fill a megabyte first. And the buffer is
 /// allocated once per invocation and reused for every object, so memory stays
-/// O(concurrency) rather than O(file size), which is `PLAN.md` §16.2's rule for
+/// O(concurrency) rather than O(file size), which is [the plan](https://doc.dctl.sh/project/plan) §16.2's rule for
 /// every path in the tool.
 pub const STREAM_CHUNK_BYTES: usize = 256 * 1024;
 
@@ -3548,7 +3548,7 @@ pub const CAT_JSON_STREAM_HINT: &str = "stdout carries either object bytes or JS
 // ─────────────────────────────────────────────────────────────────────────────
 //
 // A vault serves a byte window by fetching and authenticating only the chunks
-// covering it (`docs/FORMAT.md` §3, `crate::source::chunk_cache`). That makes a
+// covering it (`crates/dctl-decode/FORMAT.md` §3, `crate::source::chunk_cache`). That makes a
 // single window O(window) instead of O(object). These three bounds are what make
 // a *sequence* of windows O(object) instead of O(object × reads): the kernel asks
 // a filesystem for 4 KiB at a time, and a chunk is 1 MiB by default, so without a
@@ -3721,7 +3721,7 @@ pub const DIRECTORY_MODE_EXECUTE: &str = "execute";
 /// Value of the JSON `status` field on a directory-family **plan**.
 ///
 /// The only status a `--dry-run` can carry. A plan describes a request that has
-/// *not* run, and `PLAN.md` §6 forbids reporting work that did not happen — so a
+/// *not* run, and [the plan](https://doc.dctl.sh/project/plan) §6 forbids reporting work that did not happen — so a
 /// rehearsal can never be spelled `created`, whatever the engine would have
 /// done. The outcome slugs below are produced by the engine *after* the fact and
 /// are the only other values this field takes.
@@ -3733,7 +3733,7 @@ pub const DIRECTORY_STATUS_PLANNED: &str = "planned";
 /// Stable machine values a script branches on, and deliberately five rather than
 /// a boolean: "I made one" and "there was never anything to make" are different
 /// answers to `mkdir`, and reporting the second as the first is the misreport
-/// `PLAN.md` §6 exists to prevent. Every one of them is a *success* — a failure
+/// [the plan](https://doc.dctl.sh/project/plan) §6 exists to prevent. Every one of them is a *success* — a failure
 /// leaves by the error channel with an exit code, never as a status word.
 pub const DIRECTORY_OUTCOME_CREATED: &str = "created";
 /// See [`DIRECTORY_OUTCOME_CREATED`]. It was already there; nothing was written.
@@ -3888,7 +3888,7 @@ pub const TOUCH_OBJECT_STORE_HINT: &str = "Nothing was written. A bucket fixes a
 /// `dctl_store::Backend::put_from_path` would store the spooled stream under the
 /// key, verified, exactly as a transfer does. What is missing is the arm in this
 /// command — `rcat` has a filesystem path and a vault path and no third one —
-/// so it is `PLAN.md` phase 1 work (§11: `copy`/`move`/`sync` in both plain and
+/// so it is [the plan](https://doc.dctl.sh/project/plan) phase 1 work (§11: `copy`/`move`/`sync` in both plain and
 /// crypt modes), finished for the transfer family and not yet extended here.
 ///
 /// Named separately from [`TOUCH_OBJECT_STORE_FEATURE`] because the two are not
@@ -4073,11 +4073,11 @@ pub const DURATION_PARSE_EXAMPLES: &str = "5m, 1s, 500ms, or 90 (bare seconds)";
 // `dctl mount`
 // ─────────────────────────────────────────────────────────────────────────────
 //
-// Defaults for a command that cannot run yet (`PLAN.md` §11 phase 2), and that is
+// Defaults for a command that cannot run yet ([the plan](https://doc.dctl.sh/project/plan) §11 phase 2), and that is
 // exactly why they are pinned now: the flag surface is published in `--help`, in
 // the generated shell completions and in the docs the moment this ships, and a
 // default that moves later silently changes the behaviour of every script that
-// relied on it. Each value below is the one `PLAN.md` §15 argues for.
+// relied on it. Each value below is the one [the plan](https://doc.dctl.sh/project/plan) §15 argues for.
 
 /// Default `--dir-cache-time`.
 ///
@@ -4150,7 +4150,7 @@ pub const MOUNT_SIZE_DISABLED: u64 = 0;
 /// Windows attaches a userspace filesystem through **WinFSP**, which is not a
 /// FUSE binding and cannot be reached from the `fuser` crate that serves Linux
 /// and macOS. So the refusal names WinFSP by name — that is what a Windows user
-/// would have to install, and what a future `dctl-mount` crate (`PLAN.md` §16.1)
+/// would have to install, and what a future `dctl-mount` crate ([the plan](https://doc.dctl.sh/project/plan) §16.1)
 /// would have to bind — rather than leaving them to infer it.
 pub const MOUNT_ADAPTER_FEATURE: &str = "a filesystem adapter for this platform (the read-only mount is built on \
      FUSE, which Windows does not have; attaching a filesystem there needs \
@@ -4161,7 +4161,7 @@ pub const MOUNT_ADAPTER_FEATURE: &str = "a filesystem adapter for this platform 
 /// States what *is* finished, so the failure reads as a platform gap rather than
 /// as a broken command: the whole flag surface, the mountpoint checks and the
 /// filesystem itself exist and run — on Linux and macOS. The section is named
-/// because `PLAN.md` §15 is what schedules the Windows backend, and a reader who
+/// because [the plan](https://doc.dctl.sh/project/plan) §15 is what schedules the Windows backend, and a reader who
 /// wants to know when it lands should be able to find the answer.
 pub const MOUNT_ENGINE_HINT: &str = "The mountpoint checks, the flag surface and the read-only filesystem are \
      finished and run today on Linux (FUSE3) and macOS (macFUSE) — only the \
@@ -4169,7 +4169,7 @@ pub const MOUNT_ENGINE_HINT: &str = "The mountpoint checks, the flag surface and
      and ProjFS the later option for read-first streaming. Until then, `dctl \
      copy` and `dctl cat --offset` read the same data without a mount.";
 
-// ─── The read-only FUSE filesystem (`PLAN.md` §15) ──────────────────────────
+// ─── The read-only FUSE filesystem ([the plan](https://doc.dctl.sh/project/plan) §15) ───
 //
 // Tunables for the mount engine itself, as opposed to the flags above. Every one
 // of them bounds something a filesystem callback touches, and a callback that
@@ -4206,7 +4206,7 @@ pub const MOUNT_STAT_BLOCK_SIZE: u64 = 512;
 /// Longest single path component the mount advertises through `statfs`.
 ///
 /// 255 bytes, matching ext4, APFS and every filesystem a caller is likely to be
-/// comparing against. The vault itself imposes no such limit — `docs/FORMAT.md`
+/// comparing against. The vault itself imposes no such limit — `crates/dctl-decode/FORMAT.md`
 /// §5 stores a whole logical path — so this is what the mount *presents*, and
 /// presenting the universal number is what keeps a `pathconf`-driven tool from
 /// refusing to walk the tree.
@@ -4232,7 +4232,7 @@ pub const MOUNT_DIRECTORY_LINK_COUNT: u32 = 2;
 /// Permission bits on every file in the mount: `r--r--r--`.
 ///
 /// Read for everyone, write for nobody, execute for nobody. The mount is
-/// read-only in v1 (`PLAN.md` §15 makes the write path a later scoped phase), and
+/// read-only in v1 ([the plan](https://doc.dctl.sh/project/plan) §15 makes the write path a later scoped phase), and
 /// permissions that *said* a file were writable would invite an editor to open it
 /// for writing, buffer the user's work, and discover EROFS at save time. Execute
 /// is off because a vault records no mode bits: claiming a file is executable is
@@ -4318,7 +4318,7 @@ pub const MOUNT_SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_
 /// returns success, leaving a `fusermount3` child to do the work, so the
 /// mountpoint can still be attached for a moment after the call returns. A mount
 /// that reported "unmounted" at that moment would be reporting somebody else's
-/// unfinished work as its own (`PLAN.md` §6), which is what
+/// unfinished work as its own ([the plan](https://doc.dctl.sh/project/plan) §6), which is what
 /// [`mount::detached`](crate::mount::detached) now stops it doing.
 ///
 /// Two seconds, matching [`MOUNT_SHUTDOWN_GRACE`], and for the same reason: it is
@@ -4364,7 +4364,7 @@ pub const MOUNT_SHUTDOWN_POLL: std::time::Duration = std::time::Duration::from_m
 ///
 /// The binary's name rather than the remote's: a remote name is the user's word
 /// for a vault and can be anything, including something they would not want on a
-/// shared machine's mount table, and `PLAN.md` §2's metadata-privacy design does
+/// shared machine's mount table, and [the plan](https://doc.dctl.sh/project/plan) §2's metadata-privacy design does
 /// not stop at object keys.
 pub const MOUNT_FS_NAME: &str = "dctl";
 
@@ -4382,7 +4382,7 @@ pub const MOUNT_FS_SUBTYPE: &str = "dctl-vault-ro";
 // its helper *silently ignores an option it does not know* — `subtype=…`,
 // `auto_unmount` and a deliberately invented `no_such_option` were all accepted
 // and did nothing. An option that is wrong therefore produces a working mount
-// that is missing a property somebody thinks it has, which is `PLAN.md` §6's
+// that is missing a property somebody thinks it has, which is [the plan](https://doc.dctl.sh/project/plan) §6's
 // misreport with a filesystem's authority behind it. That is why the translation
 // in [`mount::macfuse::options`](crate::mount::macfuse::options) is exhaustive
 // and refuses rather than passing strings through, and why each value here is
@@ -4672,7 +4672,7 @@ pub const REMOVAL_MODE_EXECUTE: &str = "execute";
 /// Value of the JSON `status` field on a removal plan.
 ///
 /// Only ever this. A plan describes a request that has **not** run, and
-/// `PLAN.md` §6 forbids reporting work that did not happen — so the document
+/// [the plan](https://doc.dctl.sh/project/plan) §6 forbids reporting work that did not happen — so the document
 /// has no `"deleted"` spelling to accidentally carry, and no counters for a
 /// consumer to mistake for results.
 pub const REMOVAL_STATUS_PLANNED: &str = "planned";
@@ -4694,7 +4694,7 @@ pub const REMOVAL_BOOL_NO: &str = "no";
 /// in-progress multipart uploads or an object's superseded versions. A `cleanup`
 /// asked for one of those classes by name therefore refuses, because reporting
 /// "0 reclaimed" for a sweep that was never able to look is the misreport
-/// `PLAN.md` §6 exists to forbid.
+/// [the plan](https://doc.dctl.sh/project/plan) §6 exists to forbid.
 pub const REMOVAL_ENGINE_MISSING: &str = "This backend exposes no way of";
 
 /// Remediation hint attached to the removal family's `unimplemented` error.
@@ -4712,7 +4712,7 @@ pub const REMOVAL_ENGINE_HINT: &str = "Nothing of that class was touched. Run \
 //
 // One vocabulary for six commands, because a script that greps a `delete` must
 // keep working against a `purge`. Every status below is a *fact about one
-// object*, never a summary of the run: `PLAN.md` §6 forbids reporting work that
+// object*, never a summary of the run: [the plan](https://doc.dctl.sh/project/plan) §6 forbids reporting work that
 // did not happen, and the only way to guarantee that at scale is for the record
 // to be written at the moment the work either happened or did not.
 
@@ -4858,7 +4858,7 @@ pub const PURGE_SCOPE_SUBTREE: &str = "everything under this path";
 /// abandoned one are indistinguishable from the outside — nothing in the object
 /// says which — so the age is the *only* thing standing between a cleanup and
 /// another process's live work. Twenty-four hours is far longer than any single
-/// verified write (`PLAN.md` §6) and still short enough that debris does not
+/// verified write ([the plan](https://doc.dctl.sh/project/plan) §6) and still short enough that debris does not
 /// accumulate a bill.
 pub const CLEANUP_DEFAULT_MIN_AGE: &str = "24h";
 
@@ -4883,7 +4883,7 @@ pub const CLEANUP_DEFAULT_MIN_AGE: &str = "24h";
 //
 // The three commands that answer questions about DCTL itself rather than about
 // stored data, and the only three that must keep working when everything else
-// is broken. `PLAN.md` §7 makes that a requirement rather than a nicety: an
+// is broken. [The plan](https://doc.dctl.sh/project/plan) §7 makes that a requirement rather than a nicety: an
 // operator whose vault will not unlock needs to be able to say which build they
 // are running and which provider they pointed it at, and a command that needed
 // a config file or a password to answer would be useless at exactly the moment
@@ -5024,7 +5024,7 @@ pub const VERSION_UPDATE_CHECK_FEATURE: &str = "dctl version --check: an update 
 /// real, and a user reading only the last line should not conclude that the
 /// whole command failed.
 ///
-/// The phase is stated as absent. `PLAN.md` §11 runs to phase 5 and none of the
+/// The phase is stated as absent. [The plan](https://doc.dctl.sh/project/plan) §11 runs to phase 5 and none of the
 /// five mentions distribution, so a reader is told there is nothing to wait for
 /// rather than being sent to re-read the roadmap for an entry that is not there.
 pub const VERSION_UPDATE_CHECK_HINT: &str = "The build information above is complete and was printed. Only the update \
@@ -5351,7 +5351,7 @@ pub const COMPLETION_INSTALL_HINTS: &[(&str, &str)] = &[
 /// Opens a brace alternation: `{jpg,png}` matches either word.
 ///
 /// Named here beside the other metacharacters so the matcher, its diagnostics
-/// and `docs/GLOBAL_FLAGS.md` cannot drift apart — the same reason the `*`/`?`
+/// and [the global-flag reference](https://doc.dctl.sh/reference/global-flags) cannot drift apart — the same reason the `*`/`?`
 /// family is named rather than inlined.
 pub const GLOB_ALTERNATION_OPEN: char = '{';
 /// Closes a brace alternation opened by [`GLOB_ALTERNATION_OPEN`].
@@ -6127,7 +6127,7 @@ mod tests {
 
     #[test]
     fn a_scrub_reads_everything_unless_told_otherwise() {
-        // The default has to be a full pass: `PLAN.md` §13.4's promise is that
+        // The default has to be a full pass: [the plan](https://doc.dctl.sh/project/plan) §13.4's promise is that
         // rot is found before restore day, and a sampled default would quietly
         // leave most of the dataset unmeasured while still printing "healthy".
         assert_eq!(SCRUB_FULL_SAMPLE_PERCENT as u64, SCRUB_SAMPLE_BASIS);
@@ -6648,7 +6648,7 @@ mod tests {
 
     #[test]
     fn a_removal_plan_can_only_ever_say_it_planned() {
-        // PLAN.md §6: a plan describes work that has not happened, so there is
+        // [The plan](https://doc.dctl.sh/project/plan) §6: a plan describes work that has not happened, so there is
         // no second status for a document to carry.
         assert_eq!(
             REMOVAL_STATUS_PLANNED,

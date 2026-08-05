@@ -44,8 +44,9 @@ pub struct MountConfig {
     ///
     /// Zero disables it. Non-zero means: after a read, warm the chunks covering
     /// the next this-many bytes so a sequential reader finds them decrypted and
-    /// authenticated already — `PLAN.md` §15's "serve chunk *k* while fetching
-    /// *k+1…k+P*", with the window named by the user rather than guessed.
+    /// authenticated already — [the plan](https://doc.dctl.sh/project/plan)
+    /// §15's "serve chunk *k* while fetching *k+1…k+P*", with the window named
+    /// by the user rather than guessed.
     pub read_ahead: u64,
 
     /// Who may talk to the mount (`--allow-other`, `--allow-root`).

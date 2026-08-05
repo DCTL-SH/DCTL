@@ -21,10 +21,11 @@ use crate::output::size::parse_size;
 /// How much of a file the VFS keeps on local disk.
 ///
 /// The four modes are rclone's, because a user reaching for `--vfs-cache-mode`
-/// has read rclone's documentation for it, and a fifth spelling of the same four
-/// behaviours would help nobody. `PLAN.md` §15 makes the encrypted on-disk cache
-/// the second tier beneath the in-RAM one; this flag decides how much of it a
-/// mount is allowed to use.
+/// has read rclone's documentation for it, and a fifth spelling of the same
+/// four behaviours would help nobody.
+/// [The plan](https://doc.dctl.sh/project/plan) §15 makes the encrypted on-disk
+/// cache the second tier beneath the in-RAM one; this flag decides how much of
+/// it a mount is allowed to use.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "lower")]
 pub enum VfsCacheMode {

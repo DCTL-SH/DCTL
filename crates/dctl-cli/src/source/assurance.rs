@@ -14,7 +14,7 @@
 //!
 //! Both are worth running on a schedule and neither is a substitute for the
 //! other. So the claim travels with the result instead of being folded into one
-//! word: `PLAN.md` §6 forbids reporting a guarantee that was not checked, and
+//! word: [the plan](https://doc.dctl.sh/project/plan) §6 forbids reporting a guarantee that was not checked, and
 //! "healthy" over a store that cannot detect corruption would be precisely that.
 //!
 //! This is not the same axis as the `--verify` strength dial

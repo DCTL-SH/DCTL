@@ -63,7 +63,8 @@ pub const STORE_REMOTE: &str = "archive-store";
 /// pin the on-disk layout rather than following the code that produced it.
 pub const ENVELOPE: &str = "system/envelope.bin";
 
-/// Magic at the head of a sealed DCTL object (`docs/FORMAT.md` §3).
+/// Magic at the head of a sealed DCTL object (`crates/dctl-decode/FORMAT.md`
+/// §3).
 ///
 /// Written out rather than imported for the same reason as [`ENVELOPE`]: this is
 /// the *frozen format*, and a test that read the constant would keep passing if

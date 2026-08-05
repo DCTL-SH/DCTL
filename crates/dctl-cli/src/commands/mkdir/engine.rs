@@ -40,8 +40,8 @@
 //!
 //! Because the answer does not depend on its contents. Unlocking to discover
 //! that there is nothing to do would put a password prompt in the middle of a
-//! script for no result, and `PLAN.md` §14's headless case would fail on a
-//! command that never needed a credential.
+//! script for no result, and [the plan](https://doc.dctl.sh/project/plan)
+//! §14's headless case would fail on a command that never needed a credential.
 
 use std::path::Path;
 

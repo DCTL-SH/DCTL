@@ -87,7 +87,7 @@ pub const fn is_worth_repeating(error: &CliError) -> bool {
         // answered nothing, and stopped. Repeating the file cannot reach it —
         // every call refuses before it opens a connection — so a repeat here
         // would add a *Retries* count and a log line over requests that were
-        // never made, which is the class `PLAN.md` §6 forbids.
+        // never made, which is the class [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
         | ExitCode::LinkSilent => false,
 
         // The run was stopped deliberately. Repeating either of these would be
@@ -178,7 +178,7 @@ mod tests {
         // answered nothing. Every call now refuses before it opens a
         // connection, so a repeat would add a *Retries* count and a log line
         // over requests that were never made — a report of work that did not
-        // happen, which is the class `PLAN.md` §6 forbids and the exact defect
+        // happen, which is the class [the plan](https://doc.dctl.sh/project/plan) §6 forbids and the exact defect
         // the *Retries* row was built to stop telling.
         //
         // This is also why `dctl_store::StoreError::Stalled` does not map to

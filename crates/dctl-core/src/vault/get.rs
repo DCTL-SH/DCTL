@@ -135,7 +135,7 @@ impl Vault {
     }
 
     /// Open the file at `path` for **random access**: a reader that serves any byte
-    /// window by fetching only the chunks covering it (`docs/FORMAT.md` §3).
+    /// window by fetching only the chunks covering it (`crates/dctl-decode/FORMAT.md` §3).
     ///
     /// This is the narrow read [`get_file`](Vault::get_file) is not. `get_file` downloads
     /// and decrypts the whole object, so a 10-byte window of a 95 MiB file costs 95 MiB of

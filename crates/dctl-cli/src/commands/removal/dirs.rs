@@ -38,9 +38,10 @@
 //!   it has already ceased to exist by the time the file is gone, and reporting
 //!   that as a removal would be counting a thing that never happened.
 //!
-//! Both of those are stated in the report rather than smoothed over, because the
-//! alternative — inventing a directory removal so the numbers look like a
-//! filesystem's — is precisely the misreport `PLAN.md` §6 forbids.
+//! Both of those are stated in the report rather than smoothed over, because
+//! the alternative — inventing a directory removal so the numbers look like a
+//! filesystem's — is precisely the misreport
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
 
 use std::collections::BTreeSet;
 

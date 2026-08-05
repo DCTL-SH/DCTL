@@ -6,7 +6,7 @@
 //! An append-only chain has to outlive the tool that wrote it. One
 //! self-describing record per line is greppable, diffable, safely appendable,
 //! and readable by any language's standard library in twenty years — the same
-//! reasoning that governs the object format (`PLAN.md` §13.1). A database would
+//! reasoning that governs the object format ([the plan](https://doc.dctl.sh/project/plan) §13.1). A database would
 //! be faster to query and unreadable the day its file format is orphaned; an
 //! auditor with `grep` and a hash tool is the design target.
 //!
@@ -17,7 +17,7 @@
 //! that matters: a run that dies part-way through writing a record leaves bytes
 //! after the last terminator, and those bytes are unambiguously *not a record* —
 //! never "a record that might be short". The chain up to the last terminator is
-//! untouched and still verifies, which is the guarantee `PLAN.md` §6 demands of
+//! untouched and still verifies, which is the guarantee [the plan](https://doc.dctl.sh/project/plan) §6 demands of
 //! every durable write: no partial state is ever surfaced as success.
 //!
 //! [`frame`] is the pure half of that rule, over a byte slice, so the framing
@@ -118,7 +118,7 @@ pub enum Framing<'a> {
 ///
 /// The scan is backwards because the writer needs exactly two facts — the head
 /// hash and the next index — and both live in the final record. Walking the file
-/// forwards would make every append cost the whole history (`PLAN.md` §D10).
+/// forwards would make every append cost the whole history ([the plan](https://doc.dctl.sh/project/plan) §D10).
 #[must_use]
 pub fn frame(window: &[u8], anchored: bool) -> Framing<'_> {
     let terminator = window

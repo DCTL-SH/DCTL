@@ -1,10 +1,11 @@
 //! The tamper-evident audit log: one format, one chain rule, both halves.
 //!
-//! `PLAN.md` §7 makes an append-only, hash-chained record of every operation a
-//! day-1 non-negotiable, and §6 step 8 puts the append at the end of the
-//! verified-write pipeline. It is the mechanism by which DCTL can *prove* to an
-//! auditor, an insurer or a client what happened to their data — and prove that
-//! the account has not been altered since.
+//! [The plan](https://doc.dctl.sh/project/plan) §7 makes an append-only,
+//! hash-chained record of every operation a day-1 non-negotiable, and §6 step 8
+//! puts the append at the end of the verified-write pipeline. It is the
+//! mechanism by which DCTL can *prove* to an auditor, an insurer or a client
+//! what happened to their data — and prove that the account has not been
+//! altered since.
 //!
 //! ## Why this lives outside `commands::audit`
 //!
@@ -37,13 +38,15 @@
 //!   and an absence is the one defect reading the code cannot find. A test and
 //!   nothing else, like `crate::cli::mentions`, so it is compiled only under
 //!   `cargo test`; the normative statement of the same policy is
-//!   `docs/AUDIT_LOG.md` §9.1.
+//!   [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §9.1.
 //!
-//! The format is specified normatively in `docs/AUDIT_LOG.md`, in enough detail
-//! to verify a chain with a short script and no DCTL binary. That is not
-//! documentation courtesy: a tamper-evidence claim that can only be checked by
-//! the tool that produced the evidence is not tamper-evidence at all, and the
-//! same twenty-year-decodability discipline governs `docs/FORMAT.md`.
+//! The format is specified normatively in
+//! [the audit-log reference](https://doc.dctl.sh/reference/audit-log), in
+//! enough detail to verify a chain with a short script and no DCTL binary. That
+//! is not documentation courtesy: a tamper-evidence claim that can only be
+//! checked by the tool that produced the evidence is not tamper-evidence at
+//! all, and the same twenty-year-decodability discipline governs
+//! `crates/dctl-decode/FORMAT.md`.
 
 pub mod anchor;
 pub mod chain;

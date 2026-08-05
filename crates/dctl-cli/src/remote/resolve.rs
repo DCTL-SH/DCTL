@@ -5,7 +5,8 @@
 //! because they fail differently: a malformed spec is a usage error the user can
 //! see in their own command line, while an unknown remote or a half-filled
 //! config section is a configuration error whose fix is in a file somewhere else
-//! (`PLAN.md` §7 — every failure carries the remediation that matches it).
+//! ([the plan](https://doc.dctl.sh/project/plan) §7 — every failure carries
+//! the remediation that matches it).
 //!
 //! ## Resolution order
 //!
@@ -15,7 +16,8 @@
 //! 2. Otherwise, a name that *is* a provider type resolves as a **shorthand**
 //!    for it — `b2:my-bucket`, `s3:my-bucket/prefix`. This keeps the pre-config
 //!    behaviour of the CLI working: a headless job with nothing but exported
-//!    credentials needs no config file at all (`PLAN.md` §14).
+//!    credentials needs no config file at all
+//!    ([the plan](https://doc.dctl.sh/project/plan) §14).
 //! 3. Otherwise the remote is unknown, and that is a hard failure. It is never
 //!    reinterpreted as a local path — by the time resolution runs, [`super::spec`]
 //!    has already ruled that out, and quietly writing to a directory named
@@ -115,7 +117,8 @@ impl RemoteEntry {
 /// The config file holds no secrets by design, but a user is free to paste one
 /// into it anyway, and a `Debug` derive would then put it in every `--dump
 /// config` capture attached to a support ticket. Redaction is mandatory
-/// (`PLAN.md` §7), so it is not left to the caller to remember.
+/// ([the plan](https://doc.dctl.sh/project/plan) §7), so it is not left to the
+/// caller to remember.
 impl fmt::Debug for RemoteEntry {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RemoteEntry")
@@ -304,7 +307,7 @@ fn target_from_entry(name: &str, entry: &RemoteEntry) -> Result<Target> {
         // own rather than falling into "unknown type", which would be untrue and
         // would send the user looking for a typo they did not make: a vault
         // remote stores nothing itself, it encrypts on the way through to the
-        // remote it wraps (`PLAN.md` §14).
+        // remote it wraps ([the plan](https://doc.dctl.sh/project/plan) §14).
         PROVIDER_VAULT => Err(CliError::fatal(format!(
             "remote '{name}' is a {PROVIDER_VAULT} wrapper, which stores nothing itself"
         ))
@@ -608,7 +611,8 @@ pub fn vault_chunk_size<C: RemoteCatalog + ?Sized>(
 ///
 /// A bare path, a provider shorthand and an unconfigured name have no policy to
 /// state, so they take the compiled-in default — which is
-/// [`VerifyMode::Checksum`], the comparison `PLAN.md` §6 step 5 mandates.
+/// [`VerifyMode::Checksum`], the comparison
+/// [the plan](https://doc.dctl.sh/project/plan) §6 step 5 mandates.
 ///
 /// ## Why the flag is an `Option`
 ///
@@ -1294,7 +1298,8 @@ mod tests {
 
     #[test]
     fn the_shorthand_keeps_working_with_no_config_at_all() {
-        // The headless case from PLAN.md §14: exported credentials, no file.
+        // The headless case from [the plan](https://doc.dctl.sh/project/plan)
+        // §14: exported credentials, no file.
         let resolved = resolve_str("b2:my-bucket", &()).unwrap();
         assert_eq!(
             resolved.target(),

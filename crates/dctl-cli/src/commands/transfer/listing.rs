@@ -38,7 +38,8 @@
 //!
 //! ## Memory
 //!
-//! The listing is materialised into a `Vec`. `PLAN.md` §16.2 asks for streaming
+//! The listing is materialised into a `Vec`.
+//! [The plan](https://doc.dctl.sh/project/plan) §16.2 asks for streaming
 //! everything, and the streaming diff genuinely belongs in `dctl-core` — but a
 //! `sync` cannot name a destination *extra* until it has seen the whole source,
 //! so some state is unavoidable and the honest place for the streaming,

@@ -4,7 +4,8 @@
 //! contract [`Entries`](crate::source::Entries) states and both implementations
 //! honour — which is what makes a comparison of two ten-million-object trees a
 //! **merge** rather than a join. A merge holds one entry per side; a join would
-//! hold one of the two trees in a map, and `PLAN.md` §16.2 rules that out for
+//! hold one of the two trees in a map, and
+//! [the plan](https://doc.dctl.sh/project/plan) §16.2 rules that out for
 //! exactly the datasets `check` exists to compare.
 //!
 //! The merge is also what makes the three presence answers fall out for free.

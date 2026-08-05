@@ -1,10 +1,11 @@
 //! Which secret this run opens the vault with.
 //!
 //! One decision, made once, so that no two commands can answer it differently.
-//! DCTL now has two independent ways into a vault — the password and the
-//! recovery phrase (`docs/FORMAT.md` §2, `PLAN.md` §13.2) — and the moment two
-//! call sites choose between them separately is the moment one of them forgets
-//! the phrase exists.
+//! DCTL now has two independent ways into a vault — the password and the recovery
+//! phrase (`crates/dctl-decode/FORMAT.md` §2,
+//! [the plan](https://doc.dctl.sh/project/plan) §13.2) — and the moment two call
+//! sites choose between them separately is the moment one of them forgets the
+//! phrase exists.
 //!
 //! ## The precedence rule, and why it is not a conflict
 //!

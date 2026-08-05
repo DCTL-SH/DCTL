@@ -13,8 +13,9 @@
 //!   against — a second read of the same source is not a check — so the
 //!   confirmation is skipped rather than faked.
 //! * A run that cannot obtain a password **fails**. It never falls back to an
-//!   empty one, and under `--no-ask-password` it never blocks a headless job on
-//!   a prompt nobody will answer (`PLAN.md` §14).
+//!   empty one, and under `--no-ask-password` it never blocks a headless job on a
+//!   prompt nobody will answer ([the plan](https://doc.dctl.sh/project/plan)
+//!   §14).
 //!
 //! The password is wrapped in [`Secret`] the moment it exists, so it cannot
 //! reach a log by accident.
@@ -155,9 +156,10 @@ fn prompt_twice() -> Result<String> {
 /// own keystrokes seconds apart, so there is no secret here to leak by timing.
 ///
 /// # Errors
-/// [`ExitCode::Usage`] when they differ. The message says explicitly that
-/// nothing was written, because the alternative reading — "it half-worked" —
-/// is exactly the ambiguity `PLAN.md` §6 exists to remove.
+/// [`ExitCode::Usage`] when they differ. The message says explicitly that nothing
+/// was written, because the alternative reading — "it half-worked" — is exactly
+/// the ambiguity [the plan](https://doc.dctl.sh/project/plan) §6 exists to
+/// remove.
 fn confirm_match(first: &str, second: &str) -> Result<()> {
     if first == second {
         return Ok(());

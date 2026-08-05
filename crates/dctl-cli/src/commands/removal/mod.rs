@@ -45,7 +45,7 @@
 //! 2. **A partial failure is never a success.** Each failure is counted at the
 //!    moment it is observed, the run finishes the objects behind it, and the
 //!    process exits [`ExitCode::PartialFailure`](crate::exit::ExitCode::PartialFailure)
-//!    (`PLAN.md` §7). Nothing rolls up.
+//!    ([the plan](https://doc.dctl.sh/project/plan) §7). Nothing rolls up.
 //! 3. **Nothing is reported removed until the store confirms it.** For a vault
 //!    that means after the index row is committed away, which is what makes a
 //!    file count as gone. [`remove`] documents the ordering in full, including

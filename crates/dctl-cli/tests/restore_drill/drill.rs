@@ -1,6 +1,6 @@
 //! The six steps, in order, over any backend.
 //!
-//! > *A backup you never restored isn't a backup* — `PLAN.md` §13.6.
+//! > *A backup you never restored isn't a backup* — [the plan](https://doc.dctl.sh/project/plan) §13.6.
 //!
 //! Each step below is here because a specific promise would otherwise be
 //! untested, and each carries its own assertion so a failure names the step
@@ -17,7 +17,7 @@
 //!    the disaster the whole design claims to survive — the machine is gone and
 //!    only the store remains — and it is asserted, because a drill whose
 //!    disaster silently did not happen proves that the index still works.
-//! 4. **Rebuild the index from the backend.** `PLAN.md` §13.5 promises a lost
+//! 4. **Rebuild the index from the backend.** [the plan](https://doc.dctl.sh/project/plan) §13.5 promises a lost
 //!    index never means lost data. This is where that is either true or not.
 //! 5. **Restore with the recovery phrase and no password at all.** The drill
 //!    uses the phrase for step 4 as well, which is stricter than the procedure

@@ -33,8 +33,8 @@
 //! read-back that accepted short windows would answer **yes** for an object
 //! nobody has all of. `dctl mount` would serve the same short window into a
 //! `read()` and the file would be silently wrong in the middle. Both are
-//! `PLAN.md` §6's forbidden outcome reached through the command that is supposed
-//! to prevent it.
+//! [the plan](https://doc.dctl.sh/project/plan) §6's forbidden outcome reached
+//! through the command that is supposed to prevent it.
 
 use std::path::Path;
 use std::sync::Arc;

@@ -1,6 +1,6 @@
 //! Mandatory secret redaction.
 //!
-//! `PLAN.md` §7 makes this non-negotiable: **keys and tokens are never logged**,
+//! [The plan](https://doc.dctl.sh/project/plan) §7 makes this non-negotiable: **keys and tokens are never logged**,
 //! and secrets appear only as BLAKE3 fingerprints. That requirement is what
 //! makes it safe to hand a `--log-level=trace` capture to a vendor, attach it to
 //! a support ticket, or ship it to a log aggregator.
@@ -144,7 +144,7 @@ pub fn is_sensitive_key(name: &str) -> bool {
 /// tracing layer it feeds is not written, so nothing calls this yet — but the
 /// order matters: the redaction exists *before* the capture does, so the layer
 /// that eventually emits headers has a safe renderer already sitting there
-/// rather than a deadline and a `format!`. `PLAN.md` §7 makes redaction
+/// rather than a deadline and a `format!`. [The plan](https://doc.dctl.sh/project/plan) §7 makes redaction
 /// mandatory, and a mandatory thing that has to be remembered is optional.
 #[allow(dead_code)]
 #[must_use]

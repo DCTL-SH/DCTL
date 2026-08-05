@@ -298,10 +298,11 @@ const fn classify(
 /// Every object in a store, as key and size.
 ///
 /// Paged, so memory stays proportional to the number of objects rather than to
-/// the bytes they hold (`PLAN.md` §16.2). The loop refuses to continue on a
-/// cursor a backend handed back unchanged: a provider that paginates in a circle
-/// would otherwise turn a listing into an unbounded one, and a replication that
-/// never starts is a worse failure than one that reports a broken provider.
+/// the bytes they hold ([the plan](https://doc.dctl.sh/project/plan) §16.2).
+/// The loop refuses to continue on a cursor a backend handed back unchanged: a
+/// provider that paginates in a circle would otherwise turn a listing into an
+/// unbounded one, and a replication that never starts is a worse failure than
+/// one that reports a broken provider.
 async fn list_all(backend: &Arc<dyn Backend>) -> Result<BTreeMap<String, u64>> {
     let mut objects = BTreeMap::new();
     let mut cursor: Option<String> = None;

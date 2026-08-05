@@ -1,11 +1,12 @@
 //! `dctl config` — read and change the configuration file.
 //!
 //! DCTL's configuration is a TOML file holding **non-secret settings only**
-//! (`PLAN.md` §14): named remotes with their type, endpoint, bucket and region,
-//! plus policy defaults. Provider credentials live in the OS keychain and the
-//! vault password is never stored anywhere, which is the deliberate difference
-//! from `rclone.conf` — that file keeps credentials in it, "obscured" with
-//! reversible obfuscation that anyone holding the file can undo.
+//! ([the plan](https://doc.dctl.sh/project/plan) §14): named remotes with their
+//! type, endpoint, bucket and region, plus policy defaults. Provider
+//! credentials live in the OS keychain and the vault password is never stored
+//! anywhere, which is the deliberate difference from `rclone.conf` — that file
+//! keeps credentials in it, "obscured" with reversible obfuscation that anyone
+//! holding the file can undo.
 //!
 //! Three rules shape every subcommand below.
 //!
@@ -269,7 +270,8 @@ mod tests {
     #[test]
     fn a_missing_subcommand_is_a_usage_error() {
         // `dctl config` alone has no sensible default: rclone's is an
-        // interactive menu, and PLAN.md §14 rules that out.
+        // interactive menu, and [the plan](https://doc.dctl.sh/project/plan)
+        // §14 rules that out.
         let error = Cli::try_parse_from(["dctl", "config"]).unwrap_err();
         assert!(error.use_stderr());
     }

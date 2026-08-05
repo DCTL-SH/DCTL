@@ -41,9 +41,9 @@
 //!
 //! The spool is filled first and sealed second, so a producer that dies halfway
 //! leaves a partial temporary file and **no object at all**. That is the
-//! `PLAN.md` §6 ordering a stream can actually keep: the length is unknown until
-//! EOF, so there is no earlier moment at which a complete object could be
-//! committed.
+//! [plan](https://doc.dctl.sh/project/plan) §6 ordering a stream can actually
+//! keep: the length is unknown until EOF, so there is no earlier moment at
+//! which a complete object could be committed.
 
 use std::io::Read;
 

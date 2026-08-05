@@ -14,7 +14,7 @@
 //! that can touch a provider therefore hands its work — *and its reply* — to the
 //! Tokio runtime and returns immediately, so the loop is free to accept the next
 //! request. That is what lets a directory listing complete while a
-//! fifty-gigabyte read is in flight, and it is the concurrency `PLAN.md` §15 asks
+//! fifty-gigabyte read is in flight, and it is the concurrency [the plan](https://doc.dctl.sh/project/plan) §15 asks
 //! for ("multithreaded so parallel opens/seeks don't serialize") on a session
 //! loop that is single-threaded on macOS by `fuser`'s own constraint.
 //!
@@ -115,7 +115,7 @@ impl Filesystem for VaultFs {
     /// The only thing tuned here is read-ahead, and it is tuned from
     /// `--buffer-size` because that is what the flag means on the kernel's side
     /// of the boundary: how much the kernel may ask for beyond what a program
-    /// requested. `PLAN.md` §15 names it as one of the per-platform knobs, and it
+    /// requested. [The plan](https://doc.dctl.sh/project/plan) §15 names it as one of the per-platform knobs, and it
     /// composes with — rather than replaces — the mount's own read-ahead into the
     /// decrypted-chunk cache: the kernel asking for more per request means fewer,
     /// larger reads, and the chunk warming means the ones it does make are
@@ -177,7 +177,7 @@ impl Filesystem for VaultFs {
 
     fn lookup(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEntry) {
         let Some(name) = logical_name(name) else {
-            // A vault path is NFC UTF-8 (`docs/FORMAT.md` §5), so a name that is
+            // A vault path is NFC UTF-8 (`crates/dctl-decode/FORMAT.md` §5), so a name that is
             // not representable as one cannot name anything stored. ENOENT is
             // the truth: there is no such entry.
             reply.error(Errno::ENOENT);
@@ -247,7 +247,7 @@ impl Filesystem for VaultFs {
     /// **The call this filesystem exists to make fast.** It goes to
     /// [`MountState::read`] and from there to the ranged read: only the chunks
     /// covering `[offset, offset + size)` are fetched and authenticated
-    /// (`docs/FORMAT.md` §3), so seeking to 45:00 in a fifty-gigabyte film costs
+    /// (`crates/dctl-decode/FORMAT.md` §3), so seeking to 45:00 in a fifty-gigabyte film costs
     /// the covering chunks and nothing else. There is no whole-object path behind
     /// this at any size.
     fn read(
@@ -725,7 +725,7 @@ impl Filesystem for VaultFs {
 /// Two conversions, both necessary. A vault path is UTF-8, so a name that is not
 /// is not a name anything stored can have — and the caller reports that as
 /// `ENOENT`, which is the truth rather than an error. It is also **NFC**
-/// (`docs/FORMAT.md` §5), and macOS is the reason that matters: the same
+/// (`crates/dctl-decode/FORMAT.md` §5), and macOS is the reason that matters: the same
 /// filename typed into a terminal and produced by Finder can differ by
 /// normalisation alone, and comparing the two byte-wise would make a file
 /// visible in a listing and unopenable by name.

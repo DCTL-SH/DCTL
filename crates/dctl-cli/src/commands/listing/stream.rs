@@ -4,7 +4,7 @@
 //! holds exactly one page — never the listing — so the memory a `dctl ls` of a
 //! ten-million-object vault uses is set by
 //! [`LIST_PAGE_SIZE`](crate::constants::LIST_PAGE_SIZE), not by the size of the
-//! vault (`PLAN.md` §16.2).
+//! vault ([the plan](https://doc.dctl.sh/project/plan) §16.2).
 //!
 //! ## Why a callback rather than `Iterator`
 //!
@@ -12,7 +12,7 @@
 //! `Result<Entry>` and every renderer would carry the same `match` on every
 //! element. Worse, the natural `for entry in stream` then *silently* skips the
 //! rest of the listing when a page fails unless each renderer remembers to break
-//! — a truncated listing that exits zero, which is the one outcome `PLAN.md` §6
+//! — a truncated listing that exits zero, which is the one outcome [the plan](https://doc.dctl.sh/project/plan) §6
 //! forbids. [`Stream::try_for_each`] makes the failure the loop's own
 //! short-circuit: it is not possible to write the renderer that ignores it.
 //!
@@ -125,7 +125,7 @@ impl Stream {
                     continue;
                 }
                 self.matched += 1;
-                // One record per listed object, at trace (`PLAN.md` §7). Cheap
+                // One record per listed object, at trace ([the plan](https://doc.dctl.sh/project/plan) §7). Cheap
                 // when the level is off — `tracing` checks it before evaluating
                 // the fields — and the only way to answer "why did this listing
                 // include that" without re-running with different flags. The

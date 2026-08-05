@@ -1,11 +1,13 @@
 //! What `dctl version` prints, in whichever format was asked for.
 //!
-//! The report is the command's *result*, so it goes to **stdout** (`PLAN.md`
-//! §7) and `dctl version --json | jq -r .git_hash` is a working pipeline. It is
-//! also the text a user pastes into a bug report, which is why every field is
-//! present in every format: a key that vanished when its value was unknown would
-//! make two reports from two machines structurally different, and the reader
-//! would have to guess whether the field was absent or the tool was older.
+//! The report is the command's *result*, so it goes to **stdout**
+//! ([the plan](https://doc.dctl.sh/project/plan) §7) and
+//! `dctl version --json | jq -r .git_hash` is a working pipeline. It is also
+//! the text a user pastes into a bug report, which is why every field is
+//! present in every format: a key that vanished when its value was unknown
+//! would make two reports from two machines structurally different, and the
+//! reader would have to guess whether the field was absent or the tool was
+//! older.
 //!
 //! Unknown values are therefore `null` in JSON and [`UNKNOWN_VALUE`] in text,
 //! never omitted and never filled in with a guess.

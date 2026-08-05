@@ -62,8 +62,8 @@
 //! * **Nothing is reported as removed until the index row is gone.**
 //!   `delete_file` returns `true` only after step 3 has committed, and only that
 //!   `true` produces a `removed` record. So the report can never claim a file is
-//!   gone while a listing would still show it — which is the promise `PLAN.md` §6
-//!   actually makes.
+//!   gone while a listing would still show it — which is the promise
+//!   [the plan](https://doc.dctl.sh/project/plan) §6 actually makes.
 //! * **Removal is idempotent, and re-running converges.** From the state after
 //!   step 1 or 2, running the same command again resolves the path (through the
 //!   index, or through the name record on a fresh machine), deletes a content
@@ -92,8 +92,10 @@ use super::selection::Item;
 ///
 /// A failure on one object is recorded and the loop continues. That is the whole
 /// point: abandoning nine hundred removals because the nine hundred and first
-/// was unreachable helps nobody, and `PLAN.md` §7 already has the vocabulary for
-/// the result — the run finishes, the errors are counted, and the process exits
+/// was unreachable helps nobody, and
+/// [the plan](https://doc.dctl.sh/project/plan) §7 already has the vocabulary
+/// for the result — the run finishes, the errors are counted, and the process
+/// exits
 /// [`ExitCode::PartialFailure`](crate::exit::ExitCode::PartialFailure) rather
 /// than `0`.
 ///
@@ -105,7 +107,8 @@ use super::selection::Item;
 ///
 /// One chained record per object, appended after the store has confirmed the
 /// removal — for a vault, after the index row is committed away, which is what
-/// makes a file count as gone (`PLAN.md` §6 step 8). Both the record and the
+/// makes a file count as gone ([the plan](https://doc.dctl.sh/project/plan) §6
+/// step 8). Both the record and the
 /// operator's report are derived from the *same* match arm on the same outcome,
 /// so the log and the report cannot come to disagree about what happened to an
 /// object: there is no second decision for one of them to make differently.
@@ -118,8 +121,9 @@ use super::selection::Item;
 /// # Errors
 /// A failure to *write the report* — a broken stdout other than a closed pipe —
 /// or a failure to append the audit record, which fails the command because
-/// `PLAN.md` §7 does not make the chain optional. A failure to remove an object
-/// is data, not an error return, because it must not stop the objects behind it.
+/// [the plan](https://doc.dctl.sh/project/plan) §7 does not make the chain
+/// optional. A failure to remove an object is data, not an error return,
+/// because it must not stop the objects behind it.
 pub async fn run(
     ctx: &Ctx,
     op: &'static str,

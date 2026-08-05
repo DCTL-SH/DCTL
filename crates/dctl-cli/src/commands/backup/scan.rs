@@ -3,12 +3,13 @@
 //! Three properties this walk is written for, in order of how much they matter.
 //!
 //! **It never stops on one bad entry.** A directory that cannot be read, a
-//! filename that is not valid UTF-8, a file that vanished between the listing
-//! and the `stat` — each is recorded and the walk continues. A backup that
-//! aborts on the first unreadable directory backs up nothing; one that reports
-//! four problems and 200 000 files gives its operator something to act on. The
+//! filename that is not valid UTF-8, a file that vanished between the listing and
+//! the `stat` — each is recorded and the walk continues. A backup that aborts on
+//! the first unreadable directory backs up nothing; one that reports four
+//! problems and 200 000 files gives its operator something to act on. The
 //! problems are returned, never swallowed: the caller counts them as errors and
-//! the run's exit code reflects it (`PLAN.md` §7).
+//! the run's exit code reflects it ([the plan](https://doc.dctl.sh/project/plan)
+//! §7).
 //!
 //! **It cannot loop.** Following symlinks is opt-in, and when it is on the walk
 //! remembers the identity of every directory on the path from the root to the

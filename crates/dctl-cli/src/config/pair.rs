@@ -8,11 +8,12 @@
 //! The base gets a *name*, and that is the load-bearing decision. Because it is
 //! named, an offsite replication job addressed at `archive-store:` copies
 //! ciphertext provider-to-provider and needs **no vault password at all**: a
-//! backup operator can satisfy 3-2-1 without ever holding decryption capability.
-//! Separation of duties becomes a structural property of the configuration
-//! rather than a rule somebody is trusted to follow. `PLAN.md` §13.3 requires
-//! exactly this — replicating a vault's object tree with no re-encryption — and
-//! it is unimplementable if the base has no name to type.
+//! backup operator can satisfy 3-2-1 without ever holding decryption
+//! capability. Separation of duties becomes a structural property of the
+//! configuration rather than a rule somebody is trusted to follow.
+//! [The plan](https://doc.dctl.sh/project/plan) §13.3 requires exactly this —
+//! replicating a vault's object tree with no re-encryption — and it is
+//! unimplementable if the base has no name to type.
 //!
 //! ## Why the pair is a type
 //!
@@ -95,8 +96,9 @@ impl VaultPair {
         let vault = RemoteDef::Vault(VaultDef {
             base: store_name.clone(),
             base_path,
-            // Left unset on purpose: a chunk size written today would freeze
-            // a tuning decision a later release improves (`PLAN.md` §3).
+            // Left unset on purpose: a chunk size written today would freeze a
+            // tuning decision a later release improves
+            // ([the plan](https://doc.dctl.sh/project/plan) §3).
             chunk_size: None,
             verify: None,
         });

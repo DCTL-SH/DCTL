@@ -1,6 +1,7 @@
 //! The serialisation format chosen for one command invocation.
 //!
-//! `--format` is what makes DCTL scriptable (`PLAN.md` §16.3): the same command
+//! `--format` is what makes DCTL scriptable
+//! ([the plan](https://doc.dctl.sh/project/plan) §16.3): the same command
 //! either prints aligned columns for a human or emits machine-readable JSON, and
 //! nothing about the *work* changes between the two. Keeping the choice in one
 //! small enum — rather than a pair of booleans threaded through the writers —

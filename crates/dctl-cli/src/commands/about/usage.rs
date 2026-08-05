@@ -32,11 +32,11 @@
 //!
 //! ## Cost
 //!
-//! One listing pass, and memory for two `u64`s however large the remote is —
-//! the cursor is pulled one entry at a time (`PLAN.md` §16.2). On a vault that
-//! is a local index scan; on a bucket it is a real paged listing, which is the
-//! honest price of an exact answer and is why the notice says the figure was
-//! measured.
+//! One listing pass, and memory for two `u64`s however large the remote is — the
+//! cursor is pulled one entry at a time
+//! ([the plan](https://doc.dctl.sh/project/plan) §16.2). On a vault that is a
+//! local index scan; on a bucket it is a real paged listing, which is the honest
+//! price of an exact answer and is why the notice says the figure was measured.
 
 use crate::ctx::Ctx;
 use crate::error::Result;

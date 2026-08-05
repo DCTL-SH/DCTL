@@ -1,10 +1,11 @@
 //! What `dctl about` prints.
 //!
 //! Two tables in text, one document in JSON, and the same facts in both. The
-//! summary says which remote was addressed, what is really on the far end of it,
-//! and — unless `--capabilities` asked for the offline half alone — how much is
-//! stored there; the matrix says what that provider's backend can do. Both go to
-//! **stdout**, because they are the command's result (`PLAN.md` §7), and
+//! summary says which remote was addressed, what is really on the far end of
+//! it, and — unless `--capabilities` asked for the offline half alone — how
+//! much is stored there; the matrix says what that provider's backend can do.
+//! Both go to **stdout**, because they are the command's result
+//! ([the plan](https://doc.dctl.sh/project/plan) §7), and
 //! `dctl about vault: --json | jq '.bytes'` is a working pipeline.
 //!
 //! ## Every fact is in both renderings, including the absences

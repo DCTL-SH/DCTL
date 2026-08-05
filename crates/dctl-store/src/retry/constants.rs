@@ -17,7 +17,8 @@ use std::time::Duration;
 /// live restore drill — and S3's documented `503 SlowDown`, without turning a
 /// genuinely broken bucket into a run that looks hung. The same number the B2
 /// module already ran with, kept deliberately: the two schedules being equal is
-/// what makes one sentence in `docs/GLOBAL_FLAGS.md` true of every provider.
+/// what makes one sentence in [the global-flags reference](https://doc.dctl.sh/reference/global-flags) true of
+/// every provider.
 pub const NETWORK_MAX_ATTEMPTS: u32 = 6;
 
 /// The deterministic wait before the second network attempt; each later one

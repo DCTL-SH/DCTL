@@ -1,9 +1,10 @@
 //! Nothing a vault does to a whole object may cost the object.
 //!
-//! `PLAN.md` §16.2 requires memory to stay `O(concurrency)`, and the promise the
-//! whole tool is sold on — play a huge encrypted video straight off a bucket —
-//! is the same property said in a user's words. It was not true. Measured on the
-//! release binary under a hard cgroup cap, before the change:
+//! [The plan](https://doc.dctl.sh/project/plan) §16.2 requires memory to stay
+//! `O(concurrency)`, and the promise the whole tool is sold on — play a huge
+//! encrypted video straight off a bucket — is the same property said in a
+//! user's words. It was not true. Measured on the release binary under a hard
+//! cgroup cap, before the change:
 //!
 //! | object  | copy in   | copy out  | cat       | verify    |
 //! |---------|-----------|-----------|-----------|-----------|

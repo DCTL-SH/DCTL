@@ -10,8 +10,8 @@
 //! interesting mistake is not a bad number — it is two good numbers the wrong
 //! way round. `--min-size 10G --max-size 1G` parses perfectly and can never
 //! match anything, so a run using it would report success having moved nothing.
-//! That is precisely the "reported work that did not happen" outcome `PLAN.md`
-//! §6 forbids, so the crossed pair is a usage error instead.
+//! That is precisely the "reported work that did not happen" outcome
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids, so the crossed pair is a usage error instead.
 //!
 //! Sizes are parsed by [`crate::output::size::parse_size`], not here: the
 //! spellings DCTL *accepts* and the spellings it *prints* are one contract, and

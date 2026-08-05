@@ -2,7 +2,7 @@
 //!
 //! These types are the *only* definition of what may appear in the file: the
 //! parser accepts nothing they do not describe, and the writer emits nothing
-//! they do not contain. That symmetry is what lets `PLAN.md` §14's central
+//! they do not contain. That symmetry is what lets [the plan](https://doc.dctl.sh/project/plan) §14's central
 //! promise be enforced rather than merely documented — there is no field here
 //! that could hold a credential, so there is no code path that could write one.
 //!
@@ -64,7 +64,7 @@ impl Config {
 
     /// Whether no remotes are configured.
     ///
-    /// The state a fresh installation is in, and not an error: `PLAN.md` §14
+    /// The state a fresh installation is in, and not an error: [the plan](https://doc.dctl.sh/project/plan) §14
     /// requires DCTL to run fully headless from flags and environment variables
     /// alone, so a machine that never runs `dctl config` is a supported machine.
     ///
@@ -100,7 +100,7 @@ impl Config {
 /// # No credentials, ever
 ///
 /// **Every field below is non-secret, and that is a hard invariant, not a
-/// default.** `PLAN.md` §14 rejects rclone's model outright: `rclone.conf`
+/// default.** [the plan](https://doc.dctl.sh/project/plan) §14 rejects rclone's model outright: `rclone.conf`
 /// stores provider keys and vault passwords in the file, "obscured" with
 /// reversible obfuscation that anyone holding the file can undo. DCTL stores
 /// buckets, endpoints, regions, account ids, chunk sizes and verify policy —
@@ -228,7 +228,7 @@ impl RemoteDef {
     /// between the config and [`crate::ctx::Ctx::verify_mode`] carries a
     /// per-remote default yet. Until it does, every run verifies at whatever the
     /// flag says — which is the safe direction to be wrong in, because the
-    /// default flag value is already the checksum comparison `PLAN.md` §6
+    /// default flag value is already the checksum comparison [the plan](https://doc.dctl.sh/project/plan) §6
     /// mandates.
     #[allow(dead_code)]
     #[must_use]
@@ -432,7 +432,7 @@ fn is_unset(flag: &bool) -> bool {
     !*flag
 }
 
-/// Settings for a `vault` remote — the wrapper described in `PLAN.md` §14.
+/// Settings for a `vault` remote — the wrapper described in [the plan](https://doc.dctl.sh/project/plan) §14.
 ///
 /// A vault remote stores nothing itself. It names a **base** remote and
 /// encrypts everything on the way through, so `vault:` can be a vault over
@@ -465,7 +465,7 @@ pub struct VaultDef {
 
     /// AEAD chunk size, in bytes.
     ///
-    /// The seek granularity of the format (`PLAN.md` §3): playing from the
+    /// The seek granularity of the format ([the plan](https://doc.dctl.sh/project/plan) §3): playing from the
     /// middle of a video fetches whole chunks, so a larger value trades seek
     /// latency for fewer round trips. Unset means the media profile default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn no_field_is_named_like_a_secret() {
-        // The invariant PLAN.md §14 rests on, checked by the build rather than by
+        // The invariant [the plan](https://doc.dctl.sh/project/plan) §14 rests on, checked by the build rather than by
         // review: adding a `secret_key` or `password` field to any RemoteDef
         // fails here. The list is the same one that redacts HTTP headers, so the
         // two definitions of "looks like a credential" cannot drift.
@@ -682,7 +682,7 @@ mod tests {
 
     #[test]
     fn a_credential_pasted_into_the_file_is_refused_not_ignored() {
-        // The rclone habit PLAN.md §14 exists to break. Silently dropping the key
+        // The rclone habit [the plan](https://doc.dctl.sh/project/plan) §14 exists to break. Silently dropping the key
         // would leave it on disk; `deny_unknown_fields` makes the parse fail.
         let text = "[remotes.b2prod]\ntype = \"b2\"\nbucket = \"photos\"\n\
                     app_key = \"K000ffffffffffffffffffffffff\"\n";

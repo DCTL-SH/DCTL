@@ -10,10 +10,11 @@
 //! 2. **A vault remote whose base chain loops.** `vault` wrapping `inner`
 //!    wrapping `vault` parses perfectly and would hang or blow the stack the
 //!    first time anything tried to resolve it.
-//! 3. **A credential in the file.** `PLAN.md` §14's central prohibition. The
-//!    model has no field that could hold one, so the only way a secret arrives
-//!    is as an unexpected key — and an unexpected key that looks like a
-//!    credential deserves a louder answer than "unknown field".
+//! 3. **A credential in the file.** [The plan](https://doc.dctl.sh/project/plan)
+//!    §14's central prohibition. The model has no field that could hold one, so
+//!    the only way a secret arrives is as an unexpected key — and an unexpected
+//!    key that looks like a credential deserves a louder answer than "unknown
+//!    field".
 //! 4. **A plain remote pointing into a vault's object store.** A location
 //!    marked `require_vault` holds a vault's opaque objects. A second, plain
 //!    remote addressing the same place is one mistyped command away from
@@ -373,9 +374,10 @@ pub fn vault_chain<'a>(config: &'a Config, name: &'a str) -> Result<Vec<&'a str>
 /// rather than like the security event it is.
 ///
 /// Only keys holding a *value* are checked. A key whose value is a table is a
-/// user-chosen remote name, and `my-secret-vault` is a perfectly reasonable
-/// thing to call a vault; the prohibition in `PLAN.md` §14 is about storing
-/// credentials, not about the words people name things with.
+/// user-chosen remote name, and `my-secret-vault` is a perfectly reasonable thing
+/// to call a vault; the prohibition in
+/// [the plan](https://doc.dctl.sh/project/plan) §14 is about storing credentials,
+/// not about the words people name things with.
 ///
 /// # Errors
 /// [`ConfigError::SecretInConfig`], carrying the dotted path of the first
@@ -621,7 +623,8 @@ mod tests {
     #[test]
     fn an_empty_configuration_is_valid() {
         // A machine driven entirely by flags and environment variables never
-        // writes a config, and PLAN.md §14 says that must keep working.
+        // writes a config, and [the plan](https://doc.dctl.sh/project/plan) §14
+        // says that must keep working.
         assert!(validate(&Config::default()).is_ok());
     }
 

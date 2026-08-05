@@ -72,7 +72,7 @@ pub struct Ctx {
     pub deadlines: Deadlines,
 
     /// The tamper-evident log every data-changing operation appends to
-    /// (`PLAN.md` §7).
+    /// ([the plan](https://doc.dctl.sh/project/plan) §7).
     ///
     /// Resolved here with everything else ambiguous, and opened lazily by the
     /// first record, so a read-only command leaves no evidence file behind. It
@@ -284,7 +284,7 @@ impl Ctx {
 
     /// The exit code implied by the counters.
     ///
-    /// `PLAN.md` §7 forbids rolling a partial failure up into success, so any
+    /// [The plan](https://doc.dctl.sh/project/plan) §7 forbids rolling a partial failure up into success, so any
     /// recorded error downgrades the result even when the command body returned
     /// `Ok`.
     #[must_use]

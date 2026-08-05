@@ -1,4 +1,5 @@
-//! `dctl audit` — inspect and verify the tamper-evident log (`PLAN.md` §7).
+//! `dctl audit` — inspect and verify the tamper-evident log
+//! ([the plan](https://doc.dctl.sh/project/plan) §7).
 //!
 //! The log is an append-only, hash-chained record of every operation: each entry
 //! carries the previous entry's hash, so the sequence can be extended but not
@@ -35,8 +36,8 @@
 //! code 26 rather than 24, because "the links failed" and "the links held and
 //! this is not the chain you left" are different findings. The operating
 //! procedure — where an operator is supposed to keep the anchor, and how often
-//! — is `docs/AUDIT_LOG.md` §10, because a defence nobody knows how to operate
-//! is not a defence.
+//! — is [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §10,
+//! because a defence nobody knows how to operate is not a defence.
 //!
 //! ## The format is not defined here
 //!

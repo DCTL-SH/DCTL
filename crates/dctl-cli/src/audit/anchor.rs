@@ -8,14 +8,14 @@
 //! perfectly — every link still holds, every index is still dense — because
 //! nothing inside a log attests to how many records it should have. The records
 //! an attacker most wants gone are the most recent ones, which is exactly the
-//! region the chain cannot defend. `docs/AUDIT_LOG.md` §1 has always said so;
+//! region the chain cannot defend. [The audit-log reference](https://doc.dctl.sh/reference/audit-log) §1 has always said so;
 //! this module is the mechanism that does something about it.
 //!
 //! The only thing that can attest to a chain's length is a value recorded
 //! somewhere the writer cannot reach. That value is the **anchor**, and
 //! comparing it against the log is the whole defence. `dctl audit head` produces
 //! one, `dctl audit verify --expect-head` checks one, and
-//! `docs/AUDIT_LOG.md` §10 is the operating procedure for keeping one — because
+//! [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §10 is the operating procedure for keeping one — because
 //! a defence nobody knows how to operate is not a defence.
 //!
 //! ## Why an anchor carries a record count
@@ -58,7 +58,7 @@
 //! All four exit [`crate::exit::ExitCode::AuditHeadMismatch`] (26), which is a
 //! *different* code from a broken chain (24) on purpose. The chain being sound
 //! and the chain not ending where you left it are different findings with
-//! different remedies, and `docs/EXIT_CODES.md`'s own rule is that a new
+//! different remedies, and the [exit-code reference](https://doc.dctl.sh/reference/exit-codes)'s own rule is that a new
 //! condition gets a new number rather than re-scoping a published one.
 //!
 //! ## What an anchor still does not prove

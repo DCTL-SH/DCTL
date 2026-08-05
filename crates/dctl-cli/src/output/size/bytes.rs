@@ -54,7 +54,7 @@ pub fn bytes(count: u64, units: Units) -> String {
 /// [`UNKNOWN_VALUE`] — the placeholder this crate already uses for a value it
 /// could not compute — and not `0 B`, because a rebuilt vault index really does
 /// hold rows nobody has measured and rendering those as a number is the
-/// misreport `PLAN.md` §6 forbids.
+/// misreport [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
 #[must_use]
 pub fn bytes_or_unknown(count: Option<u64>, units: Units) -> String {
     count.map_or_else(|| UNKNOWN_VALUE.to_string(), |value| bytes(value, units))

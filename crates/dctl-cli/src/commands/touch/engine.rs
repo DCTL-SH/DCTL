@@ -65,7 +65,7 @@
 //! each stamp `Last-Modified` when they accept an object and expose no operation
 //! that moves it afterwards; there is no `utimes()` to call and no header to
 //! send. So the missing capability is the **provider's**, below `dctl-store`,
-//! and no phase of `PLAN.md` delivers it — which is why
+//! and no phase of [the plan](https://doc.dctl.sh/project/plan) delivers it — which is why
 //! [`TOUCH_OBJECT_STORE_FEATURE`] says so rather than naming a release.
 //!
 //! Creating an empty object there *is* possible, and the refusal says that too:
@@ -179,7 +179,7 @@ async fn sealed(ctx: &Ctx, request: Request<'_>) -> Result<Outcome> {
 
     // An empty object goes through the same verified write and the same durable
     // index commit as any other, so success here means the same thing it means
-    // for a 40 GB file (`PLAN.md` §6).
+    // for a 40 GB file ([the plan](https://doc.dctl.sh/project/plan) §6).
     //
     // The record carries `request.stamp` whether or not `--timestamp` supplied
     // it, which is what keeps the plan and the object in agreement: the plan

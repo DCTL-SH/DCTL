@@ -27,7 +27,7 @@ bytes: key handling, the authenticated-encryption paths, the integrity checks
 that decide whether a write is reported as durable, and anything that causes a
 success to be reported for work that did not happen.
 
-`docs/SECURITY.md` is the security and threat model — what is protected, how,
+<https://doc.dctl.sh/security/threat-model> is the security and threat model — what is protected, how,
 and explicitly what is not. Read it before reporting: several properties people
 expect are deliberately *not* claimed there, and it says so plainly.
 

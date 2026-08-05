@@ -1,11 +1,12 @@
 //! The mandatory scrub every value passes through before it can enter a record.
 //!
-//! `PLAN.md` §7 is unambiguous: keys and tokens are never logged, and secrets
-//! appear only as BLAKE3 fingerprints. The audit log is the *most* exposed thing
-//! DCTL writes — its whole purpose is to be handed to an auditor, an insurer or
-//! a client — so a credential that leaked into it would leak to exactly the
-//! audience least entitled to it, and would do so in a file nobody is allowed to
-//! edit afterwards. There is no "redact it later" for an append-only log.
+//! [The plan](https://doc.dctl.sh/project/plan) §7 is unambiguous: keys and
+//! tokens are never logged, and secrets appear only as BLAKE3 fingerprints. The
+//! audit log is the *most* exposed thing DCTL writes — its whole purpose is to be
+//! handed to an auditor, an insurer or a client — so a credential that leaked
+//! into it would leak to exactly the audience least entitled to it, and would do
+//! so in a file nobody is allowed to edit afterwards. There is no "redact it
+//! later" for an append-only log.
 //!
 //! Two scrubs, applied by [`super::record::Entry`]'s setters so that no call
 //! site can skip them:

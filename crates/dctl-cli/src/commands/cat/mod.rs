@@ -15,7 +15,7 @@
 //!   into a film costs one request rather than 40 GB of transfer.
 //! * **Every argument is pre-flighted before any byte is written.** A run that
 //!   emitted half a stream and then failed would leave a redirected file that
-//!   looks complete and is not — the false success `PLAN.md` §6 forbids.
+//!   looks complete and is not — the false success [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
 //! * **`--json` requires `--discard`.** stdout cannot carry both raw bytes and a
 //!   JSON document. Rather than silently corrupting one with the other, the
 //!   combination is refused and `--discard` turns `cat` into a
@@ -181,7 +181,7 @@ async fn stream<W: Write + Send>(
         // decrypts an object and puts its plaintext on a pipe. Every other verb
         // that does that is recorded, and this one being silent left the log
         // unable to answer the question it exists for — which is why the rule in
-        // `docs/AUDIT_LOG.md` §9.1 is now "content, in either direction",
+        // [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §9.1 is now "content, in either direction",
         // rather than "anything that changes stored data".
         //
         // `--discard` records too, and records the same count. It reads exactly
@@ -434,7 +434,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_unresolvable_remote_is_refused_before_anything_is_written() {
-        // PLAN.md §6: never report work that did not happen. A remote nothing
+        // [The plan](https://doc.dctl.sh/project/plan) §6: never report work that did not happen. A remote nothing
         // can resolve must be a loud failure, not an empty successful stream.
         let parsed = parse(&["cat", "nosuchremote:film.mkv", "--no-ask-password"]);
         let error = run(&ctx_for(&parsed), parsed.args()).await.unwrap_err();

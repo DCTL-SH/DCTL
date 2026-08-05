@@ -17,7 +17,7 @@
 //!
 //! Both were stored, in walk order, the second overwriting the first. The run
 //! printed `Files: 2 / 2`, `Errors: 0`, and exited **0**. Twenty-three bytes were
-//! gone and the tool said it had them. That is the failure `PLAN.md` §6 forbids
+//! gone and the tool said it had them. That is the failure [the plan](https://doc.dctl.sh/project/plan) §6 forbids
 //! by name — never report work as done that did not happen — and a backup tool
 //! is the one place it cannot be tolerated, because the report is the only thing
 //! anybody looks at until restore day. Both `dctl backup` and `dctl copy` did

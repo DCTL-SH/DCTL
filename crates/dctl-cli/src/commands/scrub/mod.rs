@@ -1,6 +1,7 @@
 //! `dctl scrub REMOTE:` — re-read the dataset on purpose, before you need it.
 //!
-//! This is the ZFS-scrub discipline written into `PLAN.md` §13.4, and its whole
+//! This is the ZFS-scrub discipline written into
+//! [the plan](https://doc.dctl.sh/project/plan) §13.4, and its whole
 //! reason for existing is one sentence: **never discover corruption for the
 //! first time on restore day.** Cloud objects rot, providers lose replicas, and
 //! a backup that has sat untouched for three years has never once been proved
@@ -45,10 +46,11 @@
 //! ## `--repair` is refused, not ignored
 //!
 //! Repair means rebuilding a damaged object from redundancy — the par2-style
-//! Reed-Solomon parity of `PLAN.md` §13.3 — and this build writes no parity, so
-//! there is nothing to rebuild from. The flag is therefore **refused with an
-//! error** rather than accepted and quietly dropped: a run that printed
-//! `damaged` after silently doing nothing would leave the operator believing a
+//! Reed-Solomon parity of [the plan](https://doc.dctl.sh/project/plan) §13.3 —
+//! and this build writes no parity, so there is nothing to rebuild from. The
+//! flag is therefore **refused with an error** rather than accepted and quietly
+//! dropped: a run that printed `damaged` after silently doing nothing would
+//! leave the operator believing a
 //! repair had been attempted and failed for some other reason, which is worse
 //! than being told plainly that the capability is not there yet.
 //!
@@ -95,7 +97,7 @@
 //! strength cannot be honoured. The run warns when one was asked for, and the
 //! report records the strength that actually ran rather than the one requested,
 //! because a report naming a check that did not happen is the misreport
-//! `PLAN.md` §6 forbids.
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
 
 pub mod engine;
 pub mod plan;
@@ -178,7 +180,8 @@ pub struct ScrubArgs {
 /// [`ExitCode::NoFilesTransferred`](crate::exit::ExitCode::NoFilesTransferred)
 /// when the run read no object at all. Nothing failed there; nothing was proved
 /// either, and a scheduled scrub that exits 0 while verifying nothing is the
-/// exact failure `PLAN.md` §13.4 exists to prevent.
+/// exact failure [the plan](https://doc.dctl.sh/project/plan) §13.4 exists to
+/// prevent.
 pub async fn run(ctx: &Ctx, args: &ScrubArgs) -> Result<()> {
     let command = command_name(VERB);
     let target = Target::parse(&args.target)?;

@@ -11,7 +11,7 @@
 //! Both default to "do the whole job" ([`SCRUB_FULL_SAMPLE_PERCENT`],
 //! [`SCRUB_MAX_ERRORS_UNLIMITED`]), because a scrub that silently sampled would
 //! print a health verdict it had not measured — which is the exact failure
-//! `PLAN.md` §13.4 exists to prevent.
+//! [the plan](https://doc.dctl.sh/project/plan) §13.4 exists to prevent.
 //!
 //! ## Why the sample is keyed, not simply hashed
 //!

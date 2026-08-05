@@ -105,7 +105,8 @@ impl MountAudit {
     ///
     /// Appended once, when the mount attaches. No direction and no bytes: the
     /// session has moved nothing, and `bytes` is a measurement rather than a
-    /// plan (`docs/AUDIT_LOG.md` §2.2).
+    /// plan ([the audit-log reference](https://doc.dctl.sh/reference/audit-log)
+    /// §2.2).
     ///
     /// # Errors
     /// Whatever [`Sink::record`] refused. The caller drops the mount on the

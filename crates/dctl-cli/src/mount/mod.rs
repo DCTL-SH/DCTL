@@ -1,14 +1,16 @@
 //! The read-only filesystem a vault is served through.
 //!
-//! `PLAN.md` §15 asks for a mount whose *whole* design is the streaming case: a
-//! player seeking to 45:00 in a fifty-gigabyte film should fetch the covering
-//! chunks and nothing else. That is what this module is, and it is only possible
+//! [The plan](https://doc.dctl.sh/project/plan) §15 asks for a mount whose
+//! *whole* design is the streaming case: a player seeking to 45:00 in a
+//! fifty-gigabyte film should fetch the covering chunks and nothing else. That
+//! is what this module is, and it is only possible
 //! because of what came before it — [`Source::read_range`](crate::source::Source::read_range)
 //! serves a byte window at O(window) on both implementations
-//! (`docs/FORMAT.md` §3), and [`chunk_cache`](crate::source::chunk_cache) keeps
-//! the decrypted chunks so a kernel reading in 4 KiB steps does not re-fetch the
-//! same megabyte 256 times. A FUSE `read(ino, offset, size)` maps onto that call
-//! directly, with no whole-object path anywhere behind it.
+//! (`crates/dctl-decode/FORMAT.md` §3), and
+//! [`chunk_cache`](crate::source::chunk_cache) keeps the decrypted chunks so a
+//! kernel reading in 4 KiB steps does not re-fetch the same megabyte 256 times.
+//! A FUSE `read(ino, offset, size)` maps onto that call directly, with no
+//! whole-object path anywhere behind it.
 //!
 //! The verb — parsing, validating, refusing the flags this engine cannot honour
 //! — lives in [`crate::commands::mount`]. This module is the filesystem.
@@ -19,9 +21,9 @@
 //! mount is additionally attached with the kernel's own `ro` flag so most of them
 //! never reach userspace at all. Both, rather than either: the kernel flag is the
 //! cheap defence and the callback is the true one, and a filesystem that accepted
-//! a write and dropped it would be `PLAN.md` §6's misreport with a filesystem's
-//! authority behind it — the program that wrote would see success, and its data
-//! would not exist.
+//! a write and dropped it would be [the plan](https://doc.dctl.sh/project/plan)
+//! §6's misreport with a filesystem's authority behind it — the program that
+//! wrote would see success, and its data would not exist.
 //!
 //! ## No callback may panic
 //!

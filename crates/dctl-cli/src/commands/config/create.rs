@@ -1,10 +1,10 @@
 //! `dctl config create NAME TYPE [key=value ...]` — add a remote.
 //!
 //! Non-interactive by design. rclone's `config` is a questionnaire, which is
-//! excellent on a laptop and useless in a provisioning script; `PLAN.md` §14
-//! requires DCTL to be configurable with no interactive step at all, so a remote
-//! is created in one command whose arguments a configuration-management tool can
-//! generate.
+//! excellent on a laptop and useless in a provisioning script;
+//! [the plan](https://doc.dctl.sh/project/plan) §14 requires DCTL to be
+//! configurable with no interactive step at all, so a remote is created in one
+//! command whose arguments a configuration-management tool can generate.
 //!
 //! Two refusals are worth their inconvenience:
 //!
@@ -16,9 +16,10 @@
 //!   first, so a missing `bucket` or a setting the provider does not define
 //!   fails here rather than at 3am in a backup job.
 //!
-//! Credentials are not accepted as settings and would not work if they were:
-//! the configuration model has no field that could hold one, so `app_key=…` is
-//! refused with the offending key named (`PLAN.md` §14).
+//! Credentials are not accepted as settings and would not work if they were: the
+//! configuration model has no field that could hold one, so `app_key=…` is
+//! refused with the offending key named
+//! ([the plan](https://doc.dctl.sh/project/plan) §14).
 
 use clap::Args;
 use serde::Serialize;
@@ -209,7 +210,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_vault_remote_can_wrap_one_that_already_exists() {
-        // The PLAN.md §14 worked example, built one command at a time.
+        // The worked example from [the plan](https://doc.dctl.sh/project/plan)
+        // §14, built one command at a time.
         let (_dir, path) = empty();
         let ctx = ctx(&path, &[]);
         run(&ctx, &args("b2prod", "b2", &["bucket=photos"]))
@@ -383,8 +385,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_credential_offered_as_a_setting_is_refused_by_name() {
-        // The rclone habit PLAN.md §14 exists to break, attempted through the
-        // command line rather than through the file.
+        // The rclone habit [the plan](https://doc.dctl.sh/project/plan) §14
+        // exists to break, attempted through the command line rather than through
+        // the file.
         let (_dir, path) = empty();
         let ctx = ctx(&path, &[]);
         let error = run(

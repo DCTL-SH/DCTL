@@ -1,4 +1,4 @@
-//! DKE1 envelope data model (`docs/FORMAT.md` §2).
+//! DKE1 envelope data model (`crates/dctl-decode/FORMAT.md` §2).
 
 use crate::constants::{COMMIT_LEN, KEY_LEN, NONCE_LEN, TAG_LEN};
 

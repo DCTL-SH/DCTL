@@ -1,10 +1,11 @@
 //! The vocabulary of a comparison: what two sides can disagree about, and how
 //! "the same" is decided.
 //!
-//! `check` exists because `PLAN.md` §13.6 makes a tested restore a first-class
-//! requirement — a backup nobody ever compared against its source is a hope, not
-//! a backup. The comparison therefore has to be honest about *what* it proved,
-//! and that is entirely a question of which fields it looked at:
+//! `check` exists because [the plan](https://doc.dctl.sh/project/plan) §13.6
+//! makes a tested restore a first-class requirement — a backup nobody ever
+//! compared against its source is a hope, not a backup. The comparison
+//! therefore has to be honest about *what* it proved, and that is entirely a
+//! question of which fields it looked at:
 //!
 //! * size and modification time (the default) is cheap and catches the overwhelming
 //!   majority of real differences, but two files can share both and differ;

@@ -1,8 +1,9 @@
 //! `dctl backup LOCAL REMOTE:` — store a local tree in a vault.
 //!
 //! `backup` is `copy` with two additions that only make sense for an archive: it
-//! runs the name pre-flight over everything it is about to store (`PLAN.md`
-//! §13.6), and it stores by **streaming** rather than by buffering.
+//! runs the name pre-flight over everything it is about to store
+//! ([the plan](https://doc.dctl.sh/project/plan) §13.6), and it stores by
+//! **streaming** rather than by buffering.
 //!
 //! The pre-flight is the first. A filename that is legal on this machine and
 //! illegal on the machine that will one day restore it — `report:final.pdf`,
@@ -467,8 +468,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_snapshot_is_refused_on_a_real_run_rather_than_silently_dropped() {
-        // PLAN.md §13.6: an operator who believes a named point in time exists
-        // discovers otherwise on the day they reach for it.
+        // [The plan](https://doc.dctl.sh/project/plan) §13.6: an operator who
+        // believes a named point in time exists discovers otherwise on the day
+        // they reach for it.
         let dir = tree();
         let source = dir.path().display().to_string();
         let (ctx, args) = setup(&[source.as_str(), "vault:archive", "--snapshot"]);

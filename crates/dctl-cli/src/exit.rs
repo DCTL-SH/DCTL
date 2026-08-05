@@ -1,4 +1,5 @@
-//! Stable process exit codes (`PLAN.md` §7, §16.3).
+//! Stable process exit codes ([the plan](https://doc.dctl.sh/project/plan) §7,
+//! §16.3).
 //!
 //! These are a **public contract**: scripts branch on them, so a code's meaning
 //! must never change once released. New conditions get new numbers.
@@ -32,8 +33,9 @@
 //!
 //! [`ExitCode::all`] and [`ExitCode::describe`] have no caller outside this
 //! file's own tests. They exist so the contract can be enumerated rather than
-//! transcribed, and the table in `docs/EXIT_CODES.md` is currently kept in step
-//! by hand. This used to say they fed a `help exitcodes` topic; no such
+//! transcribed, and the table in [the exit-code
+//! reference](https://doc.dctl.sh/reference/exit-codes) is currently kept in
+//! step by hand. This used to say they fed a `help exitcodes` topic; no such
 //! subcommand exists, in this or any build, and a comment that names one
 //! teaches the next reader to repeat it in a user-facing hint — which is
 //! exactly how three of those got written.
@@ -80,7 +82,8 @@ pub enum ExitCode {
     /// grinding through them produces ten million copies of one message.
     ///
     /// A full disk used to arrive as exit 2 "uncategorised" and, worse, as exit
-    /// 20 "checksum mismatch" — see `docs/EXIT_CODES.md` §20.
+    /// 20 "checksum mismatch" — see [the exit-code
+    /// reference](https://doc.dctl.sh/reference/exit-codes) §20.
     FatalError = 7,
     /// `--max-transfer` limit was reached.
     TransferLimitExceeded = 8,
@@ -208,10 +211,10 @@ impl ExitCode {
         }
     }
 
-    /// One-line explanation of the code, and the wording `docs/EXIT_CODES.md`
-    /// carries for it. Nothing calls this outside the tests below; it is the
-    /// contract written once so the published table has a single source to be
-    /// checked against.
+    /// One-line explanation of the code, and the wording [the exit-code
+    /// reference](https://doc.dctl.sh/reference/exit-codes) carries for it.
+    /// Nothing calls this outside the tests below; it is the contract written
+    /// once so the published table has a single source to be checked against.
     #[must_use]
     pub const fn describe(self) -> &'static str {
         match self {

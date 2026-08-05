@@ -207,7 +207,7 @@ mod tests {
     #[test]
     fn every_capability_explains_itself() {
         // The description column is what makes the table usable by someone who
-        // has never read PLAN.md.
+        // has never read [the plan](https://doc.dctl.sh/project/plan).
         for (name, description, _) in BACKEND_CAPABILITIES {
             assert!(!description.is_empty(), "'{name}' has no description");
             assert!(

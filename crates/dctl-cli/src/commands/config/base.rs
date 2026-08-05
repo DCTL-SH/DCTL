@@ -29,8 +29,9 @@
 //! fixed object key and honours no prefix: accepting the spec would create a
 //! vault at the bucket root while the configuration said it was in a
 //! subdirectory, and every later command would look in the place the file
-//! named and find nothing. Refusing is the `PLAN.md` §6 answer — say what did
-//! not happen, rather than report a vault at an address it is not at.
+//! named and find nothing. Refusing is the
+//! [plan](https://doc.dctl.sh/project/plan) §6 answer — say what did not
+//! happen, rather than report a vault at an address it is not at.
 
 use std::path::Path;
 

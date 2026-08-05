@@ -24,7 +24,7 @@
 //! | [`prepare`]  | two command-line specs in, one reviewable plan out |
 //! | [`report`]   | how a plan is printed in each `--format` |
 //! | [`staged`]   | one file in flight, and the source time travelling with it |
-//! | [`pipeline`] | the `PLAN.md` §6 stage walk and its progress wiring |
+//! | [`pipeline`] | the [plan](https://doc.dctl.sh/project/plan) §6 stage walk and its progress wiring |
 //! | [`engine`]   | the binding to `dctl-core`, and what is still missing |
 //! | [`execute`]  | running a plan's actions through a driver |
 //! | [`options`]  | the rclone-compatible per-command flags |

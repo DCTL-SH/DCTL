@@ -5,11 +5,11 @@
 //! **Which file?** `--config` beats `DCTL_CONFIG` beats the platform config
 //! directory. That order is not arbitrary: the flag is the most specific
 //! statement of intent available (it applies to this one invocation), the
-//! environment variable is the next (it applies to this shell or this
-//! container), and the platform default is the fallback that makes DCTL work
-//! with no configuration at all. `PLAN.md` §14 requires all three, because a
-//! server running DCTL headless configures it by environment and a CI job
-//! configures it by flag.
+//! environment variable is the next (it applies to this shell or this container),
+//! and the platform default is the fallback that makes DCTL work with no
+//! configuration at all. [The plan](https://doc.dctl.sh/project/plan) §14
+//! requires all three, because a server running DCTL headless configures it by
+//! environment and a CI job configures it by flag.
 //!
 //! **Is it usable?** A file the user *named* and got wrong is an error; a
 //! *default* path that does not exist is a fresh installation and yields an
@@ -18,10 +18,10 @@
 //! other module has to defend itself against a cycle or a dangling base.
 //!
 //! Reading the file also *warns* — never fails — when it is readable by anyone
-//! but its owner (`PLAN.md` §14). The file holds no secrets, so exposure is not
-//! a breach; it holds buckets, endpoints, regions and account ids, which is free
-//! reconnaissance, and that is worth a line on stderr rather than a refusal to
-//! run.
+//! but its owner ([the plan](https://doc.dctl.sh/project/plan) §14). The file
+//! holds no secrets, so exposure is not a breach; it holds buckets, endpoints,
+//! regions and account ids, which is free reconnaissance, and that is worth a
+//! line on stderr rather than a refusal to run.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -115,9 +115,10 @@ pub fn load(path: &Path) -> Result<Config> {
 
 /// Read the configuration at `path`, treating absence as an empty one.
 ///
-/// The right call for the *default* location: `PLAN.md` §14 requires DCTL to run
-/// fully headless from flags and environment variables, so a machine that never
-/// runs `dctl config` must not be told it is misconfigured.
+/// The right call for the *default* location:
+/// [the plan](https://doc.dctl.sh/project/plan) §14 requires DCTL to run fully
+/// headless from flags and environment variables, so a machine that never runs
+/// `dctl config` must not be told it is misconfigured.
 ///
 /// Only `NotFound` is forgiven. A file that exists but cannot be read — wrong
 /// owner, bad permissions, an I/O error — is still an error, because silently
@@ -141,9 +142,9 @@ pub fn load_or_default(path: &Path) -> Result<Config> {
 /// Turn the text of a configuration file into a validated [`Config`].
 ///
 /// Parsed once into a raw document, audited, then deserialised. The audit has to
-/// come first: `deny_unknown_fields` would reject a pasted-in credential too,
-/// but as "unknown field `secret_key`", which reads like a typo instead of like
-/// the security event it is (`PLAN.md` §14).
+/// come first: `deny_unknown_fields` would reject a pasted-in credential too, but
+/// as "unknown field `secret_key`", which reads like a typo instead of like the
+/// security event it is ([the plan](https://doc.dctl.sh/project/plan) §14).
 ///
 /// `path` is carried only so that a failure can say which file it was talking
 /// about; nothing is read from disk here, which is what makes this the entry
@@ -185,8 +186,9 @@ pub fn parse(text: &str, path: &Path) -> Result<Config> {
 ///
 /// What it does **not** skip is the part that protects the user rather than the
 /// tool: the file must still be well-formed TOML matching the model, and a
-/// credential-shaped key is still refused (`PLAN.md` §14). Reporting on a file
-/// while ignoring a secret sitting in it would be the wrong kind of lenient.
+/// credential-shaped key is still refused
+/// ([the plan](https://doc.dctl.sh/project/plan) §14). Reporting on a file while
+/// ignoring a secret sitting in it would be the wrong kind of lenient.
 ///
 /// Nothing that *acts* on a configuration may call this. The value it returns
 /// has not been proven consistent, so the invariant every other module relies on
@@ -273,11 +275,11 @@ pub fn exposed_permission_bits(_path: &Path) -> Option<u32> {
 
 /// Warn — never fail — when the configuration is readable beyond its owner.
 ///
-/// `PLAN.md` §14 asks for exactly this shape. Refusing to run would be wrong:
-/// the file holds no credentials, so a loose mode is a disclosure of buckets and
-/// endpoints rather than of access, and a tool that refuses to start over it
-/// would teach people to `chmod 777` and move on. Saying so once, with the fix
-/// in the message, is the proportionate response.
+/// [The plan](https://doc.dctl.sh/project/plan) §14 asks for exactly this shape.
+/// Refusing to run would be wrong: the file holds no credentials, so a loose mode
+/// is a disclosure of buckets and endpoints rather than of access, and a tool
+/// that refuses to start over it would teach people to `chmod 777` and move on.
+/// Saying so once, with the fix in the message, is the proportionate response.
 fn warn_if_exposed(path: &Path) {
     if let Some(bits) = exposed_permission_bits(path) {
         let recommended = recommended_mode();
@@ -464,7 +466,8 @@ mod tests {
     #[test]
     fn the_diagnostic_door_still_refuses_a_credential_and_a_malformed_file() {
         // Leniency is only ever about the *graph*. A secret in the file is not a
-        // finding to report politely; it is a key to rotate (PLAN.md §14).
+        // finding to report politely; it is a key to rotate
+        // ([the plan](https://doc.dctl.sh/project/plan) §14).
         let error = parse_unvalidated(
             "[remotes.b2prod]\ntype = \"b2\"\nbucket = \"x\"\napp_key = \"K00…\"\n",
             &any_path(),

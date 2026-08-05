@@ -281,10 +281,9 @@ fn the_reduced_cost_also_requires_debug_assertions() {
 
 #[test]
 fn the_production_cost_is_the_one_the_format_document_publishes() {
-    // `docs/FORMAT.md` §2.1 prints these three numbers in its worked example,
-    // and `dctl-core`'s conformance test asserts an envelope carries them. This
-    // is the other half of that: the figures the product ships are the figures
-    // the document names.
+    // `crates/dctl-decode/FORMAT.md` §2.1 prints these three numbers in its worked example,
+    // and `dctl-core`'s conformance test asserts an envelope carries them. This is the other
+    // half of that: the figures the product ships are the figures the document names.
     assert_eq!(
         Cost::PRODUCTION,
         Cost {

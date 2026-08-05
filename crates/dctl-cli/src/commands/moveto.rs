@@ -4,7 +4,7 @@
 //! [`super::copyto`]'s destination semantics with [`super::mv`]'s ordering
 //! guarantee. `DEST` names the object rather than the directory it lands in, and
 //! the source is removed **only after** the destination commit is durable
-//! (`PLAN.md` §6 step 7).
+//! ([the plan](https://doc.dctl.sh/project/plan) §6 step 7).
 //!
 //! ```text
 //! dctl moveto scratch/render.mov vault:films/2024/final.mov

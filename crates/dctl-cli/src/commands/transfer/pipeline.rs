@@ -1,10 +1,11 @@
 //! The verified-write pipeline, and the progress display that shows it moving.
 //!
-//! `PLAN.md` §6 numbers the steps a file goes through before DCTL will call it
-//! stored: read and hash, encrypt, stage the upload, verify what the provider
-//! actually stored, optionally verify harder, then commit the index entry. That
-//! commit — step 6 — is the only thing that makes a file count as stored, and
-//! nothing before it may be reported as success.
+//! [The plan](https://doc.dctl.sh/project/plan) §6 numbers the steps a file
+//! goes through before DCTL will call it stored: read and hash, encrypt, stage
+//! the upload, verify what the provider actually stored, optionally verify
+//! harder, then commit the index entry. That commit — step 6 — is the only
+//! thing that makes a file count as stored, and nothing before it may be
+//! reported as success.
 //!
 //! Two things live here, and they are the same thing seen from two sides:
 //!
@@ -21,10 +22,11 @@
 //!
 //! ## Where the audit record goes, and why exactly one per file
 //!
-//! `PLAN.md` §6 numbers the chained audit append step 8 — *after* the durable
-//! commit — and §7 makes it mandatory. Both functions above therefore run the
-//! whole operation to a conclusion, append one record describing how it ended,
-//! and only then hand the outcome back. Two consequences are deliberate:
+//! [The plan](https://doc.dctl.sh/project/plan) §6 numbers the chained audit
+//! append step 8 — *after* the durable commit — and §7 makes it mandatory. Both
+//! functions above therefore run the whole operation to a conclusion, append
+//! one record describing how it ended, and only then hand the outcome back. Two
+//! consequences are deliberate:
 //!
 //! * **The record is written for a failure too.** A log containing only
 //!   successes cannot answer "what went wrong on the 3rd?", which is most of why
@@ -333,7 +335,8 @@ async fn walk<D: StageDriver>(ctx: &Ctx, driver: &D, entry: &PlanEntry) -> Resul
 ///
 /// The order is the promise: the operation has already run to a conclusion by
 /// the time this is called, so the record describes what happened rather than
-/// what was about to be attempted. `PLAN.md` §6 puts the append after the
+/// what was about to be attempted.
+/// [The plan](https://doc.dctl.sh/project/plan) §6 puts the append after the
 /// durable commit for exactly that reason — a record for work that then failed
 /// is a false statement in the one artefact whose entire value is being true.
 ///
@@ -508,8 +511,9 @@ pub async fn move_file<D: StageDriver, R: Reaper>(
 
 /// Record a per-file failure without aborting the run.
 ///
-/// `PLAN.md` §7 forbids rolling a partial failure up into success, so the error
-/// is counted (which downgrades the process exit code through
+/// [The plan](https://doc.dctl.sh/project/plan) §7 forbids rolling a partial
+/// failure up into success, so the error is counted (which downgrades the
+/// process exit code through
 /// [`Ctx::outcome`](crate::ctx::Ctx::outcome)) and reported on stderr, where it
 /// cannot corrupt whatever data stdout is carrying.
 ///
@@ -536,8 +540,9 @@ pub fn record_failure(ctx: &Ctx, path: &str, error: &CliError) {
 /// that one. A log that cannot be extended stays unextendable for every file
 /// behind this one, so the run would emit ten million copies of the same
 /// message; and every one of those files would be transferred *unrecorded*,
-/// which `PLAN.md` §7 forbids outright. Stopping is the only outcome that leaves
-/// the vault and the log describing the same run.
+/// which [the plan](https://doc.dctl.sh/project/plan) §7 forbids outright.
+/// Stopping is the only outcome that leaves the vault and the log describing
+/// the same run.
 ///
 /// [`ExitCode::TransferLimitExceeded`] is on it for the opposite reason: not
 /// because the run cannot continue but because the operator said it must not.

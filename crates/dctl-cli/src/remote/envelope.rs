@@ -13,7 +13,7 @@
 //!   address really is a vault's store. Writing a plausible-looking pair of
 //!   remotes for an empty bucket would hand an operator addressing for data that
 //!   is not there — the exact "reported as done when it did not happen" failure
-//!   `PLAN.md` §6 forbids, in the one command people reach for when something
+//!   [the plan](https://doc.dctl.sh/project/plan) §6 forbids, in the one command people reach for when something
 //!   has already gone wrong.
 //!
 //! ## Key-free by construction
@@ -21,7 +21,7 @@
 //! Nothing here can decrypt anything, and that is what makes it usable at these
 //! two moments: both run before any password exists. Recognition reads the first
 //! [`VAULT_ENVELOPE_HEADER_LEN`] bytes of the envelope object — magic, version
-//! and slot count, the fields `docs/FORMAT.md` §2 freezes — and stops. The
+//! and slot count, the fields `crates/dctl-decode/FORMAT.md` §2 freezes — and stops. The
 //! wrapped root key sits a few bytes further on and is never fetched, never held
 //! and never logged.
 //!
@@ -143,7 +143,7 @@ fn classify(header: &[u8]) -> Verdict {
         return Verdict::Foreign { version };
     }
 
-    // Little-endian: `docs/FORMAT.md` states it once, at the top, for every
+    // Little-endian: `crates/dctl-decode/FORMAT.md` states it once, at the top, for every
     // multi-byte integer in the format, and the envelope's `slot_count` is no
     // exception. Reading it the other way round turns one slot into 256 and
     // sends the count out of the frozen bounds, so a real vault would be
@@ -169,7 +169,7 @@ fn classify(header: &[u8]) -> Verdict {
 mod tests {
     use super::*;
 
-    /// A header as `docs/FORMAT.md` §2 lays one out.
+    /// A header as `crates/dctl-decode/FORMAT.md` §2 lays one out.
     fn header(magic: &[u8], version: u8, slots: u16) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(VAULT_ENVELOPE_HEADER_LEN as usize);
         bytes.extend_from_slice(magic);

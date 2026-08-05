@@ -7,9 +7,9 @@
 //! Mounted, a player seeking through a 40 GB film re-downloads 40 GB on every seek. There
 //! is no filesystem on top of that, and there is no egress budget for it either.
 //!
-//! `docs/FORMAT.md` §3 specifies the alternative and every backend already implements the
-//! primitive it needs. Chunk `i`'s ciphertext lives at
-//! `payload_start + i·(chunk_size + 16)`, so the chunks covering a window are arithmetic;
+//! `crates/dctl-decode/FORMAT.md` §3 specifies the alternative and every backend already
+//! implements the primitive it needs. Chunk `i`'s ciphertext lives at `payload_start +
+//! i·(chunk_size + 16)`, so the chunks covering a window are arithmetic;
 //! [`Backend::get_range`] fetches exactly those bytes;
 //! [`object::RangeHeader`](dctl_crypto::object::RangeHeader) authenticates each one's
 //! Poly1305 tag before a byte of it is returned. This module is the join between the two.
@@ -30,14 +30,14 @@
 //! `plaintext_len`. Substitution, reordering, splicing and truncation are all caught.
 //!
 //! The **whole-object** checks are not evaluated on this path and are not faked: the
-//! trailing footer BLAKE3 and the metadata's `content_blake3` both cover the entire
-//! object, and no fragment can compute either. That is exactly the split `docs/FORMAT.md`
-//! §3 describes ("the footer is a redundant whole-object check"), and it is why
-//! [`Vault::verify_file`](crate::Vault::verify_file) — the read behind `dctl verify` and
-//! `dctl scrub` — streams the object end to end and remains the command that makes the
-//! whole-object statement. A caller that needs that statement must ask for the whole
-//! object; a caller that needs a window gets per-chunk authentication, which is the
-//! guarantee the format was designed to provide here.
+//! trailing footer BLAKE3 and the metadata's `content_blake3` both cover the entire object,
+//! and no fragment can compute either. That is exactly the split
+//! `crates/dctl-decode/FORMAT.md` §3 describes ("the footer is a redundant whole-object
+//! check"), and it is why [`Vault::verify_file`](crate::Vault::verify_file) — the read
+//! behind `dctl verify` and `dctl scrub` — streams the object end to end and remains the
+//! command that makes the whole-object statement. A caller that needs that statement must
+//! ask for the whole object; a caller that needs a window gets per-chunk authentication,
+//! which is the guarantee the format was designed to provide here.
 
 use std::sync::Arc;
 
@@ -328,8 +328,8 @@ impl RangeReader {
     /// it should be, in one bounded metadata request and no body transfer.
     ///
     /// This is the check that survives the footer's absence on the streaming read path.
-    /// `docs/FORMAT.md` §3's trailing footer is a BLAKE3 over the whole ciphertext, and a
-    /// read that never holds the whole ciphertext cannot fold it — see
+    /// `crates/dctl-decode/FORMAT.md` §3's trailing footer is a BLAKE3 over the whole
+    /// ciphertext, and a read that never holds the whole ciphertext cannot fold it — see
     /// [`Vault::verify_file`](crate::Vault::verify_file) for why that costs nothing an
     /// attacker could use. The one accidental corruption it *did* uniquely catch is bytes
     /// appended past the last chunk, which no per-chunk tag covers because no chunk claims

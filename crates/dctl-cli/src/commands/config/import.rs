@@ -8,7 +8,7 @@
 //! `dctl init` writes.
 //!
 //! **The data was never at risk.** A vault's envelope lives on its own store
-//! (`PLAN.md` §13.1 — objects are self-describing), so losing `config.toml`
+//! ([the plan](https://doc.dctl.sh/project/plan) §13.1 — objects are self-describing), so losing `config.toml`
 //! loses only the names. That is worth stating plainly, because the operator
 //! running this command usually believes something much worse has happened.
 //!

@@ -32,7 +32,7 @@ use crate::constants::{
 
 /// A content-hash algorithm.
 ///
-/// BLAKE3 first because it is what DCTL actually stores (`PLAN.md` §13.3's
+/// BLAKE3 first because it is what DCTL actually stores ([the plan](https://doc.dctl.sh/project/plan) §13.3's
 /// integrity manifest); SHA-1 and SHA-256 exist for interoperability with
 /// systems that predate it — a 20-year tool has to be able to hand its
 /// checksums to software that does not know BLAKE3.

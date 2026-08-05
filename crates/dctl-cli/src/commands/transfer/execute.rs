@@ -12,7 +12,7 @@
 //! that aborted on the first permission error would be unusable. So a per-file
 //! failure is counted and reported, the loop continues, and the recorded errors
 //! downgrade the process exit code to [`ExitCode::PartialFailure`] through
-//! [`Ctx::outcome`] — never rolled up into success (`PLAN.md` §7).
+//! [`Ctx::outcome`] — never rolled up into success ([the plan](https://doc.dctl.sh/project/plan) §7).
 //!
 //! A *fatal* failure is different, and [`pipeline::is_fatal`] draws the line: a
 //! locked vault or a cancelled run makes every remaining file fail identically,

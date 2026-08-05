@@ -10,8 +10,9 @@
 //! select a different set of objects on a laptop in Berlin than on a build agent
 //! in UTC, and would be ambiguous for one hour every autumn when the local clock
 //! repeats itself. A restore that quietly picks a different point in time
-//! depending on where it runs is not a restore anybody can test (`PLAN.md`
-//! §13.6), so the timezone is not a variable here.
+//! depending on where it runs is not a restore anybody can test
+//! ([the plan](https://doc.dctl.sh/project/plan) §13.6), so the timezone is not
+//! a variable here.
 //!
 //! The Gregorian arithmetic below is **not** in [`crate::constants`] on purpose.
 //! A tunable is something an operator might reasonably change; the number of

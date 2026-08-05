@@ -3,7 +3,8 @@
 //! `dctl about` needs one thing before it can say anything useful: which
 //! provider is on the other end. That is not always the type of the remote the
 //! user named. A vault remote stores nothing itself — it wraps another remote
-//! and encrypts on the way through (`PLAN.md` §14) — so `vault:` may be a
+//! and encrypts on the way through
+//! ([the plan](https://doc.dctl.sh/project/plan) §14) — so `vault:` may be a
 //! `vault` whose bytes land in `b2`, and a capability report that answered
 //! "vault" would be answering the wrong question.
 //!
@@ -19,7 +20,8 @@
 //!    a confident answer about the wrong provider.
 //! 3. A **provider shorthand** — `b2:bucket`, `s3:bucket/prefix` — resolves to
 //!    that provider with no config at all, which is the headless case
-//!    `PLAN.md` §14 requires to keep working.
+//!    [the plan](https://doc.dctl.sh/project/plan) §14 requires to keep
+//!    working.
 //!
 //! Anything else is an unknown remote and a hard failure. It is never quietly
 //! reinterpreted as a directory: reporting on the wrong thing is worse than
@@ -220,7 +222,8 @@ mod tests {
 
     /// A context whose configuration file does not exist.
     ///
-    /// The fresh installation `PLAN.md` §14 requires to keep working:
+    /// The fresh installation [the plan](https://doc.dctl.sh/project/plan) §14
+    /// requires to keep working:
     /// `load_or_default` answers an absent file with an empty configuration, so
     /// only the provider shorthands resolve.
     fn ctx_without_config() -> (tempfile::TempDir, Ctx) {

@@ -1,10 +1,10 @@
 //! One entry in the tamper-evident audit log, and the only safe way to build
 //! one.
 //!
-//! `PLAN.md` §7 requires an append-only, hash-chained record of every operation:
-//! timestamp, files, plaintext and ciphertext hashes, sizes, provider, result,
-//! each entry carrying the previous entry's hash. Two types live here, and the
-//! split between them is deliberate:
+//! [The plan](https://doc.dctl.sh/project/plan) §7 requires an append-only,
+//! hash-chained record of every operation: timestamp, files, plaintext and
+//! ciphertext hashes, sizes, provider, result, each entry carrying the previous
+//! entry's hash. Two types live here, and the split between them is deliberate:
 //!
 //! * [`AuditRecord`] — what is *on disk*. Eleven fields, including the three the
 //!   chain owns: `index`, `prev` and `hash`.
@@ -16,10 +16,11 @@
 //!
 //! ## Every field is scrubbed on the way in
 //!
-//! `PLAN.md` §7 makes redaction mandatory, and a mandatory thing that has to be
-//! remembered is optional. So there is no way to put a string into an entry that
-//! does not pass through [`crate::audit::redaction`] first: the setters take the
-//! raw value and store the scrubbed one. That buys two separate guarantees —
+//! [The plan](https://doc.dctl.sh/project/plan) §7 makes redaction mandatory,
+//! and a mandatory thing that has to be remembered is optional. So there is no
+//! way to put a string into an entry that does not pass through
+//! [`crate::audit::redaction`] first: the setters take the raw value and store
+//! the scrubbed one. That buys two separate guarantees —
 //! credentials never reach the log, and no field can contain
 //! [`crate::constants::AUDIT_HASH_FIELD_SEPARATOR`], which is what stops one
 //! field's contents from being read as another's.
@@ -28,9 +29,10 @@
 //!
 //! [`Timestamp`] is borrowed from `dctl touch` rather than re-derived here.
 //! DCTL converts calendar dates itself instead of taking a datetime dependency
-//! (`PLAN.md` §13.1), so there is exactly one proleptic-Gregorian
-//! implementation in the crate — and a second copy of it is how the audit log
-//! and the file listings would come to disagree about what `2028-02-29` means.
+//! ([the plan](https://doc.dctl.sh/project/plan) §13.1), so there is exactly
+//! one proleptic-Gregorian implementation in the crate — and a second copy of
+//! it is how the audit log and the file listings would come to disagree about
+//! what `2028-02-29` means.
 //!
 //! ## Why the optional fields default rather than failing to parse
 //!
@@ -51,7 +53,8 @@
 //! Version 2 adds three fields — [`AuditRecord::direction`],
 //! [`AuditRecord::bytes`] and [`AuditRecord::objects`] — and one that says which
 //! schema a record is written in, [`AuditRecord::version`]. The rule for reading
-//! old records is stated normatively in `docs/AUDIT_LOG.md` §2.1 and implemented
+//! old records is stated normatively in [the audit-log
+//! reference](https://doc.dctl.sh/reference/audit-log) §2.1 and implemented
 //! in [`crate::audit::chain::canonical`]: **the version travels with the record,
 //! never with the file**, because a hash-chained log cannot be rewritten in place
 //! — rewriting one record breaks every link after it. A v1 record therefore stays

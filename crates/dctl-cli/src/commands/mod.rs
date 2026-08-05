@@ -37,7 +37,7 @@
 //! spellings, snapshot naming, name pre-flight and plan vocabulary behind
 //! `audit`, `backup` and `restore`. Its pre-flight is the reason it is shared —
 //! a name check that runs on restore but not on backup would find the problem
-//! years after the moment it could have been fixed (`PLAN.md` §13.6).
+//! years after the moment it could have been fixed ([the plan](https://doc.dctl.sh/project/plan) §13.6).
 //!
 //! Note that the module for `move` is [`mv`]: `move` is a Rust keyword. The verb
 //! the user types and the `MoveArgs` type both keep the real name.

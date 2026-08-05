@@ -1,8 +1,9 @@
 //! What `dctl vault recover` reports.
 //!
-//! Two booleans rather than one, for the same reason `dctl init`'s report
-//! carries two: they can genuinely differ, and collapsing them would make the
-//! record claim work that did not happen (`PLAN.md` §6).
+//! Two booleans rather than one, for the same reason `dctl init`'s report carries
+//! two: they can genuinely differ, and collapsing them would make the record
+//! claim work that did not happen ([the plan](https://doc.dctl.sh/project/plan)
+//! §6).
 //!
 //! * [`Report::unlocked`] — the recovery phrase opened the vault.
 //! * [`Report::password_changed`] — a new password slot is now in force.

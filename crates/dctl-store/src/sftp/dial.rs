@@ -13,7 +13,7 @@
 //! Retrying without re-dialling would have been worse than not retrying. It
 //! would spend five attempts into a socket that is not there and then report
 //! that five attempts were made — true, and useless, and exactly the shape of
-//! claim `PLAN.md` §6 forbids.
+//! claim [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
 //!
 //! # The shape, which is rclone's
 //!

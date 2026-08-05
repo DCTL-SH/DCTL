@@ -32,9 +32,10 @@
 //! the counters in [`Ctx::outcome`](crate::ctx::Ctx::outcome): any recorded error
 //! downgrades the result to
 //! [`ExitCode::PartialFailure`](crate::exit::ExitCode::PartialFailure).
-//! `PLAN.md` §7 forbids rolling a partial failure into a success, and deriving
-//! the status from the counters rather than from the return value is what makes
-//! that structural instead of remembered.
+//! [The plan](https://doc.dctl.sh/project/plan) §7 forbids rolling a partial
+//! failure into a success, and deriving the status from the counters rather
+//! than from the return value is what makes that structural instead of
+//! remembered.
 //!
 //! An `Err` from here means the run did not get as far as removing anything: an
 //! unresolvable remote, a locked vault, a `deletefile` naming a directory, a

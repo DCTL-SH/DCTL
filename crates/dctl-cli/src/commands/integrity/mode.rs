@@ -1,8 +1,9 @@
 //! Reporting the global `--verify` strength.
 //!
-//! `PLAN.md` §6 step 5 makes verification strength an explicit cost/assurance
-//! dial, which means a report that does not say which setting produced it is
-//! incomplete: "1,204 objects verified" means something very different under
+//! [The plan](https://doc.dctl.sh/project/plan) §6 step 5 makes verification
+//! strength an explicit cost/assurance dial, which means a report that does not
+//! say which setting produced it is incomplete: "1,204 objects verified" means
+//! something very different under
 //! `checksum` (the provider's stored checksum agreed with ours) and under
 //! `strict` (every byte was fetched, decrypted, authenticated and re-hashed).
 //! Every integrity report therefore carries the mode, and this module is where
@@ -116,7 +117,8 @@ mod tests {
     #[test]
     fn only_strict_proves_the_whole_plaintext() {
         // Sampling proves *some* chunks decrypt. Claiming more would be exactly
-        // the overstatement `PLAN.md` §6 forbids.
+        // the overstatement [the plan](https://doc.dctl.sh/project/plan) §6
+        // forbids.
         assert!(proves_whole_plaintext(VerifyMode::Strict));
         assert!(!proves_whole_plaintext(VerifyMode::Sample));
         assert!(!proves_whole_plaintext(VerifyMode::Checksum));

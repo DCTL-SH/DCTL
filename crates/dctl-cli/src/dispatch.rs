@@ -6,7 +6,7 @@
 //!
 //! Every arm opens a `tracing` span carrying the command name, so every record
 //! emitted anywhere beneath it is attributable to the operation that caused it
-//! (`PLAN.md` §7).
+//! ([the plan](https://doc.dctl.sh/project/plan) §7).
 
 use tracing::Instrument as _;
 
@@ -50,8 +50,8 @@ async fn run_inner(ctx: &Ctx, command: &Command) -> Result<()> {
 
         // ── Replication ──────────────────────────────────────────────────
         // The one transfer arm that never reaches `session::open`: it moves
-        // ciphertext between two object stores and holds no key (`PLAN.md`
-        // §13.3).
+        // ciphertext between two object stores and holds no key
+        // (https://doc.dctl.sh/project/plan §13.3).
         Command::Replicate(args) => commands::replicate::run(ctx, args).await,
 
         // ── Content ──────────────────────────────────────────────────────

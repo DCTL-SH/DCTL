@@ -25,10 +25,11 @@
 //!
 //! ## Why the stage walk does not map one-to-one onto the core
 //!
-//! `PLAN.md` §6 describes six steps — read, encrypt, stage, verify, commit,
-//! delete-source. `Vault::put_file` today performs steps 1–6 as a single
-//! whole-file operation: it seals the plaintext, does a verified write to the
-//! backend, and commits the index entry, returning `Ok` only after all of it.
+//! [The plan](https://doc.dctl.sh/project/plan) §6 describes six steps — read,
+//! encrypt, stage, verify, commit, delete-source. `Vault::put_file` today
+//! performs steps 1–6 as a single whole-file operation: it seals the plaintext,
+//! does a verified write to the backend, and commits the index entry, returning
+//! `Ok` only after all of it.
 //!
 //! That is *stronger* than the stage split, not weaker — there is no window in
 //! which a file is uploaded but uncommitted. So the stages here are honest about
@@ -61,9 +62,9 @@
 //! or R2 credentials. What backs it is that the provider `put` implementations
 //! are the same ones every sealed vault write to those providers already uses,
 //! and that nothing on this path is provider-specific. See
-//! `docs/commands/dctl_copy.md` for the one behavioural consequence a user meets
-//! — a plain destination stamps its own write time, so the default comparison
-//! re-transfers.
+//! [`dctl copy`](https://doc.dctl.sh/commands/copy) for the one behavioural
+//! consequence a user meets — a plain destination stamps its own write time, so
+//! the default comparison re-transfers.
 //!
 //! `mkdir`, `touch` and `rcat` reach a plain remote through the same
 //! *classification* and then write through the filesystem path `Place` hands
@@ -108,10 +109,10 @@
 //! vault's root, so it stores `a.txt` rather than `photos/a.txt`.
 //!
 //! Closing that needs the [`Resolved`](crate::remote::resolve::Resolved) remote,
-//! not just the spec, to survive into [`Session`] and prefix every key — a
-//! change to what a session carries rather than to the engine's own logic.
-//! `docs/commands/dctl_copy.md` states the current behaviour plainly so nobody
-//! plans a backup around the intended one.
+//! not just the spec, to survive into [`Session`] and prefix every key — a change
+//! to what a session carries rather than to the engine's own logic.
+//! [`dctl copy`](https://doc.dctl.sh/commands/copy) states the current behaviour
+//! plainly so nobody plans a backup around the intended one.
 //!
 //! The **plain** path does not have that gap: [`PlainRemote`] keeps its
 //! `Resolved` and prefixes every key, so `copy ./src backup:photos` stores
@@ -806,9 +807,10 @@ impl StageDriver for Engine {
     ///
     /// The provider-checksum comparison already happened inside the verified
     /// write, so `checksum` has nothing further to do. The deeper modes read the
-    /// object back — re-authenticating it where it is sealed, re-hashing it
-    /// where it is not, which is as much as an unsealed object can be asked —
-    /// and that read is the egress cost `PLAN.md` §12 says must be opt-in.
+    /// object back — re-authenticating it where it is sealed, re-hashing it where
+    /// it is not, which is as much as an unsealed object can be asked — and that
+    /// read is the egress cost [the plan](https://doc.dctl.sh/project/plan) §12
+    /// says must be opt-in.
     async fn verify(&self, entry: &PlanEntry, mode: VerifyMode) -> Result<()> {
         match (mode, self.direction) {
             (VerifyMode::Checksum, _) | (_, Direction::LocalOnly) => Ok(()),
@@ -851,9 +853,10 @@ impl StageDriver for Engine {
                 // ranged windows rather than as one buffer. The store already
                 // compared it once, on write; this is the second, independent
                 // look the flag was asked for, and on a provider it costs a full
-                // egress of the object — which is exactly why `PLAN.md` §12
-                // makes it opt-in. It costs no *memory* proportional to the
-                // object, which is why a 10 GB upload can now be asked for it.
+                // egress of the object — which is exactly why
+                // [the plan](https://doc.dctl.sh/project/plan) §12 makes it
+                // opt-in. It costs no *memory* proportional to the object, which
+                // is why a 10 GB upload can now be asked for it.
                 let stored = self.plain()?.hash_object(&entry.dest).await?;
                 self.confirm(&stored, &entry.dest, "the stored object")
             }

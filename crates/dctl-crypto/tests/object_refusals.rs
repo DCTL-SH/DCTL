@@ -26,7 +26,7 @@
 //! # And the head, which is read before any key is used
 //!
 //! `parse_head` decides `version`, `algo`, `kem_id` and the flag word before a
-//! byte is decrypted, and `docs/FORMAT.md` §8 makes every undefined flag bit
+//! byte is decrypted, and `crates/dctl-decode/FORMAT.md` §8 makes every undefined flag bit
 //! **critical**: an object written by a later build must be refused, never
 //! read past. Six of those refusals had no test, so a build that silently
 //! accepted a format it does not implement would have passed the gate — and

@@ -14,7 +14,7 @@
 //! produced a mount that came up cleanly and did not have the property asked for.
 //! Only a few options are validated at all — `fstypename` is length-checked and
 //! refused — so a wrong spelling does not fail, it *works incorrectly*. That is
-//! `PLAN.md` §6's misreport arriving through a mount table: `dctl mount` would
+//! [The plan](https://doc.dctl.sh/project/plan) §6's misreport arriving through a mount table: `dctl mount` would
 //! report success, the mount would be up, and a property somebody is relying on
 //! would quietly not be there.
 //!

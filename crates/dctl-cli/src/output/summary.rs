@@ -6,7 +6,8 @@
 //! * *Transferred* and *Verified* are separate rows. Bytes that have been
 //!   uploaded but not yet checksum-confirmed are **not yet durable**, and
 //!   collapsing the two into one number is exactly the misreporting the
-//!   verified-write contract (`PLAN.md` §6) exists to prevent.
+//!   verified-write contract ([the plan](https://doc.dctl.sh/project/plan) §6)
+//!   exists to prevent.
 //! * *Errors* is always shown, including as `0`, because a missing row could be
 //!   read as "nothing failed" when it really meant "nobody rendered it".
 //! * The optional rows — *Verified*, *Checks*, *Skipped*, *Deleted*, *Retries*,
@@ -340,8 +341,9 @@ mod tests {
 
     #[test]
     fn transferred_and_verified_stay_separate_numbers() {
-        // The core of PLAN.md §6: uploaded is not the same as durable, so the
-        // report must never merge them.
+        // The core of [the plan](https://doc.dctl.sh/project/plan) §6:
+        // uploaded is not the same as durable, so the report must never merge
+        // them.
         let stats = Stats::new();
         stats.set_total_bytes(4096);
         stats.add_bytes(4096);

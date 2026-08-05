@@ -14,7 +14,7 @@
 //! has just told an operator that the object hashes to nothing. `dctl hashsum`
 //! and `dctl lsjson` both have to distinguish *unknown* from *known*, because the
 //! honest output for unknown is to omit the field entirely rather than to invent
-//! a value for it (`PLAN.md` §6).
+//! a value for it ([the plan](https://doc.dctl.sh/project/plan) §6).
 //!
 //! The index itself can hold an empty hash: [`Vault::get_file`] warms a record
 //! from the authoritative name record on a cross-device read and has no
@@ -63,7 +63,7 @@ pub struct Entry {
     /// next read. Rendering that absence as the number 0 told a capacity monitor
     /// that a forty-terabyte vault held nothing, and told `dctl scrub`'s audit
     /// trail that it had verified zero bytes — both of them stated as fact
-    /// (`PLAN.md` §6).
+    /// ([the plan](https://doc.dctl.sh/project/plan) §6).
     ///
     /// A plain object store always fills this in: the provider's listing carries
     /// a byte count for every key, so `None` there would be a bug rather than an

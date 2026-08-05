@@ -132,7 +132,8 @@ pub fn acquire(globals: &GlobalArgs) -> Result<Option<RecoveryPhrase>> {
 /// # Errors
 /// Whatever [`acquire`] reports, or [`ExitCode::VaultLocked`] when there is no
 /// terminal to prompt on (an unattended run must fail immediately rather than
-/// block on a prompt nobody will answer, `PLAN.md` §14).
+/// block on a prompt nobody will answer,
+/// [the plan](https://doc.dctl.sh/project/plan) §14).
 pub fn acquire_required(globals: &GlobalArgs) -> Result<RecoveryPhrase> {
     if let Some(phrase) = acquire(globals)? {
         return Ok(phrase);

@@ -1,10 +1,10 @@
 //! Typed CLI errors and their mapping onto stable exit codes.
 //!
-//! `PLAN.md` §7 forbids silent failures and requires every error to carry a
-//! stable code plus a remediation hint. This module is the single place where a
-//! failure from any layer is classified — so a `checksum-mismatch` deep in the
-//! storage layer always surfaces as exit code 20 with the same message,
-//! regardless of which command produced it.
+//! [The plan](https://doc.dctl.sh/project/plan) §7 forbids silent failures and
+//! requires every error to carry a stable code plus a remediation hint. This
+//! module is the single place where a failure from any layer is classified — so
+//! a `checksum-mismatch` deep in the storage layer always surfaces as exit code
+//! 20 with the same message, regardless of which command produced it.
 
 use std::fmt;
 
@@ -53,7 +53,8 @@ impl CliError {
     /// A feature accepted by the parser but not yet wired to an engine.
     ///
     /// Deliberately an *error*, never a silent success: reporting work as done
-    /// when it did not happen is the one thing `PLAN.md` §6 forbids outright.
+    /// when it did not happen is the one thing
+    /// [the plan](https://doc.dctl.sh/project/plan) §6 forbids outright.
     pub fn unimplemented(what: impl fmt::Display) -> Self {
         Self::new(
             ExitCode::FatalError,
@@ -167,9 +168,10 @@ impl From<StoreError> for CliError {
             // necessary: every one of these used to arrive saying "Retries were
             // exhausted" over a run that had attempted the request exactly once
             // — a message describing work that did not happen, which is the
-            // class `PLAN.md` §6 forbids and the worse kind of false, because it
-            // tells an operator the tool already did the thing they would
-            // otherwise go and do. See `dctl_store::retry`.
+            // class [the plan](https://doc.dctl.sh/project/plan) §6 forbids and
+            // the worse kind of false, because it tells an operator the tool
+            // already did the thing they would otherwise go and do. See
+            // `dctl_store::retry`.
             StoreError::Backend(_) | StoreError::Provider { .. } | StoreError::Transport { .. } => {
                 Self::new(ExitCode::TemporaryError, error.to_string())
                     .with_hint(retry_hint(attempts))
@@ -520,14 +522,15 @@ mod tests {
 
     #[test]
     fn a_run_that_stopped_asking_gets_its_own_code_and_not_the_retry_one() {
-        // Exit **28**, not 5. `EXIT_CODES.md`'s own rule is that a code's
-        // meaning never changes and a new condition gets a new number, and 5
-        // already stands for "temporary error; retries exhausted" — which is
-        // nearly the opposite of what happened here: the retries were **not**
-        // exhausted, the run stopped early because a link that answers nothing
-        // cannot be persuaded by asking again. The two also want opposite
-        // handling inside the run; see `pipeline::is_fatal` and
-        // `retry::is_worth_repeating`.
+        // Exit **28**, not 5. The rule set out by
+        // [the exit-code reference](https://doc.dctl.sh/reference/exit-codes)
+        // is that a code's meaning never changes and a new condition gets a new
+        // number, and 5 already stands for "temporary error; retries
+        // exhausted" — which is nearly the opposite of what happened here: the
+        // retries were **not** exhausted, the run stopped early because a link
+        // that answers nothing cannot be persuaded by asking again. The two
+        // also want opposite handling inside the run; see `pipeline::is_fatal`
+        // and `retry::is_worth_repeating`.
         let err = CliError::from(StoreError::Stalled {
             attempts: 6,
             idle: std::time::Duration::from_secs(30),
@@ -575,7 +578,7 @@ mod tests {
         // The defect, in one assertion: the hint still said *Retries were
         // exhausted* on an sftp connection failure where none were attempted —
         // a message describing work that did not happen, which is the class
-        // `PLAN.md` §6 forbids outright.
+        // [the plan](https://doc.dctl.sh/project/plan) §6 forbids outright.
         let err = CliError::from(StoreError::Transport {
             backend: "sftp",
             detail: "connection reset by peer".into(),

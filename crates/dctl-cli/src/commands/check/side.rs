@@ -25,7 +25,7 @@
 //! A side holds exactly one entry at a time — the lookahead the merge in
 //! [`super::walk`] needs — on top of the [`Entries`] cursor, which is itself
 //! O(page). Comparing two ten-million-object trees therefore costs two entries
-//! of memory, not twenty million, which is what `PLAN.md` §16.2 requires and
+//! of memory, not twenty million, which is what [the plan](https://doc.dctl.sh/project/plan) §16.2 requires and
 //! what makes `check` usable on the datasets it exists for.
 //!
 //! ## Filters

@@ -26,12 +26,13 @@
 //! wants already holds — and a command that refuses when its goal is met teaches
 //! its users to ignore exit codes.
 //!
-//! Writing a zero-byte marker at `<dir>/.dctl-dir` was the previous design and
-//! is rejected. The marker is a real object in the user's own namespace: `ls`,
+//! Writing a zero-byte marker at `<dir>/.dctl-dir` was the previous design and is
+//! rejected. The marker is a real object in the user's own namespace: `ls`,
 //! `size`, `check`, `sync`, `hashsum` and every restore would carry it as data,
 //! and a file fabricated to simulate a directory is a larger misreport than the
-//! absence it hides. `PLAN.md` §6 forbids reporting work that did not happen; it
-//! equally forbids inventing data so that a report can be made.
+//! absence it hides. [The plan](https://doc.dctl.sh/project/plan) §6 forbids
+//! reporting work that did not happen; it equally forbids inventing data so that
+//! a report can be made.
 //!
 //! **`--parents` follows the same rule**, because the alternative is
 //! incoherent. Where directories exist it creates the chain and makes an

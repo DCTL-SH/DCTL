@@ -12,7 +12,7 @@
 //!
 //! ## Why the directory has to be created here
 //!
-//! The index is a **cache**, not a source of truth (`PLAN.md` §13.5): a lost one
+//! The index is a **cache**, not a source of truth ([the plan](https://doc.dctl.sh/project/plan) §13.5): a lost one
 //! is rebuilt from the backend by `dctl index rebuild`. That promise is what
 //! makes a wiped laptop an inconvenience instead of a disaster, and it is stated
 //! in the command's own documentation — *"a machine that has never seen this

@@ -3,8 +3,8 @@
 Notable changes to DCTL. Dates are the date the work landed.
 
 This project is in **alpha**: the on-disk format is frozen and documented in
-`docs/FORMAT.md`, but the tool around it is still moving, and there has been no
-independent cryptographic audit.
+`crates/dctl-decode/FORMAT.md`, but the tool around it is still moving, and
+there has been no independent cryptographic audit.
 
 ## Unreleased
 

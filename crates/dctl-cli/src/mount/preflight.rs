@@ -48,9 +48,10 @@
 //! kernel extension is loaded and approved — and one file, the helper that
 //! performs the mount.
 //!
-//! `PLAN.md` §15 still ranks **fuse-t** (NFS loopback) and **FSKit** above
-//! macFUSE, because both need no kernel extension and Apple keeps narrowing what
-//! a kernel extension may do. That ordering is unchanged and is reported by
+//! [The plan](https://doc.dctl.sh/project/plan) §15 still ranks **fuse-t** (NFS
+//! loopback) and **FSKit** above macFUSE, because both need no kernel extension
+//! and Apple keeps narrowing what a kernel extension may do. That ordering is
+//! unchanged and is reported by
 //! [`backend::shortfall`](crate::commands::mount::backend::shortfall); what has
 //! changed is that macFUSE now works rather than being a dead end.
 
@@ -292,9 +293,10 @@ pub fn decide_macos(macfuse: &Macfuse) -> Readiness {
 
 /// What a macOS user with no macFUSE should do.
 ///
-/// Names the kext-free backends `PLAN.md` §15 prefers as well as macFUSE, because
-/// somebody deciding whether to install a kernel extension deserves to know that
-/// it is this build's only option today and not its preferred one.
+/// Names the kext-free backends [the plan](https://doc.dctl.sh/project/plan)
+/// §15 prefers as well as macFUSE, because somebody deciding whether to install
+/// a kernel extension deserves to know that it is this build's only option
+/// today and not its preferred one.
 const MACOS_MISSING_REMEDY: &str = "Install macFUSE (https://macfuse.io) and allow its system extension when \
      macOS asks. It is a kernel extension, which is why `PLAN.md` §15 prefers \
      FSKit and fuse-t — neither has a Rust binding yet, so macFUSE is what this \

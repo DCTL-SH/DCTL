@@ -209,9 +209,9 @@ impl Vault {
         // full, and the metadata decode has already enforced `meta.size ==
         // plaintext_len` — so this is established rather than reported.
         let size = header.plaintext_len();
-        // A metadata schema this build does not parse (`docs/FORMAT.md` §8) is
-        // served, not refused, so the size is still recorded and only the time and
-        // the hash are absent.
+        // A metadata schema this build does not parse (`crates/dctl-decode/FORMAT.md` §8) is
+        // served, not refused, so the size is still recorded and only the time and the hash
+        // are absent.
         let Some(meta) = header.metadata() else {
             return Ok(Described {
                 size,

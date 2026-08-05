@@ -1,6 +1,6 @@
 //! `--immutable` for the transfer family: an overwrite becomes a refusal.
 //!
-//! The flag's contract (`docs/GLOBAL_FLAGS.md`) is one sentence — *refuse to
+//! The flag's contract ([the global-flags reference](https://doc.dctl.sh/reference/global-flags)) is one sentence — *refuse to
 //! modify or delete anything that already exists; only additions are allowed* —
 //! and it is what makes a write-once archival job expressible at all. Without it
 //! honoured here, `dctl copy ./src ./archive --immutable` replaced whatever

@@ -13,7 +13,7 @@
 //!
 //! ## stderr, never stdout
 //!
-//! stdout is the **result** stream (`PLAN.md` §7): `dctl init --json | jq -r
+//! stdout is the **result** stream ([the plan](https://doc.dctl.sh/project/plan) §7): `dctl init --json | jq -r
 //! .vault_remote` is a supported pipeline, and so is `dctl init … | tee
 //! provisioning.log`. A phrase on stdout therefore lands in a log file, a CI
 //! artefact, or a provisioning transcript — and a phrase in a log file is a

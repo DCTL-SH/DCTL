@@ -4,7 +4,8 @@
 //! exists, and the one place that reads a credential. Everything above it deals
 //! in [`Target`] — a provider plus the settings that provider needs — so adding
 //! sftp or Google Drive later is a new variant plus a new arm here, and touches
-//! no command (`PLAN.md` §16.1: extensibility through traits, not branches).
+//! no command ([the plan](https://doc.dctl.sh/project/plan) §16.1:
+//! extensibility through traits, not branches).
 //!
 //! ## Why [`Target`] is an enum and not a settings map
 //!
@@ -18,13 +19,13 @@
 //!
 //! ## Credentials come from the environment, never the config file
 //!
-//! `PLAN.md` §14 is explicit about the mistake being avoided: rclone stores
-//! provider secrets in `rclone.conf`, merely "obscured" with reversible
-//! obfuscation, so anyone who reads the file recovers them. DCTL's config file
-//! holds only the non-secret half of a remote — bucket, endpoint, region,
-//! account — and every secret arrives through the environment (later, the OS
-//! keychain). Nothing here can read a key out of a config value, because no
-//! code path exists that would.
+//! [The plan](https://doc.dctl.sh/project/plan) §14 is explicit about the
+//! mistake being avoided: rclone stores provider secrets in `rclone.conf`,
+//! merely "obscured" with reversible obfuscation, so anyone who reads the file
+//! recovers them. DCTL's config file holds only the non-secret half of a remote
+//! — bucket, endpoint, region, account — and every secret arrives through the
+//! environment (later, the OS keychain). Nothing here can read a key out of a
+//! config value, because no code path exists that would.
 //!
 //! A missing credential is reported by **variable name only**. The value is
 //! never echoed, never logged, and never included in an error — not even when
@@ -462,7 +463,8 @@ fn connect_sftp(
 /// The three steps in one call — parse, resolve against the empty catalog,
 /// build — for the commands that run before a configuration is necessarily
 /// readable (`dctl init` creating the first vault) and for headless jobs that
-/// carry everything in the environment (`PLAN.md` §14).
+/// carry everything in the environment
+/// ([the plan](https://doc.dctl.sh/project/plan) §14).
 ///
 /// Two limits are worth knowing before reaching for it, because both are silent:
 /// a **named** remote cannot resolve here — only the `local:`, `b2:`, `s3:` and

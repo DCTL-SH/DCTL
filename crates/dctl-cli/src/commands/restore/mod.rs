@@ -1,6 +1,6 @@
 //! `dctl restore REMOTE: LOCAL` — write a vault, or part of one, back to disk.
 //!
-//! A backup you never restored is not a backup (`PLAN.md` §13.6), and the way a
+//! A backup you never restored is not a backup ([the plan](https://doc.dctl.sh/project/plan) §13.6), and the way a
 //! restore fails is almost never the network. It is a filename:
 //! `report:final.pdf` landing on Windows, `README.md` and `readme.md` landing on
 //! the same case-insensitive volume, a path four characters past `MAX_PATH`, or
@@ -47,7 +47,7 @@
 //! `--at` and `--snapshot` select a point in time this build cannot produce
 //! ([`POINT_IN_TIME_FEATURE`]). The index records one current version per path;
 //! selecting an earlier one needs the versioned, snapshot-backed index of
-//! `PLAN.md` §13.5. Planning today's contents in answer to `--at 2d` would
+//! [the plan](https://doc.dctl.sh/project/plan) §13.5. Planning today's contents in answer to `--at 2d` would
 //! produce a plan that does not answer the question asked, and a restore whose
 //! output does not match its arguments is worse than one that refuses.
 
@@ -361,7 +361,7 @@ fn build_plan(target: &Target, candidates: &[Candidate], findings: &preflight::R
 /// One bad object does not abandon the rest: a per-file failure is counted,
 /// reported by name and skipped, and the recorded errors downgrade the exit code
 /// through [`Ctx::outcome`] rather than being rolled up into success
-/// (`PLAN.md` §7). A *fatal* failure stops the run, on the same line
+/// ([the plan](https://doc.dctl.sh/project/plan) §7). A *fatal* failure stops the run, on the same line
 /// [`pipeline::is_fatal`] draws for the transfer executor: a locked vault would
 /// otherwise produce one identical error per file.
 ///
@@ -457,7 +457,7 @@ async fn write_everything(
 /// — the size is not needed to fetch them — but a plan that showed their zero
 /// without comment would tell an operator a 4 TB restore is about to write
 /// nothing. Naming the count and the remedy is the difference between a wrong
-/// number and a wrong number nobody was warned about (`PLAN.md` §6).
+/// number and a wrong number nobody was warned about ([the plan](https://doc.dctl.sh/project/plan) §6).
 fn warn_about_unmeasured(ctx: &Ctx, candidates: &[Candidate]) {
     let unmeasured = candidates.iter().filter(|c| !c.object.measured).count();
     if unmeasured == 0 {
@@ -693,7 +693,7 @@ mod tests {
     fn a_plan_row_carries_the_size_the_index_recorded() {
         // The old plan reported zero for every row because it had no vault to
         // ask. A restore that says it will write nothing, and then writes four
-        // terabytes, is the misreport PLAN.md §6 forbids.
+        // terabytes, is the misreport [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out");
         let target = Target::parse("vault:").unwrap();
@@ -770,7 +770,7 @@ mod tests {
     // directories exactly as `dctl init` would leave one, `dctl backup` seals a
     // tree into it, and `dctl restore` writes it back out. The assertion is the
     // only one that matters for this command: the two trees are byte-identical.
-    // `PLAN.md` §13.6 — a backup you never restored is not a backup — and a
+    // [The plan](https://doc.dctl.sh/project/plan) §13.6 — a backup you never restored is not a backup — and a
     // test that stopped at "the plan looked right" would be exactly the kind of
     // proof that is worthless on the day it is needed.
 
@@ -1233,7 +1233,7 @@ mod tests {
     async fn a_dry_run_reports_the_real_sizes_and_writes_nothing() {
         // The plan used to report `0 B` for every row because it had no vault to
         // ask. A rehearsal that says a restore will write nothing, before a run
-        // that writes 300 KB, is the misreport PLAN.md §6 forbids.
+        // that writes 300 KB, is the misreport [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
         let vault = Vaulted::new().await;
         let source = source_tree();
         let out = tempfile::tempdir().unwrap();

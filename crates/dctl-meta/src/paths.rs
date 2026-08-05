@@ -26,9 +26,10 @@
 //! `~/.docker` made the same trade for the same reason.
 //!
 //! Nothing here is secret. The configuration holds no credentials by design
-//! (`PLAN.md` §14), the index is AEAD-encrypted, and the cache is encrypted at
-//! rest. The directory is still created `0700` on Unix, because the *set* of
-//! remote names and vault paths is reconnaissance even when the contents are not.
+//! ([the plan](https://doc.dctl.sh/project/plan) §14), the index is
+//! AEAD-encrypted, and the cache is encrypted at rest. The directory is still
+//! created `0700` on Unix, because the *set* of remote names and vault paths is
+//! reconnaissance even when the contents are not.
 //!
 //! ## Overriding it
 //!

@@ -1,6 +1,6 @@
 //! `dctl hashsum ALGO REMOTE:PATH` — print content hashes.
 //!
-//! The command exists because of `PLAN.md` §13.1: the data has to outlive the
+//! The command exists because of [the plan](https://doc.dctl.sh/project/plan) §13.1: the data has to outlive the
 //! tool. A vault whose checksums can only be read by DCTL is a vault that
 //! depends on DCTL still existing in 2045. A vault whose checksums come out as
 //!

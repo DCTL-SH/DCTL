@@ -1,5 +1,5 @@
 //! Random access into a `DSF1` object: authenticate and return **only** the chunks a
-//! byte window touches (`docs/FORMAT.md` §3, "Random-access").
+//! byte window touches (`crates/dctl-decode/FORMAT.md` §3, "Random-access").
 //!
 //! The format was designed for this. Chunk `i`'s ciphertext starts at
 //! `payload_start + i·(chunk_size + 16)` and every chunk before the last is exactly

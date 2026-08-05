@@ -1,7 +1,8 @@
 //! What `dctl init` tells the caller it did.
 //!
-//! The record is the *result*, so it goes to **stdout** (`PLAN.md` §7): the
-//! congratulations go to stderr via [`crate::output::Out::success`], and
+//! The record is the *result*, so it goes to **stdout**
+//! ([the plan](https://doc.dctl.sh/project/plan) §7): the congratulations go to
+//! stderr via [`crate::output::Out::success`], and
 //! `dctl init --name archive --base local:/v --json | jq -r .vault_remote` stays
 //! a working pipeline.
 //!
@@ -12,7 +13,8 @@
 //! exists on its store but whose addressing could not be written is a real
 //! outcome, and a recoverable one (`dctl config import`) — so collapsing them
 //! into a single "ok" would have the report claim work that did not happen,
-//! which is the one thing `PLAN.md` §6 forbids outright.
+//! which is the one thing [the plan](https://doc.dctl.sh/project/plan) §6
+//! forbids outright.
 //!
 //! ## What is deliberately absent
 //!

@@ -10,7 +10,7 @@
 //! wrapped DEK and no opaque object key, because a type that cannot hold them is
 //! a type no renderer can leak them through — an object key printed next to a
 //! plaintext path in an `lsjson` dump hands an observer exactly the mapping the
-//! design exists to hide (`PLAN.md` §2, §7).
+//! design exists to hide ([the plan](https://doc.dctl.sh/project/plan) §2, §7).
 //!
 //! ## Paths are stored whole, depth is derived
 //!

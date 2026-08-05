@@ -73,8 +73,8 @@ fn no_plaintext_reached_the_store(report: &drill::Report) {
 ///
 /// This function used to assert the opposite, and its own comment said what to do
 /// when the day came: *"if this ever fails because a rebuild started recovering
-/// sizes and times, the fix is to update `docs/RESTORE_DRILL.md` and delete this
-/// function — not to weaken it."* It did, and this is the replacement.
+/// sizes and times, the fix is to update [the restore drill](https://doc.dctl.sh/guide/restore-drill) and
+/// delete this function — not to weaken it."* It did, and this is the replacement.
 ///
 /// `dctl index rebuild` was a **list-only pass**: it read the encrypted name
 /// records, wrote the path→object mapping, and stopped. The rows carried no size

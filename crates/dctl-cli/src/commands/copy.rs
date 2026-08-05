@@ -16,12 +16,13 @@
 //! Filesystem to filesystem, and filesystem into a vault under `--no-traverse`,
 //! run end to end: [`super::transfer::Engine`] reads, seals where a vault is
 //! involved, writes durably and commits. What is still refused is refused
-//! *loudly* — listing a named remote (so a vault **source** cannot be planned at
-//! all), a second remote on the other side, and a plain write into a directory
-//! that already holds a vault. **Size is no longer among them**: this command
-//! refused any file above one gibibyte until the engine moved to bounded
-//! windows, and there is now no size at which a copy stops fitting in memory. No
-//! file is ever reported as copied when it was not (`PLAN.md` §6).
+//! *loudly* — listing a named remote (so a vault **source** cannot be planned
+//! at all), a second remote on the other side, and a plain write into a
+//! directory that already holds a vault. **Size is no longer among them**: this
+//! command refused any file above one gibibyte until the engine moved to
+//! bounded windows, and there is now no size at which a copy stops fitting in
+//! memory. No file is ever reported as copied when it was not
+//! ([the plan](https://doc.dctl.sh/project/plan) §6).
 
 use clap::Args;
 

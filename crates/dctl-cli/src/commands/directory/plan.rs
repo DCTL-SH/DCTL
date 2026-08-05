@@ -2,12 +2,13 @@
 //! what it did, rendered in every output format.
 //!
 //! One document, two lives, and the `status` field is the whole difference. A
-//! **rehearsal** carries [`DIRECTORY_STATUS_PLANNED`] and nothing else can be
-//! put there: `PLAN.md` §6 forbids reporting work that did not happen, and a
-//! `--dry-run` that answered `created` would be exactly that lie. A **real run**
-//! carries the slug of an [`Outcome`](super::Outcome) the engine produced after
-//! the fact — which is a report of what happened rather than a promise, and is
-//! the same document shape so that a consumer parses one thing.
+//! **rehearsal** carries [`DIRECTORY_STATUS_PLANNED`] and nothing else can be put
+//! there: [the plan](https://doc.dctl.sh/project/plan) §6 forbids reporting work
+//! that did not happen, and a `--dry-run` that answered `created` would be
+//! exactly that lie. A **real run** carries the slug of an
+//! [`Outcome`](super::Outcome) the engine produced after the fact — which is a
+//! report of what happened rather than a promise, and is the same document shape
+//! so that a consumer parses one thing.
 //!
 //! Nothing here can invent either value. [`Plan::new`] hard-codes `planned` and
 //! [`Plan::done`] takes an `Outcome`, so a status is either a constant or a

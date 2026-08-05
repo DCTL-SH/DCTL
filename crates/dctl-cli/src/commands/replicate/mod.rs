@@ -1,6 +1,7 @@
 //! `dctl replicate SOURCE-STORE: DEST-STORE:` — key-free object replication.
 //!
-//! This is the command that makes `PLAN.md` §13.3's 3-2-1 redundancy real, and
+//! This is the command that makes [the plan](https://doc.dctl.sh/project/plan)
+//! §13.3's 3-2-1 redundancy real, and
 //! its defining property is stated first because everything else follows from
 //! it: **it needs no vault password.** It copies opaque ciphertext objects
 //! between two object stores, byte for byte, under the same keys. Nothing here
@@ -77,8 +78,8 @@
 //! limit is [`crate::constants::REPLICATE_WHOLE_OBJECT_LIMIT`], since
 //! [`dctl_store::Backend::put`] takes a whole buffer and an object larger than
 //! that is reported as a failure rather than attempted. Both are stated in
-//! `docs/commands/dctl_replicate.md` rather than left for an operator to infer
-//! from a slow run.
+//! [the `dctl replicate` page](https://doc.dctl.sh/commands/replicate) rather
+//! than left for an operator to infer from a slow run.
 
 pub mod execute;
 pub mod filters;

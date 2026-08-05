@@ -14,9 +14,10 @@
 //! Retries were exhausted. Check connectivity and provider status.
 //! ```
 //!
-//! over a run that had attempted the request exactly once. That is the forbidden
-//! class of `PLAN.md` §6 in a single sentence: it tells an operator the tool has
-//! already done the thing they would otherwise go and do.
+//! over a run that had attempted the request exactly once. That is the
+//! forbidden class of [the plan](https://doc.dctl.sh/project/plan) §6 in a
+//! single sentence: it tells an operator the tool has already done the thing
+//! they would otherwise go and do.
 //!
 //! # The shape
 //!

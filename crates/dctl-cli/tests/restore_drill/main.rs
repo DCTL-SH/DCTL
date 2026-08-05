@@ -1,4 +1,5 @@
-//! The restore drill: `PLAN.md` §13.6, executed rather than described.
+//! The restore drill: [the plan](https://doc.dctl.sh/project/plan) §13.6,
+//! executed rather than described.
 //!
 //! > *A backup you never restored isn't a backup.*
 //!
@@ -30,8 +31,9 @@
 //! A filename stored in NFD comes back in NFC. The file's bytes are identical;
 //! the spelling of its name is not. This is correct, it is asserted rather than
 //! tolerated, and [`drill`] explains at length why reverting it would reintroduce
-//! a silent-duplicate bug. `docs/RESTORE_DRILL.md` states it in the terms an
-//! auditor will ask about.
+//! a silent-duplicate bug.
+//! [The restore-drill guide](https://doc.dctl.sh/guide/restore-drill) states it
+//! in the terms an auditor will ask about.
 //!
 //! ## What a run of this suite does not prove
 //!
@@ -40,7 +42,8 @@
 //! for a year are still readable; that is `dctl scrub`'s job and it needs a
 //! calendar, not a test runner. And it proves nothing about a vault written by
 //! an older format version, which needs golden fixtures rather than a fresh
-//! `dctl init` (`PLAN.md` §13.6, second half).
+//! `dctl init` ([the plan](https://doc.dctl.sh/project/plan) §13.6, second
+//! half).
 
 mod dataset;
 mod drill;

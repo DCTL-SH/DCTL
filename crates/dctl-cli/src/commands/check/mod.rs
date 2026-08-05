@@ -1,10 +1,10 @@
 //! `dctl check SOURCE DEST` — compare two trees without transferring anything.
 //!
-//! `PLAN.md` §13.6 is blunt about why this exists: a backup nobody ever compared
-//! against its source is a hope, not a backup. `check` is the command that turns
-//! the hope into a measurement, and it is also the safest command in the tool —
-//! it reads, it never writes to either side, and it cannot be talked into
-//! copying something "while it is there".
+//! [The plan](https://doc.dctl.sh/project/plan) §13.6 is blunt about why this
+//! exists: a backup nobody ever compared against its source is a hope, not a
+//! backup. `check` is the command that turns the hope into a measurement, and it
+//! is also the safest command in the tool — it reads, it never writes to either
+//! side, and it cannot be talked into copying something "while it is there".
 //!
 //! Every path lands in exactly one of five buckets:
 //!
@@ -37,10 +37,11 @@
 //! describe the same file with the same name.
 //!
 //! The two sides are then **merged** ([`walk`]) rather than joined: both yield
-//! keys in ascending order, so one entry per side is enough and memory stays
-//! O(1) in the size of the trees. Comparing two ten-million-object datasets is
-//! the case this command exists for, and a map of one side would put the ceiling
-//! back where the tool could not ship with it (`PLAN.md` §16.2).
+//! keys in ascending order, so one entry per side is enough and memory stays O(1)
+//! in the size of the trees. Comparing two ten-million-object datasets is the
+//! case this command exists for, and a map of one side would put the ceiling back
+//! where the tool could not ship with it
+//! ([the plan](https://doc.dctl.sh/project/plan) §16.2).
 //!
 //! Nothing is read from either object unless `--checksum` asks for a hash the
 //! source did not record — see [`side::Side::hash`] for what that costs and why
@@ -236,9 +237,10 @@ pub async fn run(ctx: &Ctx, args: &CheckArgs) -> Result<()> {
     }
 
     if let Some(sinks) = sinks.as_mut() {
-        // Explicit, because a buffered write that fails during a drop has
-        // nowhere to report the failure — and a truncated verdict file nobody
-        // was told about is the silent partial success `PLAN.md` §6 forbids.
+        // Explicit, because a buffered write that fails during a drop has nowhere
+        // to report the failure — and a truncated verdict file nobody was told
+        // about is the silent partial success
+        // [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
         sinks.finish()?;
     }
 
@@ -274,14 +276,14 @@ async fn compare(
     pair: &walk::Pair,
     comparison: Comparison,
 ) -> Difference {
-    // A recorded listing can hold a ghost: a path whose stored object was
-    // deleted behind the tool's back, still wearing the size, mtime and hash
-    // of bytes that are gone. Every comparison mode — including --checksum,
-    // whose vault-side digest is the same index row — would call that a
-    // Match, which is BENCHMARKS §7.2's "all match" over a lost object.
-    // Confirm each recorded half against the store first, so a loss
-    // classifies as missing. Costs one existence probe per entry on recorded
-    // sides only; a self-reported listing already is the store's answer.
+    // A recorded listing can hold a ghost: a path whose stored object was deleted
+    // behind the tool's back, still wearing the size, mtime and hash of bytes
+    // that are gone. Every comparison mode — including --checksum, whose
+    // vault-side digest is the same index row — would call that a Match, which is
+    // [the benchmarks](https://doc.dctl.sh/guide/benchmarks) §7.2's "all match"
+    // over a lost object. Confirm each recorded half against the store first, so
+    // a loss classifies as missing. Costs one existence probe per entry on
+    // recorded sides only; a self-reported listing already is the store's answer.
     let source_found = match confirmed(ctx, source, pair.source.as_ref()).await {
         Ok(found) => found,
         Err(()) => return Difference::Error,
@@ -477,10 +479,10 @@ mod tests {
 
     #[tokio::test]
     async fn an_unresolvable_side_is_an_error_rather_than_an_empty_comparison() {
-        // `PLAN.md` §6: never report an outcome that did not happen. A tree that
-        // was never read must not come back as "everything is missing", which
-        // would invite someone to "repair" it by copying a whole dataset over a
-        // destination that was fine.
+        // [The plan](https://doc.dctl.sh/project/plan) §6: never report an
+        // outcome that did not happen. A tree that was never read must not come
+        // back as "everything is missing", which would invite someone to "repair"
+        // it by copying a whole dataset over a destination that was fine.
         let (ctx, args) = parse(&["check", "nosuchremote:photos", "./photos"]);
         let error = run(&ctx, &args).await.unwrap_err();
         assert_eq!(error.code(), ExitCode::FatalError);
@@ -680,13 +682,14 @@ mod tests {
 
     #[tokio::test]
     async fn a_ghost_index_row_is_reported_missing_never_matched() {
-        // BENCHMARKS §7.2 / §12 defect 2, High: delete one stored object
-        // behind the tool's back and `check` said "all match" and exited 0 —
-        // the vault side listed the index row, whose size, mtime and recorded
-        // hash all still described the lost bytes, so every mode matched it,
-        // --checksum included. The confirmation probe makes the same run
-        // report the loss. Everything below is real: a sealed vault, a config
-        // naming the init pair, the ordinary unlock ladder.
+        // [The benchmarks](https://doc.dctl.sh/guide/benchmarks) §7.2 / §12
+        // defect 2, High: delete one stored object behind the tool's back and
+        // `check` said "all match" and exited 0 — the vault side listed the index
+        // row, whose size, mtime and recorded hash all still described the lost
+        // bytes, so every mode matched it, --checksum included. The confirmation
+        // probe makes the same run report the loss. Everything below is real: a
+        // sealed vault, a config naming the init pair, the ordinary unlock
+        // ladder.
         use std::sync::Arc;
 
         let dir = tempfile::TempDir::new().unwrap();

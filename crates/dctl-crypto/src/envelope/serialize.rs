@@ -1,5 +1,5 @@
 //! DKE1 envelope (de)serialization with mandatory structural validation
-//! (`docs/FORMAT.md` §2). All integers little-endian.
+//! (`crates/dctl-decode/FORMAT.md` §2). All integers little-endian.
 
 use crate::constants::{
     COMMIT_LEN, ENVELOPE_MAGIC, ENVELOPE_VERSION, MAX_SLOT_COUNT, SLOT_FIXED_PREFIX_LEN,

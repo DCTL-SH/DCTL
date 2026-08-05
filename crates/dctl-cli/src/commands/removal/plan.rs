@@ -1,8 +1,9 @@
 //! What a removal *would* do, rendered in every output format.
 //!
 //! A plan is not a result. It carries no counters and never claims that
-//! anything was removed — `PLAN.md` §6 forbids reporting work that did not
-//! happen, and a document containing `"files_deleted": 0` beside an operation
+//! anything was removed — [the plan](https://doc.dctl.sh/project/plan) §6
+//! forbids reporting work that did not happen, and a document containing
+//! `"files_deleted": 0` beside an operation
 //! that never ran would be exactly that lie. The JSON shape is deliberately
 //! limited to the *request*: which command, which target, which filters, which
 //! options, and a `status` that says the run got as far as planning.

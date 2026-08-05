@@ -14,9 +14,9 @@
 //! and renames it into place only after the whole object authenticates.
 //! `Source::read` returns a whole `Zeroizing<Vec<u8>>` — that is the shape of
 //! `Vault::get_file`, not a limitation of the trait's callers — so routing a
-//! restore through it would make peak memory O(object) and break `PLAN.md`
-//! §16.2 precisely on the verb most likely to meet the largest file anybody
-//! owns.
+//! restore through it would make peak memory O(object) and break
+//! [the plan](https://doc.dctl.sh/project/plan) §16.2 precisely on the verb most
+//! likely to meet the largest file anybody owns.
 //!
 //! The alternative — enumerate through `crate::source` and open a *second*
 //! session for the reads — costs a second unlock, which for an interactive

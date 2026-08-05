@@ -13,10 +13,11 @@
 //!
 //! ## The shape
 //!
-//! `docs/FORMAT.md` §3 makes the payload a sequence of independently sealed
-//! chunks, and [`Backend::get_range`](dctl_store::Backend::get_range) — which
-//! every backend implements as a genuine ranged request — can fetch any run of
-//! them. So a whole-object read is a *window walk*: fetch
+//! `crates/dctl-decode/FORMAT.md` §3 makes the payload a sequence of
+//! independently sealed chunks, and
+//! [`Backend::get_range`](dctl_store::Backend::get_range) — which every backend
+//! implements as a genuine ranged request — can fetch any run of them. So a
+//! whole-object read is a *window walk*: fetch
 //! [`STREAM_WINDOW_CHUNKS`](crate::constants::STREAM_WINDOW_CHUNKS) chunks,
 //! authenticate each one, write its plaintext out, drop it, advance. Nothing
 //! that scales with the object is ever allocated, and the peak is a constant in
@@ -47,12 +48,13 @@
 //!   [`Vault::get_file`](super::Vault::get_file) makes, and it is the one a
 //!   *windowed* read cannot make because it never sees the other bytes.
 //!
-//! * **The trailing footer is folded too**, from the same ciphertext each window
-//!   was decrypted from. `docs/FORMAT.md` §3's footer is a BLAKE3 over the header
-//!   bytes followed by every chunk's ciphertext, so a reader that never holds the
-//!   object cannot hash it *afterwards* — but it holds each window for exactly as
-//!   long as it takes to decrypt, which is long enough to fold it. The stored 32
-//!   bytes are then fetched in one bounded request and compared.
+//! * **The trailing footer is folded too**, from the same ciphertext each
+//!   window was decrypted from. `crates/dctl-decode/FORMAT.md` §3's footer is a
+//!   BLAKE3 over the header bytes followed by every chunk's ciphertext, so a
+//!   reader that never holds the object cannot hash it *afterwards* — but it
+//!   holds each window for exactly as long as it takes to decrypt, which is
+//!   long enough to fold it. The stored 32 bytes are then fetched in one
+//!   bounded request and compared.
 //!
 //! That last point was very nearly a silent regression, and it is worth recording
 //! why. The first version of this module argued the footer away: it is unkeyed, so

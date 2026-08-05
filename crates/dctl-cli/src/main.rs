@@ -12,7 +12,7 @@
 //! indistinguishable to a script. Instead every path ends at
 //! [`std::process::exit`] with a code from [`exit::ExitCode`].
 //!
-//! Two rules follow from `PLAN.md` §7 and are enforced here rather than trusted
+//! Two rules follow from [the plan](https://doc.dctl.sh/project/plan) §7 and are enforced here rather than trusted
 //! to each command:
 //!
 //! * A command that returns `Ok` but recorded errors still exits non-zero —
@@ -42,7 +42,7 @@ mod logging;
 // The read-only FUSE filesystem, on the two platforms that have a FUSE layer.
 // Target-gated in one place rather than inside every file it contains: on
 // Windows there is no kernel interface to compile against, and `commands::mount`
-// answers that with a refusal naming WinFSP (`PLAN.md` §15) rather than with a
+// answers that with a refusal naming WinFSP ([the plan](https://doc.dctl.sh/project/plan) §15) rather than with a
 // module full of `#[cfg]`s that could not work if they compiled.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod mount;
@@ -230,7 +230,7 @@ async fn execute(cli: Cli) -> (ExitCode, Ending) {
 
     // An interrupted run must never be reported as success: in-flight work is
     // either resumable or rolled back, and the index commit that would make it
-    // count as stored never happened (`PLAN.md` §6 step 6).
+    // count as stored never happened ([the plan](https://doc.dctl.sh/project/plan) §6 step 6).
     //
     // The periodic status line lives and dies inside this block. A redirected
     // run draws no bars, so it is the only thing that reports movement while the

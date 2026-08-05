@@ -4,10 +4,11 @@
 //!
 //! **A template failure must never be fatal.** `ProgressStyle::with_template`
 //! returns an error for a malformed template, and the library forbids panics
-//! (`PLAN.md` §16.5), so a mistake falls back to indicatif's default bar. A
-//! transfer that is otherwise going fine must not be killed by a formatting
-//! typo. The templates are still checked by tests, so the fallback is a safety
-//! net rather than a licence to ship a broken layout.
+//! ([the plan](https://doc.dctl.sh/project/plan) §16.5), so a mistake falls
+//! back to indicatif's default bar. A transfer that is otherwise going fine
+//! must not be killed by a formatting typo. The templates are still checked by
+//! tests, so the fallback is a safety net rather than a licence to ship a
+//! broken layout.
 //!
 //! **Column widths come from [`crate::constants`].** Every width in a template
 //! is interpolated, never typed into the string, because the aggregate and
@@ -59,8 +60,8 @@ pub(super) fn aggregate_style(charset: &Charset) -> ProgressStyle {
 ///
 /// The trailing `{msg}` is the row that makes DCTL's guarantee visible: it
 /// carries the verified-write stage (`read` → `encrypt` → `upload` → `verify` →
-/// `commit`) from `PLAN.md` §6, so a user can see that an uploaded file is not
-/// yet a committed one.
+/// `commit`) from [the plan](https://doc.dctl.sh/project/plan) §6, so a user
+/// can see that an uploaded file is not yet a committed one.
 pub(super) fn file_style(charset: &Charset) -> ProgressStyle {
     build(&file_template(), charset)
 }
@@ -122,7 +123,8 @@ mod tests {
 
     #[test]
     fn a_file_row_carries_its_pipeline_stage() {
-        // `{msg}` is where the verified-write stage is rendered (PLAN.md §6);
+        // `{msg}` is where the verified-write stage is rendered
+        // ([the plan](https://doc.dctl.sh/project/plan) §6);
         // dropping it would hide the difference between uploaded and committed.
         assert!(file_template().contains("{msg"));
     }

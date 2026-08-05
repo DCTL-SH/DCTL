@@ -27,8 +27,9 @@ pub use column::{Align, Border, Column};
 /// Rows are collected in full before anything is written because column widths
 /// are not knowable until the last row has been seen. That is a bounded cost for
 /// a listing page ([`crate::constants::LIST_PAGE_SIZE`] rows), and it is why
-/// listings paginate instead of streaming a single table: `PLAN.md` §16.2
-/// requires memory to stay ~O(concurrency), never O(files).
+/// listings paginate instead of streaming a single table:
+/// [the plan](https://doc.dctl.sh/project/plan) §16.2 requires memory to stay
+/// ~O(concurrency), never O(files).
 pub struct Table {
     /// Column definitions, in display order. Also decides how many cells of a
     /// row are rendered.

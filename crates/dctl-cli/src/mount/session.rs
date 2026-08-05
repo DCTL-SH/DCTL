@@ -36,7 +36,8 @@
 //!
 //! ## Why a signal exits 25 rather than 0
 //!
-//! DCTL's contract is that cancellation is not success (`PLAN.md` §7, and
+//! DCTL's contract is that cancellation is not success
+//! ([the plan](https://doc.dctl.sh/project/plan) §7, and
 //! [`ExitCode::Cancelled`]): a wrapper script has to be able to tell "the
 //! operator stopped it" from "it finished". A mount ended by `umount` *did*
 //! finish, and exits 0; a mount ended by Ctrl-C or `SIGTERM` was stopped, and
@@ -503,9 +504,10 @@ impl Mounted {
             // runs anyway — on macOS `unmount(2)` then answers `EINVAL`, because
             // there is nothing left at the path. Printing "could not detach the
             // filesystem" there tells an operator their mountpoint is stuck when
-            // it is free, which is `PLAN.md` §6's misreport pointing the other
-            // way. So the mountpoint is looked at before the warning is written,
-            // by the same predicate that decides the word "unmounted".
+            // it is free, which is [the plan](https://doc.dctl.sh/project/plan)
+            // §6's misreport pointing the other way. So the mountpoint is looked
+            // at before the warning is written, by the same predicate that
+            // decides the word "unmounted".
             if self.mountpoint_free() {
                 self.detached = true;
                 tracing::debug!(
@@ -698,8 +700,9 @@ impl Drop for Mounted {
 /// A free function taking the observation rather than a method reading the world,
 /// because the thing worth pinning is the *decision*: a signalled mount that
 /// could not be detached must not be described as having been unmounted. That is
-/// `PLAN.md` §6 applied to the one message an operator reads before walking away
-/// from the terminal, and it was wrong until the detach was checked.
+/// [the plan](https://doc.dctl.sh/project/plan) §6 applied to the one message an
+/// operator reads before walking away from the terminal, and it was wrong until
+/// the detach was checked.
 ///
 /// Cancelled either way — the operator did stop it, and
 /// [`ExitCode::Cancelled`]'s meaning does not change because the cleanup was
@@ -1400,8 +1403,9 @@ mod tests {
         // command exited 0 and printed
         //   WARN could not detach the filesystem: Invalid argument
         // which tells an operator their mountpoint is stuck when it is free. That
-        // is `PLAN.md` §6's misreport pointing the other way, and it is exactly
-        // as bad: the whole value of the warning is that it means something.
+        // is [the plan](https://doc.dctl.sh/project/plan) §6's misreport pointing
+        // the other way, and it is exactly as bad: the whole value of the warning
+        // is that it means something.
         //
         // Described rather than mounted: the detacher always fails, and the only
         // thing that changes between the two halves is what the mountpoint says.
@@ -1451,11 +1455,11 @@ mod tests {
     fn a_signalled_mount_that_did_not_detach_must_not_claim_it_unmounted() {
         // The regression this module exists for, measured on Linux 6.12: SIGTERM
         // to a mount started with --allow-other or --allow-root left the
-        // mountpoint attached and dead, and the command printed
-        // "unmounted '<path>' on request" and exited 25 anyway. An operator who
-        // reads that walks away from a directory that fails every access with
-        // ENOTCONN. `PLAN.md` §6: work that did not happen is not reported as
-        // having happened.
+        // mountpoint attached and dead, and the command printed "unmounted
+        // '<path>' on request" and exited 25 anyway. An operator who reads that
+        // walks away from a directory that fails every access with ENOTCONN.
+        // [The plan](https://doc.dctl.sh/project/plan) §6: work that did not
+        // happen is not reported as having happened.
         let outcome = signal_outcome(Path::new("/mnt/vault"), false);
         assert_eq!(
             outcome.code(),

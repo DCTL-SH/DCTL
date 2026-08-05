@@ -1,6 +1,6 @@
 [package]
 name = "dctl-cli"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -39,7 +39,8 @@ thiserror = { workspace = true }
 futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { workspace = true, features = ["signal"] }
 tracing = { workspace = true }
-# `json` provides the structured sink PLAN.md §7 requires alongside the human one.
+# `json` provides the structured sink [the plan](https://doc.dctl.sh/project/plan)
+# §7 requires alongside the human one.
 tracing-subscriber = { workspace = true, features = ["json"] }
 rpassword = { workspace = true }
 serde = { workspace = true }
@@ -72,7 +73,8 @@ unicode-normalization = "0.1"
 # than optional, because a Cargo feature would let a Windows build be configured
 # into a state where `crate::mount` is compiled without a kernel interface behind
 # it; the target gate makes "this platform has no mount" a fact of the build, and
-# `commands::mount` answers it with a refusal naming WinFSP (`PLAN.md` §15).
+# `commands::mount` answers it with a refusal naming WinFSP
+# ([the plan](https://doc.dctl.sh/project/plan) §15).
 #
 # Linux takes fuser's pure-Rust mount path: no C library at build time, only
 # `fusermount3` at run time. See the workspace table for the reasoning.

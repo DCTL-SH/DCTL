@@ -1,6 +1,6 @@
 //! The configuration layer — `config.toml` and the rules that govern it.
 //!
-//! `PLAN.md` §14 defines this file by what it deliberately is *not*. rclone's
+//! [The plan](https://doc.dctl.sh/project/plan) §14 defines this file by what it deliberately is *not*. rclone's
 //! `rclone.conf` keeps provider credentials and vault passwords next to the
 //! settings, "obscured" with reversible obfuscation that anyone holding the file
 //! can undo — which means a config in a backup, a dotfiles repository, or a bug
@@ -100,7 +100,7 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// The worked example from `PLAN.md` §14: a plain B2 remote, and a vault
+    /// The worked example from [the plan](https://doc.dctl.sh/project/plan) §14: a plain B2 remote, and a vault
     /// remote wrapping it, both usable in the same run.
     fn plan_example() -> Config {
         let mut config = Config::default();

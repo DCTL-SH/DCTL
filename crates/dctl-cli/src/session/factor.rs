@@ -1,6 +1,6 @@
 //! The `--key-file` second factor, and why every path refuses it.
 //!
-//! `PLAN.md` §8 defines the second factor as `KDF_input = password ‖ H(factor)`:
+//! [The plan](https://doc.dctl.sh/project/plan) §8 defines the second factor as `KDF_input = password ‖ H(factor)`:
 //! something you *have*, folded into the key-encryption key beside something you
 //! *know*, so a stolen password alone does not open the vault.
 //!
@@ -12,7 +12,7 @@
 //!
 //! * Accept the flag and unlock with the password alone. The command succeeds,
 //!   exits 0, and the operator believes their vault needs two factors when it
-//!   needs one. This is the failure `PLAN.md` §6 forbids, in its most damaging
+//!   needs one. This is the failure [the plan](https://doc.dctl.sh/project/plan) §6 forbids, in its most damaging
 //!   form: the thing misreported is a security property, and the misreport is
 //!   silent and repeats on every single run.
 //! * Refuse, name the flag, and say plainly that this build cannot apply it.

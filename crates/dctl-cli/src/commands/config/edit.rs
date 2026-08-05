@@ -1,6 +1,6 @@
 //! `dctl config edit` — open the configuration file in an editor.
 //!
-//! The file is TOML and meant to be edited by hand (`PLAN.md` §14), so the
+//! The file is TOML and meant to be edited by hand ([the plan](https://doc.dctl.sh/project/plan) §14), so the
 //! useful thing a CLI can add is not a questionnaire — it is finding the file,
 //! creating it correctly if it is missing, and checking the result before the
 //! user walks away believing it is fine.

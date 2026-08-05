@@ -1,11 +1,12 @@
 //! What a walk has to say about the links it met.
 //!
-//! Counts are always exact; names are sampled. Both halves matter. A count on
-//! its own tells an operator that something was passed over but not what, and a
-//! full list of names is unbounded — a home directory can hold tens of thousands
-//! of links, and a listing that promises O(page) memory (`PLAN.md` §16.2) must
-//! not quietly grow a second structure that is O(tree). So the number is the
-//! truth and the names are a sample large enough to identify a layout.
+//! Counts are always exact; names are sampled. Both halves matter. A count on its
+//! own tells an operator that something was passed over but not what, and a full
+//! list of names is unbounded — a home directory can hold tens of thousands of
+//! links, and a listing that promises O(page) memory
+//! ([the plan](https://doc.dctl.sh/project/plan) §16.2) must not quietly grow a
+//! second structure that is O(tree). So the number is the truth and the names are
+//! a sample large enough to identify a layout.
 
 use super::LinkVerdict;
 

@@ -245,9 +245,10 @@ impl Plan {
         let mut matched = vec![false; dest.len()];
 
         // Indexed rather than scanned. A linear search per source file makes the
-        // diff quadratic, which on the million-file datasets `PLAN.md` §16.2
-        // targets is the difference between seconds and hours — and it would be
-        // invisible in any test small enough to write by hand.
+        // diff quadratic, which on the million-file datasets
+        // [the plan](https://doc.dctl.sh/project/plan) §16.2 targets is the
+        // difference between seconds and hours — and it would be invisible in any
+        // test small enough to write by hand.
         let by_path: std::collections::HashMap<&str, usize> = dest
             .iter()
             .enumerate()

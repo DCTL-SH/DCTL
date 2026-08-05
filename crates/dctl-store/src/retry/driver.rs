@@ -15,9 +15,10 @@
 //! That is not bookkeeping. Every backend failure used to reach the operator
 //! with the hint *"Retries were exhausted"* over a run that had made exactly one
 //! attempt in ten milliseconds — a sentence describing work that did not happen,
-//! which is the class `PLAN.md` §6 forbids outright, and the worse kind of false
-//! because it tells somebody the tool has already done the thing they would
-//! otherwise go and do. The hint is now worded from this number.
+//! which is the class [the plan](https://doc.dctl.sh/project/plan) §6 forbids
+//! outright, and the worse kind of false because it tells somebody the tool has
+//! already done the thing they would otherwise go and do. The hint is now worded
+//! from this number.
 
 use std::future::Future;
 use std::time::Duration;

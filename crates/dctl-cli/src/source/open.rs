@@ -137,10 +137,11 @@ impl Opened {
 /// Open the source `spec` addresses, scoped as `spec` scopes it.
 ///
 /// A missing configuration file is not an error: `load_or_default` yields an
-/// empty one, which is the headless case `PLAN.md` §14 requires to keep working
-/// from a bare path or from environment credentials alone. An empty
-/// configuration simply defines no vaults, so every spec opens the plain view —
-/// which is the truth about a machine that has never run `dctl init`.
+/// empty one, which is the headless case
+/// [the plan](https://doc.dctl.sh/project/plan) §14 requires to keep working from
+/// a bare path or from environment credentials alone. An empty configuration
+/// simply defines no vaults, so every spec opens the plain view — which is the
+/// truth about a machine that has never run `dctl init`.
 ///
 /// The prefix comes back with the source, from
 /// [`logical_prefix`](crate::remote::resolve::logical_prefix), and never from the

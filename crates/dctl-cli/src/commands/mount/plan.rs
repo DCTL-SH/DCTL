@@ -7,7 +7,8 @@
 //! accepted `--vfs-cache-mode full` and streamed everything anyway would leave
 //! the user believing their seeks were being cached, tuning a dial that is not
 //! connected, and — the part that matters — unable to tell that from a working
-//! cache by looking at the mount. That is `PLAN.md` §6's rule about not reporting
+//! cache by looking at the mount. That is
+//! [the plan](https://doc.dctl.sh/project/plan) §6's rule about not reporting
 //! work that did not happen, applied to configuration rather than to data.
 //!
 //! Refusals are `usage` errors, so a script gets exit 1 and a message naming the
@@ -18,7 +19,7 @@
 //!
 //! | Flag | How |
 //! |------|-----|
-//! | `--read-only` | Always on. v1 is read-first (`PLAN.md` §15), so the mount is read-only whether the flag is given or not — and *says so* rather than letting the flag look decorative. |
+//! | `--read-only` | Always on. v1 is read-first ([the plan](https://doc.dctl.sh/project/plan) §15), so the mount is read-only whether the flag is given or not — and *says so* rather than letting the flag look decorative. |
 //! | `--allow-other` / `--allow-root` | The FUSE session ACL. See the security note in [`crate::mount`] for what widening it means for an unlocked vault. |
 //! | `--volname` | Passed to macFUSE as `volname=`. Refused elsewhere: Linux FUSE has no volume name, and pretending otherwise would be ignoring the flag. |
 //! | `--dir-cache-time` | How long a decrypted directory listing is served before it is read again. |

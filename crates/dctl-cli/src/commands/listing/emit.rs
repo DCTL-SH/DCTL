@@ -1,7 +1,7 @@
 //! Writing a JSON document that is longer than memory.
 //!
 //! `serde_json::to_string(&all_the_entries)` is the obvious way to emit a
-//! listing and the one thing `PLAN.md` §16.2 rules out: it needs the whole
+//! listing and the one thing [the plan](https://doc.dctl.sh/project/plan) §16.2 rules out: it needs the whole
 //! result set in a `Vec` *and* the whole document in a `String` before the first
 //! byte reaches the pipe. On a ten-million-object vault that is two copies of
 //! the listing in RAM in exchange for output that could have started

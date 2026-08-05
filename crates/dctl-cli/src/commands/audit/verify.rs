@@ -43,11 +43,12 @@
 //! The `--json` document therefore carries `proves` — the claims as separate
 //! tokens, so a consumer branches on a list rather than on a word's reputation.
 //! `authorship` is not in that vocabulary and there is no arm of this function
-//! that can put it there. The chain is unkeyed BLAKE3 over public values, so any
-//! process that can append a line to the log can append a correctly linked one;
-//! `docs/AUDIT_LOG.md` §11 is the argument for why DCTL cannot close that with a
-//! key it must itself be able to use unattended, and what the operator does
-//! instead. [`AUDIT_PROVES_AUTHORSHIP_NOTE`] says the same on the human stream,
+//! that can put it there. The chain is unkeyed BLAKE3 over public values, so
+//! any process that can append a line to the log can append a correctly linked
+//! one; [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §11
+//! is the argument for why DCTL cannot close that with a key it must itself be
+//! able to use unattended, and what the operator does instead.
+//! [`AUDIT_PROVES_AUTHORSHIP_NOTE`] says the same on the human stream,
 //! unconditionally, because unlike length there is no flag that closes it.
 
 use std::path::PathBuf;
@@ -512,9 +513,10 @@ mod tests {
         // compiler notice a **fourth** list added for a future keyed mode and
         // left out of the loop above. Rust has no reflection over consts and
         // there is no enum to be exhaustive about. The guard against that is
-        // this test's name and `docs/AUDIT_LOG.md` §11's normative statement,
-        // not the type system — so a pass that adds one has to come here on
-        // purpose.
+        // this test's name and
+        // [the audit-log reference](https://doc.dctl.sh/reference/audit-log)
+        // §11's normative statement, not the type system — so a pass that adds
+        // one has to come here on purpose.
     }
 
     #[test]
@@ -562,7 +564,7 @@ mod tests {
              {AUDIT_PROVES_AUTHORSHIP_NOTE}"
         );
         assert!(
-            AUDIT_PROVES_AUTHORSHIP_NOTE.contains("AUDIT_LOG.md"),
+            AUDIT_PROVES_AUTHORSHIP_NOTE.contains("doc.dctl.sh/reference/audit-log"),
             "and where the argument is: {AUDIT_PROVES_AUTHORSHIP_NOTE}"
         );
     }

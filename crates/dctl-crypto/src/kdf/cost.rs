@@ -9,8 +9,8 @@
 //!
 //! [`Cost::PRODUCTION`] is the shipped policy: 128 MiB, three passes, four
 //! lanes, roughly a third of a second per guess on a desktop. It is what
-//! `docs/FORMAT.md` §2.1 publishes and what every vault a released DCTL creates
-//! carries.
+//! `crates/dctl-decode/FORMAT.md` §2.1 publishes and what every vault a
+//! released DCTL creates carries.
 //!
 //! `Cost::TEST` — private, below — is the §2 floor, the cheapest parameters the
 //! format permits at all. It exists because DCTL's own test suite creates and
@@ -59,8 +59,9 @@ impl Cost {
     ///
     /// Stated as a named value rather than three loose constants so that "the
     /// cost this product ships" is one thing a reviewer can point at, and so
-    /// the format-conformance test can pin it against `docs/FORMAT.md` §2.1
-    /// whatever profile the suite happens to be built in.
+    /// the format-conformance test can pin it against
+    /// `crates/dctl-decode/FORMAT.md` §2.1 whatever profile the suite happens
+    /// to be built in.
     pub const PRODUCTION: Self = Self {
         m_cost: DEFAULT_ARGON2_M_COST,
         t_cost: DEFAULT_ARGON2_T_COST,

@@ -19,18 +19,20 @@
  * Build:  cc -O2 -std=c99 -Wall -Wextra -Werror -o dctl-decode dctl-decode.c
  *         (no libraries, no build system — just libc)
  *
- * This single file is the 20-year "break-glass" decoder (see PLAN.md §13). It
- * decodes the FROZEN v1 on-disk format described in docs/FORMAT.md: the `DKE1`
- * slot-list key envelope (§2) and the `DSF1` self-describing object (§3-§4). It
- * inlines its crypto from public-domain reference code and depends only on libc,
- * and is cross-validated against the Rust implementation by known-answer tests
+ * This single file is the 20-year "break-glass" decoder (see the plan §13,
+ * https://doc.dctl.sh/project/plan). It decodes the FROZEN v1 on-disk format
+ * described in crates/dctl-decode/FORMAT.md: the `DKE1` slot-list key envelope
+ * (§2) and the `DSF1` self-describing object (§3-§4). It inlines its crypto from
+ * public-domain reference code and depends only on libc, and is cross-validated
+ * against the Rust implementation by known-answer tests
  * (crates/dctl-decode/tests/kat.rs) so the two independent implementations are
  * proven to agree byte-for-byte.
  *
  * Scope — the SYMMETRIC owner path only (`kem_id=0`: Argon2id + XChaCha20-Poly1305).
- * Per FORMAT.md §6/§12.8 this minimal decoder is deliberately limited to `kem_id=0`;
- * a `kem_id=1` recipient-hybrid object is REJECTED (it needs X25519 + ML-KEM-768,
- * which a private-key holder runs from a full implementation).
+ * Per crates/dctl-decode/FORMAT.md §6/§12.8 this minimal decoder is deliberately
+ * limited to `kem_id=0`; a `kem_id=1` recipient-hybrid object is REJECTED (it
+ * needs X25519 + ML-KEM-768, which a private-key holder runs from a full
+ * implementation).
  *
  * Primitives: XChaCha20-Poly1305 (ChaCha20 + Poly1305 + HChaCha20) for every AEAD
  * wrap, and Argon2id (+ BLAKE2b) for the password->KEK step. These primitives are
@@ -319,7 +321,7 @@ static int argon2id_raw(const uint8_t *pwd, size_t pwd_len, const uint8_t *salt,
 
 #define FAIL(msg) do { fprintf(stderr, "%s\n", (msg)); return -1; } while (0)
 
-/* ── FROZEN format constants (docs/FORMAT.md §2-§4) ── */
+/* ── FROZEN format constants (crates/dctl-decode/FORMAT.md §2-§4) ── */
 #define KEY_LEN          32
 #define NONCE_LEN        24
 #define TAG_LEN          16

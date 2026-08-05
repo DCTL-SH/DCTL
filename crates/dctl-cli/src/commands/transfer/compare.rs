@@ -27,7 +27,8 @@
 //! happens to be holding, which is a different claim from "the BLAKE3 of the
 //! plaintext that was stored". Comparing the two would produce a confident wrong
 //! answer, and answering the size-and-time question instead while the user asked
-//! for content equality is exactly the misreport `PLAN.md` §6 forbids.
+//! for content equality is exactly the misreport
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
 //!
 //! ## There is no fourth comparison, and there used to be
 //!
@@ -165,7 +166,7 @@ impl ComparePolicy {
 /// side cannot supply a hash. Falling back to a size-and-time comparison would
 /// be worse than failing: the user asked for content equality, and a weaker
 /// answer dressed up as the one they asked for is exactly the misreporting
-/// `PLAN.md` §6 forbids.
+/// [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
 pub fn decide(source: &Entry, dest: Option<&Entry>, policy: &ComparePolicy) -> Result<Action> {
     let Some(dest) = dest else {
         return Ok(Action::Copy(PLAN_REASON_MISSING));

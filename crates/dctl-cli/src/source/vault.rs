@@ -10,7 +10,7 @@
 //!
 //! ## The buffering here is the core's, and this is where it will disappear
 //!
-//! `PLAN.md` §16.2 forbids materialising a full file list, and this
+//! [The plan](https://doc.dctl.sh/project/plan) §16.2 forbids materialising a full file list, and this
 //! implementation does exactly that — once, in [`VaultSource::enumerate`],
 //! because [`Vault::list`](dctl_core::Vault::list) returns a `Vec<Record>`. Its
 //! own documentation is candid about it: it enumerates the index in constant
@@ -39,7 +39,7 @@
 //! window** of a 95 MiB object. Mounted, a player seeking through a 40 GB film
 //! would have re-downloaded 40 GB on every seek.
 //!
-//! `docs/FORMAT.md` §3 specifies the alternative, and it is the reason the format
+//! `crates/dctl-decode/FORMAT.md` §3 specifies the alternative, and it is the reason the format
 //! is chunked at all: chunk `i`'s ciphertext starts at
 //! `payload_start + i·(chunk_size + 16)`, so the chunks covering a window are
 //! arithmetic rather than a search, and `Backend::get_range` — which every
@@ -452,7 +452,7 @@ impl Entries for Buffered {
 /// Deliberately drops `object_key`. It is the opaque name the ciphertext is
 /// stored under, and printing it beside the plaintext path — which is what a
 /// listing does — would hand an observer exactly the mapping the metadata-
-/// privacy design exists to withhold (`PLAN.md` §2, §7). A type that cannot
+/// privacy design exists to withhold ([the plan](https://doc.dctl.sh/project/plan) §2, §7). A type that cannot
 /// carry it is a type no renderer can leak it through.
 pub fn from_record(record: Record) -> Entry {
     // The whole point of the branch: a row that was never measured must not
@@ -820,7 +820,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_path_is_reported_rather_than_read_as_empty() {
         // Returning zero bytes for an object that is not there is the misreport
-        // `PLAN.md` §6 forbids: a redirected `dctl cat` would leave a file that
+        // [the plan](https://doc.dctl.sh/project/plan) §6 forbids: a redirected `dctl cat` would leave a file that
         // looks like a successful, empty download.
         let fixture = vault_with(&[("a.txt", b"1")]).await;
         let error = fixture

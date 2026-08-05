@@ -1,12 +1,14 @@
 //! Writing `config.toml` without ever leaving it half-written.
 //!
 //! The configuration is the file that says *where a user's data lives*. Losing
-//! it does not lose the data — objects are self-describing (`PLAN.md` §13.1) —
-//! but truncating it during a power cut turns a working installation into a
-//! puzzle, and `dctl config` is exactly the command someone runs on a laptop
-//! that is about to lose battery. So the write follows the same discipline
-//! `PLAN.md` §6 requires of a local-filesystem destination: stage, fsync,
-//! rename, fsync the directory. At no instant does the path hold a partial file.
+//! it does not lose the data — objects are self-describing
+//! ([the plan](https://doc.dctl.sh/project/plan) §13.1) — but truncating it
+//! during a power cut turns a working installation into a puzzle, and
+//! `dctl config` is exactly the command someone runs on a laptop that is about
+//! to lose battery. So the write follows the same discipline
+//! [the plan](https://doc.dctl.sh/project/plan) §6 requires of a
+//! local-filesystem destination: stage, fsync, rename, fsync the directory. At
+//! no instant does the path hold a partial file.
 //!
 //! Three further rules come from §14 rather than §6:
 //!

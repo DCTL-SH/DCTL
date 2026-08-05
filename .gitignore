@@ -9,3 +9,7 @@ crates/*/fuzz/artifacts/
 
 # OS noise
 .DS_Store
+
+# macOS resource forks, which cross into archives and tarballs
+._*
+.AppleDouble

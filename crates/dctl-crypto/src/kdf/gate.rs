@@ -15,11 +15,10 @@
 //! can choose*.
 //!
 //! It has to be nobody. An envelope records its own KDF parameters
-//! (`docs/FORMAT.md` §2), which is what makes a cheaply-written vault readable
-//! forever; it is also what makes one permanently weak. A vault created under
-//! reduced parameters has a brute-forceable password and no way to notice, so a
-//! build that can be *talked into* writing them is a build that can be talked
-//! into creating that vault.
+//! (`crates/dctl-decode/FORMAT.md` §2), which is what makes a cheaply-written vault readable
+//! forever; it is also what makes one permanently weak. A vault created under reduced
+//! parameters has a brute-forceable password and no way to notice, so a build that can be
+//! *talked into* writing them is a build that can be talked into creating that vault.
 //!
 //! ## Why every obvious mechanism is disqualified
 //!

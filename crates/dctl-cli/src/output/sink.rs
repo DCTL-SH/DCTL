@@ -205,7 +205,7 @@ impl Out {
     }
 
     /// An error. Always shown, even under `--quiet` — silence about a failure
-    /// is the one thing `PLAN.md` §7 forbids.
+    /// is the one thing [the plan](https://doc.dctl.sh/project/plan) §7 forbids.
     pub fn error(&self, text: impl AsRef<str>) {
         let style = self.palette.error();
         self.stderr_line(&format!("{style}{ERROR_PREFIX}{style:#} {}", text.as_ref()));

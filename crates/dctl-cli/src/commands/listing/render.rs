@@ -9,12 +9,12 @@
 //! ## Why not [`crate::output::table::Table`]
 //!
 //! `Table` measures its columns by scanning every row, which means holding every
-//! row: exactly the thing `PLAN.md` §16.2 forbids for a listing. Fixed widths
-//! taken from [`crate::constants`] cost one property — a run where every file is
-//! under a kilobyte still reserves ten columns for the size — and buy the ability
-//! to print the first line before the last object has been read. For a command
-//! whose output is piped into `head` as often as it is read, that is the right
-//! trade.
+//! row: exactly the thing [the plan](https://doc.dctl.sh/project/plan) §16.2
+//! forbids for a listing. Fixed widths taken from [`crate::constants`] cost one
+//! property — a run where every file is under a kilobyte still reserves ten
+//! columns for the size — and buy the ability to print the first line before the
+//! last object has been read. For a command whose output is piped into `head` as
+//! often as it is read, that is the right trade.
 //!
 //! ## The path column is last, and never padded
 //!

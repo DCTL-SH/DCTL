@@ -9,7 +9,8 @@
 //!
 //! So a remote is opened once and remembered. The cache lives for exactly one
 //! `run` and is never global: a process-wide cache of unlocked vaults is a place
-//! for root keys to outlive the command that needed them (`PLAN.md` §7).
+//! for root keys to outlive the command that needed them
+//! ([the plan](https://doc.dctl.sh/project/plan) §7).
 //!
 //! It is deliberately not a general-purpose pool. There is no eviction, no
 //! reference counting of unlock state and no sharing between commands, because

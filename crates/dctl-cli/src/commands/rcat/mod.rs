@@ -562,8 +562,9 @@ mod tests {
 
     #[test]
     fn a_plain_object_store_is_refused_before_stdin_is_touched() {
-        // PLAN.md §6: never report work that did not happen — and never consume
-        // a pipe that cannot be rewound in order to find that out.
+        // The plan (https://doc.dctl.sh/project/plan) §6: never report work that
+        // did not happen — and never consume a pipe that cannot be rewound in
+        // order to find that out.
         let parsed = parse(&["rcat", "b2:bucket/a.bin"]);
         let error = resolve(&ctx_for(&parsed), &spec("b2:bucket/a.bin"), false).unwrap_err();
         assert_eq!(error.code(), ExitCode::FatalError);

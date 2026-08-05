@@ -24,8 +24,8 @@
 //! `dctl mkdir` — the sweep removes their markers. A directory that existed only
 //! because a file sat in it has already ceased to exist by the time the file is
 //! gone, and is not counted as a removal, because none happened. Inventing one
-//! so the numbers looked like a filesystem's is exactly the misreport `PLAN.md`
-//! §6 forbids. See [`super::removal::dirs`].
+//! so the numbers looked like a filesystem's is exactly the misreport
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids. See [`super::removal::dirs`].
 
 use clap::Args;
 

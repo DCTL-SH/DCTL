@@ -2426,11 +2426,11 @@ fn a_window_of_a_large_sealed_object_is_served_without_moving_the_object() {
     // exited 0. The command warned about it, because warning was the only honest
     // thing available.
     //
-    // It now reads only the chunks covering the window (`docs/FORMAT.md` §3), so
-    // there are two things to assert and they are equally important: the bytes are
-    // right, and the warning is *gone*. A warning about a cost that is no longer
-    // paid is the kind an operator learns to filter out before the run that
-    // mattered.
+    // It now reads only the chunks covering the window
+    // (`crates/dctl-decode/FORMAT.md` §3), so there are two things to assert
+    // and they are equally important: the bytes are right, and the warning is
+    // *gone*. A warning about a cost that is no longer paid is the kind an
+    // operator learns to filter out before the run that mattered.
     let sandbox = Sandbox::new();
     sandbox.dir("vault");
 
@@ -2512,10 +2512,10 @@ fn a_window_of_a_large_sealed_object_is_served_without_moving_the_object() {
 
 // ── 20. a vault is recoverable without its password ───────────────────────────
 //
-// `PLAN.md` §13.2 calls key survival the #1 risk of a twenty-year tool. The
-// tests below are the only place that claim is checked the way a user would
-// check it: through the real binary, against the real bytes, with the password
-// genuinely gone rather than merely unused.
+// [The plan](https://doc.dctl.sh/project/plan) §13.2 calls key survival the #1
+// risk of a twenty-year tool. The tests below are the only place that claim is
+// checked the way a user would check it: through the real binary, against the
+// real bytes, with the password genuinely gone rather than merely unused.
 
 /// Pull the recovery phrase out of what `dctl init` wrote to stderr.
 ///
@@ -2771,10 +2771,11 @@ fn quiet_does_not_suppress_the_phrase() {
 
 #[test]
 fn recovering_sets_a_new_password_and_leaves_the_phrase_working() {
-    // `PLAN.md` §13.2's independence promise, end to end: rotating one wrapper
-    // of the root key must not disturb another. If it did, the first password
-    // change would silently destroy the paper backup and nobody would find out
-    // until the day they needed it.
+    // [The plan](https://doc.dctl.sh/project/plan) §13.2's independence
+    // promise, end to end: rotating one wrapper of the root key must not
+    // disturb another. If it did, the first password change would silently
+    // destroy the paper backup and nobody would find out until the day they
+    // needed it.
     const NEW_PASSWORD: &str = "an entirely different secret";
     const SECRET: &[u8] = b"still readable after the password changed";
 
@@ -2827,9 +2828,10 @@ fn recovering_sets_a_new_password_and_leaves_the_phrase_working() {
 
 #[test]
 fn a_restore_drill_proves_the_phrase_without_changing_the_vault() {
-    // `PLAN.md` §13.6: a backup nobody restored is not a backup. Checking the
-    // paper still works has to be a read-only act, or it will not be done
-    // yearly — so `--keep-password` must leave the existing password in force.
+    // [The plan](https://doc.dctl.sh/project/plan) §13.6: a backup nobody
+    // restored is not a backup. Checking the paper still works has to be a
+    // read-only act, or it will not be done yearly — so `--keep-password` must
+    // leave the existing password in force.
     const SECRET: &[u8] = b"drill";
 
     let sandbox = Sandbox::new();
@@ -3072,8 +3074,8 @@ fn a_listing_of_an_unmounted_named_remote_refuses_rather_than_reporting_empty() 
             .dctl()
             .args(["ls", target])
             .assert()
-            // 3 = dir_not_found, the same code every transfer verb
-            // already gives this path (docs/EXIT_CODES.md).
+            // 3 = dir_not_found, the same code every transfer verb already
+            // gives this path (https://doc.dctl.sh/reference/exit-codes).
             .code(3);
         let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
         assert!(
@@ -3216,7 +3218,7 @@ fn json_on_a_transfer_with_a_failure_still_reports_what_happened() {
     let assert = sandbox
         .dctl()
         .args(["--json", "copy", "src", "dst"])
-        // 6 = partial_failure (docs/EXIT_CODES.md).
+        // 6 = partial_failure (https://doc.dctl.sh/reference/exit-codes).
         .assert()
         .code(6);
     let document = json(&assert.get_output().stdout);
@@ -3251,7 +3253,7 @@ fn a_run_that_refused_before_it_started_prints_no_statistics_block() {
     let refused = sandbox
         .dctl()
         .args(["replicate", "plainloc:", "elsewhere:"])
-        // 7 = fatal_error (docs/EXIT_CODES.md).
+        // 7 = fatal_error (https://doc.dctl.sh/reference/exit-codes).
         .assert()
         .code(7);
     let stderr = String::from_utf8_lossy(&refused.get_output().stderr).into_owned();
@@ -3282,7 +3284,7 @@ fn a_run_that_failed_partway_still_prints_what_it_moved() {
     let partial = sandbox
         .dctl()
         .args(["copy", "src", "dst"])
-        // 6 = partial_failure (docs/EXIT_CODES.md).
+        // 6 = partial_failure (https://doc.dctl.sh/reference/exit-codes).
         .assert()
         .code(6);
     let stderr = String::from_utf8_lossy(&partial.get_output().stderr).into_owned();
@@ -3319,7 +3321,7 @@ fn a_remote_to_remote_refusal_prints_no_counter_lines() {
         .dctl()
         .arg("--force")
         .args(["moveto", "pl:render.mov", "p2:final.mov"])
-        // 7 = fatal_error (docs/EXIT_CODES.md).
+        // 7 = fatal_error (https://doc.dctl.sh/reference/exit-codes).
         .assert()
         .code(7);
     let output = refused.get_output();
@@ -3506,7 +3508,7 @@ fn a_malformed_bandwidth_limit_is_a_usage_error_not_an_unlimited_run() {
     sandbox
         .dctl()
         .args(["--bwlimit", "10Q", "copy", "src", "dst"])
-        // 1 = usage (docs/EXIT_CODES.md).
+        // 1 = usage (https://doc.dctl.sh/reference/exit-codes).
         .assert()
         .code(1);
     assert!(
@@ -3567,7 +3569,8 @@ fn max_transfer_stops_the_run_and_reaches_exit_8() {
     let stopped = sandbox
         .dctl()
         .args(["--max-transfer", "100k", "copy", "src", "dst"])
-        // 8 = transfer_limit_exceeded (docs/EXIT_CODES.md).
+        // 8 = transfer_limit_exceeded
+        // (https://doc.dctl.sh/reference/exit-codes).
         .assert()
         .code(8);
     let stderr = String::from_utf8_lossy(&stopped.get_output().stderr).into_owned();
@@ -3636,7 +3639,8 @@ fn max_duration_stops_the_run_and_reaches_exit_10() {
     let stopped = sandbox
         .dctl()
         .args(["--max-duration", "1ms", "copy", "src", "dst"])
-        // 10 = duration_limit_exceeded (docs/EXIT_CODES.md).
+        // 10 = duration_limit_exceeded
+        // (https://doc.dctl.sh/reference/exit-codes).
         .assert()
         .code(10);
     let stderr = String::from_utf8_lossy(&stopped.get_output().stderr).into_owned();
@@ -3741,7 +3745,8 @@ fn max_duration_ends_the_process_even_when_the_work_it_stopped_cannot_be_cancell
             "src",
             &format!("{PLAIN_REMOTE}:"),
         ])
-        // 10 = duration_limit_exceeded (docs/EXIT_CODES.md).
+        // 10 = duration_limit_exceeded
+        // (https://doc.dctl.sh/reference/exit-codes).
         .assert()
         .code(10);
     let took = started.elapsed();
@@ -3793,7 +3798,7 @@ fn a_malformed_run_window_is_a_usage_error_not_an_unbounded_run() {
     sandbox
         .dctl()
         .args(["--max-duration", "4hrs", "copy", "src", "dst"])
-        // 1 = usage (docs/EXIT_CODES.md).
+        // 1 = usage (https://doc.dctl.sh/reference/exit-codes).
         .assert()
         .code(1);
     assert!(
@@ -4211,9 +4216,10 @@ fn a_no_op_transfer_still_renders_its_result_document_under_json() {
 /// A no-op run must not be silent in *any* format.
 ///
 /// The stronger statement of the test above, and the one that matches
-/// `PLAN.md` §7: whatever the format, a successful run says something. Text
-/// already printed its statistics block; the JSON formats printed nothing at
-/// all, which is the one outcome a tool that refuses to lie must never have.
+/// [the plan](https://doc.dctl.sh/project/plan) §7: whatever the format, a
+/// successful run says something. Text already printed its statistics block;
+/// the JSON formats printed nothing at all, which is the one outcome a tool
+/// that refuses to lie must never have.
 #[test]
 fn no_successful_transfer_exits_silently_on_both_streams() {
     for format in ["text", "json", "json-lines"] {
@@ -4393,9 +4399,10 @@ fn log_source_stamps_every_record_even_when_a_log_file_is_open() {
     //     --log-source                 : 1 record on stderr carries `.rs:LINE`
     //     --log-source --log-file X    : 0 on stderr, 0 in X
     //
-    // No warning, no error. A support engineer asks for `--log-source
-    // --log-file` and gets a file with no source locations in it, which is the
-    // silent-partial-success class `PLAN.md` §7 forbids.
+    // No warning, no error. A support engineer asks for
+    // `--log-source --log-file` and gets a file with no source locations in it,
+    // which is the silent-partial-success class
+    // [the plan](https://doc.dctl.sh/project/plan) §7 forbids.
     //
     // The assertion is on the *records*, not on the flag being read: a flag
     // whose only witness is that some code mentions the field is exactly what

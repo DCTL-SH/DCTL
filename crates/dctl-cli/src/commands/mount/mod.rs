@@ -8,16 +8,17 @@
 //!
 //! ## Read-only is the whole of v1
 //!
-//! `PLAN.md` §15 makes the mount read-first: a random-write encrypted mount means
-//! re-chunking and journalled writes, and is a scoped phase of its own. So every
+//! [The plan](https://doc.dctl.sh/project/plan) §15 makes the mount read-first:
+//! a random-write encrypted mount means re-chunking and journalled writes, and
+//! is a scoped phase of its own. So every
 //! write, rename, delete and truncate through the mount is refused with `EROFS`,
 //! `--read-only` is accepted as a statement of what is already true, and a user
 //! who did *not* pass it is told on stderr rather than left to find out from an
 //! error. What this command must never do is accept a write and drop it —
-//! `PLAN.md` §6's rule against reporting work that did not happen, with a
-//! filesystem's authority behind it.
+//! [the plan](https://doc.dctl.sh/project/plan) §6's rule against reporting work
+//! that did not happen, with a filesystem's authority behind it.
 //!
-//! ## Per-platform backend (`PLAN.md` §15)
+//! ## Per-platform backend ([the plan](https://doc.dctl.sh/project/plan) §15)
 //!
 //! | OS | Backend | State |
 //! |----|---------|-------|
@@ -364,7 +365,8 @@ fn report(ctx: &Ctx, source: &Source, args: &MountArgs) {
         args.mountpoint.display()
     ));
 
-    // The backend actually being used, never the one `PLAN.md` §15 prefers — see
+    // The backend actually being used, never the one the plan
+    // (https://doc.dctl.sh/project/plan) §15 prefers — see
     // [`backend::attached`] for why naming the preference here would tell a macOS
     // user the opposite of what they need to know.
     match backend::attached() {

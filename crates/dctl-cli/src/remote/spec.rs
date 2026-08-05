@@ -234,9 +234,10 @@ impl RemoteSpec {
 
     /// The remote's name, or `None` for a local path.
     ///
-    /// Also the value of the `remote` log field (`PLAN.md` §7), which is why it
-    /// is the *configured* name and not the provider type: an operator reading
-    /// a log needs to know which of their three B2 remotes was involved.
+    /// Also the value of the `remote` log field
+    /// ([the plan](https://doc.dctl.sh/project/plan) §7), which is why it is the
+    /// *configured* name and not the provider type: an operator reading a log
+    /// needs to know which of their three B2 remotes was involved.
     #[cfg(test)]
     #[must_use]
     pub fn remote_name(&self) -> Option<&str> {

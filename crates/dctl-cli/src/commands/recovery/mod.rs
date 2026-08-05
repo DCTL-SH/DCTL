@@ -1,13 +1,15 @@
 //! Vocabulary shared by the audit & recovery family — `audit`, `backup` and
 //! `restore`.
 //!
-//! These three commands exist because of the two promises a plain copier does
-//! not make. `audit` backs the tamper-evident log (`PLAN.md` §7): you can *prove*
-//! what happened, and a deletion from the record is detectable. `backup` and
-//! `restore` back the tested-restore principle (`PLAN.md` §13.6): a backup you
-//! never restored is not a backup, so the things that make a restore fail —
-//! illegal filenames, case collisions, paths too long for the destination — are
-//! found before the first byte moves rather than 3.9 TB into a 4 TB run.
+//! These three commands exist because of the two promises a plain copier does not
+//! make. `audit` backs the tamper-evident log
+//! ([the plan](https://doc.dctl.sh/project/plan) §7): you can *prove* what
+//! happened, and a deletion from the record is detectable. `backup` and `restore`
+//! back the tested-restore principle
+//! ([the plan](https://doc.dctl.sh/project/plan) §13.6): a backup you never
+//! restored is not a backup, so the things that make a restore fail — illegal
+//! filenames, case collisions, paths too long for the destination — are found
+//! before the first byte moves rather than 3.9 TB into a 4 TB run.
 //!
 //! Six concerns are shared, and each lives in its own file rather than being
 //! written twice:

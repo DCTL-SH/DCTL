@@ -1,12 +1,13 @@
 //! `dctl index rebuild REMOTE:` — rebuild the local index from the backend.
 //!
-//! The index is a **cache and a privacy layer, never a single point of failure**
-//! (`PLAN.md` §13.5). Everything a read needs already lives in the shared
-//! backend: the wrapped root key in the envelope, the path→object mapping in the
-//! `n/*` name records, and self-describing objects that carry their own DEK and
-//! metadata. So a wiped laptop, a corrupted database, or a machine that has never
-//! seen this vault before needs exactly two things to become fully functional —
-//! the password, and this command.
+//! The index is a **cache and a privacy layer, never a single point of
+//! failure** ([the plan](https://doc.dctl.sh/project/plan) §13.5). Everything a
+//! read needs already lives in the shared backend: the wrapped root key in the
+//! envelope, the path→object mapping in the `n/*` name records, and
+//! self-describing objects that carry their own DEK and metadata. So a wiped
+//! laptop, a corrupted database, or a machine that has never seen this vault
+//! before needs exactly two things to become fully functional — the password,
+//! and this command.
 //!
 //! That is the recovery story, and it is the reason a damaged index is an
 //! inconvenience rather than a disaster. It is also why several of DCTL's error
@@ -24,31 +25,34 @@
 //! plus a few kilobytes per object rather than of a restore.
 //!
 //! It was a listing-only pass, and the rows it wrote carried **no size, no
-//! content hash and no modification time**. That is what `PLAN.md` §13.5 means by
-//! an index *"rebuildable by scanning object headers"* — and the headers were not
-//! being scanned. The result was an index that looked rebuilt and behaved
-//! degraded: `dctl check` cannot compare a row with no size and no hash, `dctl
-//! size` reports a lower bound in the shape of a total, and `dctl sync` treats
-//! every file as changed and re-uploads the whole dataset. Nothing filled the
-//! fields in afterwards either; `cat`, `hashsum` and a whole `scrub` all measure
-//! the object and answer from it without writing back, so the only cure was
-//! storing every file again.
+//! content hash and no modification time**. That is what
+//! [the plan](https://doc.dctl.sh/project/plan) §13.5 means by an index
+//! *"rebuildable by scanning object headers"* — and the headers were not being
+//! scanned. The result was an index that looked rebuilt and behaved degraded:
+//! `dctl check` cannot compare a row with no size and no hash, `dctl size`
+//! reports a lower bound in the shape of a total, and `dctl sync` treats every
+//! file as changed and re-uploads the whole dataset. Nothing filled the fields
+//! in afterwards either; `cat`, `hashsum` and a whole `scrub` all measure the
+//! object and answer from it without writing back, so the only cure was storing
+//! every file again.
 //!
-//! The modification time is the one whose absence reached furthest: a **restore**
-//! from an unmeasured index stamps every file with the time of the restore,
-//! because that is the only fact available, and a tree recovered that way reads
-//! as entirely rewritten to anything that sorts or syncs by date. See
-//! `docs/RESTORE_DRILL.md`, which measures it.
+//! The modification time is the one whose absence reached furthest: a
+//! **restore** from an unmeasured index stamps every file with the time of the
+//! restore, because that is the only fact available, and a tree recovered that
+//! way reads as entirely rewritten to anything that sorts or syncs by date. See
+//! [the restore drill](https://doc.dctl.sh/guide/restore-drill), which measures
+//! it.
 //!
 //! ## When a header cannot be read
 //!
 //! The path is indexed anyway — the mapping is what makes the file readable at
-//! all — and the row is counted as **unmeasured**. The command reports the count,
-//! warns when it is not zero, and exits [`ExitCode::PartialFailure`]. There are
-//! only two causes, an object that is not at the provider and a metadata schema
-//! this build cannot parse, and an operator has to know which before they trust
-//! the index. Reporting a complete rebuild over either would be `PLAN.md` §6's
-//! misreport with the recovery story's authority behind it.
+//! all — and the row is counted as **unmeasured**. The command reports the
+//! count, warns when it is not zero, and exits [`ExitCode::PartialFailure`].
+//! There are only two causes, an object that is not at the provider and a
+//! metadata schema this build cannot parse, and an operator has to know which
+//! before they trust the index. Reporting a complete rebuild over either would
+//! be [the plan](https://doc.dctl.sh/project/plan) §6's misreport with the
+//! recovery story's authority behind it.
 //!
 //! ## Idempotent, and safe to repeat
 //!
@@ -191,10 +195,11 @@ pub async fn run(ctx: &Ctx, args: &RebuildArgs) -> Result<()> {
     .emit(&ctx.out)?;
 
     // Reported after the table, and as a *failure*, not a note. A row nothing
-    // could describe is either an object missing at the provider or a schema this
-    // build cannot read; both make the index incomparable for that path, and a
-    // rebuild that exits 0 over either is a recovery reporting itself complete
-    // when it is not (`PLAN.md` §6).
+    // could describe is either an object missing at the provider or a schema
+    // this build cannot read; both make the index incomparable for that path,
+    // and a rebuild that exits 0 over either is a recovery reporting itself
+    // complete when it is not ([the plan](https://doc.dctl.sh/project/plan)
+    // §6).
     if rebuilt.unmeasured > 0 {
         ctx.out.warn(format!(
             "{} {}",
@@ -263,8 +268,9 @@ mod tests {
 
     #[tokio::test]
     async fn an_unresolvable_remote_is_an_error_rather_than_a_count_of_zero() {
-        // `PLAN.md` §6: a rebuild that never ran must not report "0 files",
-        // which a script would read as an empty vault.
+        // [The plan](https://doc.dctl.sh/project/plan) §6: a rebuild that never
+        // ran must not report "0 files", which a script would read as an empty
+        // vault.
         let (ctx, args) = parse(&["index", "rebuild", "nosuchremote:", "--no-ask-password"]);
         let error = run(&ctx, &args).await.unwrap_err();
         assert_eq!(error.code(), ExitCode::FatalError);
@@ -362,9 +368,10 @@ mod tests {
 
     #[tokio::test]
     async fn a_rebuild_restores_a_deleted_index_from_the_backend_alone() {
-        // The recovery story `PLAN.md` §13.5 promises, exercised end to end: the
-        // index database is destroyed, and the password plus the backend are
-        // enough to make every path listable again.
+        // The recovery story [the plan](https://doc.dctl.sh/project/plan) §13.5
+        // promises, exercised end to end: the index database is destroyed, and
+        // the password plus the backend are enough to make every path listable
+        // again.
         use std::sync::Arc;
 
         use dctl_core::{UnlockKey, Vault};

@@ -1,7 +1,7 @@
 //! Turning one offered secret back into the root key.
 //!
 //! The envelope is a list of slots, each of which wraps the same root key under
-//! a different KEK (`docs/FORMAT.md` §2). Unlocking is therefore not "check the
+//! a different KEK (`crates/dctl-decode/FORMAT.md` §2). Unlocking is therefore not "check the
 //! password" but "find a slot this secret can open" — and the secret decides
 //! which slots are even worth trying.
 //!
@@ -40,7 +40,7 @@ use super::layout;
 /// Deliberately an enum at the API boundary rather than two `&str` parameters or
 /// two similarly-named functions: the caller states *what kind of secret this
 /// is*, and the slot loop below can then be exhaustive over the kinds. When
-/// `docs/FORMAT.md` §2's reserved device (`0`) and Shamir (`3`) slot types are
+/// `crates/dctl-decode/FORMAT.md` §2's reserved device (`0`) and Shamir (`3`) slot types are
 /// implemented they become variants here, and every call site is recompiled
 /// against the new set instead of silently continuing to mean "password".
 #[derive(Clone, Copy)]
@@ -98,7 +98,7 @@ impl Vault {
     ///
     /// A [`UnlockKey::RecoveryPhrase`] opens the vault with **no password
     /// involved at any point** — that is the whole promise of the mnemonic slot
-    /// (`PLAN.md` §13.2), and the reason this takes a secret *kind* rather than
+    /// ([the plan](https://doc.dctl.sh/project/plan) §13.2), and the reason this takes a secret *kind* rather than
     /// a string.
     ///
     /// # Errors

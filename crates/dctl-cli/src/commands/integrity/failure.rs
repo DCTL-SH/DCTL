@@ -1,12 +1,13 @@
 //! What a single object's integrity check concluded, and how a run that found
 //! damage ends.
 //!
-//! The important rule this file exists to enforce is `PLAN.md` §6's read-path
-//! guarantee: *an integrity failure is loud, never served as data*. A corrupt
-//! object must therefore always end the process with
-//! [`ExitCode::IntegrityFailure`] and a message that says, in words, that the
-//! bytes were not handed over — never with the generic bucket, and never with a
-//! wording that leaves room for "maybe some of it came through".
+//! The important rule this file exists to enforce is
+//! [the plan](https://doc.dctl.sh/project/plan) §6's read-path guarantee: *an
+//! integrity failure is loud, never served as data*. A corrupt object must
+//! therefore always end the process with [`ExitCode::IntegrityFailure`] and a
+//! message that says, in words, that the bytes were not handed over — never
+//! with the generic bucket, and never with a wording that leaves room for
+//! "maybe some of it came through".
 //!
 //! Four verdicts rather than pass/fail, because the operator's next action is
 //! different for each one, and a report that collapsed them would tell them to
@@ -141,7 +142,8 @@ impl Verdict {
     pub const fn exit_code(self) -> ExitCode {
         match self {
             Self::Ok => ExitCode::Success,
-            // The whole reason code 21 exists (`PLAN.md` §7).
+            // The whole reason code 21 exists
+            // ([the plan](https://doc.dctl.sh/project/plan) §7).
             Self::Corrupt => ExitCode::IntegrityFailure,
             Self::Missing => ExitCode::FileNotFound,
             Self::Unreadable => ExitCode::TemporaryError,

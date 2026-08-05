@@ -1,8 +1,8 @@
 //! The encrypted index over stored objects, backed by SQLCipher.
 //!
-//! Storage is a single SQLCipher database (SQLite with whole-database AEAD
-//! encryption). Two independent, defence-in-depth encryption layers are kept —
-//! matching the previous backend exactly (docs/FORMAT.md §9 rule 5, §5):
+//! Storage is a single SQLCipher database (SQLite with whole-database AEAD encryption).
+//! Two independent, defence-in-depth encryption layers are kept — matching the previous
+//! backend exactly (`crates/dctl-decode/FORMAT.md` §9 rule 5, §5):
 //!
 //! 1. **Whole-DB (SQLCipher):** every page is encrypted under a raw 32-byte key
 //!    derived from the index sub-key, so a stolen `.db`/`.db-wal` file is opaque.

@@ -8,7 +8,7 @@
 //!
 //! Where DCTL adds commands, they exist because the plan promises guarantees
 //! rclone does not make: [`Command::Verify`] and [`Command::Scrub`] back the
-//! durability contract (`PLAN.md` §6, §13.4), and [`Command::Audit`] backs the
+//! durability contract ([the plan](https://doc.dctl.sh/project/plan) §6, §13.4), and [`Command::Audit`] backs the
 //! tamper-evident log (§7).
 //!
 //! Each subcommand's arguments and implementation live in their own module
@@ -25,7 +25,6 @@ pub mod window;
 // documentation lines have not. See the modules for why that is checked
 // mechanically rather than by review.
 #[cfg(test)]
-mod doc_mentions;
 #[cfg(test)]
 mod mentions;
 
@@ -185,7 +184,7 @@ pub enum Command {
     ///
     /// Grouped with the recovery verbs because that is what it is for, and named
     /// as a group rather than a bare verb because the envelope has more
-    /// operations coming (`PLAN.md` §13.2's Shamir shares, device slots) and all
+    /// operations coming ([the plan](https://doc.dctl.sh/project/plan) §13.2's Shamir shares, device slots) and all
     /// of them act on the same object. `dctl vault recover` is also the command
     /// [`crate::error`]'s unlock hint names, which makes its spelling a
     /// published contract rather than a preference.
@@ -332,7 +331,7 @@ impl Command {
     /// `replicate` joins them, and for a reason worth more than the others put
     /// together: it moves a vault's opaque ciphertext objects between two object
     /// stores, so a backup operator can satisfy 3-2-1 without ever holding
-    /// decryption capability (`PLAN.md` §13.3). Separation of duties is a
+    /// decryption capability ([the plan](https://doc.dctl.sh/project/plan) §13.3). Separation of duties is a
     /// structural property of the command, not a policy applied to it.
     #[cfg(test)]
     #[must_use]

@@ -111,8 +111,9 @@ impl PlainRemote {
     /// reclassified here.
     ///
     /// A missing configuration file is not an error. `load_or_default` yields an
-    /// empty catalogue, which is the headless case `PLAN.md` §14 requires: a
-    /// provider shorthand plus exported credentials, and no config on disk.
+    /// empty catalogue, which is the headless case
+    /// [the plan](https://doc.dctl.sh/project/plan) §14 requires: a provider
+    /// shorthand plus exported credentials, and no config on disk.
     ///
     /// # Errors
     /// [`ExitCode::FatalError`](crate::exit::ExitCode::FatalError) for an

@@ -27,7 +27,7 @@
 //! reason is structural: listing a named remote is unimplemented, and `sync`
 //! deliberately has no `--no-traverse` to plan around it, because the
 //! destination listing is where its deletions come from. That refusal fires
-//! during enumeration, before anything is transferred or removed (`PLAN.md` §6).
+//! during enumeration, before anything is transferred or removed ([the plan](https://doc.dctl.sh/project/plan) §6).
 
 pub mod execute;
 pub mod plan;

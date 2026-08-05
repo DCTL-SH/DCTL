@@ -18,10 +18,11 @@
 //!
 //! ## The fixture is a second implementation on purpose
 //!
-//! [`canonical`] and [`seal`] below build records from `docs/AUDIT_LOG.md` §3
-//! rather than by calling DCTL's own code — `dctl-cli` is a binary crate, so
-//! there is nothing to link against, and that constraint is worth keeping even
-//! if there were. The specification promises a chain can be verified from the
+//! [`canonical`] and [`seal`] below build records from
+//! [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §3 rather
+//! than by calling DCTL's own code — `dctl-cli` is a binary crate, so there is
+//! nothing to link against, and that constraint is worth keeping even if there
+//! were. The specification promises a chain can be verified from the
 //! document alone, with nothing but a JSON parser and a BLAKE3 implementation.
 //! These tests *are* that verifier: if the shipped canonical form ever drifts
 //! from the published one, every case below stops agreeing with the binary and
@@ -36,17 +37,18 @@ use std::path::PathBuf;
 use assert_cmd::Command;
 use tempfile::TempDir;
 
-/// Field separator of the canonical hash string: U+001F, `docs/AUDIT_LOG.md`
-/// §3.1. Spelled here rather than imported, so a change to DCTL's constant
-/// cannot silently change what this file checks against.
+/// Field separator of the canonical hash string: U+001F,
+/// [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §3.1.
+/// Spelled here rather than imported, so a change to DCTL's constant cannot
+/// silently change what this file checks against.
 const US: char = '\u{1f}';
 
 /// The `prev` of the first record: sixty-four `0`s (§2).
 const GENESIS: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Exit codes this file asserts on. The published contract of
-/// `docs/EXIT_CODES.md`, written as literals because that is what a customer's
-/// script contains.
+/// [the exit-code reference](https://doc.dctl.sh/reference/exit-codes), written
+/// as literals because that is what a customer's script contains.
 const EXIT_OK: i32 = 0;
 const EXIT_CHAIN_BROKEN: i32 = 24;
 const EXIT_HEAD_MISMATCH: i32 = 26;
@@ -62,7 +64,7 @@ const INHERITED_ENV: &[&str] = &[
     "DCTL_LOG_FORMAT",
 ];
 
-// ── The record, and the chain rule, per docs/AUDIT_LOG.md ────────────────────
+// ── The record, and the chain rule: https://doc.dctl.sh/reference/audit-log ──
 
 /// One audit record, as JSON Lines carries it.
 ///
@@ -356,9 +358,11 @@ fn an_honest_chain_verifies_and_yields_an_anchor_that_matches_it() {
 #[test]
 fn the_fixture_and_the_binary_agree_on_the_canonical_form() {
     // The guard that keeps every other test in this file honest. These records
-    // are hashed here from `docs/AUDIT_LOG.md` §3 alone; if DCTL's own canonical
-    // form drifted from the document, the binary would call this pristine chain
-    // broken and every forgery below would "pass" for the wrong reason.
+    // are hashed here from the audit-log reference
+    // (https://doc.dctl.sh/reference/audit-log) §3 alone; if DCTL's own
+    // canonical form drifted from the document, the binary would call this
+    // pristine chain broken and every forgery below would "pass" for the wrong
+    // reason.
     let fixture = Fixture::with(&honest_chain());
     let ran = fixture.verify();
     assert_eq!(
@@ -796,9 +800,10 @@ fn an_unanchored_verify_says_out_loud_what_it_did_not_prove() {
 
 #[test]
 fn the_operating_procedure_in_the_documentation_actually_runs() {
-    // `docs/AUDIT_LOG.md` §10 tells an operator to keep the anchor in a file and
-    // check against its last line. A procedure nobody tested is a procedure that
-    // works until somebody needs it.
+    // The audit-log reference (https://doc.dctl.sh/reference/audit-log) §10
+    // tells an operator to keep the anchor in a file and check against its last
+    // line. A procedure nobody tested is a procedure that works until somebody
+    // needs it.
     let records = honest_chain();
     let fixture = Fixture::with(&records);
 

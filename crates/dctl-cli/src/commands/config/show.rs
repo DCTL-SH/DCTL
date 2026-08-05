@@ -1,6 +1,6 @@
 //! `dctl config show NAME` — one remote's settings.
 //!
-//! **This command must never print a secret** (`PLAN.md` §14). It is the one a
+//! **This command must never print a secret** ([the plan](https://doc.dctl.sh/project/plan) §14). It is the one a
 //! user runs when something is wrong, and therefore the one whose output ends up
 //! in a screenshot, a chat message or an issue tracker.
 //!
@@ -186,7 +186,7 @@ bucket = \"photos\"
 
     #[test]
     fn a_secret_shaped_value_never_renders_in_any_format() {
-        // PLAN.md §14's hard requirement, asserted against both renderings at
+        // [The plan](https://doc.dctl.sh/project/plan) §14's hard requirement, asserted against both renderings at
         // once: whatever the format, the original text must not survive.
         let rows = render_rows("s3west", &leaky_remote());
 

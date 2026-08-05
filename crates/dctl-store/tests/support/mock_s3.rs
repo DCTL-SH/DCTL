@@ -6,7 +6,7 @@
 //! S3 and R2 are two of DCTL's five providers and neither had ever been
 //! exercised against anything. `tests/s3_live.rs` needs credentials and this
 //! environment has none, so every claim about the S3 family rested on reading
-//! the code. That is exactly the position `PLAN.md` §6 says not to be in, and
+//! the code. That is exactly the position [the plan](https://doc.dctl.sh/project/plan) §6 says not to be in, and
 //! "no credentials" is not a reason for "no coverage": the parts of an S3 client
 //! that go wrong are the parts a local server can check.
 //!

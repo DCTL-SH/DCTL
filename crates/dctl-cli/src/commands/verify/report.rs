@@ -116,7 +116,7 @@ pub struct Report {
     /// was read*; this says *what the reading could prove*. A full read of a
     /// remote that records no hashes is still only a retrievability check, and
     /// an `ok` over one of those must not be mistaken for an `ok` over a vault
-    /// (`PLAN.md` §6).
+    /// ([the plan](https://doc.dctl.sh/project/plan) §6).
     ///
     /// It was measured absent: an 8 MiB object on a plain `local:` remote was
     /// truncated to zero bytes on disk and this document reported
@@ -278,7 +278,7 @@ impl Report {
     /// indistinguishable to a script, to a monitor, and to a person.
     ///
     /// Health is a claim about objects that were read. Over zero objects there is
-    /// no claim to make, and exiting zero for it is the misreport `PLAN.md` §6
+    /// no claim to make, and exiting zero for it is the misreport [the plan](https://doc.dctl.sh/project/plan) §6
     /// forbids.
     #[must_use]
     pub fn outcome(&self) -> Option<CliError> {

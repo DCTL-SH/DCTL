@@ -19,7 +19,7 @@
 //! The post-write read-back passed because it re-read the same wrong directory.
 //! The next command exited 7 with "no vault at this location".
 //!
-//! That is the forbidden class of `PLAN.md` §6 in its purest form: work reported
+//! That is the forbidden class of [the plan](https://doc.dctl.sh/project/plan) §6 in its purest form: work reported
 //! as done that did not happen. It is the write-side twin of the read-side
 //! defect — an unmounted volume listing as an empty backup — which
 //! [`crate::local::LocalFs`]'s caller guards with

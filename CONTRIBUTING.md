@@ -53,7 +53,9 @@ Clippy warnings are denied, not advisory.
 
 ## Layout
 
-`docs/ARCHITECTURE.md` and `docs/CRATES.md` describe how the crates fit together;
-`docs/FORMAT.md` is the frozen on-disk format and is licensed separately, under
-Apache 2.0, so anyone can implement against it. Changing `FORMAT.md` is a
-compatibility decision, not a code change — raise it as an issue first.
+[The architecture reference](https://doc.dctl.sh/reference/architecture) and
+[the crate reference](https://doc.dctl.sh/reference/crates) describe how the
+crates fit together; `crates/dctl-decode/FORMAT.md` is the frozen on-disk format
+and is licensed separately, under Apache 2.0, so anyone can implement against
+it. Changing `FORMAT.md` is a compatibility decision, not a code change — raise
+it as an issue first.

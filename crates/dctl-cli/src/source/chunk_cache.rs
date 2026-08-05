@@ -23,7 +23,7 @@
 //! nothing, and on a network filesystem that first read is a provider round trip a video
 //! player waits out. [`ChunkCache::warm`] is the other half: a caller that knows where a
 //! reader is going — a mount serving a sequential read — can have the next chunks fetched
-//! and authenticated while the current one is being consumed, which is `PLAN.md` §15's
+//! and authenticated while the current one is being consumed, which is [the plan](https://doc.dctl.sh/project/plan) §15's
 //! "serve chunk *k* while fetching *k+1…k+P*". It lands in the same bounded cache, so
 //! read-ahead cannot grow memory beyond what a read already could.
 //!
@@ -34,7 +34,7 @@
 //!   header request and an index lookup to every 4 KiB read, turning one round trip into
 //!   two. Bounded by [`VAULT_RANGE_READER_CACHE_MAX`].
 //! * **Chunks**, by `(file_id, index)` — never by path. `file_id` is the object's random
-//!   per-object id (`docs/FORMAT.md` §3), so a rewritten file is a different object with
+//!   per-object id (`crates/dctl-decode/FORMAT.md` §3), so a rewritten file is a different object with
 //!   different chunk keys. A cached chunk can therefore never be served for content that
 //!   replaced it, which is the failure a path-keyed cache would have.
 //!
@@ -287,7 +287,7 @@ impl ChunkCache {
     ///
     /// The read-ahead a mount performs between reads: a player streaming a film asks for
     /// chunk *k*, and by the time it asks for *k+1* the provider round trip for it has
-    /// already happened. `PLAN.md` §15 names this as the thing that makes a streaming mount
+    /// already happened. [The plan](https://doc.dctl.sh/project/plan) §15 names this as the thing that makes a streaming mount
     /// feel local, because on a network filesystem the cost is latency rather than
     /// decryption — ChaCha20-Poly1305 pushes multiple gigabytes a second and a provider
     /// does not.
@@ -688,8 +688,8 @@ fn oldest_key<K: Clone, V>(held: &HashMap<K, Held<V>>) -> Option<K> {
 ///
 /// `covering` must hold every chunk index the window touches; a gap means the fetch above
 /// did not return what it was asked for, which is reported rather than silently served as
-/// a short read — a `cat` that wrote fewer bytes and exited 0 is the misreport `PLAN.md`
-/// §6 forbids.
+/// a short read — a `cat` that wrote fewer bytes and exited 0 is the misreport
+/// [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
 fn assemble(
     covering: &BTreeMap<u64, Chunk>,
     chunk_size: u64,

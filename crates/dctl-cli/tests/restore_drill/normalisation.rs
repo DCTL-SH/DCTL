@@ -18,8 +18,9 @@
 //!
 //! **That is what it did when this drill was first run** — `dctl backup` and
 //! `dctl copy` both — and the 23-byte file was gone while the run exited 0
-//! having said it stored it. That is the failure `PLAN.md` §6 forbids by name,
-//! and a backup tool is the worst possible place for it.
+//! having said it stored it. That is the failure
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids by name, and a
+//! backup tool is the worst possible place for it.
 //!
 //! So the refusal is the assertion below, and it is made for **every verb that
 //! reads a local tree**, not only the one the drill happened to use. The bug was
@@ -70,8 +71,10 @@ const DECOMPOSED_BYTES: &[u8] = b"decomposed-nfd\n";
 /// Exit code for a refusal made before anything is stored.
 ///
 /// `fatal_error`, the same code the name pre-flight already uses. Spelled out
-/// rather than imported: `docs/EXIT_CODES.md` is a published contract, and a
-/// test that read the constant would keep passing if the constant changed.
+/// rather than imported:
+/// [the exit-code reference](https://doc.dctl.sh/reference/exit-codes) is a
+/// published contract, and a test that read the constant would keep passing if
+/// the constant changed.
 const FATAL_ERROR: i32 = 7;
 
 /// Every verb that reads a local tree and writes it into a vault.

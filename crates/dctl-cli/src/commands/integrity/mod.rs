@@ -2,8 +2,9 @@
 //! `hashsum`.
 //!
 //! These four commands are the reason DCTL exists rather than a shell script
-//! around a provider SDK (`PLAN.md` §6, §13.4), and they overlap in three
-//! places. Each of the three lives here rather than being written four times:
+//! around a provider SDK ([the plan](https://doc.dctl.sh/project/plan) §6,
+//! §13.4), and they overlap in three places. Each of the three lives here rather
+//! than being written four times:
 //!
 //! * [`target`] — turning a `REMOTE:PATH` argument into a remote name plus a
 //!   canonical logical path, with the drive-letter and `..` rules applied once.

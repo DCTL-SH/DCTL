@@ -33,11 +33,12 @@
 //!
 //! ## Enumeration is a stream, and that is not negotiable
 //!
-//! `PLAN.md` §16.2 forbids ever materialising the full file list in RAM: a
-//! ten-million-object vault has to list on a laptop, and a renderer written
-//! against a slice works perfectly on a developer's ten-file fixture and dies on
-//! the dataset the tool exists for. [`Source::enumerate`] therefore hands back
-//! an [`Entries`] cursor — a thing you pull one entry from — and never a `Vec`.
+//! [The plan](https://doc.dctl.sh/project/plan) §16.2 forbids ever
+//! materialising the full file list in RAM: a ten-million-object vault has to
+//! list on a laptop, and a renderer written against a slice works perfectly on
+//! a developer's ten-file fixture and dies on the dataset the tool exists for.
+//! [`Source::enumerate`] therefore hands back an [`Entries`] cursor — a thing
+//! you pull one entry from — and never a `Vec`.
 //!
 //! One of the two implementations cannot honour that yet, and says so plainly
 //! rather than hiding it: [`Vault::list`](dctl_core::Vault::list) materialises
@@ -55,20 +56,22 @@
 //! [`Source::read`] and [`Source::read_range`] return
 //! [`Zeroizing<Vec<u8>>`](zeroize::Zeroizing) rather than a `Read`. Plaintext
 //! that came out of a vault is key-adjacent material by the time it is in a
-//! buffer, and `PLAN.md` §7 wants it gone from memory when the buffer dies rather
-//! than left in a freed page. A plain store's bytes were never secret, but one
-//! return type means no caller has to know which it is holding — and wiping bytes
-//! that did not need wiping costs a `memset`.
+//! buffer, and [the plan](https://doc.dctl.sh/project/plan) §7 wants it gone
+//! from memory when the buffer dies rather than left in a freed page. A plain
+//! store's bytes were never secret, but one return type means no caller has to
+//! know which it is holding — and wiping bytes that did not need wiping costs a
+//! `memset`.
 //!
 //! The *size* of that buffer is now the caller's to choose on both
 //! implementations. [`Source::read`] is whole-object by definition. A
 //! [`Source::read_range`] is O(window): a plain store issues a ranged `GET`, and
 //! a vault fetches and authenticates only the chunks covering the window
-//! (`docs/FORMAT.md` §3) rather than opening the whole object to slice it. That
-//! is a change — the vault used to transfer and decrypt everything, which cost
-//! +97 MB of resident memory to return a 10-byte window of a 95 MiB object, and
-//! it needed a pre-flight warning on `cat` to say so. Both the cost and the
-//! warning are gone. See [`vault`] for what a windowed read of a sealed object
+//! (`crates/dctl-decode/FORMAT.md` §3) rather than opening the whole object to
+//! slice it. That is a change — the vault used to transfer and decrypt
+//! everything, which cost +97 MB of resident memory to return a 10-byte window
+//! of a 95 MiB object, and it needed a pre-flight warning on `cat` to say so.
+//! Both the cost and the warning are gone. See [`vault`] for what a windowed
+//! read of a sealed object
 //! does and does not authenticate, and [`chunk_cache`] for why the chunks are
 //! kept between reads.
 //!
@@ -76,7 +79,8 @@
 //!
 //! [`Source::prefetch`] sits beside the three above and is deliberately not one
 //! of them: it returns nothing, promises nothing, and cannot fail in any way a
-//! caller could act on. It exists because `PLAN.md` §15 makes *latency*, not
+//! caller could act on. It exists because
+//! [the plan](https://doc.dctl.sh/project/plan) §15 makes *latency*, not
 //! decryption, the thing a streaming mount has to hide — a player asking for
 //! chunk *k* should find *k+1* already fetched — and only the source knows what
 //! "the next chunk" is. The caller says where a reader is heading; each
@@ -138,9 +142,10 @@ use crate::error::Result;
 /// signature cannot express without yielding `Result<Entry>` — and the natural
 /// `for entry in source` over that *silently truncates* the listing at the first
 /// failure unless every caller remembers to break. A truncated listing that
-/// exits zero is precisely the misreport `PLAN.md` §6 forbids, so the failure is
-/// made unavoidable instead: `next` returns `Result` and the loop cannot advance
-/// without handling it.
+/// exits zero is precisely the misreport
+/// [the plan](https://doc.dctl.sh/project/plan) §6 forbids, so the failure is
+/// made unavoidable instead: `next` returns `Result` and the loop cannot
+/// advance without handling it.
 #[async_trait]
 pub trait Entries: Send {
     /// The next entry in path order, or `None` once the prefix is exhausted.
@@ -313,9 +318,10 @@ pub trait Source: Send + Sync {
     /// the unit the numbers are in, which `dctl size` has to print because it
     /// reduces a whole vault to one figure that people reconcile against a
     /// provider invoice. A total that does not say whether it counted plaintext
-    /// or ciphertext is a number two readers will read two ways, and `PLAN.md`
-    /// §6's rule against misreporting covers being ambiguous just as much as it
-    /// covers being wrong.
+    /// or ciphertext is a number two readers will read two ways, and
+    /// [the plan](https://doc.dctl.sh/project/plan) §6's rule against
+    /// misreporting covers being ambiguous just as much as it covers being
+    /// wrong.
     fn sizes(&self) -> Sizes;
 
     /// Read one object whole.
@@ -370,7 +376,8 @@ pub trait Source: Send + Sync {
     /// **Both implementations serve a window at O(window), and an implementation
     /// that cannot must not be added silently.** A plain store issues a ranged
     /// `GET`; a vault computes the chunks covering the window from the object's
-    /// authenticated geometry and fetches exactly those (`docs/FORMAT.md` §3).
+    /// authenticated geometry and fetches exactly those
+    /// (`crates/dctl-decode/FORMAT.md` §3).
     /// Seeking 40 GB into an object costs one request on either. A source that
     /// served a window by moving the whole object would make `dctl cat --count 4`
     /// a 40 GB transfer that returns four bytes and exits 0 — a cost discovered
@@ -448,8 +455,9 @@ pub trait Source: Send + Sync {
     /// never made.
     ///
     /// **The reason this is on the trait rather than inside one implementation.**
-    /// `PLAN.md` §15 makes latency, not decryption, the thing a streaming mount
-    /// has to hide: a player asking for chunk *k* should find *k+1* already
+    /// [The plan](https://doc.dctl.sh/project/plan) §15 makes latency, not
+    /// decryption, the thing a streaming mount has to hide: a player asking for
+    /// chunk *k* should find *k+1* already
     /// fetched. Only the source knows what "the next chunk" is — for a vault it is
     /// a covering-chunk range in the decrypted-chunk cache, and for a plain store
     /// there is no cache to warm at all — so the caller states *where the reader

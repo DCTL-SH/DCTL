@@ -611,9 +611,9 @@ async fn a_store_that_moves_out_from_under_a_run_is_a_failure_and_not_a_reported
     // and the post-write read-back passed because it re-read the same wrong
     // place. The next command exited 7: "no vault at this location".
     //
-    // Work reported as done that did not happen — `PLAN.md` §6 — and the
-    // write-side twin of the unmounted-volume defect the read side already
-    // guards.
+    // Work reported as done that did not happen —
+    // [the plan](https://doc.dctl.sh/project/plan) §6 — and the write-side twin
+    // of the unmounted-volume defect the read side already guards.
     //
     // Asserted here rather than against the binary, and that is not a
     // convenience: the property is about one *process* whose store changes

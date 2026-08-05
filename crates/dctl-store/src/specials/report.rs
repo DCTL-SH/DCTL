@@ -5,7 +5,7 @@
 //! same promise: a count on its own tells an operator that something was passed
 //! over but not what, and a full list of names is unbounded — `/dev` alone holds
 //! hundreds of device nodes, and a listing that promises O(page) memory
-//! (`PLAN.md` §16.2) must not quietly grow a second structure that is O(tree).
+//! ([the plan](https://doc.dctl.sh/project/plan) §16.2) must not quietly grow a second structure that is O(tree).
 
 use super::SpecialKind;
 

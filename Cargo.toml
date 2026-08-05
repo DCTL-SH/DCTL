@@ -40,8 +40,9 @@ directories = "5"
 # Multi-process-safe index store: SQLite + full-database encryption (SQLCipher).
 # `bundled-sqlcipher-vendored-openssl` compiles SQLCipher and vendors OpenSSL from
 # source, so no system libsqlite3/OpenSSL is required (only a C toolchain). See
-# docs/FORMAT.md §9 rule 5 — the App and its File-Provider extension share one
-# App-Group DB via WAL; records stay AEAD-encrypted and keyed by hash(NFC(path)).
+# crates/dctl-decode/FORMAT.md §9 rule 5 — the App and its File-Provider extension
+# share one App-Group DB via WAL; records stay AEAD-encrypted and keyed by
+# hash(NFC(path)).
 rusqlite = { version = "0.37", features = ["bundled-sqlcipher-vendored-openssl"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -76,7 +77,8 @@ libc = "0.2"
 subtle = "2.6"
 ml-kem = "0.2"
 x25519-dalek = { version = "2", features = ["static_secrets", "zeroize"] }
-# `dctl mount` — the FUSE binding behind the read-only filesystem (PLAN.md §15).
+# `dctl mount` — the FUSE binding behind the read-only filesystem (the plan §15,
+# https://doc.dctl.sh/project/plan).
 # Listed here rather than only in dctl-cli because the mount adapter is expected
 # to become its own crate (`dctl-mount` in the §16.1 layout) and the version must
 # not fork when it does.

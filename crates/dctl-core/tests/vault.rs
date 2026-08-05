@@ -794,7 +794,8 @@ async fn shared_put_roundtrips_and_head_is_kem1() {
     // The owner reads it back through the ordinary get_file (kem_id=1 branch exercised).
     assert_eq!(owner.get_file("shared/a").await.unwrap().as_slice(), data);
 
-    // The stored object's head declares kem_id=1 (FORMAT.md §3: head byte 6 = kem_id).
+    // The stored object's head declares kem_id=1
+    // (crates/dctl-decode/FORMAT.md §3: head byte 6 = kem_id).
     let obj = only_object_bytes(e._store.path());
     assert_eq!(obj[6], 1, "shared object head kem_id must be 1 (hybrid)");
 }

@@ -1,4 +1,5 @@
-//! Structured logging, diagnostics and secret redaction (`PLAN.md` §7).
+//! Structured logging, diagnostics and secret redaction
+//! ([the plan](https://doc.dctl.sh/project/plan) §7).
 //!
 //! Three guarantees this module is responsible for:
 //!
@@ -22,7 +23,7 @@
 //! | `op`         | Command name (`copy`, `sync`, `verify`)          |
 //! | `path`       | Logical vault path                               |
 //! | `remote`     | Remote name from the config                      |
-//! | `stage`      | Verified-write stage (`PLAN.md` §6)              |
+//! | `stage`      | Verified-write stage (the plan §6)               |
 //! | `bytes`      | Byte count for this record                       |
 //! | `dek_fp`     | DEK fingerprint — never the key                  |
 //! | `error_code` | Stable slug from [`crate::exit::ExitCode`]       |

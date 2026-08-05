@@ -1,6 +1,6 @@
 //! Durable local writes for `rcat`.
 //!
-//! `PLAN.md` §6 puts local destinations under the same discipline as the index:
+//! [The plan](https://doc.dctl.sh/project/plan) §6 puts local destinations under the same discipline as the index:
 //! *fsync the file **and** its directory before reporting success*. A stream is
 //! the hardest case for that promise, because its length is unknown until it
 //! ends — there is no point at which a partially written file can be told apart

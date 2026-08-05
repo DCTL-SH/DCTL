@@ -1,6 +1,6 @@
 //! Which filesystem layer a mount would attach through, per platform.
 //!
-//! Straight out of `PLAN.md` §15, and recorded in code rather than only in prose
+//! Straight out of [the plan](https://doc.dctl.sh/project/plan) §15, and recorded in code rather than only in prose
 //! because the choice is the first thing a user needs to know: a mount fails on
 //! a machine with no filesystem layer installed, and "install macFUSE" is a very
 //! different answer from "your mountpoint is not empty".
@@ -8,16 +8,16 @@
 //! | OS      | Backend, in preference order      | Why that order |
 //! |---------|-----------------------------------|----------------|
 //! | Linux   | FUSE3 (`fuser`)                   | The only real option, and a good one: writeback cache, large `max_read`/`max_write`, multithreaded, big readahead. |
-//! | macOS   | FSKit (15+) → fuse-t → macFUSE    | FSKit is Apple-sanctioned and needs no kernel extension, which is what makes it the 20-year-safe choice (`PLAN.md` §13.1). fuse-t also avoids a kext by tunnelling over NFS loopback. macFUSE is a kext: highest throughput, but it must be opt-in because a kext can be broken by any macOS release. |
+//! | macOS   | FSKit (15+) → fuse-t → macFUSE    | FSKit is Apple-sanctioned and needs no kernel extension, which is what makes it the 20-year-safe choice ([the plan](https://doc.dctl.sh/project/plan) §13.1). fuse-t also avoids a kext by tunnelling over NFS loopback. macFUSE is a kext: highest throughput, but it must be opt-in because a kext can be broken by any macOS release. |
 //! | Windows | WinFSP                            | The mature FUSE-like layer. ProjFS is an option later for read-first streaming virtualisation. |
 //!
-//! The order is a *preference*, not a detection result: it is what `PLAN.md` §15
+//! The order is a *preference*, not a detection result: it is what [the plan](https://doc.dctl.sh/project/plan) §15
 //! argues DCTL should reach for, in what order, and it is the roadmap rather
 //! than the build.
 //!
 //! **What this build actually attaches through is a different question, and
 //! [`attached`] is the one that answers it.** The two are not the same on macOS
-//! and saying they were would be the kind of misreport `PLAN.md` §6 forbids: the
+//! and saying they were would be the kind of misreport [the plan](https://doc.dctl.sh/project/plan) §6 forbids: the
 //! preference names FSKit first, and this build mounts through macFUSE, because
 //! FSKit and fuse-t have no Rust binding and the crate DCTL uses (`fuser`) speaks
 //! FUSE. A user reading "backend: FSKit" while a kernel extension was doing the
@@ -80,7 +80,7 @@ pub fn preferred() -> &'static [MountBackend] {
         &[MountBackend::Fuse3]
     } else if cfg!(target_os = "macos") {
         // FSKit first: Apple-sanctioned, no kext, and therefore the option most
-        // likely to still work in twenty years (`PLAN.md` §13.1).
+        // likely to still work in twenty years ([the plan](https://doc.dctl.sh/project/plan) §13.1).
         &[
             MountBackend::FsKit,
             MountBackend::FuseT,
@@ -125,7 +125,8 @@ pub fn attached() -> Option<MountBackend> {
     }
 }
 
-/// Why this build does not use the backend `PLAN.md` §15 prefers, if it does not.
+/// Why this build does not use the backend [the plan](https://doc.dctl.sh/project/plan) §15 prefers, if it
+/// does not.
 ///
 /// [`None`] when preference and implementation agree, which is the case on Linux
 /// and the case DCTL is working towards everywhere. A `Some` is printed beside
@@ -161,7 +162,7 @@ mod tests {
 
     #[test]
     fn macos_prefers_the_backend_that_needs_no_kernel_extension() {
-        // The ordering PLAN.md §15 argues for: a kext is the fastest option and
+        // The ordering [the plan](https://doc.dctl.sh/project/plan) §15 argues for: a kext is the fastest option and
         // the one most likely to be broken by a future macOS release, so it is
         // last rather than first.
         if cfg!(target_os = "macos") {

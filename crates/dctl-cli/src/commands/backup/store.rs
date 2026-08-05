@@ -18,7 +18,7 @@
 //! which seals the source straight from disk into a temporary object and hands
 //! *that* to the backend's streaming write: no stage ever holds the whole file
 //! or the whole object, so peak memory is O(chunk) per file regardless of size,
-//! which is what `PLAN.md` §16.2 asks for. There is therefore no size limit here
+//! which is what [the plan](https://doc.dctl.sh/project/plan) §16.2 asks for. There is therefore no size limit here
 //! and no size check — not because one was forgotten, but because the path this
 //! module uses does not have the failure the limit exists to prevent.
 //!
@@ -26,14 +26,14 @@
 //! inside the core: the content object is written and verified, then the
 //! authoritative §5 name record, then the durable index commit. Success is
 //! returned only after all three, so a file this module reports as stored *is*
-//! stored (`PLAN.md` §6).
+//! stored ([the plan](https://doc.dctl.sh/project/plan) §6).
 //!
 //! ## One bad file does not abandon the run
 //!
 //! A tree with one unreadable file must still back up the other four million.
 //! Per-file failures are counted through [`Ctx::stats`], reported by name, and
 //! the run continues; the recorded errors downgrade the process exit code
-//! through [`Ctx::outcome`] so nothing is rolled up into success (`PLAN.md` §7).
+//! through [`Ctx::outcome`] so nothing is rolled up into success ([the plan](https://doc.dctl.sh/project/plan) §7).
 //!
 //! A *fatal* failure is different, and [`pipeline::is_fatal`] draws the same line
 //! the transfer executor draws: a locked vault makes every remaining file fail
@@ -176,7 +176,7 @@ impl Store {
 /// could enter a vault and the log would say nothing at all. That is the one
 /// thing an audit log may not do, and it is the reason the record is appended
 /// here — per file, after the core's durable commit returns, exactly where
-/// `PLAN.md` §6 step 8 puts it and exactly where the transfer pipeline puts its
+/// [the plan](https://doc.dctl.sh/project/plan) §6 step 8 puts it and exactly where the transfer pipeline puts its
 /// own.
 ///
 /// A failure is recorded too, with the command's own classified code and zero
@@ -248,7 +248,7 @@ pub async fn everything(ctx: &Ctx, store: &Store, files: &[ScannedFile]) -> Resu
 /// side for a reason worth stating plainly: storing the files and quietly
 /// dropping the snapshot name leaves an operator believing a named point in time
 /// exists. They would discover it does not on the day they reached for it, which
-/// is the single worst moment (`PLAN.md` §13.6). A backup that refuses today
+/// is the single worst moment ([the plan](https://doc.dctl.sh/project/plan) §13.6). A backup that refuses today
 /// costs one flag; one that lies costs the restore.
 ///
 /// `--dry-run` is exempt: planning a snapshot is not claiming one, and the plan

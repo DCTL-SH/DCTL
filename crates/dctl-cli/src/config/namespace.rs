@@ -1,7 +1,8 @@
 //! Which vault's namespace a destination belongs to, decided from the file.
 //!
-//! A vault has two names and they mean different things (`PLAN.md` §13.3, and
-//! the shape [`super::pair`] writes):
+//! A vault has two names and they mean different things
+//! ([the plan](https://doc.dctl.sh/project/plan) §13.3, and the shape
+//! [`super::pair`] writes):
 //!
 //! * `archive:` — the **sealed view**. Everything through it is encrypted.
 //! * `archive-store:` — the **object view**: the opaque ciphertext objects.
@@ -37,7 +38,8 @@
 //! remote that addresses it". Choosing between them stays with the operator.
 //!
 //! The flag is the discriminator rather than "is the base of some vault
-//! remote", and that is deliberate too: `PLAN.md` §14's worked example is a
+//! remote", and that is deliberate too:
+//! [the plan](https://doc.dctl.sh/project/plan) §14's worked example is a
 //! vault over `b2prod` in which `b2prod:` remains usable as an ordinary remote,
 //! and [`super::validate::vault_only_locations`] already draws the line in the
 //! same place. Two definitions of "this location is a vault's" would sooner or

@@ -20,7 +20,7 @@
 //! never learns which it was given. When that call fails, so does the command,
 //! with a real exit code rather than an empty listing: "the vault has no
 //! objects" and "DCTL could not look" must never be the same output
-//! (`PLAN.md` §6).
+//! ([the plan](https://doc.dctl.sh/project/plan) §6).
 
 use clap::Args;
 

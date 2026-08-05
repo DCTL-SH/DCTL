@@ -1,8 +1,9 @@
 //! Typed failures of the configuration layer.
 //!
-//! `PLAN.md` §16.5 asks for a `thiserror` taxonomy per concern rather than a
-//! stringly-typed `anyhow` chain, and configuration is the concern with the most
-//! *distinguishable* ways to go wrong: a name a user typed, a base remote that
+//! [The plan](https://doc.dctl.sh/project/plan) §16.5 asks for a `thiserror`
+//! taxonomy per concern rather than a stringly-typed `anyhow` chain, and
+//! configuration is the concern with the most *distinguishable* ways to go
+//! wrong: a name a user typed, a base remote that
 //! does not exist, a cycle between vault remotes, a file that cannot be read,
 //! and — the one this whole layer exists to prevent — a credential pasted into
 //! the file.
@@ -77,8 +78,9 @@ pub enum ConfigError {
 
     /// A key whose name looks like a credential was found in the file.
     ///
-    /// The loudest error in this enum on purpose. `PLAN.md` §14 rejects
-    /// rclone's model of keeping reversibly-obscured secrets in the config, and
+    /// The loudest error in this enum on purpose.
+    /// [The plan](https://doc.dctl.sh/project/plan) §14 rejects rclone's model
+    /// of keeping reversibly-obscured secrets in the config, and
     /// a tool that merely *ignored* an unexpected `secret_key` would leave it
     /// sitting on disk, in a backup, and in the next bug report.
     #[error(
@@ -247,8 +249,9 @@ pub enum ConfigError {
 impl ConfigError {
     /// The process exit status this failure should produce.
     ///
-    /// The split follows `PLAN.md` §7: a *fatal* error is one where the state of
-    /// the machine is wrong (exit 7 — the file is missing, unreadable, malformed,
+    /// The split follows [the plan](https://doc.dctl.sh/project/plan) §7: a
+    /// *fatal* error is one where the state of the machine is wrong (exit 7 —
+    /// the file is missing, unreadable, malformed,
     /// or describes an impossible remote graph), while a *usage* error is one
     /// where the invocation was wrong (exit 1 — the caller supplied a name that
     /// is not a legal remote name). Scripts branch on these, so a bad `--name`

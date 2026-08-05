@@ -51,7 +51,7 @@ The format and its reference decoder — Apache License 2.0
 (LICENSE-Apache-2.0.txt)
 ------------------------------------------------------------------------------
 
-  docs/FORMAT.md
+  crates/dctl-decode/FORMAT.md
   crates/dctl-decode/reference/
 
 These are Apache 2.0, deliberately and separately from everything above, and

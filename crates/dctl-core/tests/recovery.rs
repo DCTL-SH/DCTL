@@ -1,4 +1,4 @@
-//! A vault must be recoverable without its password (`PLAN.md` §13.2).
+//! A vault must be recoverable without its password ([the plan](https://doc.dctl.sh/project/plan) §13.2).
 //!
 //! Everything here asserts the same property from a different angle: the root
 //! key has **more than one independent way out of the envelope**, and the ways
@@ -7,7 +7,7 @@
 //! calls the #1 risk of a twenty-year tool.
 //!
 //! The first test reads the envelope's frozen header bytes rather than asking
-//! the code that wrote them. `docs/FORMAT.md` §2 fixes `slot_count` at offset 21
+//! the code that wrote them. `crates/dctl-decode/FORMAT.md` §2 fixes `slot_count` at offset 21
 //! as a little-endian `u16`, and a restore in 2046 will be performed by
 //! something that reads those bytes, not by this build — so a test that agreed
 //! with whatever the encoder currently believes would confirm nothing.
@@ -213,7 +213,7 @@ async fn a_password_never_opens_the_mnemonic_slot_and_a_phrase_never_opens_the_p
 
 #[tokio::test]
 async fn changing_the_password_leaves_the_recovery_phrase_working() {
-    // `PLAN.md` §13.2's whole point: one root key, wrapped several independent
+    // [The plan](https://doc.dctl.sh/project/plan) §13.2's whole point: one root key, wrapped several independent
     // ways. Rotating one wrapper must not disturb any other — otherwise the
     // first password change silently destroys the paper backup, and nobody finds
     // out until the day they need it.
@@ -392,7 +392,7 @@ fn decode_slots(bytes: &[u8]) -> Vec<DecodedSlot> {
 
 #[tokio::test]
 async fn the_envelope_matches_the_table_the_format_document_publishes() {
-    // `docs/FORMAT.md` §2.1 states, field by field, exactly what a v1 writer
+    // `crates/dctl-decode/FORMAT.md` §2.1 states, field by field, exactly what a v1 writer
     // emits. A restore twenty years from now is performed against that document
     // and nothing else, so it is worth as much as the code — and a document that
     // has silently drifted from the encoder is worse than no document, because

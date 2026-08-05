@@ -132,8 +132,9 @@ mod tests {
     #[test]
     fn the_wrapper_type_is_creatable_but_not_advertised_as_a_destination() {
         // Both halves matter: offering `vault` as a place to put data would be
-        // misleading, and refusing to create one would make PLAN.md §14's
-        // worked example impossible.
+        // misleading, and refusing to create one would make
+        // [the plan](https://doc.dctl.sh/project/plan) §14's worked example
+        // impossible.
         assert!(settings::validate_type(constants::PROVIDER_VAULT).is_ok());
         assert!(
             !constants::REMOTE_PROVIDER_TYPES

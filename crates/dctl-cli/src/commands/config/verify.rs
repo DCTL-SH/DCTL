@@ -97,7 +97,8 @@ struct VerifyReport {
 /// [`ExitCode::FatalError`] when the file cannot be read or parsed at all, or
 /// when the pre-flight found something. A configuration that is merely empty is
 /// sound and exits zero: a machine driven entirely by flags and environment
-/// variables never writes one (`PLAN.md` §14).
+/// variables never writes one
+/// ([the plan](https://doc.dctl.sh/project/plan) §14).
 pub async fn run(ctx: &Ctx) -> Result<()> {
     let path = config::resolve_path(ctx.globals.config.as_deref());
 
@@ -570,7 +571,8 @@ mod tests {
     #[tokio::test]
     async fn a_credential_in_the_file_is_still_refused_by_the_pre_flight() {
         // Leniency is only ever about the remote graph. A key sitting in the
-        // file is not a finding to report politely (PLAN.md §14).
+        // file is not a finding to report politely
+        // (https://doc.dctl.sh/project/plan §14).
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("config.toml");
         std::fs::write(

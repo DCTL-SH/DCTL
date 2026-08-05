@@ -1,5 +1,5 @@
 //! Everything that could stop a name from being written, found before anything
-//! is (`PLAN.md` §13.6).
+//! is ([the plan](https://doc.dctl.sh/project/plan) §13.6).
 //!
 //! A backup you never restored is not a backup, and the way a restore fails is
 //! never the way you expect. It is not the network: it is `report:final.pdf`

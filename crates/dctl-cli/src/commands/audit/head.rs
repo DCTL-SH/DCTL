@@ -5,7 +5,7 @@
 //! attests to how many records it should have — and the records an attacker
 //! most wants gone are the most recent ones. The only defence is a value
 //! recorded where the writer cannot reach it, and this is the command that
-//! produces it. `docs/AUDIT_LOG.md` §10 is the procedure for keeping it;
+//! produces it. [The audit-log reference](https://doc.dctl.sh/reference/audit-log) §10 is the procedure for keeping it;
 //! `dctl audit verify --expect-head` is what checks it.
 //!
 //! ## What it prints, and why it is not only a hash
@@ -187,7 +187,7 @@ mod tests {
     async fn the_anchor_it_prints_is_the_anchor_verify_accepts() {
         // The round trip that makes the pair usable: whatever `head` hands an
         // operator has to satisfy `--expect-head` on the same log, or the
-        // procedure documented in AUDIT_LOG.md §10 does not work.
+        // procedure documented in [the audit-log reference](https://doc.dctl.sh/reference/audit-log) §10 does not work.
         let dir = tempfile::tempdir().unwrap();
         let (path, _) = write_chain(dir.path(), 6);
 

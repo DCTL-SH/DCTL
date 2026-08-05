@@ -3,7 +3,7 @@
 //!
 //! Every verified write in this crate stages its bytes under a temporary name in
 //! the destination's own directory, fsyncs, checks what landed, and only then
-//! `rename`s onto the final name. The rename is the commit (`PLAN.md` §6): a
+//! `rename`s onto the final name. The rename is the commit ([the plan](https://doc.dctl.sh/project/plan) §6): a
 //! crash before it leaves a staging file, and a staging file was never reported
 //! to anybody as stored. Listings must therefore skip them — an object nothing
 //! committed is not an object.
@@ -114,7 +114,7 @@ static STAGING_SEQ: AtomicU64 = AtomicU64::new(0);
 /// as DCTL's own half-written object: it is not listed as data, and
 /// `dctl cleanup --class staging` will delete it once it is older than
 /// `--min-age`. That is a much narrower claim than the substring test it
-/// replaced, and it is stated in `docs/FORMAT.md` §5 so it is a contract rather
+/// replaced, and it is stated in `crates/dctl-decode/FORMAT.md` §5 so it is a contract rather
 /// than an implementation detail.
 pub const STAGING_NAME_PREFIX: &str = ".dctl-staging.";
 
@@ -398,7 +398,7 @@ mod tests {
         // On a plain store the keys are the user's own paths, so the collision
         // is possible in exactly one way: a file literally named
         // `.dctl-staging.<something>`. That is the claimed namespace, stated in
-        // `docs/FORMAT.md` §5, and it is why the claim is a leading-dot prefix
+        // `crates/dctl-decode/FORMAT.md` §5, and it is why the claim is a leading-dot prefix
         // no ordinary tool produces rather than a substring.
         assert!(is_staging_key(&format!("{STAGING_NAME_PREFIX}anything")));
     }

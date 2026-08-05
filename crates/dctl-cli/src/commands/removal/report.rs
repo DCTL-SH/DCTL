@@ -1,14 +1,15 @@
 //! What a removal tells the user, written as it happens.
 //!
-//! A removal report is a stream, not a document assembled at the end, and that
-//! is a correctness property rather than a performance one. `PLAN.md` §6 forbids
-//! reporting work that did not happen; the surest way to honour it is for each
-//! record to be written **at the moment** the work either happened or did not,
-//! so there is no window in which a buffer of intentions could be flushed as a
-//! buffer of outcomes. It is also what keeps memory at O(1) on a removal of ten
-//! million objects (`PLAN.md` §16.2) — including the failure records, which are
-//! emitted individually precisely because there is no bound on how many of them
-//! a broken provider can produce.
+//! A removal report is a stream, not a document assembled at the end, and that is
+//! a correctness property rather than a performance one.
+//! [The plan](https://doc.dctl.sh/project/plan) §6 forbids reporting work that
+//! did not happen; the surest way to honour it is for each record to be written
+//! **at the moment** the work either happened or did not, so there is no window
+//! in which a buffer of intentions could be flushed as a buffer of outcomes. It
+//! is also what keeps memory at O(1) on a removal of ten million objects
+//! ([the plan](https://doc.dctl.sh/project/plan) §16.2) — including the failure
+//! records, which are emitted individually precisely because there is no bound on
+//! how many of them a broken provider can produce.
 //!
 //! ## One document, three renderings
 //!
@@ -242,9 +243,9 @@ impl<'a> Report<'a> {
     ///
     /// Counted as an error, which is what downgrades the whole run to
     /// [`ExitCode::PartialFailure`](crate::exit::ExitCode::PartialFailure).
-    /// `PLAN.md` §7 forbids rolling a partial failure into a success, and the
-    /// only way to guarantee that is for the failure to be counted at the moment
-    /// it is observed.
+    /// [The plan](https://doc.dctl.sh/project/plan) §7 forbids rolling a partial
+    /// failure into a success, and the only way to guarantee that is for the
+    /// failure to be counted at the moment it is observed.
     ///
     /// # Errors
     /// A stdout write failure other than a broken pipe.
@@ -527,8 +528,9 @@ mod tests {
 
     #[test]
     fn a_failure_is_counted_as_an_error_and_never_as_a_removal() {
-        // PLAN.md §7: a partial failure may not be rolled into a success, and
-        // the exit code is derived from this counter.
+        // [The plan](https://doc.dctl.sh/project/plan) §7: a partial failure may
+        // not be rolled into a success, and the exit code is derived from this
+        // counter.
         let ctx = ctx(&["--quiet"]);
         let mut report = Report::new(&ctx);
         report.removed(&item("a.txt", 4)).unwrap();

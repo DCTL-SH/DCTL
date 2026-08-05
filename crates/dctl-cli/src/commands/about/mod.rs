@@ -33,7 +33,8 @@
 //! space needs a `statvfs` this crate cannot make under
 //! `#![forbid(unsafe_code)]`. A number nobody measured is worse than no number,
 //! because it gets believed and then gets used to decide whether a backup will
-//! fit — `PLAN.md` §6's promise applied to a read.
+//! fit — [the plan](https://doc.dctl.sh/project/plan) §6's promise applied to a
+//! read.
 //!
 //! This is not a special case bolted on: `usage_reporting` and `quota_reporting`
 //! are rows in the capability matrix like any other, both unsupported by every

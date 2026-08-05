@@ -54,8 +54,9 @@ mod tests {
 
     #[test]
     fn separators_appear_once_per_group() {
-        // Ten-million-file runs are the design target (`PLAN.md` §16.2), so the
-        // grouping has to hold at that magnitude.
+        // Ten-million-file runs are the design target
+        // (https://doc.dctl.sh/project/plan §16.2), so the grouping has to hold
+        // at that magnitude.
         let rendered = count(10_000_000);
         assert_eq!(rendered, "10,000,000");
         assert_eq!(

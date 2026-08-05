@@ -26,9 +26,9 @@
 //! offsite replication job can be addressed at `archive-store:` and run with
 //! **no vault password at all**: a backup operator replicates ciphertext to a
 //! second provider and satisfies 3-2-1 without ever holding decryption
-//! capability. `PLAN.md` §13.3 requires replicating a vault's object tree
-//! provider-to-provider with no re-encryption, and that is unimplementable if
-//! the base has no name to type.
+//! capability. [The plan](https://doc.dctl.sh/project/plan) §13.3 requires
+//! replicating a vault's object tree provider-to-provider with no
+//! re-encryption, and that is unimplementable if the base has no name to type.
 //!
 //! ## The order things happen in, and why
 //!
@@ -55,8 +55,9 @@
 //!
 //! ## What this build still cannot do
 //!
-//! **`--key-file` (`PLAN.md` §8).** `dctl_core::Vault::init` takes a password
-//! and nothing else; the second factor has no way in. Passing `--key-file` is
+//! **`--key-file` ([the plan](https://doc.dctl.sh/project/plan) §8).**
+//! `dctl_core::Vault::init` takes a password and nothing else; the second
+//! factor has no way in. Passing `--key-file` is
 //! refused rather than silently creating a vault protected by one factor when
 //! the user asked for two. The refusal is delegated to
 //! [`crate::session::factor`], which every unlock also goes through, so creating

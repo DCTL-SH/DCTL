@@ -6,9 +6,9 @@
 //! among a dozen concurrent transfers. So both ends are kept and the middle goes.
 //!
 //! The whole module works in `char`s, never bytes. Vault paths are UTF-8 and
-//! routinely non-ASCII (`PLAN.md` §14 and the NFC rule in `platform::path`), and
-//! byte-slicing one would panic mid-codepoint — an unacceptable way for a
-//! progress bar to take down a transfer.
+//! routinely non-ASCII ([the plan](https://doc.dctl.sh/project/plan) §14 and the
+//! NFC rule in `platform::path`), and byte-slicing one would panic mid-codepoint
+//! — an unacceptable way for a progress bar to take down a transfer.
 
 use crate::constants::{
     TRUNCATE_MIN_WIDTH, TRUNCATE_TAIL_DENOMINATOR, TRUNCATE_TAIL_NUMERATOR, TRUNCATION_ELLIPSIS,

@@ -8,7 +8,7 @@
 //!
 //! ## Pagination is the whole design
 //!
-//! [`Backend::list_page`] exists because `PLAN.md` §16.2 requires listings to
+//! [`Backend::list_page`] exists because [the plan](https://doc.dctl.sh/project/plan) §16.2 requires listings to
 //! cost O(page) and not O(objects): a bucket with ten million keys must list on a
 //! laptop. This implementation therefore walks cursors and holds **one provider
 //! page** — one round trip's worth of metadata — no matter how large the store
@@ -151,7 +151,7 @@ impl Source for PlainSource {
             if window.is_empty() {
                 // The object declared a length and stopped serving before it.
                 // Returning what arrived would report a truncated object as a
-                // complete read, which is the misreport `PLAN.md` §6 forbids.
+                // complete read, which is the misreport [the plan](https://doc.dctl.sh/project/plan) §6 forbids.
                 return Err(CliError::new(
                     ExitCode::IntegrityFailure,
                     format!("'{path}' stopped serving bytes at {at} of the {size} it declares"),
@@ -234,7 +234,7 @@ impl Source for PlainSource {
     ///
     /// Windowed for the reason [`Source::verify`] is windowed: the point is to
     /// touch every byte, and a whole-object `get` would buffer a fifty-gigabyte
-    /// file to do it. `PLAN.md` §16.2 caps memory at O(concurrency), and a
+    /// file to do it. [The plan](https://doc.dctl.sh/project/plan) §16.2 caps memory at O(concurrency), and a
     /// `--checksum` that materialised a huge file *in order to decide whether to
     /// copy it* would be the most absurd possible way to break that rule.
     async fn content_hash(&self, path: &str) -> Result<Option<Vec<u8>>> {
@@ -1316,7 +1316,7 @@ mod tests {
         // user: `dctl cat archive:big.iso > big.iso`. Writing four bytes and
         // exiting 0 would put a truncated file on the operator's disk under the
         // name of the whole one — a restore that reports success and loses the
-        // file, which is `PLAN.md` §6's forbidden outcome.
+        // file, which is [the plan](https://doc.dctl.sh/project/plan) §6's forbidden outcome.
         let source = short_serving(10, 4);
         let mut sink: Vec<u8> = Vec::new();
 
@@ -1347,7 +1347,7 @@ mod tests {
 
     #[test]
     fn a_local_spec_needs_no_configuration_to_resolve() {
-        // The headless case `PLAN.md` §14 requires: a bare path is a legitimate
+        // The headless case [the plan](https://doc.dctl.sh/project/plan) §14 requires: a bare path is a legitimate
         // source with no config file anywhere in sight.
         let root = TempDir::new().unwrap();
         let spec = RemoteSpec::Local(root.path().to_path_buf());

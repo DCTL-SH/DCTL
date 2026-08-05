@@ -10,7 +10,7 @@ use clap::ValueEnum;
 #[value(rename_all = "lower")]
 pub enum LogLevel {
     /// Failures only. What `--quiet` leaves visible: a silent failure is the one
-    /// outcome `PLAN.md` §7 forbids outright.
+    /// outcome <https://doc.dctl.sh/project/plan> §7 forbids outright.
     Error,
     /// Failures plus anything the user should look at. The default.
     #[default]

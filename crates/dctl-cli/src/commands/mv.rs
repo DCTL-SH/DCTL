@@ -5,7 +5,7 @@
 //!
 //! # The ordering *is* the product
 //!
-//! `PLAN.md` §6 step 7: *"`move` only: after the commit is durable, delete the
+//! [The plan](https://doc.dctl.sh/project/plan) §6 step 7: *"`move` only: after the commit is durable, delete the
 //! source."* Everything else about this command is `copy`. That one sentence is
 //! why a `move` interrupted by a crash, a network failure, a bad checksum or a
 //! Ctrl-C leaves the source file exactly where it was — and why DCTL can be
@@ -20,7 +20,7 @@
 //!
 //! Two consequences worth stating outright:
 //!
-//! * A checksum mismatch (`PLAN.md` §6 step 4) aborts before the commit, so the
+//! * A checksum mismatch ([the plan](https://doc.dctl.sh/project/plan) §6 step 4) aborts before the commit, so the
 //!   source survives. Exit code 20 says so specifically.
 //! * A file that transferred but whose *source deletion* failed is reported as
 //!   an error even though the data is safe. The operator needs to know they now
@@ -238,7 +238,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_source_is_removed_only_after_the_destination_holds_it() {
-        // `PLAN.md` §6 step 7, asserted on the filesystem: the destination must
+        // [The plan](https://doc.dctl.sh/project/plan) §6 step 7, asserted on the filesystem: the destination must
         // hold the bytes *and* the source must be gone. Checking only the second
         // half would pass for a `move` that deleted without copying.
         let (dir, source, dest) = fixture();

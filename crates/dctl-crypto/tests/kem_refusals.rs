@@ -29,7 +29,7 @@
 //! So a block whose framing is wrong has exactly two possible fates. Either it
 //! is refused here, by name, or it is indexed past the end of the object and the
 //! process aborts — which for `dctl restore` means the recovery run dies on the
-//! object it was started for, and `PLAN.md` forbids the panic besides.
+//! object it was started for, and [the plan](https://doc.dctl.sh/project/plan) forbids the panic besides.
 //!
 //! # Every case is one edit to a real object
 //!
@@ -359,7 +359,7 @@ fn the_recipient_count_a_sealer_is_asked_for_is_bounded_at_both_ends() {
     // The writer's side of `recip_count`. Zero recipients produces an object
     // nobody can ever open — including the vault that wrote it, since
     // `kem_id=1` has no symmetric fallback (§12.8) — and it would be written
-    // without complaint, which is `PLAN.md` §6's forbidden outcome reached by
+    // without complaint, which is [the plan](https://doc.dctl.sh/project/plan) §6's forbidden outcome reached by
     // way of a successful `dctl share`.
     let root = keys::generate_key();
     let alice = derive_recipient(&root, 0).expect("a recipient");

@@ -218,7 +218,7 @@ impl MountState {
     ///
     /// **This is the call the format exists for.** It goes straight to
     /// [`Source::read_range`], which fetches only the chunks covering the window
-    /// (`docs/FORMAT.md` §3) — so a player seeking to 45:00 in a fifty-gigabyte
+    /// (`crates/dctl-decode/FORMAT.md` §3) — so a player seeking to 45:00 in a fifty-gigabyte
     /// film transfers the covering chunks and nothing else. There is no
     /// whole-object path behind it, at any size.
     ///
@@ -520,7 +520,7 @@ impl MountState {
     /// measured from the object's own authenticated header, which is a bounded
     /// read and not a transfer of the file. Reporting the absent size as zero
     /// instead would make every reader see an empty file and exit successfully,
-    /// which is `PLAN.md` §6's misreport with a filesystem's authority behind
+    /// which is [the plan](https://doc.dctl.sh/project/plan) §6's misreport with a filesystem's authority behind
     /// it.
     async fn size_of(&self, kind: Kind, path: &str, recorded: Option<u64>) -> Result<u64> {
         match (kind, recorded) {
@@ -540,7 +540,7 @@ impl MountState {
 
     /// Warm the chunks after a read, if this handle has not already covered them.
     ///
-    /// `PLAN.md` §15's latency hiding: serve chunk *k* while fetching *k+1…k+P*,
+    /// [The plan](https://doc.dctl.sh/project/plan) §15's latency hiding: serve chunk *k* while fetching *k+1…k+P*,
     /// with *P* set by `--buffer-size` and the number of windows in flight by
     /// [`MOUNT_READ_AHEAD_DEPTH`](crate::constants::MOUNT_READ_AHEAD_DEPTH) —
     /// claimed a window early, so the fetch of the next window overlaps the

@@ -9,7 +9,7 @@
 //! - [`kem`] — §12 hybrid X25519 + ML-KEM-768 recipient layer (`kem_id=1`).
 //! - [`names`] — `n/*` authoritative path→object records; [`path`] — §5 validation.
 //!
-//! The normative on-disk layout is `docs/FORMAT.md`. All format identifiers live
+//! The normative on-disk layout is `crates/dctl-decode/FORMAT.md`. All format identifiers live
 //! in [`constants`] and are intentionally independent of the product name, which
 //! may be rebranded without touching the format.
 #![forbid(unsafe_code)]

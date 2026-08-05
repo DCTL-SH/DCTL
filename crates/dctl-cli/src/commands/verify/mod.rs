@@ -1,7 +1,7 @@
 //! `dctl verify REMOTE:PATH` — prove that stored objects still decrypt and
 //! still match the hashes recorded when they were written.
 //!
-//! This is the read-side half of the verified-write contract (`PLAN.md` §6). A
+//! This is the read-side half of the verified-write contract ([the plan](https://doc.dctl.sh/project/plan) §6). A
 //! write refuses to commit unless the destination's checksum matches ours; a
 //! `verify` asks the same question again later, on demand.
 //!
@@ -33,7 +33,7 @@
 //! says**, and the run warns when a cheaper strength was asked for. One of the
 //! cheaper two cannot be performed at all with the primitives that exist; the
 //! other has not been designed. Performing something else while reporting the
-//! requested name would be the misreport `PLAN.md` §6 forbids:
+//! requested name would be the misreport [the plan](https://doc.dctl.sh/project/plan) §6 forbids:
 //!
 //! * `checksum` would need the provider's own checksum of the *stored object*
 //!   compared against one DCTL holds. `dctl_core::Vault` exposes no such value —

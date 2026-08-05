@@ -9,8 +9,8 @@
 //! For a long time the answer here was **one**: a single password slot, and a
 //! forgotten password meant permanent, total data loss with the ciphertext
 //! sitting intact and unreadable on a provider that kept billing for it.
-//! `PLAN.md` §13.2 calls key survival the #1 risk of a twenty-year tool and
-//! promises several independent unwrap paths; `docs/FORMAT.md` §2 has carried
+//! [The plan](https://doc.dctl.sh/project/plan) §13.2 calls key survival the #1 risk of a twenty-year tool and
+//! promises several independent unwrap paths; `crates/dctl-decode/FORMAT.md` §2 has carried
 //! the multi-slot envelope that makes them possible since the format was frozen.
 //! Nothing was missing except the second slot.
 //!
@@ -89,7 +89,7 @@ impl Vault {
     /// Argon2id `cost`, rather than at this build's shipped one.
     ///
     /// The cost is a **creation-time policy decision** that the envelope then
-    /// carries forever (`docs/FORMAT.md` §2). That is what makes §9.10's
+    /// carries forever (`crates/dctl-decode/FORMAT.md` §2). That is what makes §9.10's
     /// per-device calibration adoptable without a format change, and it is why
     /// the value is worth being able to name: the conformance tests use this to
     /// pin the exact figures §2.1 publishes regardless of which profile they

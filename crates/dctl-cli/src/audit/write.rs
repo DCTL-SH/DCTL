@@ -1,8 +1,9 @@
 //! The append path: open the log, append one record, make it durable.
 //!
-//! `PLAN.md` §6 step 8 puts the audit record at the end of the verified-write
-//! pipeline, and §7 makes the chain a day-1 non-negotiable. This module is what
-//! turns "we did something" into evidence that we did it.
+//! [The plan](https://doc.dctl.sh/project/plan) §6 step 8 puts the audit record
+//! at the end of the verified-write pipeline, and §7 makes the chain a day-1
+//! non-negotiable. This module is what turns "we did something" into evidence
+//! that we did it.
 //!
 //! ## Three promises, and the mechanism for each
 //!
@@ -33,9 +34,10 @@
 //!
 //! That check narrows the race; it does not close it. Two processes appending at
 //! the same instant can still both read the same head and fork the chain.
-//! DCTL's answer to that is the index lock of `PLAN.md` §6 — one writer per
-//! vault, enforced where the vault is opened — and this module deliberately does
-//! not invent a second, weaker one. What it guarantees is that a fork is
+//! DCTL's answer to that is the index lock of
+//! [the plan](https://doc.dctl.sh/project/plan) §6 — one writer per vault,
+//! enforced where the vault is opened — and this module deliberately does not
+//! invent a second, weaker one. What it guarantees is that a fork is
 //! **detectable**: the two records share an index, and `dctl audit verify`
 //! reports an index discontinuity at a nameable position rather than silently
 //! accepting one of them.
@@ -124,8 +126,9 @@ impl Writer {
 
         if is_new {
             // The bytes of the first record are useless if the directory entry
-            // pointing at them did not survive the same power cut (`PLAN.md` §6,
-            // "fsync the file *and* its directory").
+            // pointing at them did not survive the same power cut
+            // (https://doc.dctl.sh/project/plan §6, "fsync the file *and* its
+            // directory").
             if let Some(parent) = parent {
                 sync_directory(parent);
             }
@@ -208,8 +211,9 @@ impl Writer {
         self.file
             .flush()
             .map_err(|error| at_path(&self.path, error))?;
-        // `PLAN.md` §6: durability before success. Everything above this line is
-        // a promise; this is what makes it one.
+        // The plan (https://doc.dctl.sh/project/plan) §6: durability before
+        // success. Everything above this line is a promise; this is what makes
+        // it one.
         self.file
             .sync_all()
             .map_err(|error| at_path(&self.path, error))?;
@@ -732,9 +736,10 @@ mod tests {
 
     #[test]
     fn no_secret_reaches_the_log() {
-        // `PLAN.md` §7: keys, passwords and tokens never reach a log, and
-        // secrets appear only as BLAKE3 fingerprints. This asserts it on the
-        // bytes that actually land on disk, not on the builder's return value.
+        // The plan (https://doc.dctl.sh/project/plan) §7: keys, passwords and
+        // tokens never reach a log, and secrets appear only as BLAKE3
+        // fingerprints. This asserts it on the bytes that actually land on disk,
+        // not on the builder's return value.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(AUDIT_LOG_FILE_NAME);
 

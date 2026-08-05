@@ -2,7 +2,7 @@
 //!
 //! rclone fuses those two questions: a `crypt` remote is both a location and a
 //! transformation, so what a command encrypts depends on how the destination was
-//! wrapped. DCTL cannot fuse them, because `PLAN.md` §13.3 requires replicating a
+//! wrapped. DCTL cannot fuse them, because [the plan](https://doc.dctl.sh/project/plan) §13.3 requires replicating a
 //! vault's object tree provider-to-provider **with no re-encryption** — which is
 //! only expressible if the ciphertext objects have an address of their own.
 //!
@@ -188,7 +188,7 @@ pub fn refuse_plain_write_to_remote(ctx: &Ctx, remote: &str) -> Result<()> {
 /// The configuration this invocation is governed by.
 ///
 /// `load_or_default`, because a machine that has never run `dctl config` is a
-/// supported machine (`PLAN.md` §14) and must not be told it is misconfigured —
+/// supported machine ([the plan](https://doc.dctl.sh/project/plan) §14) and must not be told it is misconfigured —
 /// it simply has no vault namespaces, and the filesystem fallback is all that
 /// applies.
 fn load(ctx: &Ctx) -> Result<Config> {

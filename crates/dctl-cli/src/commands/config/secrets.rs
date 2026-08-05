@@ -1,5 +1,5 @@
 //! The rule the whole command is built around: **a rendered configuration never
-//! contains a secret** (`PLAN.md` §14).
+//! contains a secret** ([the plan](https://doc.dctl.sh/project/plan) §14).
 //!
 //! DCTL's config file is designed to hold no credentials — provider keys live in
 //! the OS keychain, and the vault password is never stored anywhere. So in a
@@ -192,7 +192,8 @@ mod tests {
 
     #[test]
     fn a_secret_shaped_key_never_renders_its_value() {
-        // PLAN.md §14's hard requirement, stated as a test.
+        // [The plan](https://doc.dctl.sh/project/plan) §14's hard requirement,
+        // stated as a test.
         for key in [
             "password",
             "Password",

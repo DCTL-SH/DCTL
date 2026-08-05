@@ -4,9 +4,10 @@ use clap::ValueEnum;
 
 /// How log records are rendered.
 ///
-/// `PLAN.md` §7 requires both a human sink and a JSON sink: an operator reading
-/// a terminal and a log pipeline ingesting records have opposite needs, and
-/// making one serve both badly is a false economy.
+/// [The plan](https://doc.dctl.sh/project/plan) §7 requires both a human sink
+/// and a JSON sink: an operator reading a terminal and a log pipeline ingesting
+/// records have opposite needs, and making one serve both badly is a false
+/// economy.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
 #[value(rename_all = "lower")]
 pub enum LogFormat {

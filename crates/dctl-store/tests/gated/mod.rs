@@ -19,8 +19,9 @@
 //! covered by a green tick and nothing else.
 //!
 //! A test that skips and prints `ok` is a lie in the exact place a buyer looks
-//! for assurance, and it is the forbidden class of `PLAN.md` §6 — reporting
-//! something that did not happen — moved into the test suite.
+//! for assurance, and it is the forbidden class of
+//! [the plan](https://doc.dctl.sh/project/plan) §6 — reporting something that
+//! did not happen — moved into the test suite.
 //!
 //! # Three states, and a suite that keeps them apart
 //!

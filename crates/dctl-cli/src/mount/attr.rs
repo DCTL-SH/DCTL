@@ -18,8 +18,9 @@
 //!
 //! Every file in the mount is owned by the user running it. A vault stores no
 //! uid or gid — deliberately, since a uid is metadata about a machine and
-//! `PLAN.md` §2 keeps that out of the stored form — so there is nothing to
-//! report but the truth about who can read this mount. That truth is also the
+//! [the plan](https://doc.dctl.sh/project/plan) §2 keeps that out of the stored
+//! form — so there is nothing to report but the truth about who can read this
+//! mount. That truth is also the
 //! useful one: with the default `SessionACL::Owner` nobody else can talk to the
 //! filesystem at all.
 //!

@@ -1,19 +1,20 @@
 //! What a replication tells the caller it did.
 //!
 //! The record is the *result*, so it goes to **stdout** in whichever `--format`
-//! was asked for (`PLAN.md` §7); the commentary, the warnings and the end-of-run
-//! summary stay on stderr, where they cannot corrupt a pipeline. An offsite job
-//! is scheduled software, and `dctl replicate archive-store: offsite-store:
-//! --json | jq '.summary.failed'` is how it reports to a monitoring system.
+//! was asked for ([the plan](https://doc.dctl.sh/project/plan) §7); the
+//! commentary, the warnings and the end-of-run summary stay on stderr, where
+//! they cannot corrupt a pipeline. An offsite job is scheduled software, and
+//! `dctl replicate archive-store: offsite-store: --json | jq
+//! '.summary.failed'` is how it reports to a monitoring system.
 //!
 //! ## Two fields that must never be collapsed
 //!
 //! [`Report::dry_run`] and [`Summary::replicated`](super::plan::Summary) are
 //! separate, and a dry run sets the first and reports the second as what *would*
 //! move. A single "ok" would have the report claim work that did not happen,
-//! which `PLAN.md` §6 forbids outright — and this is the command where that lie
-//! would be most expensive, because the thing being claimed is the existence of
-//! a second copy.
+//! which [the plan](https://doc.dctl.sh/project/plan) §6 forbids outright —
+//! and this is the command where that lie would be most expensive, because the
+//! thing being claimed is the existence of a second copy.
 //!
 //! [`Report::verify_mode`] is carried for the same reason every integrity report
 //! carries it: "1 204 objects replicated" means something very different under

@@ -1,4 +1,4 @@
-//! DKE1 envelope — self-delimiting key-slot list (`docs/FORMAT.md` §2).
+//! DKE1 envelope — self-delimiting key-slot list (`crates/dctl-decode/FORMAT.md` §2).
 //!
 //! Every slot (password / mnemonic / device / …) independently AEAD-wraps the *same*
 //! 32-byte root key, and carries a `SUBKEY(KEK,·)` **key-commitment** checked in

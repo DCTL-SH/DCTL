@@ -4,7 +4,7 @@
 //! hand both to the destination's verified write, and — at the stronger
 //! `--verify` settings — read it back and compare. No key is derived, no
 //! envelope is unwrapped, no plaintext exists at any point in this file. The
-//! `encrypt` stage of `PLAN.md` §6 is absent from the progress display for the
+//! `encrypt` stage of [the plan](https://doc.dctl.sh/project/plan) §6 is absent from the progress display for the
 //! same reason it is absent from the code: there is nothing here to encrypt,
 //! because everything passing through is already sealed.
 //!
@@ -32,7 +32,7 @@
 //! both are deliberate. The report names every failure, so a run that moved
 //! 9 998 of 10 000 objects says so rather than saying "done"; and the process
 //! exits non-zero — 20 when a destination stored the wrong bytes, 6 otherwise —
-//! because `PLAN.md` §7 forbids rolling a partial failure up into success. A
+//! because [the plan](https://doc.dctl.sh/project/plan) §7 forbids rolling a partial failure up into success. A
 //! replication that stopped at the first failure would be worse: the objects it
 //! had not reached yet are the ones with no second copy.
 
@@ -158,7 +158,7 @@ pub async fn run(
 /// # Errors
 /// Whatever [`crate::audit::sink::Sink::record`] refused. Fatal to the run: the
 /// log is unwritable for every object behind this one too, and replicating
-/// 10 000 objects unrecorded is precisely what `PLAN.md` §7 forbids.
+/// 10 000 objects unrecorded is precisely what [the plan](https://doc.dctl.sh/project/plan) §7 forbids.
 fn record(ctx: &Ctx, done: &Replicated, destination: &Store) -> Result<()> {
     let item = &done.item;
     let outcome = if item.action == Action::Failed {

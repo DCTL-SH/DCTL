@@ -24,7 +24,8 @@ use crate::error::{CliError, Result};
 /// Counters are updated as the bytes move rather than at the end, so `--progress`
 /// and `--stats` show a live figure during a long stream. They report bytes
 /// *transferred*, never bytes verified: nothing is durable until the caller
-/// commits, which is the distinction `PLAN.md` §6 draws and the summary shows.
+/// commits, which is the distinction
+/// [the plan](https://doc.dctl.sh/project/plan) §6 draws and the summary shows.
 ///
 /// # Errors
 /// Any read failure, and any write failure whatsoever.

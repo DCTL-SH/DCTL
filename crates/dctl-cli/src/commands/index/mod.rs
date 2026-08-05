@@ -1,8 +1,9 @@
 //! `dctl index` — operations on the local index database.
 //!
 //! The index is a **cache and a privacy layer, never a single point of failure**
-//! (`PLAN.md` §13.5). Every fact it holds is derivable from the backend: the
-//! path→object mapping lives in the encrypted `n/*` name records, and each object
+//! ([the plan](https://doc.dctl.sh/project/plan) §13.5). Every fact it holds is
+//! derivable from the backend: the path→object mapping lives in the encrypted
+//! `n/*` name records, and each object
 //! carries its own DEK and metadata. It exists because deriving those facts on
 //! demand would mean a network round trip per path, and because keeping the
 //! mapping local is what stops a provider from learning the shape of the dataset

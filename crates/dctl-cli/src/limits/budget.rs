@@ -10,10 +10,11 @@
 //! so overshoots by nothing but ends with a partial object at the destination.
 //! DCTL cannot take that option and would not want it: the engine hands a whole
 //! object to `dctl_store::Backend::put` in one call, and a partially-written
-//! object is precisely what the verified-write contract (`PLAN.md` §6) exists to
-//! make impossible. `cautious` is one of rclone's own modes, so this is a choice
-//! from its menu rather than an invention, and it is the stronger guarantee of
-//! the two for the thing the flag is actually for.
+//! object is precisely what the verified-write contract
+//! ([the plan](https://doc.dctl.sh/project/plan) §6) exists to make impossible.
+//! `cautious` is one of rclone's own modes, so this is a choice from its menu
+//! rather than an invention, and it is the stronger guarantee of the two for the
+//! thing the flag is actually for.
 //!
 //! The visible consequence is worth stating because somebody will meet it:
 //! `--max-transfer 1M` against a 10 MiB file transfers **nothing** and exits 8.

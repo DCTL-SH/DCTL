@@ -31,12 +31,12 @@
 //!
 //! `--dry-run` performs no durable change, so there is nothing to attest to. A
 //! record saying `copy / success` for a rehearsal would be the precise thing
-//! `PLAN.md` §6 forbids — a true-looking statement about work that did not
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids — a true-looking statement about work that did not
 //! happen — and it would be indistinguishable from a real one forever after.
 //!
 //! ## If the log cannot be written, the command fails
 //!
-//! `PLAN.md` §7 makes the chained record mandatory, and a mandatory thing that
+//! [The plan](https://doc.dctl.sh/project/plan) §7 makes the chained record mandatory, and a mandatory thing that
 //! is skipped when it is inconvenient is optional. So a failed append is a
 //! failed command, and [`Sink::classify`] chooses between exactly two codes:
 //!
@@ -160,7 +160,7 @@ impl Sink {
     /// Append one record and return only once it is on stable storage.
     ///
     /// Call this **after** the durable commit that made the operation real
-    /// (`PLAN.md` §6 step 8), never before, and call it for a failure too: a log
+    /// ([the plan](https://doc.dctl.sh/project/plan) §6 step 8), never before, and call it for a failure too: a log
     /// that contains only successes cannot answer "what went wrong on the 3rd?",
     /// which is most of why anybody reads one.
     ///
@@ -232,7 +232,7 @@ impl Sink {
 ///
 /// Centralised so every call site spells a success the same way and — the part
 /// that matters — so a failure carries the command's *own* classified code
-/// rather than a generic "error". `docs/EXIT_CODES.md`'s vocabulary is what a
+/// rather than a generic "error". The [exit-code reference](https://doc.dctl.sh/reference/exit-codes)'s vocabulary is what a
 /// compliance query filters on years later, and a log in which one command
 /// wrote `checksum_mismatch` and another wrote `fatal_error` for the same event
 /// is a log nobody can query.

@@ -2,18 +2,18 @@
 //!
 //! Everything here acts on the **envelope**, not on the data: the small object
 //! holding the wrapped root key that every byte in the vault depends on
-//! (`docs/FORMAT.md` §2). That is why it is its own command group rather than a
-//! flag on `init` or a mode of `config`. Losing an object loses a file; losing
-//! the envelope loses the dataset, and the operations that touch it deserve a
-//! name an operator can find under stress.
+//! (`crates/dctl-decode/FORMAT.md` §2). That is why it is its own command group
+//! rather than a flag on `init` or a mode of `config`. Losing an object loses a
+//! file; losing the envelope loses the dataset, and the operations that touch
+//! it deserve a name an operator can find under stress.
 //!
 //! ## Why `recover` exists first
 //!
-//! `PLAN.md` §13.2 calls key survival the #1 risk of a twenty-year tool and
-//! promises several independent unwrap paths. `dctl init` now issues one — a
-//! BIP-39 recovery phrase alongside the password — and a phrase is only worth
-//! having if there is a documented way to *use* it, named in the message
-//! somebody reads when their vault will not open.
+//! [The plan](https://doc.dctl.sh/project/plan) §13.2 calls key survival the #1
+//! risk of a twenty-year tool and promises several independent unwrap paths.
+//! `dctl init` now issues one — a BIP-39 recovery phrase alongside the password
+//! — and a phrase is only worth having if there is a documented way to *use*
+//! it, named in the message somebody reads when their vault will not open.
 //!
 //! There are two halves to using it, and they are one command because doing
 //! only the first leaves the operator no better off:

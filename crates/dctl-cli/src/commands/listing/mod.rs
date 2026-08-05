@@ -35,10 +35,11 @@
 //!
 //! ## Why paging, when the index hands back a `Vec` today
 //!
-//! `PLAN.md` §16.2 forbids ever holding the full file list in RAM, and
-//! [`Vault::list`](dctl_core::Vault::list) currently violates that by
-//! materialising every record before returning. That buffer is the core's and
-//! lives in [`crate::source::vault`], which says so plainly and names what
+//! [The plan](https://doc.dctl.sh/project/plan) §16.2 forbids ever holding the
+//! full file list in RAM, and [`Vault::list`](dctl_core::Vault::list) currently
+//! violates that by materialising every record before returning. That buffer is
+//! the core's and lives in [`crate::source::vault`], which says so plainly and
+//! names what
 //! removing it takes. The boundary is drawn at [`source::Pages`] anyway: the
 //! renderers are written against a page cursor they cannot see the end of, so
 //! the day the index exposes a range scan the change is confined to one `impl`
@@ -148,8 +149,9 @@ mod tests {
 
     #[tokio::test]
     async fn opening_a_stream_fails_loudly_rather_than_returning_an_empty_one() {
-        // The whole point of `PLAN.md` §6: a listing that cannot reach its
-        // source must not render as "the vault is empty".
+        // The whole point of [the plan](https://doc.dctl.sh/project/plan) §6:
+        // a listing that cannot reach its source must not render as "the vault
+        // is empty".
         let ctx = crate::commands::listing::tests_support::ctx(&["--no-ask-password"]);
         let target = Target::parse(Some("nosuchremote:"), None).unwrap();
         let error = open(&ctx, &target, Filter::from_globals(&ctx.globals).unwrap())

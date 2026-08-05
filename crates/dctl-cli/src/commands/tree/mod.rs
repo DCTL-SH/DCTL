@@ -33,7 +33,7 @@
 //! Under `--json` or `--format json-lines`, `tree` emits the same
 //! [`JsonEntry`] records the rest of the family
 //! emits, in the same order. A nested JSON document would have to be assembled
-//! whole before its first byte could be written — the one thing `PLAN.md` §16.2
+//! whole before its first byte could be written — the one thing [the plan](https://doc.dctl.sh/project/plan) §16.2
 //! rules out — and the hierarchy is already in the `Path` field, losslessly. A
 //! consumer that wants a tree can build one; a consumer that wants records
 //! should not have to walk one.

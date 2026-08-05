@@ -7,15 +7,16 @@
 //! ## The classes, and what each one really is
 //!
 //! * **staging** — an object left under a temporary key by a write that never
-//!   reached its commit. `PLAN.md` §6 step 3 stages an upload under a name
-//!   `dctl_store::staging` reserves and only makes it live once the checksum
-//!   matches, so this litter is a *consequence* of the durability guarantee
-//!   rather than a bug in it.
-//! * **orphans** — a content object no index row refers to. This is exactly what
-//!   a verified write that aborted after storing the ciphertext leaves behind
-//!   (`PLAN.md` §6 steps 3–6: the object is written, then the name record, then
-//!   the index row that makes the file count as stored). It is also what a failed
-//!   overwrite GC leaves, which `Vault::put_file` itself warns is a storage leak.
+//!   reached its commit. [The plan](https://doc.dctl.sh/project/plan) §6 step 3
+//!   stages an upload under a name `dctl_store::staging` reserves and only
+//!   makes it live once the checksum matches, so this litter is a *consequence*
+//!   of the durability guarantee rather than a bug in it.
+//! * **orphans** — a content object no index row refers to. This is exactly
+//!   what a verified write that aborted after storing the ciphertext leaves
+//!   behind ([the plan](https://doc.dctl.sh/project/plan) §6 steps 3–6: the
+//!   object is written, then the name record, then the index row that makes the
+//!   file count as stored). It is also what a failed overwrite GC leaves, which
+//!   `Vault::put_file` itself warns is a storage leak.
 //! * **multipart** — an upload begun and never finished. The parts are stored
 //!   and charged for and no listing shows them.
 //! * **versions** — a superseded object still alive on a versioned bucket.
@@ -23,10 +24,11 @@
 //! ## One of the four cannot be swept, and says so
 //!
 //! [`dctl_store::Backend`] has no API for object versions, on any provider,
-//! because the trait does not have one. A sweep that reported "0 reclaimed" for a
-//! class it was never able to *look* at would be the misreport `PLAN.md` §6
-//! forbids — so that class emits an explicit `unsupported` record instead, naming
-//! the capability that is missing.
+//! because the trait does not have one. A sweep that reported "0 reclaimed" for
+//! a class it was never able to *look* at would be the misreport
+//! [the plan](https://doc.dctl.sh/project/plan) §6 forbids — so that class
+//! emits an explicit `unsupported` record instead, naming the capability that
+//! is missing.
 //!
 //! **`multipart` used to be the second, and is not.** The two calls this module
 //! named as what would close it —
@@ -720,11 +722,12 @@ async fn count_under(store: &Store, prefix: &str) -> Result<usize> {
 ///
 /// Two views of **one** backend handle, built from a single [`Arc`] so they can
 /// never come to describe different remotes: [`PlainSource`] supplies the paged
-/// enumeration `PLAN.md` §16.2 requires for the orphan class, and the backend
-/// supplies both the `delete` that the read abstraction deliberately does not
-/// have and the staging enumeration it deliberately does not offer. Keeping the
-/// `Arc` here rather than reaching into the source is what lets the read side
-/// stay read-only for every other caller in the binary.
+/// enumeration [the plan](https://doc.dctl.sh/project/plan) §16.2 requires for
+/// the orphan class, and the backend supplies both the `delete` that the read
+/// abstraction deliberately does not have and the staging enumeration it
+/// deliberately does not offer. Keeping the `Arc` here rather than reaching
+/// into the source is what lets the read side stay read-only for every other
+/// caller in the binary.
 struct Store {
     source: PlainSource,
     backend: Arc<dyn Backend>,

@@ -42,7 +42,7 @@ pub struct InitPlan {
     /// Name of the object view — the opaque ciphertext objects.
     ///
     /// Named rather than anonymous so an offsite replication job can be
-    /// addressed at it and run with no vault password at all (`PLAN.md` §13.3).
+    /// addressed at it and run with no vault password at all ([the plan](https://doc.dctl.sh/project/plan) §13.3).
     pub store_name: String,
 
     /// The base spec exactly as it was typed, for reports and messages.

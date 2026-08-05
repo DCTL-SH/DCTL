@@ -18,8 +18,9 @@
 //! No object key, no wrapped DEK, no chunk map. A `lsjson` dump is the artefact
 //! most likely to be pasted into a ticket or committed to a repository, and the
 //! plaintext-path-to-object-key mapping is precisely the metadata the storage
-//! design exists to withhold (`PLAN.md` §2). [`Entry`] does not carry them, so
-//! this shape cannot leak them by omission of a `skip_serializing`.
+//! design exists to withhold ([the plan](https://doc.dctl.sh/project/plan) §2).
+//! [`Entry`] does not carry them, so this shape cannot leak them by omission of
+//! a `skip_serializing`.
 //!
 //! ## `Hashes` is a map, not a string
 //!

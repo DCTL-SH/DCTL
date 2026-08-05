@@ -61,10 +61,11 @@
 //! copy of that for plain remotes would be shipping a worse version of the
 //! product's core under the same word.
 //!
-//! So the honest answer for a plain remote is the one `PLAN.md` §6 requires:
-//! say which claim cannot be made, refuse to make it, and name what does make it
-//! — a vault, or `dctl check` against the tree the replica is a replica of,
-//! which is the only independent record a replica has.
+//! So the honest answer for a plain remote is the one
+//! [the plan](https://doc.dctl.sh/project/plan) §6 requires: say which claim
+//! cannot be made, refuse to make it, and name what does make it — a vault, or
+//! `dctl check` against the tree the replica is a replica of, which is the only
+//! independent record a replica has.
 
 use crate::constants::{INVENTORY_RECORDED, INVENTORY_SELF_REPORTED};
 

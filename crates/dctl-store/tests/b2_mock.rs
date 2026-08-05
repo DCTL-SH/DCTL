@@ -445,8 +445,9 @@ async fn a_receipt_that_names_a_different_sha1_is_refused_rather_than_believed()
     //
     // Deleting the comparison leaves a `put` that returns `Ok` for bytes the
     // provider says are not the bytes that were sent — a transfer reported as
-    // complete for an object that is not there, which is `PLAN.md` §6's
-    // forbidden outcome arriving through the one field designed to prevent it.
+    // complete for an object that is not there, which is the plan
+    // (https://doc.dctl.sh/project/plan) §6's forbidden outcome arriving through
+    // the one field designed to prevent it.
     //
     // Both upload shapes are asserted, because they are separate call sites over
     // one helper and the single-shot path is the one almost every object takes.

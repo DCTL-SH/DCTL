@@ -30,8 +30,9 @@
 //! Two things, and neither is theoretical for a file that lives on the same disk
 //! a backup is restored to.
 //!
-//! * **A panic**, which `PLAN.md` forbids outside `#[cfg(test)]`: every slice in
-//!   `parse_slot` is taken at an offset computed from the file's own numbers.
+//! * **A panic**, which [the plan](https://doc.dctl.sh/project/plan) forbids
+//!   outside `#[cfg(test)]`: every slice in `parse_slot` is taken at an offset
+//!   computed from the file's own numbers.
 //!   `dctl unlock` on a truncated `vault.dke` would abort the process instead of
 //!   saying the envelope is damaged — and the operator reaching for it is,
 //!   by definition, already having a bad day.
