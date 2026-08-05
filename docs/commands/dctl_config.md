@@ -349,9 +349,9 @@ commands now take the same text and write the same canonical value, and a
 configuration still carrying the old spelling fails loudly with the
 one-character fix rather than quietly picking one. `dctl init --base sftp:HOST/PATH` reads one slash as the SSH login
 directory and two as the filesystem root, exactly as `scp` and rclone do:
-`--base sftp:lsx-001/dctl-store` is `~/dctl-store`,
-`--base sftp:lsx-001//srv/dctl-store` is `/srv/dctl-store`, and
-`--base sftp:lsx-001/~/dctl-store` is `~/dctl-store` spelled explicitly.
+`--base sftp:backup.example.com/dctl-store` is `~/dctl-store`,
+`--base sftp:backup.example.com//srv/dctl-store` is `/srv/dctl-store`, and
+`--base sftp:backup.example.com/~/dctl-store` is `~/dctl-store` spelled explicitly.
 
 `host` is a destination `ssh` itself understands — a `Host` alias from
 `~/.ssh/config`, or `user@host[:port]`. It is not a credential: the user, port,
@@ -404,8 +404,8 @@ question, so both work in a provisioning script:
 
 ```console
 $ dctl config touch
-✓ created /home/mx/.dctl/config.toml
-/home/mx/.dctl/config.toml  true
+✓ created /home/example/.dctl/config.toml
+/home/example/.dctl/config.toml  true
 $ dctl config create b2prod b2 bucket=media-archive chunk_size=8388608
 ✓ created remote 'b2prod'
 b2prod  b2
@@ -475,7 +475,7 @@ reasons, never values:
 ```console
 $ dctl config redact
 warning: 1 value(s) were withheld from this report: s3west.endpoint (the URL
-carries a password). They do not belong in /home/mx/.dctl/config.toml —
+carries a password). They do not belong in /home/example/.dctl/config.toml —
 treat them as exposed
 s3west  bucket    archive
 s3west  endpoint  <redacted>

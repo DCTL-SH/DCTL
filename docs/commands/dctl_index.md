@@ -66,7 +66,7 @@ with any unmeasured row warns and exits **6** (`partial_failure`):
 dctl index rebuild archive:
 Files  Unmeasured  Index
 -----  ----------  ------------------------------------
- 1204           2  /home/mx/.dctl/index/vault.redb
+ 1204           2  /home/example/.dctl/index/vault.redb
 warning: 2 object(s) are mapped but could not be described: ...
 ```
 
@@ -135,7 +135,7 @@ needed; nothing local survives from before.
 dctl index rebuild archive:
 Files  Unmeasured  Index
 -----  ----------  ------------------------------------
- 1204           0  /home/mx/.dctl/index/vault.redb
+ 1204           0  /home/example/.dctl/index/vault.redb
 ```
 
 Reconcile after a `scrub` reported `missing` objects — the index and the provider

@@ -229,10 +229,10 @@ is already configured, use `dctl config create NAME vault base=EXISTING`.
 **An sftp base says where on the server it is.** `--base sftp:HOST/PATH`
 splits at the first `/`, and what follows reads exactly as `scp` and rclone
 read it: **one** slash is the SSH login directory, **two** is the filesystem
-root. So `--base sftp:lsx-001/dctl-store` is `~/dctl-store`,
-`--base sftp:lsx-001//srv/dctl-store` is the absolute `/srv/dctl-store` —
-exactly as `dctl config create NAME sftp host=lsx-001 base=/srv/dctl-store`
-writes it — and `--base sftp:lsx-001/~/dctl-store` spells the login-relative
+root. So `--base sftp:backup.example.com/dctl-store` is `~/dctl-store`,
+`--base sftp:backup.example.com//srv/dctl-store` is the absolute `/srv/dctl-store` —
+exactly as `dctl config create NAME sftp host=backup.example.com base=/srv/dctl-store`
+writes it — and `--base sftp:backup.example.com/~/dctl-store` spells the login-relative
 form explicitly. A single slash used to mean the absolute path, which put
 1.6 GiB of a benchmark's ciphertext on a server's OS disk while every
 convention said it would land under the home directory. Every
