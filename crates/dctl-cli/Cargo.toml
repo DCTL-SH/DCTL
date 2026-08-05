@@ -36,6 +36,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 # `signal` powers the Ctrl-C race in main.rs: an interrupted run must exit 25,
 # never be reported as success.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 tokio = { workspace = true, features = ["signal"] }
 tracing = { workspace = true }
 # `json` provides the structured sink PLAN.md §7 requires alongside the human one.

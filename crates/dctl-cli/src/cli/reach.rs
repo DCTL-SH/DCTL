@@ -51,7 +51,7 @@
 
 use crate::constants::{
     CHECKERS_PERFORMED, CHECKERS_UNSUPPORTED_REASON, DUMP_UNSUPPORTED_REASON,
-    KEY_FILE_UNSUPPORTED_REASON, LOW_LEVEL_RETRIES_UNSUPPORTED_REASON, TRANSFERS_PERFORMED,
+    KEY_FILE_UNSUPPORTED_REASON, LOW_LEVEL_RETRIES_UNSUPPORTED_REASON, TRANSFERS_MAX,
     TRANSFERS_UNSUPPORTED_REASON,
 };
 
@@ -77,11 +77,12 @@ pub enum Reach {
         /// Whether this run asked for something [`Reach::Refused::reason`]
         /// forbids.
         ///
-        /// A predicate rather than a bare "was it present", because two of these
-        /// flags have one honest value. `--transfers 1` is a true statement
-        /// about this executor, so it is accepted; `--transfers 8` is not, so it
-        /// is refused. Refusing a request for the behaviour you already have
-        /// teaches nobody anything.
+        /// A predicate rather than a bare "was it present", because some of
+        /// these flags have honest values. `--checkers 1` is a true statement
+        /// about this build, so it is accepted; `--checkers 2` is not, so it is
+        /// refused. `--transfers` is honoured across its whole range and refused
+        /// only outside it. Refusing a request for the behaviour you already
+        /// have teaches nobody anything.
         asked: fn(&GlobalArgs) -> bool,
     },
 }
@@ -169,11 +170,16 @@ pub const FLAGS: &[Flag] = &[
     Flag::honoured("--modify-window", "modify_window"),
     Flag::honoured("--immutable", "immutable"),
     // ── Transfer ─────────────────────────────────────────────────────────
+    // Honoured, and refused only outside its range. The executor runs
+    // `--transfers` entries of the plan concurrently; zero would run nothing at
+    // all, and a value above `TRANSFERS_MAX` asks for more lanes than a client
+    // or a provider can carry, which surfaces as an out-of-memory or a
+    // rate-limit ban far from the flag that caused it.
     Flag::refused(
         "--transfers",
         "transfers",
         TRANSFERS_UNSUPPORTED_REASON,
-        |globals| globals.transfers != TRANSFERS_PERFORMED,
+        |globals| globals.transfers == 0 || globals.transfers > TRANSFERS_MAX,
     ),
     Flag::refused(
         "--checkers",
@@ -492,7 +498,10 @@ mod tests {
     /// `--transfers 1` is accepted, so the guard has to ask for `2`.
     fn sample_value(long: &str) -> Option<&'static str> {
         match long {
-            "--transfers" | "--checkers" => Some("2"),
+            // Above the range `--transfers` accepts; `--checkers` still has
+            // exactly one honest value, so two is already too many for it.
+            "--transfers" => Some("65"),
+            "--checkers" => Some("2"),
             "--verify-samples" | "--low-level-retries" => Some("4"),
             "--dump" => Some("headers"),
             "--key-file" => Some("/dev/null"),

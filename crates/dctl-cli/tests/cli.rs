@@ -3517,6 +3517,42 @@ fn a_malformed_bandwidth_limit_is_a_usage_error_not_an_unlimited_run() {
 }
 
 #[test]
+fn concurrent_transfers_move_every_file_exactly_once() {
+    // The arrival half of `--transfers` leaving the refused list. The executor
+    // walked the plan on a single task, which was honest and cost 13m43s to
+    // ingest 100,000 files to a *local* store — 23 hours for ten million before
+    // any network. What has to survive the change is not the speed but the
+    // accounting: every file present, exactly once, with the counters agreeing.
+    let sandbox = Sandbox::new();
+    for i in 0..40 {
+        sandbox.write(&format!("src/d{}/f{i}.bin", i % 4), format!("body-{i}").as_bytes());
+    }
+
+    let done = sandbox
+        .dctl()
+        .args(["--transfers", "8", "copy", "src", "dst"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&done.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("Files: 40 / 40"),
+        "every file must be accounted for:\n{stderr}"
+    );
+    assert!(stderr.contains("Errors: 0"), "and none may fail:\n{stderr}");
+
+    // The bytes, not just the count: a lane that raced another could plausibly
+    // report a file it had half-written.
+    for i in 0..40 {
+        let landed = sandbox.read(&format!("dst/d{}/f{i}.bin", i % 4));
+        assert_eq!(
+            landed,
+            format!("body-{i}").into_bytes(),
+            "f{i}.bin must hold its own body"
+        );
+    }
+}
+
+#[test]
 fn max_transfer_stops_the_run_and_reaches_exit_8() {
     // Exit code 8 was unreachable in every build: `--max-transfer 1M` moved the
     // whole 10 MiB and exited 0. This is the test that makes the published
@@ -3852,8 +3888,12 @@ fn every_inert_flag_is_now_refused_by_name_before_anything_runs() {
     // move: a flag may only leave here by arriving there. `--verify-samples`
     // left the same way when the sampled read-back became real — its arrival
     // half is `a_sampled_read_back_is_accepted_and_the_file_arrives`.
+    // `--transfers 8` was here until the executor became concurrent. It is
+    // honoured across its whole range now, so what is refused is a value outside
+    // it — and its arrival half is
+    // `concurrent_transfers_move_every_file_exactly_once`.
     let cases: &[(&[&str], &str)] = &[
-        (&["--transfers", "8"], "--transfers"),
+        (&["--transfers", "65"], "--transfers"),
         (&["--checkers", "16"], "--checkers"),
         (&["--low-level-retries", "5"], "--low-level-retries"),
         (&["--dump", "headers"], "--dump"),

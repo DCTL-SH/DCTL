@@ -74,23 +74,83 @@ pub async fn transfers<D: StageDriver>(
     driver: &D,
     plan: &Plan,
 ) -> Result<()> {
-    for entry in plan.entries.iter().filter(|e| e.action.is_action()) {
-        match entry.action {
-            Op::Copy | Op::Update => {
-                perform(
-                    ctx,
-                    &entry.dest,
-                    pipeline::transfer_file(ctx, op, driver, entry).await,
-                )?;
-            }
-            Op::CreateDir => {
-                perform(ctx, &entry.dest, driver.create_dir(entry).await)?;
-            }
-            // Deletes are the reaper's job, and skips are not actions.
-            Op::Delete | Op::Skip => {}
+    // Directories first, in plan order and one at a time. They are the entries
+    // that *create* somewhere for other entries to land, so overlapping them
+    // with the files is the one reordering that could turn a working plan into a
+    // missing parent. There are few of them and they are cheap.
+    for entry in plan.entries.iter().filter(|e| e.action == Op::CreateDir) {
+        perform(ctx, &entry.dest, driver.create_dir(entry).await)?;
+    }
+
+    let files = plan
+        .entries
+        .iter()
+        .filter(|e| matches!(e.action, Op::Copy | Op::Update));
+    run_concurrently(ctx, files, |entry| {
+        pipeline::transfer_file(ctx, op, driver, entry)
+    })
+    .await
+}
+
+/// Run `perform` over each entry, up to `--transfers` of them at once.
+///
+/// The concurrency is here rather than inside the drivers so that every verb in
+/// the family gets it from one place, and so the failure policy stays one
+/// policy: [`perform`] is still what folds an outcome into the run, and it still
+/// distinguishes a per-file failure from a fatal one.
+///
+/// **A fatal error stops the run without abandoning what is already moving.**
+/// It closes the gate, so no further entry is started, and then keeps draining
+/// until the files already in flight finish. Returning immediately would drop
+/// them mid-write, and that is not a theoretical worry: `--max-transfer` is
+/// *raised* by a lane discovering the ceiling, and the lanes beside it are files
+/// that fit and had already claimed their budget. Cancelling those turned "one
+/// file fits under 100 KiB" into zero files transferred — a run that stopped at
+/// its ceiling having thrown away the work it had paid for.
+///
+/// The first fatal error is the one reported; the rest are the same error
+/// arriving on the other lanes.
+///
+/// Outcomes arrive as they complete, not in plan order, and that is the whole of
+/// what concurrency changes here. The *list* is still the plan, built once and
+/// consumed once, so `--dry-run` still prints what the machine performs.
+async fn run_concurrently<'a, I, F, Fut>(ctx: &Ctx, entries: I, start: F) -> Result<()>
+where
+    I: Iterator<Item = &'a super::plan::PlanEntry>,
+    F: Fn(&'a super::plan::PlanEntry) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    use futures_util::stream::StreamExt as _;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let lanes = ctx.globals.transfers.max(1);
+    let stopped = std::sync::Arc::new(AtomicBool::new(false));
+    let gate = std::sync::Arc::clone(&stopped);
+
+    // The gate is on the *iterator*, which `stream::iter` pulls from only as a
+    // lane frees up — so closing it stops the next start without disturbing the
+    // ones already running. Gating the stream instead would work too, and would
+    // make the whole chain `!Unpin` for a check that needs no await at all.
+    let gated = entries.take_while(move |_| !gate.load(Ordering::SeqCst));
+
+    let mut outcomes = futures_util::stream::iter(gated)
+        .map(|entry| {
+            let running = start(entry);
+            async move { (entry, running.await) }
+        })
+        .buffer_unordered(lanes);
+
+    let mut fatal = None;
+    while let Some((entry, outcome)) = outcomes.next().await {
+        if let Err(error) = perform(ctx, &entry.dest, outcome) {
+            stopped.store(true, Ordering::SeqCst);
+            fatal.get_or_insert(error);
         }
     }
-    Ok(())
+    match fatal {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 /// Transfer every entry, then delete each source once its commit is durable.
@@ -110,19 +170,21 @@ pub async fn moves<D: StageDriver, R: Reaper>(
     source_reaper: &R,
     plan: &Plan,
 ) -> Result<()> {
-    for entry in plan.entries.iter().filter(|e| e.action.is_action()) {
-        match entry.action {
-            Op::Copy | Op::Update => {
-                let outcome = pipeline::move_file(ctx, op, driver, source_reaper, entry).await;
-                perform(ctx, &entry.dest, outcome)?;
-            }
-            Op::CreateDir => {
-                perform(ctx, &entry.dest, driver.create_dir(entry).await)?;
-            }
-            Op::Delete | Op::Skip => {}
-        }
+    for entry in plan.entries.iter().filter(|e| e.action == Op::CreateDir) {
+        perform(ctx, &entry.dest, driver.create_dir(entry).await)?;
     }
-    Ok(())
+
+    // The copy-then-delete ordering that makes a move survive being killed is
+    // per file and inside `move_file`, so it is untouched by running several
+    // files at once: each one is still copied, committed and only then unlinked.
+    let files = plan
+        .entries
+        .iter()
+        .filter(|e| matches!(e.action, Op::Copy | Op::Update));
+    run_concurrently(ctx, files, |entry| {
+        pipeline::move_file(ctx, op, driver, source_reaper, entry)
+    })
+    .await
 }
 
 /// Remove every entry the plan marks for deletion.

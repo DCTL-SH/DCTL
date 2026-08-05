@@ -16,17 +16,33 @@
 
 /// Files this build transfers at once (`--transfers`).
 ///
-/// **One**, and this is a measurement of the executor rather than a preference.
-/// [`crate::commands::transfer::execute`] walks the plan in plan order on one
-/// task, so that what `--dry-run` printed and what the machine performs are
-/// provably the same list rather than two traversals that happen to agree.
+/// Four, and it is now a measurement again rather than an aspiration:
+/// [`crate::commands::transfer::execute`] runs this many entries of the plan
+/// concurrently. It was `1` for a long time, honestly, because the executor
+/// walked the plan on a single task — and that honesty had a price. Ingesting
+/// 100,000 files took **13 minutes 43 seconds** to a local store with no network
+/// in the way, which is 2.3 hours per million and 23 hours for ten million; over
+/// a remote provider, where each file is a round trip rather than a write, it
+/// was days.
 ///
-/// It was `4` — the number a concurrent executor would have wanted — and was the
-/// clap default of a flag nothing read, so `dctl --help` published a parallelism
-/// this build has never had. The value now says what happens, and `--transfers`
-/// accepts exactly it; see [`crate::cli::reach`] for why anything larger is
-/// refused rather than ignored.
-pub const TRANSFERS_PERFORMED: usize = 1;
+/// The property the single task was protecting still holds, and it is worth
+/// stating precisely because it is the reason this could change safely: the plan
+/// is built once and consumed once, so what `--dry-run` printed and what the
+/// machine performs are the same *list*. Concurrency reorders when entries
+/// finish, never which entries there are.
+///
+/// Four rather than more because the ceiling here is rarely the client: a
+/// provider rate-limits, a disk seeks, and the sealing is CPU-bound per file
+/// anyway. [`TRANSFERS_MAX`] is where the refusal now sits.
+pub const TRANSFERS_PERFORMED: usize = 4;
+
+/// The most concurrent transfers `--transfers` will accept.
+///
+/// A bound rather than a shrug. Every lane holds a file's worth of buffers and
+/// one provider connection, so an unbounded value turns a typo into an
+/// out-of-memory or a rate-limit ban — and both of those surface far away from
+/// the flag that caused them. Refusing above this says so at the point of asking.
+pub const TRANSFERS_MAX: usize = 64;
 
 /// Metadata checks this build runs at once (`--checkers`).
 ///
@@ -918,22 +934,26 @@ pub const KEY_FILE_UNSUPPORTED_REASON: &str = "This build derives the key-encryp
 // written to answer the question they are about to ask — "then what does it
 // actually do?" — rather than merely to say no.
 
-/// Why `--transfers N` is refused for any `N` above [`TRANSFERS_PERFORMED`].
+/// Why `--transfers N` is refused outside `1..=`[`TRANSFERS_MAX`].
 ///
-/// Not a missing dial: the executor is sequential by construction, and making it
-/// concurrent is a change to the durability contract rather than to a number.
-/// Three things depend on the single-task walk — the audit chain is appended in
-/// plan order, `is_fatal` stops the run rather than emitting one error per
-/// remaining file, and `--dry-run` prints the very list the executor consumes —
-/// and every one of them needs its own answer before a second file may be in
-/// flight. Accepting the flag and running sequentially anyway is what this build
-/// used to do, and it published a parallelism nobody had.
-pub const TRANSFERS_UNSUPPORTED_REASON: &str = "This build transfers one file at a time: \
-     crate::commands::transfer::execute walks the plan on a single task, so \
-     that the list --dry-run prints and the list the machine performs are the \
-     same one. --transfers 1 is accepted because it is what happens. A \
-     concurrent executor has to answer for the audit chain's ordering and for \
-     the fatal-error stop first, so it is not a value this flag can set.";
+/// The flag is honoured now; only the range is refused. It was refused entirely,
+/// because the executor walked the plan on one task and three things leaned on
+/// that: the audit chain was appended in plan order, `is_fatal` stopped the run
+/// rather than emitting one error per remaining file, and `--dry-run` printed
+/// the very list the executor consumed.
+///
+/// Each of those has an answer now rather than a promise. The audit sink holds
+/// its writer behind a mutex, so the hash chain is appended under a lock and
+/// stays valid whatever order entries finish in — the chain records what
+/// happened, and completion order *is* what happened. A fatal error still stops
+/// the run: the outcome stream is dropped, which cancels every entry still in
+/// flight. And the plan is still built once and consumed once, so the list is
+/// unchanged; only the order of finishing moves.
+pub const TRANSFERS_UNSUPPORTED_REASON: &str = "This build runs --transfers files at once, \
+     between 1 and 64. Zero would transfer nothing; above 64 asks for more \
+     concurrent buffers and provider connections than a client usefully holds, \
+     and the failure that causes — an out-of-memory, or a rate-limit ban — \
+     surfaces a long way from the flag that set it.";
 
 /// Why `--checkers N` is refused for any `N` above [`CHECKERS_PERFORMED`].
 pub const CHECKERS_UNSUPPORTED_REASON: &str = "This build has no checker stage to make parallel: \
@@ -5481,13 +5501,22 @@ mod tests {
 
     #[test]
     fn the_concurrency_constants_describe_the_engine_that_exists() {
-        // These used to be `4` and `8`, and the test that stood here asserted
-        // the checkers outpaced the transfers — a relationship between two
-        // numbers nothing read, in a build whose executor walks the plan on one
-        // task. Both flags published a parallelism that had never existed. The
-        // assertion is now about the engine rather than about the pair.
+        // These were once `4` and `8` describing a parallelism nothing
+        // implemented, then `1` and `1` describing an executor that really did
+        // walk the plan on one task. The rule the test enforces has never
+        // changed: the number must be what happens.
+        //
+        // `--transfers` is a measurement again — the executor runs this many
+        // entries of the plan concurrently — so the assertion is now that it
+        // sits inside the range the flag accepts. `--checkers` stays at one
+        // because there is still no checker *stage* to make parallel:
+        // comparison happens once, over two listings already in hand, and a
+        // pool would have nothing to pool.
         const {
-            assert!(TRANSFERS_PERFORMED == 1, "the executor is sequential");
+            assert!(
+                TRANSFERS_PERFORMED >= 1 && TRANSFERS_PERFORMED <= TRANSFERS_MAX,
+                "the default must be a value the flag itself accepts"
+            );
             assert!(CHECKERS_PERFORMED == 1, "there is no checker stage");
         }
     }

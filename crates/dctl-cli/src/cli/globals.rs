@@ -268,9 +268,11 @@ pub struct GlobalArgs {
     /// sequential, and a larger value is refused rather than ignored.
     ///
     /// The default is the *measurement*, not an aspiration, which is why there
-    /// is no `Option` here as there is on the flags below: `1` is a true
-    /// statement about what happens, so `--help` may publish it and a run that
-    /// asks for it has asked for what it will get.
+    /// is no `Option` here as there is on the flags below: the executor really
+    /// does run this many entries of the plan at once, so `--help` may publish
+    /// it and a run that asks for it has asked for what it will get. Values
+    /// outside `1..=64` are refused rather than clamped; see
+    /// [`TRANSFERS_UNSUPPORTED_REASON`](constants::TRANSFERS_UNSUPPORTED_REASON).
     #[arg(
         long,
         global = true,

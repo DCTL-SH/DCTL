@@ -160,7 +160,8 @@ mod tests {
                 continue;
             };
             let argv: Vec<&str> = match flag.long {
-                "--transfers" | "--checkers" => vec![flag.long, "2"],
+                "--transfers" => vec![flag.long, "65"],
+                "--checkers" => vec![flag.long, "2"],
                 "--verify-samples" | "--low-level-retries" => vec![flag.long, "4"],
                 "--dump" => vec![flag.long, "headers"],
                 "--key-file" => vec![flag.long, "/dev/null"],
@@ -216,15 +217,25 @@ mod tests {
 
     #[test]
     fn the_honest_value_of_a_partly_refused_flag_is_accepted() {
-        // `--transfers 1` describes this executor exactly. Refusing it would be
-        // refusing a correct statement.
-        refuse_if_present(&globals(&["--transfers", "1"]), "dctl copy", "Nothing.").unwrap();
-        let error = refuse_if_present(&globals(&["--transfers", "2"]), "dctl copy", "Nothing.")
-            .unwrap_err();
-        assert!(
-            error.message().contains("--transfers"),
-            "{}",
-            error.message()
-        );
+        // The executor really runs `--transfers` files at once now, so every
+        // value it can carry is a correct statement and is accepted. Refusing
+        // one would be refusing the behaviour the flag describes.
+        for lanes in ["1", "2", "8", "64"] {
+            refuse_if_present(&globals(&["--transfers", lanes]), "dctl copy", "Nothing.")
+                .unwrap_or_else(|error| panic!("--transfers {lanes}: {}", error.message()));
+        }
+
+        // Outside the range it is refused, and the refusal names the flag —
+        // zero would transfer nothing at all, and past the ceiling asks for more
+        // lanes than a client or a provider usefully holds.
+        for lanes in ["0", "65"] {
+            let error = refuse_if_present(&globals(&["--transfers", lanes]), "dctl copy", "Nothing.")
+                .unwrap_err();
+            assert!(
+                error.message().contains("--transfers"),
+                "--transfers {lanes}: {}",
+                error.message()
+            );
+        }
     }
 }

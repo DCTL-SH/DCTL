@@ -624,6 +624,7 @@ dependencies = [
  "dctl-meta",
  "dctl-store",
  "fuser",
+ "futures-util",
  "indicatif",
  "nix",
  "predicates",
