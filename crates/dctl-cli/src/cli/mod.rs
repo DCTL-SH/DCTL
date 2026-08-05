@@ -48,7 +48,8 @@ contract applies to both.
 Paths are written as REMOTE:PATH, for example 'vault:photos/2024'. A bare path,
 a Windows drive path such as C:\\data, and a UNC path are all treated as local.
 
-See docs/EXIT_CODES.md for the exit-code contract, or docs/commands/ for
+See https://doc.dctl.sh/reference/exit-codes for the exit-code contract, or
+//! https://doc.dctl.sh/commands for
 per-command documentation.";
 
 /// Top-level parsed command line.
