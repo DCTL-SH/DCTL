@@ -743,6 +743,28 @@ async fn cross_device_delete_removes_object_and_name_record() {
 }
 
 /// Path of the single stored content object under a `LocalFs` store's `o/` prefix. Only
+/// Deliver a shared object into `store` at the key it names itself by, and
+/// return its `file_id`.
+///
+/// These fixtures used to mint a path on the recipient with a placeholder
+/// `put_file` and then overwrite that placeholder's *bytes* with the owner's
+/// object — putting object A's bytes at key B. That is precisely the
+/// substitution an object's `file_id` now has to answer for: the fixture was
+/// staging an attack in order to stage a share, and it only worked because the
+/// invariant was missing.
+///
+/// A real recipient receives the object at its own `o/<hex file_id>` key and
+/// reads it with `get_shared`, which is keyed by `file_id` rather than by a path
+/// the recipient's index would have had to be told about. So does this.
+fn deliver_shared_object(store: &std::path::Path, bytes: &[u8]) -> [u8; 16] {
+    let mut file_id = [0u8; 16];
+    file_id.copy_from_slice(&bytes[52..68]);
+    let dir = store.join("o");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join(hex::encode(file_id)), bytes).unwrap();
+    file_id
+}
+
 /// valid when exactly one object exists (the sharing tests arrange that).
 fn only_object_path(store: &std::path::Path) -> std::path::PathBuf {
     let dir = store.join("o");
@@ -836,17 +858,17 @@ async fn recipient_in_set_decrypts_but_non_recipient_errors() {
     b.put_file("p", b"placeholder", Modified::Now)
         .await
         .unwrap();
-    std::fs::write(only_object_path(b_env._store.path()), &shared).unwrap();
+    let b_shared = deliver_shared_object(b_env._store.path(), &shared);
     c.put_file("p", b"placeholder", Modified::Now)
         .await
         .unwrap();
-    std::fs::write(only_object_path(c_env._store.path()), &shared).unwrap();
+    let c_shared = deliver_shared_object(c_env._store.path(), &shared);
 
     // B is a recipient → decrypts to the original plaintext.
-    assert_eq!(b.get_file("p").await.unwrap().as_slice(), data);
+    assert_eq!(b.get_shared(&b_shared).await.unwrap().as_slice(), data);
     // C is NOT a recipient → error (no kem_wrap sub-record for C's key_id).
     assert!(
-        c.get_file("p").await.is_err(),
+        c.get_shared(&c_shared).await.is_err(),
         "a non-recipient vault must not be able to open the shared object"
     );
 }
@@ -1031,11 +1053,11 @@ async fn sidecar_add_grants_read_then_remove_revokes() {
         .await
         .unwrap();
     let shared = only_object_bytes(o_store);
-    std::fs::write(only_object_path(b_store), &shared).unwrap();
+    let b_shared = deliver_shared_object(b_store, &shared);
 
     // Before any grant: B is NOT a recipient (no inline sub-record, no sidecar) → errors.
     assert!(
-        b.get_file("clip").await.is_err(),
+        b.get_shared(&b_shared).await.is_err(),
         "B cannot read before being granted"
     );
 
@@ -1047,12 +1069,12 @@ async fn sidecar_add_grants_read_then_remove_revokes() {
 
     // B now reads the EXACT bytes via the sidecar grant — buffered and streamed-to-path.
     assert_eq!(
-        b.get_file("clip").await.unwrap().as_slice(),
+        b.get_shared(&b_shared).await.unwrap().as_slice(),
         data.as_slice()
     );
     let out = TempDir::new().unwrap();
     let dest = out.path().join("nested/clip.out");
-    b.get_file_to_path("clip", &dest).await.unwrap();
+    b.get_shared_to_path(&b_shared, &dest).await.unwrap();
     assert_eq!(std::fs::read(&dest).unwrap(), data);
     // Adding B again is an idempotent no-op (already granted).
     o.share_add_recipients("clip", &[b.identity().clone()])
@@ -1071,7 +1093,7 @@ async fn sidecar_add_grants_read_then_remove_revokes() {
     sc[8] ^= 0xFF;
     std::fs::write(&sc_path, &sc).unwrap();
     assert!(
-        b.get_file("clip").await.is_err(),
+        b.get_shared(&b_shared).await.is_err(),
         "sidecar bound to the wrong file_id is rejected"
     );
     copy_sidecar(o_store, b_store); // restore
@@ -1079,12 +1101,12 @@ async fn sidecar_add_grants_read_then_remove_revokes() {
     sc[24] ^= 0xFF;
     std::fs::write(&sc_path, &sc).unwrap();
     assert!(
-        b.get_file("clip").await.is_err(),
+        b.get_shared(&b_shared).await.is_err(),
         "sidecar with a wrong head_hash is rejected"
     );
     copy_sidecar(o_store, b_store); // restore
     assert_eq!(
-        b.get_file("clip").await.unwrap().as_slice(),
+        b.get_shared(&b_shared).await.unwrap().as_slice(),
         data.as_slice(),
         "the intact sidecar still grants B"
     );
@@ -1095,7 +1117,7 @@ async fn sidecar_add_grants_read_then_remove_revokes() {
         .unwrap();
     copy_sidecar(o_store, b_store);
     assert!(
-        b.get_file("clip").await.is_err(),
+        b.get_shared(&b_shared).await.is_err(),
         "B is revoked from the sidecar"
     );
     // The owner still reads it (inline recipient, unaffected by sidecar edits).
@@ -1387,18 +1409,18 @@ async fn get_file_sidecar_only_recipient_transient_get_error_is_retryable_not_de
         .await
         .unwrap();
     let shared = only_object_bytes(o_env._store.path());
-    std::fs::write(only_object_path(b_store.path()), &shared).unwrap();
+    let b_shared = deliver_shared_object(b_store.path(), &shared);
     copy_sidecar(o_env._store.path(), b_store.path());
 
     // Baseline (fault disarmed): B is a legitimate sidecar recipient and reads the bytes.
     assert_eq!(
-        b.get_file("clip").await.unwrap().as_slice(),
+        b.get_shared(&b_shared).await.unwrap().as_slice(),
         data.as_slice()
     );
 
     // Arm the transient fault: the sidecar GET now 5xx's.
     faulty.arm();
-    let err = b.get_file("clip").await.unwrap_err();
+    let err = b.get_shared(&b_shared).await.unwrap_err();
     assert!(
         matches!(err, CoreError::Store(_)),
         "a transient sidecar GET must surface as a Store error, got {err:?}"
@@ -1440,14 +1462,11 @@ async fn genuine_absent_sidecar_stays_permanent_not_a_recipient_and_share_add_st
     b.put_file("clip", b"placeholder", Modified::Now)
         .await
         .unwrap();
-    std::fs::write(
-        only_object_path(b_env._store.path()),
-        only_object_bytes(o_env._store.path()),
-    )
-    .unwrap();
+    let b_shared =
+        deliver_shared_object(b_env._store.path(), &only_object_bytes(o_env._store.path()));
 
     // get_file on a genuinely absent sidecar ⇒ PERMANENT non-recipient, not Transient.
-    let err = b.get_file("clip").await.unwrap_err();
+    let err = b.get_shared(&b_shared).await.unwrap_err();
     assert_eq!(
         err.kind(),
         ErrorKind::Permanent,
@@ -1501,7 +1520,7 @@ async fn share_add_on_missing_or_non_recipient_errors() {
         .put_file("doc", b"placeholder", Modified::Now)
         .await
         .unwrap();
-    std::fs::write(only_object_path(r_env._store.path()), &shared).unwrap();
+    let _r_shared = deliver_shared_object(r_env._store.path(), &shared);
     assert!(
         stranger
             .share_add_recipients("doc", &[stranger.identity().clone()])
@@ -1988,4 +2007,71 @@ async fn a_file_is_sealed_from_a_reader_that_was_never_a_file_on_disk() {
     assert_eq!(listed[0].path, "from/memory.bin");
     assert_eq!(listed[0].size, plaintext.len() as u64);
     assert_eq!(listed[0].modified_unix, Some(1_700_000_000));
+}
+
+#[tokio::test]
+async fn a_substituted_object_is_refused_rather_than_returned_as_the_file_asked_for() {
+    // The defect this project exists to make impossible, found by audit and
+    // reproduced here before it was fixed.
+    //
+    // Every integrity check on the read path is INTERNAL to whatever object is
+    // present: the chunk tags verify, `meta.size` matches the plaintext, and the
+    // content hash is compared against that object's OWN metadata. Together they
+    // prove "this is a valid object". None proves "this is the object you asked
+    // for".
+    //
+    // So a backend with write access — the adversary the security model says is
+    // handled — copies one object over another's key. Every check passed and
+    // `get_file` returned the attacker's plaintext reporting success. Measured:
+    // reading `wages.csv` returned "ATTACKER CONTROLLED CONTENT" and exit 0.
+    let e = env();
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .expect("a vault");
+
+    vault
+        .put_file("wages.csv", b"the file the caller asked for", Modified::Now)
+        .await
+        .expect("stored");
+    vault
+        .put_file("decoy.txt", b"ATTACKER CONTROLLED CONTENT", Modified::Now)
+        .await
+        .expect("stored");
+
+    let wages_key = vault
+        .object_key_of("wages.csv")
+        .await
+        .expect("resolvable")
+        .expect("present");
+    let decoy_key = vault
+        .object_key_of("decoy.txt")
+        .await
+        .expect("resolvable")
+        .expect("present");
+
+    let decoy_bytes = e
+        .backend
+        .get(&dctl_store::ObjectKey::new(decoy_key))
+        .await
+        .expect("readable");
+    let expected = dctl_store::ContentHash::blake3(&decoy_bytes);
+    e.backend
+        .put(
+            &dctl_store::ObjectKey::new(wages_key),
+            decoy_bytes,
+            &expected,
+            dctl_store::SourceModified::unknown(),
+        )
+        .await
+        .expect("the attacker can write to the bucket");
+
+    // Returning the decoy's plaintext — or any plaintext — would be the tool
+    // reporting success for something it did not do.
+    match vault.get_file("wages.csv").await {
+        Err(_) => {}
+        Ok(bytes) => panic!(
+            "object substitution went undetected: reading 'wages.csv' returned {:?}",
+            String::from_utf8_lossy(bytes.as_slice())
+        ),
+    }
 }

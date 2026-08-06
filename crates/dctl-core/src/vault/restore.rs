@@ -190,7 +190,13 @@ impl Vault {
     /// could only describe the second kind would report the first as damaged.
     async fn describe(&self, key: &ObjectKey, path: &str) -> Result<Described> {
         let (prefix, header_len) = range::fetch_header(self.backend.as_ref(), key, path).await?;
-        let header = match object::parse_head(&prefix)?.kem_id {
+        let described_head = object::parse_head(&prefix)?;
+        // A rebuild takes the key from a §5 name record and the bytes from the
+        // backend. If they disagree, the record is describing something it did
+        // not name, and indexing it would write that disagreement into the index
+        // as though it were a fact.
+        super::get::require_object_identity(key.as_str(), &described_head)?;
+        let header = match described_head.kem_id {
             KEM_ID_NONE => object::RangeHeader::open(self.root()?, &prefix[..header_len])?,
             KEM_ID_HYBRID => {
                 let kw = self.recover_object_kw(&prefix).await?;
