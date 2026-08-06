@@ -1938,3 +1938,54 @@ async fn a_shared_object_records_its_source_time_like_any_other() {
         Some(1_234)
     );
 }
+
+#[tokio::test]
+async fn a_file_is_sealed_from_a_reader_that_was_never_a_file_on_disk() {
+    // The primitive a read-write mount is built on. A file written through a
+    // mount arrives as arbitrary writes at arbitrary offsets and cannot be
+    // sealed until it is closed, so it must be spilled somewhere first — and
+    // that spill has to be encrypted, or a mounted vault leaves plaintext on
+    // disk for as long as a file is open. Sealing therefore has to accept a
+    // reader over that spill rather than a path to plaintext.
+    //
+    // `Cursor` stands in for the decrypting view here: it is seekable, it is not
+    // a file, and nothing about it touches the filesystem.
+    let e = env();
+    let vault = init_vault(e.backend.clone(), &e.index_path, "pw")
+        .await
+        .expect("a vault");
+
+    // Larger than one chunk, so the two-pass layout (prepare hashes and plans,
+    // emit seals) is genuinely exercised rather than fitting in a single frame.
+    let plaintext: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+    let reader = std::io::Cursor::new(plaintext.clone());
+
+    vault
+        .put_file_from_source(
+            "from/memory.bin",
+            reader,
+            plaintext.len() as u64,
+            Modified::At(1_700_000_000),
+        )
+        .await
+        .expect("a reader is a valid source");
+
+    // It reads back byte-identical, which is the only claim that matters.
+    let restored = vault
+        .get_file("from/memory.bin")
+        .await
+        .expect("the file is there");
+    assert_eq!(
+        restored.as_slice(),
+        plaintext.as_slice(),
+        "what was sealed from a reader must come back exactly"
+    );
+
+    // And it is a first-class vault entry: indexed, sized, and listed like any
+    // other, not a special case that happens to decrypt.
+    let listed = vault.list("from/").expect("a listing");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].path, "from/memory.bin");
+    assert_eq!(listed[0].size, plaintext.len() as u64);
+    assert_eq!(listed[0].modified_unix, Some(1_700_000_000));
+}

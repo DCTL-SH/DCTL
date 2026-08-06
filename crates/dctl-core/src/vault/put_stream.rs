@@ -113,9 +113,9 @@ use crate::streamed::Streamed;
 /// between the hash and the encryption produces an object whose sealed
 /// `content_blake3` does not describe its own payload, which nothing downstream
 /// would notice until somebody verified it years later.
-struct Planned {
+struct Planned<S> {
     plan: PlannedSeal,
-    source: std::fs::File,
+    source: S,
 }
 
 impl Vault {
@@ -145,6 +145,54 @@ impl Vault {
         source: &Path,
         modified: Modified,
     ) -> Result<Streamed> {
+        let source = source.to_path_buf();
+        // Opened off the runtime: `open` and `metadata` both hit the filesystem,
+        // and an async task that blocks on a slow disk stalls every other task
+        // sharing its thread.
+        let (file, plaintext_len) = tokio::task::spawn_blocking(move || -> Result<_> {
+            let file = std::fs::File::open(&source).map_err(io_err)?;
+            let len = file.metadata().map_err(io_err)?.len();
+            Ok((file, len))
+        })
+        .await
+        .map_err(|e| task_failed("opening the source", &e))??;
+
+        self.put_file_from_source(logical_path, file, plaintext_len, modified)
+            .await
+    }
+
+    /// Seal `source` under `logical_path`, streaming, without it ever being a
+    /// file on disk in the clear.
+    ///
+    /// The generic half of [`put_file_from_path`](Vault::put_file_from_path),
+    /// and the primitive a read-write mount needs: it accepts any seekable
+    /// reader, so the bytes may come from a decrypting view over an encrypted
+    /// spill rather than from plaintext somebody could read while the file is
+    /// open.
+    ///
+    /// `plaintext_len` is passed rather than measured because a reader has no
+    /// length of its own, and the caller — which created the spill — is the only
+    /// party that knows it. It must be exact: it decides the frame layout, and a
+    /// wrong value produces an object whose header disagrees with its contents.
+    ///
+    /// `modified` is a required argument for the reason [`Modified`] gives, and
+    /// it is never inferred from the source.
+    ///
+    /// # Errors
+    /// Whatever sealing, uploading or indexing reported. Nothing is committed on
+    /// any of them: the object is not finished, the name record is not written,
+    /// and the index row is not added.
+    #[tracing::instrument(skip(self, source), fields(backend = self.backend.name()))]
+    pub async fn put_file_from_source<S>(
+        &self,
+        logical_path: &str,
+        source: S,
+        plaintext_len: u64,
+        modified: Modified,
+    ) -> Result<Streamed>
+    where
+        S: std::io::Read + std::io::Seek + Send + 'static,
+    {
         let path = path::normalize(logical_path)?;
         // Capture any object this path currently maps to, for post-commit overwrite GC.
         let previous = self.lookup_object_key(&path).await?;
@@ -160,11 +208,9 @@ impl Vault {
         // when the task returns.
         let root_key = Zeroizing::new(*self.root()?);
         let chunk_size = self.chunk_size;
-        let source_path = source.to_path_buf();
         let meta_path = path.clone();
-        let planned = tokio::task::spawn_blocking(move || -> Result<Planned> {
-            let mut file = std::fs::File::open(&source_path).map_err(io_err)?;
-            let plaintext_len = file.metadata().map_err(io_err)?.len();
+        let mut file = source;
+        let planned = tokio::task::spawn_blocking(move || -> Result<Planned<S>> {
             let plan = PlannedSeal::prepare(
                 &root_key,
                 &mut file,
@@ -184,6 +230,8 @@ impl Vault {
         // travel to the thread that uses it and be wiped there.
         let file_id = plan.file_id();
         let object_key = format!("{}{}", layout::OBJECT_KEY_PREFIX, hex::encode(file_id));
+        // The plan's length rather than the argument: `prepare` is what the
+        // header will actually claim, and the two must be the same number.
         let plaintext_len = plan.plaintext_len();
         let plaintext_hash = plan.content_blake3();
         tracing::debug!(
