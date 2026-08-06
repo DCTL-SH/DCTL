@@ -21,6 +21,49 @@ use super::{Vault, layout};
 use crate::error::{CoreError, Result};
 use crate::range::{self, RangeReader};
 
+/// Refuse an object that is not the one its key names.
+///
+/// Every other check on the read path is *internal* to whatever object is
+/// present: the chunk tags verify, `meta.size` matches the plaintext it
+/// produced, and the content hash is compared against that object's own
+/// metadata. Together they prove "this is a valid object". None of them proves
+/// "this is the object you asked for", and that gap was exploitable.
+///
+/// Measured before this existed: store `wages.csv`, copy another object's bytes
+/// over its key, read `wages.csv` back. Every check passed and the read returned
+/// the attacker's content reporting success — the exact failure this project
+/// exists to make impossible, against the backend-with-write-access adversary
+/// the security model says is handled.
+///
+/// The binding that closes it was already present and unused. An object's key is
+/// `o/<hex file_id>`, and `file_id` lives inside the authenticated head, where it
+/// cannot be edited without breaking the tags. Comparing the two makes the key a
+/// claim the object itself has to answer for.
+pub(super) fn require_object_identity(object_key: &str, head: &object::Head) -> Result<()> {
+    let named = object_key
+        .strip_prefix(super::layout::OBJECT_KEY_PREFIX)
+        .and_then(|hex| hex::decode(hex).ok())
+        .and_then(|raw| <[u8; 16]>::try_from(raw.as_slice()).ok());
+
+    match named {
+        Some(expected) if expected == head.file_id => Ok(()),
+        Some(_) => Err(CoreError::Integrity(format!(
+            "the object stored at '{object_key}' identifies itself as '{}{}'. \
+             The bytes at that key belong to a different object than the key \
+             names, so nothing was returned: answering with them would report \
+             content this vault never stored there.",
+            super::layout::OBJECT_KEY_PREFIX,
+            hex::encode(head.file_id),
+        ))),
+        // A key this cannot parse is not a key this vault wrote, and assuming it
+        // is fine would defeat the check entirely.
+        None => Err(CoreError::Integrity(format!(
+            "'{object_key}' is not a well-formed object key, so the object found \
+             there cannot be checked against the name it was fetched by."
+        ))),
+    }
+}
+
 impl Vault {
     /// Resolve a normalized path to its backend object key, **without side effects**.
     ///
@@ -102,12 +145,14 @@ impl Vault {
             .ok_or_else(|| CoreError::NotFound(path.clone()))?;
         tracing::debug!(object = %object_key, "resolved object key");
 
+        let object_key_str = object_key.clone();
         let object = self.backend.get(&ObjectKey::new(object_key)).await?;
         // The object self-describes its DEK + metadata; the head's `kem_id` selects the
         // decode path. `kem_id=0` unwraps the DEK under the vault root; `kem_id=1` (§12)
         // recovers `KW` via this vault's root-derived recipient identity. Either opener
         // has already verified every chunk tag and `meta.size == plaintext_len`.
         let head = object::parse_head(&object)?;
+        require_object_identity(&object_key_str, &head)?;
         let opened = match head.kem_id {
             KEM_ID_NONE => object::open(self.root()?, &object)?,
             // §12: recover `KW` via this vault's identity — inline recipient first, then
@@ -175,7 +220,9 @@ impl Vault {
         let key = ObjectKey::new(object_key);
 
         let (prefix, header_len) = range::fetch_header(self.backend.as_ref(), &key, &path).await?;
-        let header = match object::parse_head(&prefix)?.kem_id {
+        let ranged_head = object::parse_head(&prefix)?;
+        require_object_identity(key.as_str(), &ranged_head)?;
+        let header = match ranged_head.kem_id {
             KEM_ID_NONE => object::RangeHeader::open(self.root()?, &prefix[..header_len])?,
             // §12: the same `KW` recovery `get_file` performs, and it needs only the head
             // and the inline `kem_wrap` block — both inside the header prefix already
@@ -318,8 +365,12 @@ impl Vault {
     #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
     pub async fn get_shared(&self, file_id: &[u8; FILE_ID_LEN]) -> Result<Zeroizing<Vec<u8>>> {
         let object_key = format!("{}{}", layout::OBJECT_KEY_PREFIX, hex::encode(file_id));
-        let object = self.backend.get(&ObjectKey::new(object_key)).await?;
+        let object = self
+            .backend
+            .get(&ObjectKey::new(object_key.clone()))
+            .await?;
         let head = object::parse_head(&object)?;
+        require_object_identity(&object_key, &head)?;
         if head.kem_id != KEM_ID_HYBRID {
             return Err(not_a_shared_object());
         }
@@ -346,8 +397,12 @@ impl Vault {
     #[tracing::instrument(skip(self), fields(backend = self.backend.name()))]
     pub async fn get_shared_to_path(&self, file_id: &[u8; FILE_ID_LEN], dest: &Path) -> Result<()> {
         let object_key = format!("{}{}", layout::OBJECT_KEY_PREFIX, hex::encode(file_id));
-        let object = self.backend.get(&ObjectKey::new(object_key)).await?;
+        let object = self
+            .backend
+            .get(&ObjectKey::new(object_key.clone()))
+            .await?;
         let head = object::parse_head(&object)?;
+        require_object_identity(&object_key, &head)?;
         if head.kem_id != KEM_ID_HYBRID {
             return Err(not_a_shared_object());
         }
