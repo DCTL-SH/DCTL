@@ -621,6 +621,7 @@ dependencies = [
  "clap",
  "clap_complete",
  "dctl-core",
+ "dctl-crypto",
  "dctl-meta",
  "dctl-store",
  "fuser",

@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 dctl-core = { path = "../dctl-core" }
+dctl-crypto = { path = "../dctl-crypto" }
 dctl-store = { path = "../dctl-store" }
 dctl-meta = { path = "../dctl-meta" }
 # shared across the workspace

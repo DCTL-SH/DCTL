@@ -119,6 +119,7 @@ pub mod macfuse;
 pub mod preflight;
 pub mod refuse;
 pub mod session;
+pub mod staging;
 pub mod state;
 pub mod tree;
 
