@@ -35,7 +35,14 @@
 //! 1. `DCTL_SPOOL_DIR`, if set. The explicit answer always wins, including when
 //!    it is a RAM disk — an operator who says "stage in memory, I have 512 GB of
 //!    it" is entitled to be believed, and is warned once rather than overruled.
-//! 2. Otherwise the platform's temp directory, which honours `TMPDIR`.
+//! 2. Otherwise `~/.dctl/cache`, which is where everything this program writes
+//!    on a client machine belongs — owner-only by construction, reported by
+//!    `dctl home`, and cleared by the operator rather than by the system.
+//! 3. Only if that cannot be created, the platform's temp directory, which
+//!    honours `TMPDIR`. That is a fallback for a machine with no usable home,
+//!    not a default: `/tmp` is world-listable on a normal Unix box, is swept on
+//!    a schedule that has nothing to do with this program, and is the last place
+//!    an operator looking for DCTL's files would think to check.
 //!
 //! Either way, if the result is RAM-backed the run emits a warning naming the
 //! variable to set. It is a warning and not a refusal because the overwhelming
@@ -73,8 +80,30 @@ static WARNED: AtomicBool = AtomicBool::new(false);
 /// [`SPOOL_DIR_VAR`]. See the module documentation for the order and for why
 /// this warns rather than refuses.
 #[must_use]
+/// Where a sealed object is assembled when nothing overrides it.
+///
+/// `~/.dctl/cache`, because that is the single directory a client machine keeps
+/// DCTL's files in — the same one `dctl home` reports and the operator clears.
+/// The platform temp directory is used only if the cache cannot be created,
+/// which means a machine with no usable home rather than an ordinary one.
+fn default_spool_dir() -> PathBuf {
+    let cache = dctl_meta::paths::cache_dir();
+    match std::fs::create_dir_all(&cache) {
+        Ok(()) => cache,
+        Err(error) => {
+            tracing::warn!(
+                path = %cache.display(),
+                %error,
+                "could not use the DCTL cache directory for staging; \
+                 falling back to the platform temp directory"
+            );
+            std::env::temp_dir()
+        }
+    }
+}
+
 pub fn spool_dir() -> PathBuf {
-    let dir = choose(std::env::var_os(SPOOL_DIR_VAR), std::env::temp_dir());
+    let dir = choose(std::env::var_os(SPOOL_DIR_VAR), default_spool_dir());
     if ram_backed(&dir) == Some(true) && !WARNED.swap(true, Ordering::Relaxed) {
         tracing::warn!(
             directory = %dir.display(),
@@ -196,6 +225,39 @@ tmpfs /dev/shm tmpfs rw,nosuid,nodev 0 0
             choose(None, PathBuf::from("/tmp")),
             PathBuf::from("/tmp"),
             "and the platform default when they do not"
+        );
+    }
+}
+
+#[cfg(test)]
+mod home_tests {
+    use super::*;
+
+    #[test]
+    fn staging_defaults_under_the_dctl_home_not_the_system_temp_dir() {
+        // Everything DCTL writes on a client machine belongs in one directory.
+        // `~/.dctl` is owner-only by construction and is what `dctl home`
+        // reports when something has gone wrong; the system temp directory is
+        // world-listable on a normal Unix box, is swept on a schedule nothing to
+        // do with this program, and is the last place an operator would look. A
+        // partly-assembled object must not land there by default.
+        let chosen = default_spool_dir();
+
+        assert_eq!(
+            chosen,
+            dctl_meta::paths::cache_dir(),
+            "staging must default to the DCTL cache directory"
+        );
+        assert!(
+            chosen.starts_with(dctl_meta::paths::home_dir()),
+            "staging landed at {} which is outside the DCTL home at {}",
+            chosen.display(),
+            dctl_meta::paths::home_dir().display()
+        );
+        assert_ne!(
+            chosen,
+            std::env::temp_dir(),
+            "staging fell back to the system temp directory"
         );
     }
 }
